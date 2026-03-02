@@ -30,6 +30,25 @@ def _base_config() -> OptimizationConfig:
     )
 
 
+def _s03_bool_config() -> OptimizationConfig:
+    return OptimizationConfig(
+        csv_file="dummy.csv",
+        strategy_id="s03_reversal_v10",
+        enabled_params={
+            "maType3": True,
+            "useCloseCount": True,
+            "useTBands": True,
+        },
+        param_ranges={},
+        param_types={
+            "maType3": "select",
+            "useCloseCount": "bool",
+            "useTBands": "bool",
+        },
+        fixed_params={},
+    )
+
+
 def _sample_space() -> dict:
     return {
         "maType": {"type": "categorical", "choices": ["EMA", "SMA", "HMA", "WMA"]},
@@ -235,3 +254,68 @@ def test_nsga_coverage_marker_is_noop_when_coverage_mode_disabled():
     study.optimize(objective, n_trials=1)
     attrs = study.trials[0].system_attrs
     assert attrs.get(NSGAIISampler._GENERATION_KEY) is None
+
+
+def test_s03_bool_group_rule_reduces_invalid_combo_in_search_space():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=0),
+        warmup_trials=0,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_s03_bool_config(), optuna_cfg)
+
+    space = optimizer._build_search_space()
+    surrogate_keys = [key for key in space if key.startswith("__bool_group__")]
+
+    assert "useCloseCount" not in space
+    assert "useTBands" not in space
+    assert len(surrogate_keys) == 1
+    assert len(space[surrogate_keys[0]]["choices"]) == 3
+
+
+def test_s03_bool_group_rule_updates_coverage_minimum():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=0),
+        warmup_trials=0,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_s03_bool_config(), optuna_cfg)
+    space = optimizer._build_search_space()
+    report = _analyze_coverage_requirements(space)
+
+    assert report["n_min"] == 33
+    assert report["coverage_block_size"] == 33
+
+
+def test_s03_bool_group_surrogate_is_decoded_to_real_bool_params():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="random", n_startup_trials=0),
+        warmup_trials=0,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_s03_bool_config(), optuna_cfg)
+    space = optimizer._build_search_space()
+    surrogate_keys = [key for key in space if key.startswith("__bool_group__")]
+    assert len(surrogate_keys) == 1
+    surrogate_key = surrogate_keys[0]
+    token = space[surrogate_key]["choices"][0]
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.RandomSampler(seed=7))
+    study.enqueue_trial({surrogate_key: token, "maType3": "SMA"})
+
+    captured = {}
+
+    def objective(trial):
+        params = optimizer._prepare_trial_parameters(trial, space)
+        captured.update(params)
+        return 0.0
+
+    study.optimize(objective, n_trials=1)
+
+    assert surrogate_key not in captured
+    assert "useCloseCount" in captured
+    assert "useTBands" in captured
+    assert captured["useCloseCount"] or captured["useTBands"]

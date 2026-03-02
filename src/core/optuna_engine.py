@@ -11,7 +11,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import optuna
 from optuna.pruners import MedianPruner, PercentilePruner, PatientPruner
@@ -264,6 +264,83 @@ def _format_objective_value(value: Any) -> str:
         return str(float(value))
     except (TypeError, ValueError):
         return "NaN"
+
+
+def _coerce_bool_value(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _normalize_bool_choices(raw_values: Any) -> List[bool]:
+    if raw_values is None:
+        return []
+    if isinstance(raw_values, (list, tuple)):
+        source_values = raw_values
+    else:
+        source_values = [raw_values]
+
+    normalized: List[bool] = []
+    for raw in source_values:
+        parsed = _coerce_bool_value(raw)
+        if parsed is None or parsed in normalized:
+            continue
+        normalized.append(parsed)
+    return normalized
+
+
+def _extract_bool_group_rules(strategy_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(strategy_config, dict):
+        return []
+
+    optimization_rules = strategy_config.get("optimization_rules")
+    if not isinstance(optimization_rules, dict):
+        return []
+
+    raw_groups = optimization_rules.get("bool_groups")
+    if not isinstance(raw_groups, list):
+        return []
+
+    rules: List[Dict[str, Any]] = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            continue
+
+        raw_params = (
+            raw_group.get("params")
+            or raw_group.get("parameters")
+            or raw_group.get("members")
+        )
+        if not isinstance(raw_params, list):
+            continue
+
+        deduped_params: List[str] = []
+        seen: Set[str] = set()
+        for raw_name in raw_params:
+            name = str(raw_name or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            deduped_params.append(name)
+        if len(deduped_params) < 2:
+            continue
+
+        rules.append(
+            {
+                "params": deduped_params,
+                "mode": str(raw_group.get("mode", "at_least_one_true")).strip().lower(),
+            }
+        )
+
+    return rules
 
 
 _COVERAGE_FLOAT_TOL = 1e-12
@@ -1326,6 +1403,7 @@ class OptunaOptimizer:
         self.param_type_map: Dict[str, str] = {}
         self._multiprocess_mode: bool = False
         self._coverage_report: Optional[Dict[str, Any]] = None
+        self._bool_group_choice_map: Dict[str, Dict[str, Dict[str, bool]]] = {}
 
     # ------------------------------------------------------------------
     # Search space handling
@@ -1346,6 +1424,7 @@ class OptunaOptimizer:
 
         space: Dict[str, Dict[str, Any]] = {}
         self.param_type_map = {}
+        self._bool_group_choice_map = {}
 
         for param_name, param_spec in parameters.items():
             if not isinstance(param_spec, dict):
@@ -1411,12 +1490,148 @@ class OptunaOptimizer:
                 }
 
             elif param_type in {"bool", "boolean"}:
+                bool_choices = [True, False]
+
+                range_override = self.base_config.param_ranges.get(param_name)
+                if isinstance(range_override, dict):
+                    override_options = range_override.get("values") or range_override.get("options")
+                    normalized_override = _normalize_bool_choices(override_options)
+                    if normalized_override:
+                        bool_choices = normalized_override
+
+                fixed_override = self.base_config.fixed_params.get(f"{param_name}_options")
+                normalized_fixed = _normalize_bool_choices(fixed_override)
+                if normalized_fixed:
+                    bool_choices = normalized_fixed
+
                 space[param_name] = {
                     "type": "categorical",
-                    "choices": [True, False],
+                    "choices": list(bool_choices),
                 }
 
-        return space
+        return self._apply_bool_group_rules(space, strategy_config)
+
+    def _build_bool_group_surrogate_name(self, member_names: List[str]) -> str:
+        sanitized = [name for name in member_names if name]
+        return "__bool_group__" + "__".join(sanitized)
+
+    def _apply_bool_group_rules(
+        self,
+        search_space: Dict[str, Dict[str, Any]],
+        strategy_config: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        rules = _extract_bool_group_rules(strategy_config)
+        if not rules:
+            return search_space
+
+        updated_space: Dict[str, Dict[str, Any]] = dict(search_space)
+        strategy_params = (
+            strategy_config.get("parameters", {})
+            if isinstance(strategy_config.get("parameters", {}), dict)
+            else {}
+        )
+
+        for rule_index, rule in enumerate(rules):
+            member_names = list(rule.get("params") or [])
+            mode = str(rule.get("mode", "")).strip().lower()
+            if len(member_names) < 2:
+                continue
+            if mode != "at_least_one_true":
+                raise ValueError(
+                    f"Unsupported bool group mode '{mode}' in strategy '{self.base_config.strategy_id}'"
+                )
+
+            optimizable_members: List[str] = []
+            member_choices: Dict[str, List[bool]] = {}
+            for name in member_names:
+                spec = updated_space.get(name)
+                if isinstance(spec, dict) and str(spec.get("type", "")).lower() == "categorical":
+                    normalized_choices = _normalize_bool_choices(spec.get("choices"))
+                    if not normalized_choices:
+                        raise ValueError(
+                            f"Invalid bool choices for '{name}' in strategy '{self.base_config.strategy_id}'"
+                        )
+                    member_choices[name] = normalized_choices
+                    optimizable_members.append(name)
+                    continue
+
+                fixed_value = self.base_config.fixed_params.get(name)
+                if fixed_value is None and isinstance(strategy_params, dict):
+                    param_spec = strategy_params.get(name, {})
+                    if isinstance(param_spec, dict):
+                        fixed_value = param_spec.get("default")
+
+                parsed_fixed = _coerce_bool_value(fixed_value)
+                if parsed_fixed is None:
+                    raise ValueError(
+                        f"Unable to resolve bool value for '{name}' in strategy '{self.base_config.strategy_id}'"
+                    )
+                member_choices[name] = [parsed_fixed]
+
+            if not optimizable_members:
+                continue
+
+            combinations: List[Dict[str, bool]] = []
+            choice_lists = [member_choices[name] for name in member_names]
+            for combo_values in itertools.product(*choice_lists):
+                combo = dict(zip(member_names, combo_values))
+                if mode == "at_least_one_true" and not any(combo.values()):
+                    continue
+                combinations.append(combo)
+
+            if not combinations:
+                raise ValueError(
+                    "Boolean optimization rules produced no valid combinations for "
+                    f"strategy '{self.base_config.strategy_id}'."
+                )
+
+            projected_combinations: List[Dict[str, bool]] = []
+            for combo in combinations:
+                projected = {name: combo[name] for name in optimizable_members}
+                if projected not in projected_combinations:
+                    projected_combinations.append(projected)
+
+            if not projected_combinations:
+                raise ValueError(
+                    "Boolean optimization rules produced no projected combinations for "
+                    f"strategy '{self.base_config.strategy_id}'."
+                )
+
+            if len(optimizable_members) == 1:
+                target_name = optimizable_members[0]
+                allowed_values: List[bool] = []
+                for projected in projected_combinations:
+                    value = projected[target_name]
+                    if value not in allowed_values:
+                        allowed_values.append(value)
+                updated_space[target_name] = {
+                    "type": "categorical",
+                    "choices": allowed_values,
+                }
+                continue
+
+            surrogate_name = self._build_bool_group_surrogate_name(optimizable_members)
+            while surrogate_name in updated_space:
+                surrogate_name = f"{surrogate_name}_{rule_index}"
+
+            choice_map: Dict[str, Dict[str, bool]] = {}
+            surrogate_choices: List[str] = []
+            for idx, projected in enumerate(projected_combinations):
+                token = f"g{rule_index}_{idx}"
+                choice_map[token] = projected
+                surrogate_choices.append(token)
+
+            for name in optimizable_members:
+                updated_space.pop(name, None)
+
+            updated_space[surrogate_name] = {
+                "type": "categorical",
+                "choices": surrogate_choices,
+            }
+            self.param_type_map[surrogate_name] = "categorical"
+            self._bool_group_choice_map[surrogate_name] = choice_map
+
+        return updated_space
 
     # ------------------------------------------------------------------
     # Sampler / pruner factories
@@ -1524,7 +1739,8 @@ class OptunaOptimizer:
             if param_type == "float":
                 return float(value)
             if param_type == "bool":
-                return bool(value)
+                parsed_bool = _coerce_bool_value(value)
+                return bool(value) if parsed_bool is None else parsed_bool
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return value
         return value
@@ -1566,6 +1782,18 @@ class OptunaOptimizer:
                     )
             elif p_type == "categorical":
                 params_dict[key] = trial.suggest_categorical(key, list(spec["choices"]))
+
+        for surrogate_name, choice_map in self._bool_group_choice_map.items():
+            token = params_dict.pop(surrogate_name, None)
+            if token is None:
+                continue
+            decoded = choice_map.get(str(token))
+            if not decoded:
+                raise ValueError(
+                    f"Invalid bool-group token '{token}' for '{surrogate_name}' "
+                    f"in strategy '{self.base_config.strategy_id}'"
+                )
+            params_dict.update(decoded)
 
         for key, value in (self.base_config.fixed_params or {}).items():
             if value is None or key in params_dict:

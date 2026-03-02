@@ -94,6 +94,43 @@ Create parameter schema matching PineScript inputs:
 - Match PineScript input names exactly
 - Group related parameters for UI organization
 
+### Bool Parameters in Optimization
+
+Bool parameters are optimized as categorical values (`True` / `False`) in Start page.
+
+Use one of these patterns:
+
+1. **All bool combinations are valid**  
+Do nothing special. Define bool params normally in `parameters`.
+
+2. **Some bool combinations are invalid**  
+Declare rules in `config.json` under `optimization_rules.bool_groups`.
+
+Example (`at_least_one_true`):
+
+```json
+{
+  "optimization_rules": {
+    "bool_groups": [
+      {
+        "params": ["useCloseCount", "useTBands"],
+        "mode": "at_least_one_true"
+      }
+    ]
+  }
+}
+```
+
+What this does:
+- Invalid combo (`false`, `false`) is excluded from optimizer search space.
+- Valid combos remain available.
+- Coverage mode minimum/recommended trials are computed from the filtered search space.
+
+Important notes:
+- Rules apply to **optimized** bool params in the group.
+- If a bool in the group is fixed (not optimized), its fixed value is used when validating combinations.
+- If your strategy should allow all states (including all-off), do not add a bool group rule.
+
 ## Step 4: Create Params Dataclass
 
 ```python
@@ -314,6 +351,7 @@ See `src/strategies/s04_stochrsi/` for a complete working example:
 | Strategy not discovered | Ensure both config.json and strategy.py exist |
 | snake_case parameters | Use camelCase everywhere: `rsiLen` not `rsi_len` |
 | Missing trades | Check `trade_start_idx` usage, verify entry conditions |
+| Wasted trials from invalid bool states | Add `optimization_rules.bool_groups` (e.g., `at_least_one_true`) |
 
 ## Architecture Guarantees
 

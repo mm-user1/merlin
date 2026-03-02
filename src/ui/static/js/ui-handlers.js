@@ -831,6 +831,28 @@ function getWorkerProcessesValue() {
   return Math.round(Math.min(32, Math.max(1, workerProcesses)));
 }
 
+function readSelectedOptimizerOptionValues(paramName) {
+  return Array.from(
+    document.querySelectorAll(
+      `input.select-option-checkbox[data-param-name="${paramName}"]:not([data-option-value="__ALL__"])`
+    )
+  )
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.optionValue);
+}
+
+function parseBoolOptionValue(rawValue) {
+  if (rawValue === true || rawValue === false) return rawValue;
+  const normalized = String(rawValue ?? '').trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return null;
+}
+
 function validateOptimizerForm(config) {
   const params = config?.parameters || {};
   const errors = [];
@@ -846,22 +868,18 @@ function validateOptimizerForm(config) {
 
     enabledCount += 1;
 
-    if (paramType === 'select' || paramType === 'options') {
-      const selectedOptions = Array.from(
-        document.querySelectorAll(
-          `input.select-option-checkbox[data-param-name="${name}"]:not([data-option-value="__ALL__"])`
-        )
-      )
-        .filter((cb) => cb.checked)
-        .map((cb) => cb.dataset.optionValue);
-
+    if (
+      paramType === 'select'
+      || paramType === 'options'
+      || paramType === 'bool'
+      || paramType === 'boolean'
+    ) {
+      const selectedOptions = readSelectedOptimizerOptionValues(name);
       if (!selectedOptions.length) {
         errors.push(`${label}: select at least one option to optimize.`);
       }
       return;
     }
-
-    if (paramType === 'bool') return;
 
     const fromVal = Number(fromInput?.value);
     const toVal = Number(toInput?.value);
@@ -907,19 +925,29 @@ function collectOptimizerParams() {
 
     const paramType = paramDef.type || 'float';
 
-    if (paramType === 'select' || paramType === 'options') {
-      const selectedOptions = [];
-      const optionCheckboxes = document.querySelectorAll(
-        `input.select-option-checkbox[data-param-name="${paramName}"]:not([data-option-value="__ALL__"])`
-      );
+    if (
+      paramType === 'select'
+      || paramType === 'options'
+      || paramType === 'bool'
+      || paramType === 'boolean'
+    ) {
+      const selectedOptions = readSelectedOptimizerOptionValues(paramName);
+      if (!selectedOptions.length) return;
 
-      optionCheckboxes.forEach((cb) => {
-        if (cb.checked) {
-          selectedOptions.push(cb.dataset.optionValue);
+      if (paramType === 'bool' || paramType === 'boolean') {
+        const boolValues = [];
+        selectedOptions.forEach((value) => {
+          const parsed = parseBoolOptionValue(value);
+          if (parsed === null || boolValues.includes(parsed)) return;
+          boolValues.push(parsed);
+        });
+        if (boolValues.length > 0) {
+          ranges[paramName] = {
+            type: 'select',
+            values: boolValues
+          };
         }
-      });
-
-      if (selectedOptions.length > 0) {
+      } else {
         ranges[paramName] = {
           type: 'select',
           values: selectedOptions
@@ -995,23 +1023,34 @@ function buildOptimizationConfig(state) {
     enabledParams[name] = isChecked;
 
     if (isChecked) {
-      if (paramType === 'select' || paramType === 'options') {
-        const selectedOptions = Array.from(
-          document.querySelectorAll(
-            `input.select-option-checkbox[data-param-name="${name}"]:not([data-option-value="__ALL__"])`
-          )
-        )
-          .filter((cb) => cb.checked)
-          .map((cb) => cb.dataset.optionValue);
-
+      if (
+        paramType === 'select'
+        || paramType === 'options'
+        || paramType === 'bool'
+        || paramType === 'boolean'
+      ) {
+        const selectedOptions = readSelectedOptimizerOptionValues(name);
         if (selectedOptions.length > 0) {
-          paramRanges[name] = {
-            type: 'select',
-            values: selectedOptions
-          };
+          if (paramType === 'bool' || paramType === 'boolean') {
+            const boolValues = [];
+            selectedOptions.forEach((value) => {
+              const parsed = parseBoolOptionValue(value);
+              if (parsed === null || boolValues.includes(parsed)) return;
+              boolValues.push(parsed);
+            });
+            if (boolValues.length > 0) {
+              paramRanges[name] = {
+                type: 'select',
+                values: boolValues
+              };
+            }
+          } else {
+            paramRanges[name] = {
+              type: 'select',
+              values: selectedOptions
+            };
+          }
         }
-      } else if (paramType === 'bool') {
-        // Boolean params require no range metadata; search space derives from type
       } else if (fromInput && toInput && stepInput) {
         const fromValue = Number(fromInput.value);
         const toValue = Number(toInput.value);

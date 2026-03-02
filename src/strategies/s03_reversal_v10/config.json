@@ -129,5 +129,13 @@
       "group": "Backtest Settings",
       "optimize": { "enabled": false }
     }
+  },
+  "optimization_rules": {
+    "bool_groups": [
+      {
+        "params": ["useCloseCount", "useTBands"],
+        "mode": "at_least_one_true"
+      }
+    ]
   }
 }

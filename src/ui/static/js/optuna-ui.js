@@ -3,7 +3,7 @@
   const COVERAGE_HINT_COLOR = '#888';
   const COVERAGE_DEFAULT_WARMUP = 20;
   const COVERAGE_AUTO_BLOCKS = 3;
-  const COVERAGE_HINT_BLOCKS = 4;
+  const COVERAGE_HINT_MULTIPLIERS = [1, 3, 5, 9];
   let coverageListenersBound = false;
 
   const OBJECTIVE_LABELS = {
@@ -85,6 +85,18 @@
     nsgaSettings.style.display = isNsga ? 'block' : 'none';
   }
 
+  function parseBoolOptionValue(rawValue) {
+    if (rawValue === true || rawValue === false) return rawValue;
+    const normalized = String(rawValue ?? '').trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+      return false;
+    }
+    return null;
+  }
+
   function readSelectedCategoricalCount(paramName, paramDef) {
     const choices = Array.isArray(paramDef?.options) ? paramDef.options : [];
     const optionNodes = document.querySelectorAll(
@@ -95,6 +107,117 @@
     }
     const selected = Array.from(optionNodes).filter((node) => node.checked).length;
     return selected > 0 ? selected : (choices.length || 0);
+  }
+
+  function readSelectedBooleanOptions(paramName, paramDef) {
+    const optionNodes = document.querySelectorAll(
+      `input.select-option-checkbox[data-param-name="${paramName}"]:not([data-option-value="__ALL__"])`
+    );
+    if (!optionNodes.length) {
+      return [true, false];
+    }
+
+    const selected = Array.from(optionNodes)
+      .filter((node) => node.checked)
+      .map((node) => parseBoolOptionValue(node.dataset.optionValue))
+      .filter((value) => value !== null);
+
+    const deduped = [];
+    selected.forEach((value) => {
+      if (!deduped.includes(value)) {
+        deduped.push(value);
+      }
+    });
+    if (deduped.length > 0) {
+      return deduped;
+    }
+
+    const defaultValue = parseBoolOptionValue(paramDef?.default);
+    return defaultValue === null ? [true, false] : [defaultValue];
+  }
+
+  function getBoolGroupRules() {
+    const rawRules = window.currentStrategyConfig?.optimization_rules?.bool_groups;
+    if (!Array.isArray(rawRules)) return [];
+
+    const result = [];
+    rawRules.forEach((rule) => {
+      if (!rule || typeof rule !== 'object') return;
+      const rawParams = rule.params || rule.parameters || rule.members;
+      if (!Array.isArray(rawParams)) return;
+      const dedupedParams = [];
+      rawParams.forEach((name) => {
+        const normalized = String(name ?? '').trim();
+        if (!normalized || dedupedParams.includes(normalized)) return;
+        dedupedParams.push(normalized);
+      });
+      if (dedupedParams.length < 2) return;
+      result.push({
+        params: dedupedParams,
+        mode: String(rule.mode || 'at_least_one_true').toLowerCase()
+      });
+    });
+    return result;
+  }
+
+  function countValidBoolGroupCombinations(memberNames, boolAxisOptions, mode) {
+    const optionsPerMember = memberNames.map((name) => boolAxisOptions.get(name) || []);
+    if (optionsPerMember.some((options) => !options.length)) {
+      return 0;
+    }
+
+    let validCount = 0;
+    const state = new Array(memberNames.length).fill(false);
+
+    const dfs = (index) => {
+      if (index >= memberNames.length) {
+        if (mode === 'at_least_one_true') {
+          if (state.some(Boolean)) validCount += 1;
+        } else {
+          validCount += 1;
+        }
+        return;
+      }
+      const options = optionsPerMember[index];
+      options.forEach((value) => {
+        state[index] = value;
+        dfs(index + 1);
+      });
+    };
+
+    dfs(0);
+    return validCount;
+  }
+
+  function applyBoolGroupCoverageAdjustments(blockSize, categoricalAxisByName, boolAxisOptions) {
+    let adjusted = Math.max(1, Number(blockSize) || 1);
+    const rules = getBoolGroupRules();
+
+    rules.forEach((rule) => {
+      if (rule.mode !== 'at_least_one_true') return;
+
+      const presentMembers = rule.params.filter((name) => (
+        categoricalAxisByName.has(name) && boolAxisOptions.has(name)
+      ));
+      if (presentMembers.length !== rule.params.length) {
+        return;
+      }
+
+      let groupProduct = 1;
+      presentMembers.forEach((name) => {
+        const options = boolAxisOptions.get(name) || [];
+        groupProduct *= Math.max(1, options.length);
+      });
+      if (groupProduct <= 0) return;
+
+      const validCount = countValidBoolGroupCombinations(presentMembers, boolAxisOptions, rule.mode);
+      if (!Number.isFinite(validCount) || validCount <= 0) return;
+
+      adjusted = Math.round((adjusted / groupProduct) * validCount);
+      adjusted = Math.max(1, adjusted);
+    });
+
+    return adjusted;
   }
 
   function inferPrimaryNumericName(mainAxisName, numericNames) {
@@ -155,6 +278,8 @@
       : [];
 
     const categoricalAxes = [];
+    const categoricalAxisByName = new Map();
+    const boolAxisOptions = new Map();
     const numericNames = [];
 
     paramRows.forEach((entry) => {
@@ -163,12 +288,23 @@
       const paramDef = strategyParams[name] || entry.def || {};
       const paramType = String(paramDef.type || '').toLowerCase();
 
-      if (paramType === 'select' || paramType === 'options' || paramType === 'bool' || paramType === 'boolean') {
-        const count = (paramType === 'bool' || paramType === 'boolean')
-          ? 2
-          : readSelectedCategoricalCount(name, paramDef);
+      if (paramType === 'bool' || paramType === 'boolean') {
+        const boolOptions = readSelectedBooleanOptions(name, paramDef);
+        if (boolOptions.length > 0) {
+          const axis = { name, count: boolOptions.length };
+          categoricalAxes.push(axis);
+          categoricalAxisByName.set(name, axis);
+          boolAxisOptions.set(name, boolOptions);
+        }
+        return;
+      }
+
+      if (paramType === 'select' || paramType === 'options') {
+        const count = readSelectedCategoricalCount(name, paramDef);
         if (count > 0) {
-          categoricalAxes.push({ name, count });
+          const axis = { name, count };
+          categoricalAxes.push(axis);
+          categoricalAxisByName.set(name, axis);
         }
         return;
       }
@@ -182,6 +318,7 @@
     categoricalAxes.forEach((axis) => {
       blockSize *= Math.max(1, Number(axis.count) || 1);
     });
+    blockSize = applyBoolGroupCoverageAdjustments(blockSize, categoricalAxisByName, boolAxisOptions);
     const nMin = Math.max(1, blockSize);
     const nRec = Math.max(nMin, nMin * COVERAGE_AUTO_BLOCKS);
 
@@ -281,10 +418,7 @@
     const trialCountRaw = Number(warmupInput.value);
     const trialCount = Number.isFinite(trialCountRaw) ? Math.max(0, Math.round(trialCountRaw)) : 0;
     const analysis = collectCoverageAnalysis();
-    const blockHints = Array.from(
-      { length: COVERAGE_HINT_BLOCKS },
-      (_entry, index) => analysis.blockSize * (index + 1)
-    );
+    const blockHints = COVERAGE_HINT_MULTIPLIERS.map((multiplier) => analysis.blockSize * multiplier);
 
     infoEl.style.display = 'block';
     renderCoverageBlockHints(infoEl, warmupInput, blockHints, trialCount);
