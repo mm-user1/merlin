@@ -1395,6 +1395,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                     "sampler": "tpe",
                     "enable_pruning": False,
                     "pruner": "median",
+                    "warmup_trials": 132,
+                    "coverage_mode": True,
                     "sanitize_enabled": True,
                     "sanitize_trades_threshold": 3,
                 },
@@ -1466,6 +1468,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["optuna_settings"]["sampler_type"] == "tpe"
         assert first["optuna_settings"]["enable_pruning"] is False
         assert first["optuna_settings"]["pruner"] == "median"
+        assert first["optuna_settings"]["warmup_trials"] == 132
+        assert first["optuna_settings"]["coverage_mode"] is True
         assert first["optuna_settings"]["workers"] == 4
         assert first["optuna_settings"]["sanitize_enabled"] is True
         assert first["optuna_settings"]["sanitize_trades_threshold"] == 3
@@ -1489,6 +1493,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["optuna_settings"]["budget_mode"] == "time"
         assert second["optuna_settings"]["time_limit"] == 1800
         assert second["optuna_settings"]["sampler_type"] == "random"
+        assert second["optuna_settings"]["warmup_trials"] is None
+        assert second["optuna_settings"]["coverage_mode"] is None
         assert second["optuna_settings"]["sanitize_enabled"] is False
         assert second["optuna_settings"]["sanitize_trades_threshold"] == 11
         assert second["optuna_settings"]["filter_min_profit"] is True

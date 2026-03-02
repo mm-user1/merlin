@@ -702,12 +702,22 @@ def register_routes(app):
                 equity_curve = []
                 equity_timestamps = []
 
+            sampler_config = _parse_json_dict(optuna_config.get("sampler_config"))
             sampler_type = (
-                _parse_json_dict(optuna_config.get("sampler_config")).get("sampler_type")
+                sampler_config.get("sampler_type")
                 or optuna_config.get("sampler_type")
                 or optuna_config.get("sampler")
                 or row_dict.get("sampler_type")
             )
+            warmup_trials = _safe_int(optuna_config.get("warmup_trials"))
+            if warmup_trials is None:
+                warmup_trials = _safe_int(config_payload.get("n_startup_trials"))
+            if warmup_trials is None:
+                warmup_trials = _safe_int(sampler_config.get("n_startup_trials"))
+
+            coverage_mode = _safe_bool(optuna_config.get("coverage_mode"))
+            if coverage_mode is None:
+                coverage_mode = _safe_bool(config_payload.get("coverage_mode"))
             workers_value = _safe_int(config_payload.get("worker_processes"))
             if workers_value is None:
                 workers_value = _safe_int(config_payload.get("workerProcesses"))
@@ -786,6 +796,8 @@ def register_routes(app):
                         "sampler_type": sampler_type,
                         "enable_pruning": _safe_bool(optuna_config.get("enable_pruning")),
                         "pruner": optuna_config.get("pruner"),
+                        "warmup_trials": warmup_trials,
+                        "coverage_mode": coverage_mode,
                         "workers": workers_value,
                         "sanitize_enabled": (
                             _safe_bool(optuna_config.get("sanitize_enabled"))

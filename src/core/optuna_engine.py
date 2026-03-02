@@ -1716,7 +1716,41 @@ class OptunaOptimizer:
             return -value
         return value
 
+    def _mark_coverage_generation_for_nsga(self, trial: optuna.Trial) -> None:
+        """Ensure enqueued coverage trials are visible to NSGA generations."""
+        if not bool(getattr(self.optuna_config, "coverage_mode", False)):
+            return
+
+        sampler_type = str(getattr(self.sampler_config, "sampler_type", "")).lower()
+        if sampler_type == "nsga2":
+            generation_key = NSGAIISampler._GENERATION_KEY
+        elif sampler_type == "nsga3":
+            generation_key = NSGAIIISampler._GENERATION_KEY
+        else:
+            return
+
+        trial_id = getattr(trial, "_trial_id", None)
+        storage = getattr(getattr(trial, "study", None), "_storage", None)
+        if trial_id is None or storage is None:
+            return
+
+        try:
+            frozen_trial = storage.get_trial(trial_id)
+            system_attrs = dict(getattr(frozen_trial, "system_attrs", {}) or {})
+            if "fixed_params" not in system_attrs:
+                return
+            if system_attrs.get(generation_key) is not None:
+                return
+            storage.set_trial_system_attr(trial_id, generation_key, 0)
+        except Exception:  # pragma: no cover - defensive safety
+            logger.debug(
+                "Failed to mark NSGA generation for trial %s in coverage mode",
+                getattr(trial, "number", "?"),
+                exc_info=True,
+            )
+
     def _objective(self, trial: optuna.Trial, search_space: Dict[str, Dict[str, Any]]):
+        self._mark_coverage_generation_for_nsga(trial)
         params_dict = self._prepare_trial_parameters(trial, search_space)
 
         result = self._evaluate_parameters(params_dict)
@@ -1784,6 +1818,7 @@ class OptunaOptimizer:
         """
         Objective used inside worker processes (no shared state).
         """
+        self._mark_coverage_generation_for_nsga(trial)
         params_dict = self._prepare_trial_parameters(trial, search_space)
         result = self._evaluate_parameters(params_dict)
 

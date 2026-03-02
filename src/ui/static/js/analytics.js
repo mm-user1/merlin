@@ -580,6 +580,18 @@
     return MISSING_TEXT;
   }
 
+  function formatInitialLabel(settings) {
+    const warmupRaw = settings?.warmup_trials;
+    const warmup = toFiniteNumber(warmupRaw);
+    if (warmup === null) return MISSING_TEXT;
+    const initialValue = String(Math.max(0, Math.round(Number(warmup))));
+    const coverageModeRaw = settings?.coverage_mode;
+    const coverageMode = coverageModeRaw === undefined || coverageModeRaw === null
+      ? null
+      : Boolean(coverageModeRaw);
+    return coverageMode === true ? `${initialValue} (coverage)` : initialValue;
+  }
+
   function formatFilterLabel(settings) {
     const filterMinProfitRaw = settings?.filter_min_profit;
     const filterMinProfit = filterMinProfitRaw === undefined || filterMinProfitRaw === null
@@ -689,6 +701,7 @@
           : MISSING_TEXT,
       },
       { key: 'Pruner', val: prunerValue },
+      { key: 'Initial', val: formatInitialLabel(optunaSettings) },
       { key: 'Sanitize Trades', val: formatSanitizeLabel(optunaSettings) },
       { key: 'Filter', val: formatFilterLabel(optunaSettings) },
       {

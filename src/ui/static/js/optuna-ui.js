@@ -1,5 +1,9 @@
 (function () {
-  const COVERAGE_WARNING_COLOR = '#c57600';
+  const COVERAGE_WARNING_COLOR = '#c0392b';
+  const COVERAGE_HINT_COLOR = '#888';
+  const COVERAGE_DEFAULT_WARMUP = 20;
+  const COVERAGE_AUTO_BLOCKS = 3;
+  const COVERAGE_HINT_BLOCKS = 4;
   let coverageListenersBound = false;
 
   const OBJECTIVE_LABELS = {
@@ -179,7 +183,7 @@
       blockSize *= Math.max(1, Number(axis.count) || 1);
     });
     const nMin = Math.max(1, blockSize);
-    const nRec = Math.max(nMin, nMin * 2);
+    const nRec = Math.max(nMin, nMin * COVERAGE_AUTO_BLOCKS);
 
     const mainAxis = categoricalAxes.length
       ? categoricalAxes.reduce((best, item) => (
@@ -200,6 +204,69 @@
     };
   }
 
+  function shouldAutofillCoverageWarmup(rawValue) {
+    const raw = String(rawValue ?? '').trim();
+    if (!raw) return true;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return true;
+    return Math.round(parsed) === COVERAGE_DEFAULT_WARMUP;
+  }
+
+  function maybeAutofillCoverageWarmup() {
+    const checkbox = document.getElementById('optunaCoverageMode');
+    const warmupInput = document.getElementById('optunaWarmupTrials');
+    if (!checkbox || !warmupInput || !checkbox.checked) return;
+    if (!shouldAutofillCoverageWarmup(warmupInput.value)) return;
+
+    const analysis = collectCoverageAnalysis();
+    const target = Math.max(analysis.nMin, analysis.blockSize * COVERAGE_AUTO_BLOCKS);
+    warmupInput.value = String(target);
+  }
+
+  function applyCoverageHintSelection(warmupInput, value) {
+    if (!warmupInput) return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    const normalized = Math.max(0, Math.round(parsed));
+    warmupInput.value = String(normalized);
+    warmupInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function renderCoverageBlockHints(infoEl, warmupInput, blockHints, currentTrials) {
+    infoEl.replaceChildren();
+    const normalizedTrials = Number.isFinite(currentTrials) ? Math.round(currentTrials) : -1;
+
+    blockHints.forEach((blockValue, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = String(blockValue);
+      button.setAttribute('aria-label', `Set initial trials to ${blockValue}`);
+      button.style.background = 'none';
+      button.style.border = '0';
+      button.style.padding = '0';
+      button.style.margin = '0';
+      button.style.font = 'inherit';
+      button.style.fontSize = '12px';
+      button.style.color = 'inherit';
+      button.style.cursor = 'pointer';
+      button.style.lineHeight = 'inherit';
+      button.style.textDecoration = 'underline';
+      button.style.textDecorationThickness = 'from-font';
+      button.style.textUnderlineOffset = '2px';
+      if (normalizedTrials === blockValue) {
+        button.style.fontWeight = '700';
+        button.style.textDecoration = 'none';
+      }
+      button.addEventListener('click', () => {
+        applyCoverageHintSelection(warmupInput, blockValue);
+      });
+      infoEl.appendChild(button);
+      if (index < blockHints.length - 1) {
+        infoEl.appendChild(document.createTextNode(' / '));
+      }
+    });
+  }
+
   function updateCoverageInfo() {
     const checkbox = document.getElementById('optunaCoverageMode');
     const infoEl = document.getElementById('coverageInfo');
@@ -214,25 +281,14 @@
     const trialCountRaw = Number(warmupInput.value);
     const trialCount = Number.isFinite(trialCountRaw) ? Math.max(0, Math.round(trialCountRaw)) : 0;
     const analysis = collectCoverageAnalysis();
+    const blockHints = Array.from(
+      { length: COVERAGE_HINT_BLOCKS },
+      (_entry, index) => analysis.blockSize * (index + 1)
+    );
 
     infoEl.style.display = 'block';
-    if (trialCount < analysis.nMin) {
-      infoEl.textContent = `Need more initial trials (min: ${analysis.nMin}, recommended: ${analysis.nRec})`;
-      infoEl.style.color = COVERAGE_WARNING_COLOR;
-      return;
-    }
-
-    const fullBlocks = Math.floor(trialCount / analysis.blockSize);
-    const remainder = trialCount % analysis.blockSize;
-    const axisPart = analysis.mainAxisName && analysis.mainAxisOptions > 0
-      ? `${analysis.mainAxisName}: ${analysis.mainAxisOptions} options`
-      : `${analysis.categoricalAxes} categorical params`;
-    const primaryPart = analysis.primaryNumericName
-      ? `, primary numeric: ${analysis.primaryNumericName}`
-      : '';
-    const tailPart = remainder > 0 ? ` + ${remainder} partial` : '';
-    infoEl.textContent = `Coverage block size: ${analysis.blockSize}, blocks: ${fullBlocks}${tailPart}, ${axisPart}${primaryPart}`;
-    infoEl.style.color = '#888';
+    renderCoverageBlockHints(infoEl, warmupInput, blockHints, trialCount);
+    infoEl.style.color = trialCount < analysis.nMin ? COVERAGE_WARNING_COLOR : COVERAGE_HINT_COLOR;
   }
 
   function shouldRefreshCoverageFromEventTarget(target) {
@@ -258,6 +314,12 @@
     if (!coverageListenersBound) {
       coverageListenersBound = true;
       document.addEventListener('change', (event) => {
+        if (event.target
+          && event.target.id === 'optunaCoverageMode'
+          && event.target.checked
+          && event.isTrusted) {
+          maybeAutofillCoverageWarmup();
+        }
         if (shouldRefreshCoverageFromEventTarget(event.target)) {
           updateCoverageInfo();
         }

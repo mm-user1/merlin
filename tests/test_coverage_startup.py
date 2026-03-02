@@ -3,9 +3,13 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import optuna
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.optuna_engine import (  # noqa: E402
+    NSGAIIISampler,
+    NSGAIISampler,
     OptimizationConfig,
     OptunaConfig,
     OptunaOptimizer,
@@ -160,3 +164,74 @@ def test_optuna_summary_no_coverage_warning_when_minimum_is_met():
     summary = getattr(base_config, "optuna_summary", {})
     assert summary.get("coverage_warning") is None
 
+
+def test_nsga2_coverage_marks_enqueued_trial_as_generation_zero():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct", "max_drawdown_pct"],
+        sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+        warmup_trials=1,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_base_config(), optuna_cfg)
+    study = optuna.create_study(
+        directions=["maximize", "minimize"],
+        sampler=optimizer._create_sampler(),
+    )
+    study.enqueue_trial({"x": 3})
+
+    def objective(trial):
+        optimizer._mark_coverage_generation_for_nsga(trial)
+        x = trial.suggest_int("x", 0, 10)
+        return float(x), float(-x)
+
+    study.optimize(objective, n_trials=1)
+    attrs = study.trials[0].system_attrs
+    assert attrs.get(NSGAIISampler._GENERATION_KEY) == 0
+
+
+def test_nsga3_coverage_marks_enqueued_trial_as_generation_zero():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct", "max_drawdown_pct"],
+        sampler_config=SamplerConfig(sampler_type="nsga3", population_size=4),
+        warmup_trials=1,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_base_config(), optuna_cfg)
+    study = optuna.create_study(
+        directions=["maximize", "minimize"],
+        sampler=optimizer._create_sampler(),
+    )
+    study.enqueue_trial({"x": 5})
+
+    def objective(trial):
+        optimizer._mark_coverage_generation_for_nsga(trial)
+        x = trial.suggest_int("x", 0, 10)
+        return float(x), float(-x)
+
+    study.optimize(objective, n_trials=1)
+    attrs = study.trials[0].system_attrs
+    assert attrs.get(NSGAIIISampler._GENERATION_KEY) == 0
+
+
+def test_nsga_coverage_marker_is_noop_when_coverage_mode_disabled():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct", "max_drawdown_pct"],
+        sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+        warmup_trials=1,
+        coverage_mode=False,
+    )
+    optimizer = OptunaOptimizer(_base_config(), optuna_cfg)
+    study = optuna.create_study(
+        directions=["maximize", "minimize"],
+        sampler=optimizer._create_sampler(),
+    )
+    study.enqueue_trial({"x": 1})
+
+    def objective(trial):
+        optimizer._mark_coverage_generation_for_nsga(trial)
+        x = trial.suggest_int("x", 0, 10)
+        return float(x), float(-x)
+
+    study.optimize(objective, n_trials=1)
+    attrs = study.trials[0].system_attrs
+    assert attrs.get(NSGAIISampler._GENERATION_KEY) is None
