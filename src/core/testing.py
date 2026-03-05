@@ -84,9 +84,17 @@ def _build_source_candidates(items: Iterable[Any], rank_key: Optional[str]) -> L
     return candidates
 
 
-def build_test_metrics(result: Any) -> Dict[str, Any]:
+def build_test_metrics(
+    result: Any,
+    *,
+    consistency_segments: Optional[int] = None,
+) -> Dict[str, Any]:
     basic = metrics.calculate_basic(result, 100.0)
-    advanced = metrics.calculate_advanced(result, 100.0)
+    advanced = metrics.calculate_advanced(
+        result,
+        100.0,
+        consistency_segments=consistency_segments,
+    )
     return {
         "net_profit_pct": basic.net_profit_pct,
         "max_drawdown_pct": basic.max_drawdown_pct,
@@ -100,6 +108,7 @@ def build_test_metrics(result: Any) -> Dict[str, Any]:
         "ulcer_index": advanced.ulcer_index,
         "sqn": advanced.sqn,
         "consistency_score": advanced.consistency_score,
+        "consistency_segments_used": consistency_segments,
     }
 
 
@@ -114,6 +123,8 @@ def run_period_test_for_trials(
     trials: Sequence[Dict[str, Any]],
     baseline_period_days: int,
     test_period_days: int,
+    is_period_days_for_segments: Optional[int] = None,
+    consistency_segments_is: Optional[int] = None,
     original_metrics_resolver: Callable[[Dict[str, Any]], Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     if df is None or df.empty:
@@ -131,6 +142,21 @@ def run_period_test_for_trials(
     if df_prepared.empty:
         raise ValueError("No data available in the selected test period.")
 
+    normalized_is_segments = (
+        metrics.normalize_consistency_segments(consistency_segments_is)
+        if consistency_segments_is is not None
+        else None
+    )
+    auto_test_segments = (
+        metrics.derive_auto_consistency_segments(
+            is_period_days_for_segments,
+            normalized_is_segments,
+            test_period_days,
+        )
+        if normalized_is_segments is not None
+        else None
+    )
+
     results_payload: List[Dict[str, Any]] = []
     for idx, trial in enumerate(trials, 1):
         if not trial:
@@ -142,7 +168,10 @@ def run_period_test_for_trials(
         params["end"] = end_ts
 
         result = strategy_class.run(df_prepared, params, trade_start_idx)
-        test_metrics = build_test_metrics(result)
+        test_metrics = build_test_metrics(
+            result,
+            consistency_segments=auto_test_segments,
+        )
         original_metrics = original_metrics_resolver(trial)
         comparison = calculate_comparison_metrics(
             original_metrics,

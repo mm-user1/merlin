@@ -767,6 +767,18 @@ async function applyStudyPayload(data) {
 
   const config = study.config_json || {};
   const configWfa = config.wfa || {};
+  const consistencySegments = typeof getStudyConsistencySegments === 'function'
+    ? getStudyConsistencySegments(study)
+    : null;
+  const isPeriodDaysForSegments = study.is_period_days ?? configWfa.is_period_days ?? config.is_period_days ?? null;
+  const ftPeriodDaysForSegments = study.ft_period_days ?? null;
+  const oosPeriodDaysForSegments = study.oos_test_period_days ?? null;
+  const ftConsistencySegments = typeof deriveAutoConsistencySegments === 'function'
+    ? deriveAutoConsistencySegments(isPeriodDaysForSegments, consistencySegments, ftPeriodDaysForSegments)
+    : null;
+  const oosConsistencySegments = typeof deriveAutoConsistencySegments === 'function'
+    ? deriveAutoConsistencySegments(isPeriodDaysForSegments, consistencySegments, oosPeriodDaysForSegments)
+    : null;
   const adaptiveModeRaw = study.adaptive_mode ?? configWfa.adaptive_mode ?? config.adaptive_mode;
   ResultsState.wfa = {
     postProcess: config.postProcess || {},
@@ -788,11 +800,18 @@ async function applyStudyPayload(data) {
   ResultsState.dateFilter = Boolean(ResultsState.fixedParams.dateFilter ?? ResultsState.dateFilter);
   ResultsState.start = ResultsState.fixedParams.start || ResultsState.start;
   ResultsState.end = ResultsState.fixedParams.end || ResultsState.end;
+  ResultsState.consistencySegments = consistencySegments;
 
   if (ResultsState.mode === 'wfa') {
     ResultsState.results = data.windows || [];
   } else {
-    ResultsState.results = data.trials || [];
+    ResultsState.results = (data.trials || []).map((trial) => ({
+      ...trial,
+      consistency_segments_used: trial.consistency_segments_used ?? consistencySegments,
+      ft_consistency_segments_used: trial.ft_consistency_segments_used ?? ftConsistencySegments,
+      oos_test_consistency_segments_used:
+        trial.oos_test_consistency_segments_used ?? oosConsistencySegments,
+    }));
   }
   ResultsState.selectedRowId = null;
 
@@ -801,10 +820,12 @@ async function applyStudyPayload(data) {
   ResultsState.forwardTest.endDate = study.ft_end_date || '';
   ResultsState.forwardTest.periodDays = study.ft_period_days ?? null;
   ResultsState.forwardTest.sortMetric = study.ft_sort_metric || 'profit_degradation';
-  ResultsState.forwardTest.trials = (data.trials || []).filter((trial) => trial.ft_rank !== null && trial.ft_rank !== undefined);
+  ResultsState.forwardTest.trials = (ResultsState.results || [])
+    .filter((trial) => trial.ft_rank !== null && trial.ft_rank !== undefined);
   ResultsState.forwardTest.trials.sort((a, b) => (a.ft_rank || 0) - (b.ft_rank || 0));
 
-  const dsrTrials = (data.trials || []).filter((trial) => trial.dsr_rank !== null && trial.dsr_rank !== undefined);
+  const dsrTrials = (ResultsState.results || [])
+    .filter((trial) => trial.dsr_rank !== null && trial.dsr_rank !== undefined);
   dsrTrials.sort((a, b) => (a.dsr_rank || 0) - (b.dsr_rank || 0));
   ResultsState.dsr = {
     enabled: Boolean(study.dsr_enabled),
@@ -818,7 +839,8 @@ async function applyStudyPayload(data) {
     || inferPostProcessSource(data.trials || [], 'ft_source')
     || 'optuna';
 
-  const stTrials = (data.trials || []).filter((trial) => trial.st_rank !== null && trial.st_rank !== undefined);
+  const stTrials = (ResultsState.results || [])
+    .filter((trial) => trial.st_rank !== null && trial.st_rank !== undefined);
   stTrials.sort((a, b) => (a.st_rank || 0) - (b.st_rank || 0));
   ResultsState.stressTest = {
     enabled: Boolean(study.st_enabled),
@@ -837,7 +859,7 @@ async function applyStudyPayload(data) {
       || 'optuna'
   };
 
-  const oosTrials = (data.trials || []).filter(
+  const oosTrials = (ResultsState.results || []).filter(
     (trial) => trial.oos_test_source_rank !== null && trial.oos_test_source_rank !== undefined
   );
   oosTrials.sort((a, b) => (a.oos_test_source_rank || 0) - (b.oos_test_source_rank || 0));

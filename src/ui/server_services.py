@@ -799,7 +799,7 @@ DEFAULT_OPTIMIZER_SCORE_CONFIG: Dict[str, Any] = {
         "pf": {"min": 0.0, "max": 5.0},
         "ulcer": {"min": 0.0, "max": 20.0},
         "sqn": {"min": -2.0, "max": 7.0},
-        "consistency": {"min": 0.0, "max": 100.0},
+        "consistency": {"min": 0.0, "max": 5.0},
     },
 }
 
@@ -1611,6 +1611,15 @@ def _build_optimization_config(
     risk_per_trade = payload.get("risk_per_trade_pct", 2.0)
     contract_size = payload.get("contract_size", 0.01)
     commission_rate = payload.get("commission_rate", 0.0005)
+    consistency_segments_raw = payload.get(
+        "consistencySegments",
+        payload.get("consistency_segments", 4),
+    )
+    try:
+        consistency_segments = int(consistency_segments_raw)
+    except (TypeError, ValueError):
+        consistency_segments = 4
+    consistency_segments = max(2, min(24, consistency_segments))
 
     filter_min_profit_raw = payload.get("filter_min_profit")
     filter_min_profit = _parse_bool(filter_min_profit_raw, False)
@@ -1779,6 +1788,7 @@ def _build_optimization_config(
         swapping_prob=swapping_prob if swapping_prob is not None else 0.5,
         n_startup_trials=n_startup_trials,
         coverage_mode=coverage_mode,
+        consistency_segments=consistency_segments,
     )
 
     if optimization_mode == "optuna":

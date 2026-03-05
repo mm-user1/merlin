@@ -15,6 +15,7 @@ const ResultsState = {
   dateFilter: false,
   start: '',
   end: '',
+  consistencySegments: null,
   fixedParams: {},
   strategyConfig: {},
   optuna: {},

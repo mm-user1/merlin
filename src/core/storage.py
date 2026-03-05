@@ -268,6 +268,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             sqn REAL,
             ulcer_index REAL,
             consistency_score REAL,
+            consistency_segments_used INTEGER,
 
             composite_score REAL,
 
@@ -283,6 +284,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             ft_ulcer_index REAL,
             ft_sqn REAL,
             ft_consistency_score REAL,
+            ft_consistency_segments_used INTEGER,
             profit_degradation REAL,
             ft_rank INTEGER,
             ft_source TEXT,
@@ -328,6 +330,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             oos_test_ulcer_index REAL,
             oos_test_sqn REAL,
             oos_test_consistency_score REAL,
+            oos_test_consistency_segments_used INTEGER,
             oos_test_profit_degradation REAL,
             oos_test_source TEXT,
             oos_test_source_rank INTEGER,
@@ -502,6 +505,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("trials", "oos_test_ulcer_index", "REAL")
     ensure("trials", "oos_test_sqn", "REAL")
     ensure("trials", "oos_test_consistency_score", "REAL")
+    ensure("trials", "consistency_segments_used", "INTEGER")
+    ensure("trials", "ft_consistency_segments_used", "INTEGER")
+    ensure("trials", "oos_test_consistency_segments_used", "INTEGER")
     ensure("trials", "oos_test_profit_degradation", "REAL")
     ensure("trials", "oos_test_source", "TEXT")
     ensure("trials", "oos_test_source_rank", "INTEGER")
@@ -1375,7 +1381,9 @@ def save_optuna_study_to_db(
                         result.ulcer_index,
                         result.sqn,
                         result.consistency_score,
+                        getattr(result, "consistency_segments_used", None),
                         result.score,
+                        None,
                         None,
                         None,
                         None,
@@ -1402,11 +1410,12 @@ def save_optuna_study_to_db(
                         net_profit_pct, max_drawdown_pct, total_trades, win_rate, max_consecutive_losses, avg_win, avg_loss,
                         gross_profit, gross_loss,
                         romad, sharpe_ratio, sortino_ratio, profit_factor, ulcer_index, sqn,
-                        consistency_score, composite_score,
+                        consistency_score, consistency_segments_used, composite_score,
                         ft_net_profit_pct, ft_max_drawdown_pct, ft_total_trades, ft_win_rate,
                         ft_sharpe_ratio, ft_sortino_ratio, ft_romad, ft_profit_factor,
-                        ft_ulcer_index, ft_sqn, ft_consistency_score, profit_degradation, ft_rank
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ft_ulcer_index, ft_sqn, ft_consistency_score, ft_consistency_segments_used,
+                        profit_degradation, ft_rank
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     trial_rows,
                 )
@@ -2357,6 +2366,10 @@ def save_forward_test_results(
                             payload.get("ft_ulcer_index"),
                             payload.get("ft_sqn"),
                             payload.get("ft_consistency_score"),
+                            payload.get(
+                                "ft_consistency_segments_used",
+                                payload.get("consistency_segments_used"),
+                            ),
                             payload.get("profit_degradation"),
                             payload.get("ft_rank"),
                             ft_source,
@@ -2381,6 +2394,7 @@ def save_forward_test_results(
                         ft_ulcer_index = ?,
                         ft_sqn = ?,
                         ft_consistency_score = ?,
+                        ft_consistency_segments_used = ?,
                         profit_degradation = ?,
                         ft_rank = ?,
                         ft_source = ?
@@ -2698,6 +2712,7 @@ def save_oos_test_results(
                     oos_test_ulcer_index = NULL,
                     oos_test_sqn = NULL,
                     oos_test_consistency_score = NULL,
+                    oos_test_consistency_segments_used = NULL,
                     oos_test_profit_degradation = NULL,
                     oos_test_source = NULL,
                     oos_test_source_rank = NULL
@@ -2725,6 +2740,7 @@ def save_oos_test_results(
                             test_metrics.get("ulcer_index"),
                             test_metrics.get("sqn"),
                             test_metrics.get("consistency_score"),
+                            test_metrics.get("consistency_segments_used"),
                             comparison.get("profit_degradation"),
                             result.get("oos_test_source"),
                             result.get("oos_test_source_rank"),
@@ -2749,6 +2765,7 @@ def save_oos_test_results(
                         oos_test_ulcer_index = ?,
                         oos_test_sqn = ?,
                         oos_test_consistency_score = ?,
+                        oos_test_consistency_segments_used = ?,
                         oos_test_profit_degradation = ?,
                         oos_test_source = ?,
                         oos_test_source_rank = ?

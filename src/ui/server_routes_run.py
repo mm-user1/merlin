@@ -380,6 +380,7 @@ def register_routes(app):
             "swapping_prob": getattr(optimization_config, "swapping_prob", None),
             "n_startup_trials": getattr(optimization_config, "n_startup_trials", 20),
             "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
+            "consistencySegments": int(getattr(optimization_config, "consistency_segments", 4) or 4),
         }
         if post_process_payload:
             base_template["postProcess"] = post_process_payload
@@ -509,6 +510,7 @@ def register_routes(app):
         wf_config = WFConfig(
             is_period_days=is_period_days,
             oos_period_days=oos_period_days,
+            consistency_segments=int(getattr(optimization_config, "consistency_segments", 4) or 4),
             warmup_bars=warmup_bars,
             strategy_id=strategy_id,
             post_process=post_process_config,
@@ -1145,6 +1147,9 @@ def register_routes(app):
                 ft_start_date=ft_start.strftime("%Y-%m-%d") if ft_start else "",
                 ft_end_date=ft_end.strftime("%Y-%m-%d") if ft_end else "",
                 n_workers=worker_processes,
+                consistency_segments=int(
+                    getattr(optimization_config, "consistency_segments", 4) or 4
+                ),
             )
             save_forward_test_results(
                 study_id,
@@ -1306,6 +1311,10 @@ def register_routes(app):
                 trials=trials_to_test,
                 baseline_period_days=int(baseline_period_days),
                 test_period_days=int(test_period_days),
+                is_period_days_for_segments=int(is_days or 0),
+                consistency_segments_is=int(
+                    getattr(optimization_config, "consistency_segments", 4) or 4
+                ),
                 original_metrics_resolver=resolve_original_metrics,
             )
 

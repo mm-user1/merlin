@@ -168,6 +168,15 @@ def test_studies_stitched_columns():
     assert "inactivity_multiplier" in columns
 
 
+def test_trials_consistency_segment_columns():
+    with get_db_connection() as conn:
+        cursor = conn.execute("PRAGMA table_info(trials)")
+        columns = {row["name"] for row in cursor.fetchall()}
+    assert "consistency_segments_used" in columns
+    assert "ft_consistency_segments_used" in columns
+    assert "oos_test_consistency_segments_used" in columns
+
+
 def test_save_wfa_study_with_trials():
     wf_result = _build_dummy_wfa_result()
     study_id = save_wfa_study_to_db(

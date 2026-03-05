@@ -494,6 +494,15 @@ def register_routes(app):
             baseline_period_days = study.get("is_period_days")
         if baseline_period_days is None:
             baseline_period_days = calculate_is_period_days(config) or 0
+        is_period_days_for_segments = int(study.get("is_period_days") or 0)
+        if is_period_days_for_segments <= 0:
+            is_period_days_for_segments = int(calculate_is_period_days(config) or 0)
+        try:
+            consistency_segments_is = int(
+                (config.get("consistencySegments") or config.get("consistency_segments") or 4)
+            )
+        except (TypeError, ValueError):
+            consistency_segments_is = 4
 
         trials_to_test = [trial_map[int(number)] for number in trial_numbers]
 
@@ -513,6 +522,8 @@ def register_routes(app):
                 trials=trials_to_test,
                 baseline_period_days=int(baseline_period_days or 0),
                 test_period_days=int(test_period_days),
+                is_period_days_for_segments=is_period_days_for_segments,
+                consistency_segments_is=consistency_segments_is,
                 original_metrics_resolver=resolve_original_metrics,
             )
         except Exception as exc:

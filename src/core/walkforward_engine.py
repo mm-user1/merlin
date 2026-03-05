@@ -36,6 +36,7 @@ class WFConfig:
     # Window sizing (calendar-based)
     is_period_days: int = 180
     oos_period_days: int = 60
+    consistency_segments: int = 4
 
     # Strategy and warmup
     strategy_id: str = ""
@@ -586,6 +587,7 @@ class WalkForwardEngine:
                     ft_start_date=training_end.strftime("%Y-%m-%d"),
                     ft_end_date=window.is_end.strftime("%Y-%m-%d"),
                     n_workers=worker_count,
+                    consistency_segments=self.config.consistency_segments,
                 )
                 module_status["forward_test"]["ran"] = True
                 if ft_results:
@@ -697,7 +699,12 @@ class WalkForwardEngine:
             )
 
             is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
-            is_adv = metrics.calculate_advanced(is_result, initial_balance=100.0)
+            is_segments = metrics.normalize_consistency_segments(self.config.consistency_segments)
+            is_adv = metrics.calculate_advanced(
+                is_result,
+                initial_balance=100.0,
+                consistency_segments=is_segments,
+            )
 
             print(
                 "OOS validation: dates "
@@ -718,7 +725,17 @@ class WalkForwardEngine:
             )
 
             oos_basic = metrics.calculate_basic(oos_result, initial_balance=100.0)
-            oos_adv = metrics.calculate_advanced(oos_result, initial_balance=100.0)
+            oos_days = max(0, int((window.oos_end - window.oos_start).days))
+            oos_segments = metrics.derive_auto_consistency_segments(
+                self.config.is_period_days,
+                is_segments,
+                oos_days,
+            )
+            oos_adv = metrics.calculate_advanced(
+                oos_result,
+                initial_balance=100.0,
+                consistency_segments=oos_segments,
+            )
 
             if oos_basic.total_trades == 0:
                 print(
@@ -1010,6 +1027,7 @@ class WalkForwardEngine:
                 ft_start_date=training_end.strftime("%Y-%m-%d"),
                 ft_end_date=is_end.strftime("%Y-%m-%d"),
                 n_workers=worker_count,
+                consistency_segments=self.config.consistency_segments,
             )
             module_status["forward_test"]["ran"] = True
             if ft_results:
@@ -1556,7 +1574,12 @@ class WalkForwardEngine:
                 params=is_pipeline.best_params,
             )
             is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
-            is_adv = metrics.calculate_advanced(is_result, initial_balance=100.0)
+            is_segments = metrics.normalize_consistency_segments(self.config.consistency_segments)
+            is_adv = metrics.calculate_advanced(
+                is_result,
+                initial_balance=100.0,
+                consistency_segments=is_segments,
+            )
             baseline = self._compute_is_baseline(is_result, self.config.is_period_days)
 
             if not (
@@ -1592,7 +1615,17 @@ class WalkForwardEngine:
                 oos_max_end=oos_max_end,
             )
             oos_basic = metrics.calculate_basic(truncated_oos_result, initial_balance=100.0)
-            oos_adv = metrics.calculate_advanced(truncated_oos_result, initial_balance=100.0)
+            oos_days = max(0, int((oos_actual_end - oos_start).days))
+            oos_segments = metrics.derive_auto_consistency_segments(
+                self.config.is_period_days,
+                is_segments,
+                oos_days,
+            )
+            oos_adv = metrics.calculate_advanced(
+                truncated_oos_result,
+                initial_balance=100.0,
+                consistency_segments=oos_segments,
+            )
 
             if oos_basic.total_trades == 0:
                 print(
@@ -2174,6 +2207,12 @@ class WalkForwardEngine:
             swapping_prob=self.base_config_template.get("swapping_prob", 0.5),
             n_startup_trials=self.base_config_template.get("n_startup_trials", 20),
             coverage_mode=bool(self.base_config_template.get("coverage_mode", False)),
+            consistency_segments=metrics.normalize_consistency_segments(
+                self.base_config_template.get(
+                    "consistencySegments",
+                    self.base_config_template.get("consistency_segments", 4),
+                )
+            ),
         )
 
         objectives = list(self.optuna_settings.get("objectives") or [])

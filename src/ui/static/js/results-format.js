@@ -9,7 +9,7 @@ const OBJECTIVE_LABELS = {
   max_consecutive_losses: 'Max CL',
   sqn: 'SQN',
   ulcer_index: 'Ulcer Index',
-  consistency_score: 'Consistency %',
+  consistency_score: 'Consistency',
   composite_score: 'Composite Score'
 };
 
@@ -62,6 +62,46 @@ function formatSigned(value, digits = 2, suffix = '') {
   if (!Number.isFinite(num)) return 'N/A';
   const sign = num > 0 ? '+' : '';
   return `${sign}${num.toFixed(digits)}${suffix}`;
+}
+
+function normalizeConsistencySegments(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const rounded = Math.round(parsed);
+  if (rounded < 2) return null;
+  return rounded;
+}
+
+function deriveAutoConsistencySegments(isPeriodDays, isSegments, targetPeriodDays) {
+  const isDays = Number(isPeriodDays);
+  const targetDays = Number(targetPeriodDays);
+  const normalizedIsSegments = normalizeConsistencySegments(isSegments);
+  if (!Number.isFinite(isDays) || !Number.isFinite(targetDays) || !normalizedIsSegments) {
+    return null;
+  }
+  if (isDays <= 0 || targetDays <= 0) return null;
+  const segmentDays = isDays / normalizedIsSegments;
+  if (!Number.isFinite(segmentDays) || segmentDays <= 0) return null;
+  const derived = Math.round(targetDays / segmentDays);
+  return derived >= 2 ? derived : null;
+}
+
+function getStudyConsistencySegments(study) {
+  const config = (study && study.config_json) || {};
+  const value = config.consistencySegments
+    ?? config.consistency_segments
+    ?? null;
+  return normalizeConsistencySegments(value);
+}
+
+function formatConsistency(value, segments) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 'N/A';
+  const normalizedSegments = normalizeConsistencySegments(segments);
+  if (!normalizedSegments) {
+    return `${num.toFixed(1)}%`;
+  }
+  return `${num.toFixed(2)}/${normalizedSegments}`;
 }
 
 function formatRankCell(rank, delta) {

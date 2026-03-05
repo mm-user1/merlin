@@ -52,7 +52,7 @@ class StrategyResult:
     romad: Optional[float] = None  # Return Over Maximum Drawdown
     ulcer_index: Optional[float] = None
     sqn: Optional[float] = None
-    consistency_score: Optional[float] = None  # % of profitable months
+    consistency_score: Optional[float] = None  # Stability score across sub-periods
 
     def to_dict(self) -> Dict[str, Any]:
         data = {

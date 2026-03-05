@@ -72,6 +72,7 @@ class OptimizationConfig:
     swapping_prob: float = 0.5
     n_startup_trials: int = 20
     coverage_mode: bool = False
+    consistency_segments: int = 4
 
 
 @dataclass
@@ -95,6 +96,7 @@ class OptimizationResult:
     ulcer_index: Optional[float] = None
     sqn: Optional[float] = None
     consistency_score: Optional[float] = None
+    consistency_segments_used: Optional[int] = None
     score: float = 0.0
     optuna_trial_number: Optional[int] = None
     objective_values: List[float] = field(default_factory=list)
@@ -169,7 +171,7 @@ DEFAULT_METRIC_BOUNDS: Dict[str, Dict[str, float]] = {
     "pf": {"min": 0.0, "max": 5.0},
     "ulcer": {"min": 0.0, "max": 20.0},
     "sqn": {"min": -2.0, "max": 7.0},
-    "consistency": {"min": 0.0, "max": 100.0},
+    "consistency": {"min": 0.0, "max": 5.0},
 }
 
 DEFAULT_SCORE_CONFIG: Dict[str, Any] = {
@@ -206,7 +208,7 @@ OBJECTIVE_DISPLAY_NAMES: Dict[str, str] = {
     "win_rate": "Win Rate %",
     "sqn": "SQN",
     "ulcer_index": "Ulcer Index",
-    "consistency_score": "Consistency %",
+    "consistency_score": "Consistency",
     "composite_score": "Composite Score",
 }
 
@@ -896,19 +898,26 @@ def _build_sampler_config(config: Any) -> SamplerConfig:
 
 
 def _run_single_combination(
-    args: Tuple[Dict[str, Any], pd.DataFrame, int, Any]
+    args: Tuple[Dict[str, Any], pd.DataFrame, int, Any, int]
 ) -> OptimizationResult:
     """
     Worker function to run a single parameter combination using strategy.run().
 
     Args:
-        args: Tuple of (params_dict, df, trade_start_idx, strategy_class)
+        args: Tuple of (
+            params_dict,
+            df,
+            trade_start_idx,
+            strategy_class,
+            consistency_segments,
+        )
 
     Returns:
         OptimizationResult with metrics for this combination
     """
 
-    params_dict, df, trade_start_idx, strategy_class = args
+    params_dict, df, trade_start_idx, strategy_class, consistency_segments = args
+    consistency_segments = metrics.normalize_consistency_segments(consistency_segments)
 
     def _base_result(params: Dict[str, Any]) -> OptimizationResult:
         return OptimizationResult(
@@ -929,13 +938,17 @@ def _run_single_combination(
             ulcer_index=None,
             sqn=None,
             consistency_score=None,
+            consistency_segments_used=consistency_segments,
         )
 
     try:
         result = strategy_class.run(df, params_dict, trade_start_idx)
 
         basic_metrics = metrics.calculate_basic(result)
-        advanced_metrics = metrics.calculate_advanced(result)
+        advanced_metrics = metrics.calculate_advanced(
+            result,
+            consistency_segments=consistency_segments,
+        )
 
         return OptimizationResult(
             params=params_dict.copy(),
@@ -955,6 +968,7 @@ def _run_single_combination(
             ulcer_index=advanced_metrics.ulcer_index,
             sqn=advanced_metrics.sqn,
             consistency_score=advanced_metrics.consistency_score,
+            consistency_segments_used=consistency_segments,
         )
     except Exception:
         return _base_result(params_dict)
@@ -1012,6 +1026,7 @@ def _result_from_trial(trial: optuna.trial.FrozenTrial) -> OptimizationResult:
         ulcer_index=all_metrics.get("ulcer_index"),
         sqn=all_metrics.get("sqn"),
         consistency_score=all_metrics.get("consistency_score"),
+        consistency_segments_used=all_metrics.get("consistency_segments_used"),
         score=0.0,
         optuna_trial_number=trial.number,
         objective_values=objective_values,
@@ -1728,7 +1743,13 @@ class OptunaOptimizer:
         if self.df is None or self.strategy_class is None:
             raise RuntimeError("Data and strategy must be prepared before evaluation.")
 
-        args = (params_dict, self.df, self.trade_start_idx, self.strategy_class)
+        args = (
+            params_dict,
+            self.df,
+            self.trade_start_idx,
+            self.strategy_class,
+            int(getattr(self.base_config, "consistency_segments", 4) or 4),
+        )
         return _run_single_combination(args)
 
     def _cast_param_value(self, name: str, value: Any) -> Any:
@@ -1824,6 +1845,7 @@ class OptunaOptimizer:
             "ulcer_index": result.ulcer_index,
             "sqn": result.sqn,
             "consistency_score": result.consistency_score,
+            "consistency_segments_used": result.consistency_segments_used,
             "composite_score": result.score,
         }
 

@@ -753,6 +753,11 @@ function applyQueueConfigFallback(item) {
   if (Object.prototype.hasOwnProperty.call(config, 'sanitize_trades_threshold')) {
     setInputValue('optuna_sanitize_trades_threshold', config.sanitize_trades_threshold);
   }
+  if (Object.prototype.hasOwnProperty.call(config, 'consistencySegments')) {
+    setInputValue('consistencySegmentsIS', config.consistencySegments);
+  } else if (Object.prototype.hasOwnProperty.call(config, 'consistency_segments')) {
+    setInputValue('consistencySegmentsIS', config.consistency_segments);
+  }
 
   applyQueueObjectives(config);
   applyQueueConstraints(config);

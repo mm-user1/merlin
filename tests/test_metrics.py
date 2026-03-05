@@ -26,7 +26,11 @@ from core.backtest_engine import (  # noqa: E402
 from core.metrics import (  # noqa: E402
     calculate_basic,
     calculate_advanced,
+    _calculate_consistency_score_value,
+    _calculate_subperiod_returns,
     _calculate_sqn_value,
+    derive_auto_consistency_segments,
+    normalize_consistency_segments,
 )
 from strategies.s01_trailing_ma.strategy import S01Params, S01TrailingMA  # noqa: E402
 
@@ -299,6 +303,43 @@ class TestMetricsEdgeCases:
         assert sqn < 0
 
 
+class TestConsistencyHelpers:
+    """Unit tests for sub-period segmentation and consistency scoring helpers."""
+
+    def test_subperiod_returns_basic_split(self):
+        equity = [100.0, 110.0, 120.0, 132.0, 145.2]
+        returns = _calculate_subperiod_returns(equity, 2)
+        assert len(returns) == 2
+        assert returns[0] == pytest.approx(20.0)
+        assert returns[1] == pytest.approx(21.0)
+
+    def test_subperiod_returns_invalid_input(self):
+        assert _calculate_subperiod_returns([100.0, 101.0], 1) == []
+        assert _calculate_subperiod_returns([100.0, 101.0], 3) == []
+
+    def test_consistency_score_none_when_insufficient_segments(self):
+        assert _calculate_consistency_score_value([]) is None
+        assert _calculate_consistency_score_value([1.0]) is None
+
+    def test_consistency_score_identical_returns(self):
+        score = _calculate_consistency_score_value([2.0, 2.0, 2.0, 2.0])
+        assert score == pytest.approx(2.0, abs=1e-6)
+
+    def test_consistency_score_all_negative_is_zero_with_full_loss_penalty(self):
+        score = _calculate_consistency_score_value([-3.0, -2.0, -4.0, -1.0])
+        assert score is not None
+        assert score == pytest.approx(0.0, abs=1e-6)
+
+    def test_normalize_consistency_segments_bounds(self):
+        assert normalize_consistency_segments(None) == 4
+        assert normalize_consistency_segments(1) == 2
+        assert normalize_consistency_segments(100) == 24
+
+    def test_derive_auto_consistency_segments(self):
+        assert derive_auto_consistency_segments(180, 6, 65) == 2
+        assert derive_auto_consistency_segments(180, 6, 10) is None
+
+
 class TestMetricsRegression:
     """Regression checks against recorded baseline values."""
 
@@ -327,7 +368,13 @@ class TestMetricsRegression:
         else:
             assert abs((advanced.sqn or 0) - baseline_sqn) < 1e-6
         assert abs((advanced.ulcer_index or 0) - baseline["ulcer_index"]) < 1e-6
-        assert abs((advanced.consistency_score or 0) - baseline["consistency_score"]) < 1e-6
+        expected_consistency = _calculate_consistency_score_value(
+            _calculate_subperiod_returns(test_result.equity_curve, 4)
+        )
+        if expected_consistency is None:
+            assert advanced.consistency_score is None
+        else:
+            assert advanced.consistency_score == pytest.approx(expected_consistency, abs=1e-6)
 
 
 class TestEnrichStrategyResult:

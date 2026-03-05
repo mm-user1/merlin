@@ -30,7 +30,7 @@ const SCORE_DEFAULT_BOUNDS = {
   pf: { min: 0, max: 5 },
   ulcer: { min: 0, max: 20 },
   sqn: { min: -2, max: 7 },
-  consistency: { min: 0, max: 100 }
+  consistency: { min: 0, max: 5 }
 };
 
 const OPT_STATE_KEY = 'merlinOptimizationState';
@@ -685,7 +685,7 @@ function updateScoreFormulaPreview() {
         pf: 'Profit Factor',
         ulcer: 'Ulcer Index',
         sqn: 'SQN',
-        consistency: 'Consistency Score'
+        consistency: 'Stability Score'
       };
       const label = labelMap[metric] || metric;
       const weight = state.scoreWeights[metric];
@@ -1114,6 +1114,7 @@ function buildOptunaConfig(state) {
   const nsgaCrossover = document.getElementById('nsgaCrossoverProb');
   const nsgaMutation = document.getElementById('nsgaMutationProb');
   const nsgaSwapping = document.getElementById('nsgaSwappingProb');
+  const consistencySegmentsInput = document.getElementById('consistencySegmentsIS');
 
   const selectedBudget = Array.from(budgetModeRadios).find((radio) => radio.checked)?.value || 'trials';
   const trialsValue = Number(optunaTrials?.value);
@@ -1136,6 +1137,10 @@ function buildOptunaConfig(state) {
   const normalizedCrossover = Number.isFinite(crossoverValue) ? Math.max(0, Math.min(1, crossoverValue)) : 0.9;
   const normalizedMutation = Number.isFinite(mutationValue) ? Math.max(0, Math.min(1, mutationValue)) : null;
   const normalizedSwapping = Number.isFinite(swappingValue) ? Math.max(0, Math.min(1, swappingValue)) : 0.5;
+  const consistencySegmentsRaw = Number(consistencySegmentsInput?.value);
+  const consistencySegments = Number.isFinite(consistencySegmentsRaw)
+    ? Math.max(2, Math.min(24, Math.round(consistencySegmentsRaw)))
+    : 4;
 
   const objectiveConfig = window.OptunaUI
     ? window.OptunaUI.collectObjectives()
@@ -1174,6 +1179,7 @@ function buildOptunaConfig(state) {
     crossover_prob: normalizedCrossover,
     mutation_prob: normalizedMutation,
     swapping_prob: normalizedSwapping,
+    consistencySegments,
     postProcess: postProcessConfig,
     oosTest: oosTestConfig
   };

@@ -123,6 +123,54 @@
     }) || null;
   }
 
+  function deriveDaysFromIsoRange(startIso, endIso) {
+    if (!startIso || !endIso) return null;
+    const startTs = Date.parse(startIso);
+    const endTs = Date.parse(endIso);
+    if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) {
+      return null;
+    }
+    return (endTs - startTs) / 86400000;
+  }
+
+  function enrichModuleConsistencySegments(modules, windowData) {
+    const source = modules && typeof modules === 'object' ? modules : {};
+    const isSegments = windowData?.is_consistency_segments_used
+      ?? window.ResultsState?.consistencySegments
+      ?? null;
+    const isPeriodDays = window.ResultsState?.wfa?.isPeriodDays ?? null;
+    const oosDays = windowData?.oos_actual_days
+      ?? deriveDaysFromIsoRange(windowData?.oos_start_date, windowData?.oos_end_date);
+    const ftDays = deriveDaysFromIsoRange(windowData?.ft_start_date, windowData?.ft_end_date)
+      ?? window.ResultsState?.forwardTest?.periodDays
+      ?? null;
+    const deriveAuto = typeof deriveAutoConsistencySegments === 'function'
+      ? deriveAutoConsistencySegments
+      : null;
+    const oosSegments = deriveAuto ? deriveAuto(isPeriodDays, isSegments, oosDays) : null;
+    const ftSegments = deriveAuto ? deriveAuto(isPeriodDays, isSegments, ftDays) : null;
+
+    const mapped = {};
+    Object.entries(source).forEach(([moduleType, trials]) => {
+      mapped[moduleType] = (Array.isArray(trials) ? trials : []).map((trial) => {
+        if (!trial || typeof trial !== 'object') return trial;
+        let segments = trial.consistency_segments_used ?? null;
+        if (segments == null) {
+          if (moduleType === 'forward_test') {
+            segments = ftSegments;
+          } else if (moduleType === 'optuna_is' || moduleType === 'dsr' || moduleType === 'stress_test') {
+            segments = isSegments;
+          } else if (moduleType === 'oos') {
+            segments = oosSegments;
+          }
+        }
+        if (segments == null) return trial;
+        return { ...trial, consistency_segments_used: segments };
+      });
+    });
+    return mapped;
+  }
+
   function findBoundaryIndex(timestamps, boundaryDate) {
     if (!Array.isArray(timestamps) || !boundaryDate) return null;
     const boundaryTime = Date.parse(boundaryDate);
@@ -528,7 +576,7 @@
         throw new Error(`Failed to load window details: ${response.status}`);
       }
       const data = await response.json();
-      const modules = data.modules || {};
+      const modules = enrichModuleConsistencySegments(data.modules || {}, data.window || {});
       const available = normalizeModules(data.window?.available_modules || availableModules || []);
 
       WFAState.windowTrials[windowNumber] = {
@@ -713,6 +761,26 @@
       });
       tbody.appendChild(headerRow);
 
+      const isSegments = window.is_consistency_segments_used
+        ?? ResultsState.consistencySegments
+        ?? null;
+      let oosDays = window.oos_actual_days;
+      if ((oosDays === null || oosDays === undefined) && window.oos_start_date && window.oos_end_date) {
+        const startTs = Date.parse(window.oos_start_date);
+        const endTs = Date.parse(window.oos_end_date);
+        if (Number.isFinite(startTs) && Number.isFinite(endTs) && endTs > startTs) {
+          oosDays = (endTs - startTs) / 86400000;
+        }
+      }
+      const oosSegments = window.oos_consistency_segments_used
+        ?? (typeof deriveAutoConsistencySegments === 'function'
+          ? deriveAutoConsistencySegments(
+            ResultsState.wfa?.isPeriodDays,
+            isSegments,
+            oosDays
+          )
+          : null);
+
       const isTrial = {
         trial_number: window.is_best_trial_number ?? '',
         win_rate: window.is_win_rate,
@@ -727,6 +795,7 @@
         ulcer_index: window.is_ulcer_index,
         sqn: window.is_sqn,
         consistency_score: window.is_consistency_score,
+        consistency_segments_used: isSegments,
         is_pareto_optimal: window.is_pareto_optimal,
         constraints_satisfied: window.constraints_satisfied,
         objective_values: []
@@ -766,6 +835,7 @@
         ulcer_index: window.oos_ulcer_index,
         sqn: window.oos_sqn,
         consistency_score: window.oos_consistency_score,
+        consistency_segments_used: oosSegments,
         is_pareto_optimal: window.is_pareto_optimal,
         constraints_satisfied: window.constraints_satisfied,
         objective_values: []

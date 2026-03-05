@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   const OBJECTIVE_LABELS = {
     net_profit_pct: 'Net Profit %',
   max_drawdown_pct: 'Max DD %',
@@ -10,7 +10,7 @@
     max_consecutive_losses: 'Max CL',
     sqn: 'SQN',
     ulcer_index: 'Ulcer Index',
-    consistency_score: 'Consistency %',
+    consistency_score: 'Consistency',
     composite_score: 'Composite Score'
   };
 
@@ -138,6 +138,9 @@
     const ulcer = trial.ulcer_index;
     const sqn = trial.sqn;
     const consistency = trial.consistency_score;
+    const consistencyDisplay = typeof window.formatConsistency === 'function'
+      ? window.formatConsistency(consistency, trial.consistency_segments_used)
+      : `${formatNumber(consistency, 1)}${consistency !== null && consistency !== undefined ? '%' : ''}`;
 
     return `
       <tr class="clickable" data-trial-number="${trial.trial_number ?? ''}">
@@ -157,7 +160,7 @@
         <td>${formatNumber(pf, 3)}</td>
         <td>${formatNumber(ulcer, 2)}</td>
         <td>${formatNumber(sqn, 3)}</td>
-        <td>${formatNumber(consistency, 1)}${consistency !== null && consistency !== undefined ? '%' : ''}</td>
+        <td>${consistencyDisplay}</td>
       </tr>
     `;
   }

@@ -88,6 +88,7 @@ class FTResult:
     ft_ulcer_index: Optional[float]
     ft_sqn: Optional[float]
     ft_consistency_score: Optional[float]
+    ft_consistency_segments_used: Optional[int]
 
     profit_degradation: float
     max_dd_change: float
@@ -231,6 +232,7 @@ def _ft_worker_entry(
     warmup_bars: int,
     is_period_days: int,
     ft_period_days: int,
+    consistency_segments_is: int,
 ) -> Optional[Dict[str, Any]]:
     """
     Entry point for FT worker process.
@@ -273,7 +275,16 @@ def _ft_worker_entry(
         result = strategy_class.run(df_ft_with_warmup, params, trade_start_idx)
 
         basic = metrics.calculate_basic(result, 100.0)
-        advanced = metrics.calculate_advanced(result, 100.0)
+        ft_consistency_segments = metrics.derive_auto_consistency_segments(
+            is_period_days,
+            consistency_segments_is,
+            ft_period_days,
+        )
+        advanced = metrics.calculate_advanced(
+            result,
+            100.0,
+            consistency_segments=ft_consistency_segments,
+        )
 
         ft_metrics = {
             "net_profit_pct": basic.net_profit_pct,
@@ -288,6 +299,7 @@ def _ft_worker_entry(
             "ulcer_index": advanced.ulcer_index,
             "sqn": advanced.sqn,
             "consistency_score": advanced.consistency_score,
+            "consistency_segments_used": ft_consistency_segments,
         }
 
         is_metrics = task_dict["is_metrics"]
@@ -800,10 +812,13 @@ def run_forward_test(
     ft_start_date: str,
     ft_end_date: str,
     n_workers: int,
+    consistency_segments: int = 4,
 ) -> List[FTResult]:
     """
     Run forward test for top-K optuna results.
     """
+    from . import metrics
+
     if not config.enabled:
         return []
 
@@ -813,6 +828,9 @@ def run_forward_test(
 
     top_k = max(1, int(config.top_k or 1))
     top_k = min(top_k, len(candidates))
+    normalized_consistency_segments = metrics.normalize_consistency_segments(
+        consistency_segments
+    )
 
     tasks: List[Dict[str, Any]] = []
     for idx, result in enumerate(candidates[:top_k], 1):
@@ -841,6 +859,7 @@ def run_forward_test(
                 int(config.warmup_bars),
                 int(is_period_days),
                 int(ft_period_days),
+                int(normalized_consistency_segments),
             )
             for task in tasks
         ]
@@ -875,6 +894,7 @@ def run_forward_test(
                     ft_ulcer_index=ft_metrics.get("ulcer_index"),
                     ft_sqn=ft_metrics.get("sqn"),
                     ft_consistency_score=ft_metrics.get("consistency_score"),
+                    ft_consistency_segments_used=ft_metrics.get("consistency_segments_used"),
                     profit_degradation=comparison.get("profit_degradation", 0.0),
                     max_dd_change=comparison.get("max_dd_change", 0.0),
                     romad_change=comparison.get("romad_change", 0.0),

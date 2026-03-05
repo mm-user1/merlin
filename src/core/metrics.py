@@ -94,10 +94,10 @@ class AdvancedMetrics:
     - Risk-adjusted returns (Sharpe, Sortino)
     - Efficiency ratios (Profit Factor, RoMaD, SQN)
     - Volatility measures (Ulcer Index)
-    - Consistency indicators (monthly profitability)
+    - Consistency indicators (stability across sub-periods)
 
     All values are Optional since they may not be calculable
-    (e.g., no trades, insufficient data for monthly returns).
+    (e.g., insufficient sub-period data).
     """
 
     sharpe_ratio: Optional[float] = None
@@ -197,6 +197,73 @@ def _calculate_monthly_returns(
     return monthly_returns
 
 
+def normalize_consistency_segments(
+    value: Any,
+    default: int = 4,
+    min_segments: int = 2,
+    max_segments: int = 24,
+) -> int:
+    """Normalize consistency segment count into a safe integer range."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(int(min_segments), min(int(max_segments), parsed))
+
+
+def derive_auto_consistency_segments(
+    is_period_days: Any,
+    is_consistency_segments: Any,
+    target_period_days: Any,
+) -> Optional[int]:
+    """Derive auto segment count for FT/OOS from IS segment size."""
+    try:
+        is_days = float(is_period_days)
+        target_days = float(target_period_days)
+    except (TypeError, ValueError):
+        return None
+
+    if is_days <= 0 or target_days <= 0:
+        return None
+
+    is_segments = normalize_consistency_segments(is_consistency_segments)
+    segment_days = is_days / float(is_segments)
+    if segment_days <= 0:
+        return None
+
+    derived = int(round(target_days / segment_days))
+    if derived < 2:
+        return None
+
+    return derived
+
+
+def _calculate_subperiod_returns(
+    equity_curve: List[float],
+    n_segments: int,
+) -> List[float]:
+    """Split equity into shared-boundary segments and compute % return for each."""
+    n = len(equity_curve)
+    if n_segments < 2 or n < (n_segments + 1):
+        return []
+
+    last_idx = n - 1
+    returns: List[float] = []
+
+    for i in range(n_segments):
+        start_idx = (i * last_idx) // n_segments
+        end_idx = ((i + 1) * last_idx) // n_segments
+        if end_idx <= start_idx:
+            continue
+
+        start_eq = float(equity_curve[start_idx])
+        end_eq = float(equity_curve[end_idx])
+        if start_eq > 0:
+            returns.append(((end_eq / start_eq) - 1.0) * 100.0)
+
+    return returns
+
+
 def _calculate_profit_factor_value(trades: List[TradeRecord]) -> Optional[float]:
     """Calculate Profit Factor (gross profit / gross loss)."""
     if not trades:
@@ -278,16 +345,25 @@ def _calculate_ulcer_index_value(equity_curve: List[float]) -> Optional[float]:
     return ulcer
 
 
-def _calculate_consistency_score_value(monthly_returns: List[float]) -> Optional[float]:
-    """Calculate percentage of profitable months."""
-    if len(monthly_returns) < 3:
+def _calculate_consistency_score_value(sub_returns: List[float]) -> Optional[float]:
+    """Calculate stability-based consistency score from sub-period returns."""
+    if len(sub_returns) < 2:
         return None
 
-    total_months = len(monthly_returns)
-    profitable_months = sum(1 for ret in monthly_returns if ret > 0)
+    values = np.array(sub_returns, dtype=float)
+    if values.size < 2:
+        return None
 
-    consistency = (profitable_months / total_months) * 100.0
-    return consistency
+    median_ret = float(np.median(values))
+    std_ret = float(np.std(values, ddof=0))
+    loss_ratio = float(np.sum(values < 0.0)) / float(values.size)
+    penalty = 1.0 - (loss_ratio**1.5)
+    raw_score = (median_ret / (1.0 + std_ret)) * penalty
+
+    if not math.isfinite(raw_score):
+        return None
+
+    return round(raw_score, 4)
 
 
 def calculate_higher_moments_from_monthly_returns(
@@ -437,6 +513,7 @@ def calculate_advanced(
     result: StrategyResult,
     initial_balance: Optional[float] = None,
     risk_free_rate: float = 0.02,
+    consistency_segments: Optional[int] = 4,
 ) -> AdvancedMetrics:
     """Calculate advanced risk-adjusted metrics from strategy result."""
     trades = result.trades
@@ -464,8 +541,13 @@ def calculate_advanced(
         sharpe_ratio = _calculate_sharpe_ratio_value(monthly_returns, risk_free_rate)
         sortino_ratio = _calculate_sortino_ratio_value(monthly_returns, risk_free_rate)
 
-    if len(monthly_returns) >= 1:
-        consistency_score = _calculate_consistency_score_value(monthly_returns)
+    normalized_segments: Optional[int] = None
+    if consistency_segments is not None:
+        normalized_segments = normalize_consistency_segments(consistency_segments)
+
+    if equity_curve and normalized_segments is not None:
+        sub_returns = _calculate_subperiod_returns(equity_curve, normalized_segments)
+        consistency_score = _calculate_consistency_score_value(sub_returns)
 
     if equity_curve:
         ulcer_index = _calculate_ulcer_index_value(equity_curve)

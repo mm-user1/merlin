@@ -206,6 +206,7 @@ function renderForwardTestTable(results) {
       ulcer_index: trial.ft_ulcer_index,
       sqn: trial.ft_sqn,
       consistency_score: trial.ft_consistency_score,
+      consistency_segments_used: trial.ft_consistency_segments_used,
       score: null
     };
 
@@ -498,6 +499,7 @@ function renderOosTestTable(results) {
       ulcer_index: trial.oos_test_ulcer_index,
       sqn: trial.oos_test_sqn,
       consistency_score: trial.oos_test_consistency_score,
+      consistency_segments_used: trial.oos_test_consistency_segments_used,
       score: null
     };
     const mapped = { ...trial, ...metrics };
@@ -578,6 +580,15 @@ function renderManualTestTable(results) {
     const trialNumber = entry.trial_number;
     const baseTrial = trialMap[trialNumber] || {};
     const metrics = entry.test_metrics || {};
+    const manualPeriodDays = ResultsState.activeManualTest?.config?.period_days;
+    const manualSegments = metrics.consistency_segments_used
+      ?? (typeof deriveAutoConsistencySegments === 'function'
+        ? deriveAutoConsistencySegments(
+          ResultsState.wfa?.isPeriodDays,
+          ResultsState.consistencySegments,
+          manualPeriodDays
+        )
+        : null);
     const mapped = {
       ...baseTrial,
       net_profit_pct: metrics.net_profit_pct,
@@ -592,6 +603,7 @@ function renderManualTestTable(results) {
       ulcer_index: metrics.ulcer_index,
       sqn: metrics.sqn,
       consistency_score: metrics.consistency_score,
+      consistency_segments_used: manualSegments,
       score: null
     };
 

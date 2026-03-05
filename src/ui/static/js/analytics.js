@@ -74,7 +74,7 @@
     max_consecutive_losses: 'Max CL',
     sqn: 'SQN',
     ulcer_index: 'Ulcer Index',
-    consistency_score: 'Consistency %',
+    consistency_score: 'Consistency',
     total_trades: 'Total Trades',
     composite_score: 'Composite Score',
   };
