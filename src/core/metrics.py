@@ -94,10 +94,10 @@ class AdvancedMetrics:
     - Risk-adjusted returns (Sharpe, Sortino)
     - Efficiency ratios (Profit Factor, RoMaD, SQN)
     - Volatility measures (Ulcer Index)
-    - Consistency indicators (monthly profitability)
+    - Equity-path shape indicators (Consistency)
 
     All values are Optional since they may not be calculable
-    (e.g., no trades, insufficient data for monthly returns).
+    (e.g., no trades, insufficient data for monthly returns/equity samples).
     """
 
     sharpe_ratio: Optional[float] = None
@@ -278,16 +278,37 @@ def _calculate_ulcer_index_value(equity_curve: List[float]) -> Optional[float]:
     return ulcer
 
 
-def _calculate_consistency_score_value(monthly_returns: List[float]) -> Optional[float]:
-    """Calculate percentage of profitable months."""
-    if len(monthly_returns) < 3:
+def _calculate_r2_consistency(equity_curve: List[float]) -> Optional[float]:
+    """
+    Calculate signed R² consistency from the equity curve.
+
+    The metric describes the shape of the equity path:
+    - sign comes from the regression/correlation direction
+    - magnitude comes from R²
+    - log-equity is used when all values are strictly positive so
+      compounded growth is not penalized for being non-linear in raw space
+
+    Returns:
+        Float in [-1, 1] for valid curves, 0.0 for flat curves,
+        or None when the input is too short / non-finite.
+    """
+    if len(equity_curve) < 3:
         return None
 
-    total_months = len(monthly_returns)
-    profitable_months = sum(1 for ret in monthly_returns if ret > 0)
+    equity = np.asarray(equity_curve, dtype=float)
+    if equity.size < 3 or not np.isfinite(equity).all():
+        return None
 
-    consistency = (profitable_months / total_months) * 100.0
-    return consistency
+    values = np.log(equity) if np.all(equity > 0.0) else equity
+    if np.ptp(values) == 0.0:
+        return 0.0
+
+    time_axis = np.arange(values.size, dtype=float)
+    corr = float(np.corrcoef(time_axis, values)[0, 1])
+    if not math.isfinite(corr):
+        return None
+
+    return float(corr * abs(corr))
 
 
 def calculate_higher_moments_from_monthly_returns(
@@ -464,11 +485,9 @@ def calculate_advanced(
         sharpe_ratio = _calculate_sharpe_ratio_value(monthly_returns, risk_free_rate)
         sortino_ratio = _calculate_sortino_ratio_value(monthly_returns, risk_free_rate)
 
-    if len(monthly_returns) >= 1:
-        consistency_score = _calculate_consistency_score_value(monthly_returns)
-
     if equity_curve:
         ulcer_index = _calculate_ulcer_index_value(equity_curve)
+        consistency_score = _calculate_r2_consistency(equity_curve)
 
     basic = calculate_basic(result, initial_balance)
 

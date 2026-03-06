@@ -26,6 +26,7 @@ from core.backtest_engine import (  # noqa: E402
 from core.metrics import (  # noqa: E402
     calculate_basic,
     calculate_advanced,
+    _calculate_r2_consistency,
     _calculate_sqn_value,
 )
 from strategies.s01_trailing_ma.strategy import S01Params, S01TrailingMA  # noqa: E402
@@ -297,6 +298,44 @@ class TestMetricsEdgeCases:
         sqn = _calculate_sqn_value(trades)
         assert sqn is not None
         assert sqn < 0
+
+
+class TestR2Consistency:
+    """Unit tests for the signed R² consistency metric."""
+
+    def test_perfect_compounded_growth_returns_positive_one(self):
+        equity = [100.0, 110.0, 121.0, 133.1, 146.41]
+        assert _calculate_r2_consistency(equity) == pytest.approx(1.0)
+
+    def test_perfect_compounded_decline_returns_negative_one(self):
+        equity = [146.41, 133.1, 121.0, 110.0, 100.0]
+        assert _calculate_r2_consistency(equity) == pytest.approx(-1.0)
+
+    def test_same_shape_different_scale_returns_same_score(self):
+        eq_small = [100.0, 110.0, 121.0, 133.1, 146.41]
+        eq_large = [1000.0, 1100.0, 1210.0, 1331.0, 1464.1]
+        assert _calculate_r2_consistency(eq_small) == pytest.approx(
+            _calculate_r2_consistency(eq_large),
+            abs=1e-12,
+        )
+
+    def test_flat_curve_returns_zero(self):
+        assert _calculate_r2_consistency([100.0] * 10) == pytest.approx(0.0)
+
+    def test_raw_equity_fallback_handles_non_positive_curves(self):
+        equity = [-10.0, -5.0, 0.0, 5.0, 10.0]
+        assert _calculate_r2_consistency(equity) == pytest.approx(1.0)
+
+    def test_positive_endpoint_does_not_force_positive_sign(self):
+        equity = [100.0, 80.0, 60.0, 40.0, 101.0]
+        score = _calculate_r2_consistency(equity)
+        assert score is not None
+        assert score < 0.0
+
+    def test_invalid_input_returns_none(self):
+        assert _calculate_r2_consistency([]) is None
+        assert _calculate_r2_consistency([100.0, 110.0]) is None
+        assert _calculate_r2_consistency([100.0, float("nan"), 120.0]) is None
 
 
 class TestMetricsRegression:

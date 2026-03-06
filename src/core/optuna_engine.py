@@ -169,7 +169,7 @@ DEFAULT_METRIC_BOUNDS: Dict[str, Dict[str, float]] = {
     "pf": {"min": 0.0, "max": 5.0},
     "ulcer": {"min": 0.0, "max": 20.0},
     "sqn": {"min": -2.0, "max": 7.0},
-    "consistency": {"min": 0.0, "max": 100.0},
+    "consistency": {"min": -1.0, "max": 1.0},
 }
 
 DEFAULT_SCORE_CONFIG: Dict[str, Any] = {
@@ -206,7 +206,7 @@ OBJECTIVE_DISPLAY_NAMES: Dict[str, str] = {
     "win_rate": "Win Rate %",
     "sqn": "SQN",
     "ulcer_index": "Ulcer Index",
-    "consistency_score": "Consistency %",
+    "consistency_score": "Consistency",
     "composite_score": "Composite Score",
 }
 
@@ -226,6 +226,34 @@ CONSTRAINT_OPERATORS: Dict[str, str] = {
     "ulcer_index": "lte",
     "consistency_score": "gte",
 }
+
+_LEGACY_CONSISTENCY_BOUNDS = {"min": 0.0, "max": 100.0}
+
+
+def _migrate_legacy_consistency_bounds(metric_bounds: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """
+    Upgrade stale score configs that still treat consistency as 0..100 percent.
+
+    The metric semantics changed to signed R² in [-1, 1]. Old saved queue/study
+    configs may still carry the retired 0..100 bounds, which would distort score
+    normalization if used verbatim.
+    """
+    bounds = {
+        key: {"min": float(value.get("min", 0.0)), "max": float(value.get("max", 100.0))}
+        for key, value in metric_bounds.items()
+    }
+
+    consistency = bounds.get("consistency")
+    if consistency is None:
+        return bounds
+
+    if (
+        math.isclose(consistency.get("min", 0.0), _LEGACY_CONSISTENCY_BOUNDS["min"])
+        and math.isclose(consistency.get("max", 0.0), _LEGACY_CONSISTENCY_BOUNDS["max"])
+    ):
+        bounds["consistency"] = dict(DEFAULT_METRIC_BOUNDS["consistency"])
+
+    return bounds
 
 
 # ============================================================================
@@ -1297,6 +1325,7 @@ def calculate_score(
                 min_val = current.get("min", 0.0)
                 max_val = current.get("max", 100.0)
             metric_bounds[key] = {"min": min_val, "max": max_val}
+    metric_bounds = _migrate_legacy_consistency_bounds(metric_bounds)
 
     metrics_to_normalize: List[str] = []
     for metric in SCORE_METRIC_ATTRS:

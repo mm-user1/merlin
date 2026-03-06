@@ -7,8 +7,8 @@
   "romad": 11.522958369601588,
   "ulcer_index": 12.008201030517265,
   "sqn": 1.6574394278247304,
-  "consistency_score": 66.66666666666666,
-  "generated_at": "2025-12-25T10:01:00.255704",
+  "consistency_score": 0.7939342470631295,
+  "generated_at": "2026-03-06T00:00:00Z",
   "parameters": {
     "maType": "SMA",
     "maLength": 300,

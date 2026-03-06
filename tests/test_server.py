@@ -384,6 +384,27 @@ def test_optuna_coverage_mode_parsed():
     assert config.coverage_mode is True
 
 
+def test_optuna_score_config_migrates_legacy_consistency_bounds():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["score_config"] = {
+        "enabled_metrics": {"consistency": True},
+        "weights": {"consistency": 1.0},
+        "metric_bounds": {"consistency": {"min": 0.0, "max": 100.0}},
+    }
+
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+
+    assert config.score_config["metric_bounds"]["consistency"] == {"min": -1.0, "max": 1.0}
+
+
 def _ensure_local_test_tmp_dir() -> Path:
     path = Path(__file__).parent / ".tmp_server_cancel"
     path.mkdir(parents=True, exist_ok=True)

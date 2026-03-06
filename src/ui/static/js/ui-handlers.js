@@ -30,8 +30,31 @@ const SCORE_DEFAULT_BOUNDS = {
   pf: { min: 0, max: 5 },
   ulcer: { min: 0, max: 20 },
   sqn: { min: -2, max: 7 },
-  consistency: { min: 0, max: 100 }
+  consistency: { min: -1, max: 1 }
 };
+
+function normalizeScoreBounds(rawBounds = {}) {
+  const normalized = {};
+
+  SCORE_METRICS.forEach((metric) => {
+    const defaults = SCORE_DEFAULT_BOUNDS[metric];
+    const source = rawBounds && typeof rawBounds === 'object' ? rawBounds[metric] : null;
+    let min = Number(source?.min);
+    let max = Number(source?.max);
+
+    if (!Number.isFinite(min)) min = defaults.min;
+    if (!Number.isFinite(max)) max = defaults.max;
+
+    if (metric === 'consistency' && min === 0 && max === 100) {
+      min = defaults.min;
+      max = defaults.max;
+    }
+
+    normalized[metric] = { min, max };
+  });
+
+  return normalized;
+}
 
 const OPT_STATE_KEY = 'merlinOptimizationState';
 const OPT_CONTROL_KEY = 'merlinOptimizationControl';
@@ -600,10 +623,10 @@ function applyScoreSettings(settings = {}) {
   const thresholdInput = document.getElementById('scoreThreshold');
 
   const defaultScoreConfig = window.defaults?.scoreConfig || {};
-  const baseBounds = {
+  const baseBounds = normalizeScoreBounds({
     ...SCORE_DEFAULT_BOUNDS,
     ...(defaultScoreConfig.metric_bounds || {})
-  };
+  });
   const effectiveWeights = {
     ...SCORE_DEFAULT_WEIGHTS,
     ...(defaultScoreConfig.weights || {}),
@@ -619,6 +642,10 @@ function applyScoreSettings(settings = {}) {
     ...(defaultScoreConfig.invert_metrics || {}),
     ...(settings.scoreInvertMetrics || {})
   };
+  const effectiveBounds = normalizeScoreBounds({
+    ...baseBounds,
+    ...(settings.scoreMetricBounds || {})
+  });
 
   const filterEnabled = Object.prototype.hasOwnProperty.call(settings, 'scoreFilterEnabled')
     ? Boolean(settings.scoreFilterEnabled)
@@ -657,7 +684,7 @@ function applyScoreSettings(settings = {}) {
   }
 
   SCORE_METRICS.forEach((metric) => {
-    const bounds = settings.scoreMetricBounds?.[metric] || {};
+    const bounds = effectiveBounds[metric] || {};
     const base = baseBounds[metric] || { min: 0, max: 100 };
     const minValue = Number.isFinite(Number(bounds.min)) ? Number(bounds.min) : base.min;
     const maxValue = Number.isFinite(Number(bounds.max)) ? Number(bounds.max) : base.max;
@@ -1981,10 +2008,10 @@ function bindScoreControls() {
   if (resetButton) {
     resetButton.addEventListener('click', () => {
       const defaultsConfig = window.defaults?.scoreConfig || {};
-      const mergedBounds = {
+      const mergedBounds = normalizeScoreBounds({
         ...SCORE_DEFAULT_BOUNDS,
         ...(defaultsConfig.metric_bounds || {})
-      };
+      });
       applyScoreSettings({
         scoreFilterEnabled: Boolean(defaultsConfig.filter_enabled),
         scoreThreshold: defaultsConfig.min_score_threshold ?? SCORE_DEFAULT_THRESHOLD,

@@ -228,7 +228,7 @@
                         <input type="checkbox" id="metric-consistency" checked />
                         <label for="metric-consistency" style="min-width: 140px;">Consistency Score</label>
                         <input type="number" id="weight-consistency" step="0.05" min="0" max="1" value="0.10" style="width: 70px;" />
-                        <span style="font-size: 11px; color: #777;">Profitable months %</span>
+                        <span style="font-size: 11px; color: #777;">Signed R² of equity curve</span>
                       </div>
                     </div>
 
@@ -273,9 +273,9 @@
                         </div>
                         <div class="score-metric-row">
                           <label for="bound-min-consistency" style="min-width: 140px;">Consistency Score</label>
-                          <input type="number" id="bound-min-consistency" step="1" style="width: 80px;" />
+                          <input type="number" id="bound-min-consistency" step="0.01" style="width: 80px;" />
                           <span style="font-size: 11px; color: #777;">to</span>
-                          <input type="number" id="bound-max-consistency" step="1" style="width: 80px;" />
+                          <input type="number" id="bound-max-consistency" step="0.01" style="width: 80px;" />
                         </div>
                       </div>
                     </div>
@@ -410,7 +410,7 @@
                         </label>
                         <label class="objective-item">
                           <input type="checkbox" class="objective-checkbox" data-objective="consistency_score" />
-                          Consistency %
+                          Consistency
                           <span class="objective-direction">&uarr; max</span>
                         </label>
                         <label class="objective-item">
@@ -649,10 +649,10 @@
                       <div class="constraint-row">
                         <label class="constraint-label">
                           <input type="checkbox" class="constraint-checkbox" data-constraint-metric="consistency_score" />
-                          Consistency %
+                          Consistency
                         </label>
                         <span class="constraint-operator">&ge;</span>
-                        <input type="number" class="constraint-input" data-constraint-threshold="consistency_score" value="0.0" step="0.1" />
+                        <input type="number" class="constraint-input" data-constraint-threshold="consistency_score" value="0.0" step="0.01" />
                       </div>
                       <div class="constraint-row">
                         <label class="constraint-label">

@@ -16,7 +16,7 @@
     win_rate: 'Win Rate %',
     sqn: 'SQN',
     ulcer_index: 'Ulcer Index',
-    consistency_score: 'Consistency %',
+    consistency_score: 'Consistency',
     composite_score: 'Composite Score'
   };
   function getObjectiveCheckboxes() {

@@ -799,7 +799,7 @@ DEFAULT_OPTIMIZER_SCORE_CONFIG: Dict[str, Any] = {
         "pf": {"min": 0.0, "max": 5.0},
         "ulcer": {"min": 0.0, "max": 20.0},
         "sqn": {"min": -2.0, "max": 7.0},
-        "consistency": {"min": 0.0, "max": 100.0},
+        "consistency": {"min": -1.0, "max": 1.0},
     },
 }
 
@@ -1451,6 +1451,7 @@ def _build_optimization_config(
     def _sanitize_score_config(raw_config: Any) -> Dict[str, Any]:
         source = raw_config if isinstance(raw_config, dict) else {}
         normalized = json.loads(json.dumps(DEFAULT_OPTIMIZER_SCORE_CONFIG))
+        legacy_consistency_bounds = {"min": 0.0, "max": 100.0}
 
         filter_value = source.get("filter_enabled")
         normalized["filter_enabled"] = _parse_bool(
@@ -1530,6 +1531,13 @@ def _build_optimization_config(
                     bounds[metric_key] = normalized["metric_bounds"].get(
                         metric_key, {"min": 0.0, "max": 100.0}
                     )
+            consistency_bounds = bounds.get("consistency")
+            if (
+                consistency_bounds
+                and math.isclose(consistency_bounds.get("min", 0.0), legacy_consistency_bounds["min"])
+                and math.isclose(consistency_bounds.get("max", 0.0), legacy_consistency_bounds["max"])
+            ):
+                bounds["consistency"] = dict(normalized["metric_bounds"]["consistency"])
             normalized["metric_bounds"] = bounds
 
         return normalized
