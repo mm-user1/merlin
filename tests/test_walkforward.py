@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from core import storage
 from core.walkforward_engine import (
     OOSStitchedResult,
     WFConfig,
@@ -323,6 +324,76 @@ def test_run_optuna_on_window_forwards_coverage_mode(monkeypatch):
     assert captured["base_config"].n_startup_trials == 33
     assert captured["optuna_cfg"].coverage_mode is True
     assert captured["optuna_cfg"].warmup_trials == 33
+
+
+@pytest.mark.slow
+def test_run_optuna_on_window_multiprocess_uses_in_memory_worker_csv():
+    data_path = Path(__file__).parent.parent / "data" / "raw" / "OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv"
+    if not data_path.exists():
+        pytest.skip("Sample data file not available for WFA multiprocess test.")
+
+    df = load_data(str(data_path)).iloc[:1200].copy()
+    wf_config = WFConfig(
+        strategy_id="s01_trailing_ma",
+        is_period_days=60,
+        oos_period_days=30,
+        warmup_bars=200,
+    )
+    base_template = {
+        "enabled_params": {"maLength": True},
+        "param_ranges": {"maLength": (10, 40, 10)},
+        "param_types": {"maLength": "int"},
+        "fixed_params": {
+            "dateFilter": False,
+            "maType": "EMA",
+            "closeCountLong": 2,
+            "closeCountShort": 2,
+        },
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 2,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "sampler_type": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "n_startup_trials": 20,
+        "coverage_mode": False,
+    }
+    optuna_settings = {
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "budget_mode": "trials",
+        "n_trials": 2,
+        "time_limit": 3600,
+        "convergence_patience": 10,
+        "enable_pruning": False,
+        "sampler": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "pruner": "median",
+        "warmup_trials": 20,
+        "coverage_mode": False,
+    }
+    engine = WalkForwardEngine(wf_config, base_template, optuna_settings)
+
+    before_entries = {path.name for path in storage.JOURNAL_DIR.iterdir()}
+    results, all_results = engine._run_optuna_on_window(df, df.index[200], df.index[-1])
+    after_entries = {path.name for path in storage.JOURNAL_DIR.iterdir()}
+
+    assert after_entries == before_entries
+    assert isinstance(results, list)
+    assert isinstance(all_results, list)
 
 
 def test_best_params_source_tracked(monkeypatch):

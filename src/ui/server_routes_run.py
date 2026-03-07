@@ -401,7 +401,6 @@ def register_routes(app):
             "pruner": getattr(optimization_config, "optuna_pruner", "median"),
             "warmup_trials": int(getattr(optimization_config, "n_startup_trials", 20)),
             "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
-            "save_study": bool(getattr(optimization_config, "optuna_save_study", False)),
         }
         base_template["optuna_config"] = json.loads(json.dumps(optuna_settings))
 

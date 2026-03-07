@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import bisect
+import io
 import itertools
 import logging
 import math
-import uuid
 import multiprocessing as mp
-import tempfile
+import queue
 import time
+import traceback
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -16,15 +17,30 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import optuna
 from optuna.pruners import MedianPruner, PercentilePruner, PatientPruner
 from optuna.samplers import NSGAIIISampler, NSGAIISampler, RandomSampler, TPESampler
+from optuna.storages.journal import BaseJournalBackend
 from optuna.trial import TrialState
 import pandas as pd
 
 from . import metrics
 from .backtest_engine import load_data
-from .storage import JOURNAL_DIR, save_optuna_study_to_db
+from .storage import save_optuna_study_to_db
 
 logger = logging.getLogger(__name__)
 OPTUNA_LOGGER = optuna.logging.get_logger("optuna")
+
+
+class InMemoryJournalBackend(BaseJournalBackend):
+    """Process-shared in-memory journal backend for multiprocess Optuna."""
+
+    def __init__(self, shared_logs: Any) -> None:
+        self._logs = shared_logs
+
+    def read_logs(self, log_number_from: int):
+        return list(self._logs[log_number_from:])
+
+    def append_logs(self, logs: List[Dict[str, Any]]) -> None:
+        if logs:
+            self._logs.extend(logs)
 
 
 # ============================================================================
@@ -1053,39 +1069,72 @@ def _result_from_trial(trial: optuna.trial.FrozenTrial) -> OptimizationResult:
     return result
 
 
-def _materialize_csv_to_temp(csv_source: Any) -> Tuple[str, bool]:
-    """
-    Ensure CSV source is a file path string usable by worker processes.
-
-    Returns (path_string, needs_cleanup)
-    """
+def _serialize_csv_source_for_worker(csv_source: Any) -> Tuple[str, Union[str, bytes]]:
+    """Convert CSV source into a picklable worker payload."""
     if isinstance(csv_source, (str, Path)):
-        return str(csv_source), False
+        return "path", str(csv_source)
 
     if hasattr(csv_source, "name") and csv_source.name:
         possible_path = Path(csv_source.name)
         if possible_path.exists() and possible_path.is_file():
-            return str(possible_path), False
+            return "path", str(possible_path)
 
     if hasattr(csv_source, "read"):
+        reset_after_read = False
         if hasattr(csv_source, "seek"):
+            try:
+                csv_source.seek(0)
+                reset_after_read = True
+            except Exception:
+                pass
+
+        content = csv_source.read()
+        if reset_after_read and hasattr(csv_source, "seek"):
             try:
                 csv_source.seek(0)
             except Exception:
                 pass
 
-        content = csv_source.read()
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+        if isinstance(content, (bytes, bytearray)):
+            return "bytes", bytes(content)
+        return "text", str(content)
 
-        temp_dir = Path(tempfile.gettempdir()) / "merlin_optuna_csv"
-        temp_dir.mkdir(exist_ok=True)
-        temp_path = temp_dir / f"optimization_{int(time.time())}_{id(csv_source)}.csv"
-        Path(temp_path).write_bytes(content)
-        logger.info("Materialized CSV to temp file: %s", temp_path)
-        return str(temp_path), True
+    return "path", str(csv_source)
 
-    return str(csv_source), False
+
+def _restore_csv_source_from_worker(
+    mode: str,
+    payload: Union[str, bytes],
+) -> Union[str, io.StringIO, io.BytesIO]:
+    """Rebuild a CSV source object inside a worker process."""
+    if mode == "path":
+        return str(payload)
+    if mode == "bytes":
+        raw = payload if isinstance(payload, (bytes, bytearray)) else str(payload).encode("utf-8")
+        return io.BytesIO(bytes(raw))
+    text = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+    return io.StringIO(text)
+
+
+def _terminate_processes(processes: List[mp.Process], join_timeout: float = 5.0) -> None:
+    """Best-effort worker shutdown used by the multiprocess optimizer."""
+    for proc in processes:
+        if proc.is_alive():
+            proc.terminate()
+    for proc in processes:
+        proc.join(timeout=join_timeout)
+
+
+
+def _drain_worker_errors(error_queue: Any) -> List[Dict[str, Any]]:
+    """Collect worker error payloads without blocking."""
+    errors: List[Dict[str, Any]] = []
+    while True:
+        try:
+            errors.append(error_queue.get_nowait())
+        except queue.Empty:
+            break
+    return errors
 
 
 def _resolve_csv_path_for_study(csv_source: Any) -> str:
@@ -1098,18 +1147,20 @@ def _resolve_csv_path_for_study(csv_source: Any) -> str:
 
 def _worker_process_entry(
     study_name: str,
-    storage_path: str,
+    shared_logs: Any,
+    csv_source_mode: str,
+    csv_source_payload: Union[str, bytes],
     base_config_dict: Dict[str, Any],
     optuna_config_dict: Dict[str, Any],
     n_trials: Optional[int],
     timeout: Optional[int],
     worker_id: int,
+    error_queue: Any,
 ) -> None:
     """
     Entry point for multi-process Optuna workers.
     """
     from optuna.storages import JournalStorage
-    from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
     from optuna.study import MaxTrialsCallback
 
     worker_logger = logging.getLogger(__name__)
@@ -1117,6 +1168,7 @@ def _worker_process_entry(
 
     try:
         base_config = OptimizationConfig(**base_config_dict)
+        base_config.csv_file = _restore_csv_source_from_worker(csv_source_mode, csv_source_payload)
         optuna_config = OptunaConfig(**optuna_config_dict)
 
         optimizer = OptunaOptimizer(base_config, optuna_config)
@@ -1124,9 +1176,7 @@ def _worker_process_entry(
         optimizer.pruner = optimizer._create_pruner()
         worker_sampler = optimizer._create_sampler()
 
-        storage = JournalStorage(
-            JournalFileBackend(storage_path, lock_obj=JournalFileOpenLock(storage_path))
-        )
+        storage = JournalStorage(InMemoryJournalBackend(shared_logs))
         study = optuna.load_study(
             study_name=study_name,
             storage=storage,
@@ -1155,6 +1205,16 @@ def _worker_process_entry(
         )
         worker_logger.info("Worker %s finished", worker_id)
     except Exception as exc:  # pragma: no cover - defensive
+        try:
+            error_queue.put_nowait(
+                {
+                    "worker_id": worker_id,
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            worker_logger.debug("Failed to publish worker error for worker %s", worker_id, exc_info=True)
         worker_logger.error("Worker %s failed: %s", worker_id, exc, exc_info=True)
         raise
 
@@ -1393,6 +1453,9 @@ class OptunaOptimizer:
     def __init__(self, base_config, optuna_config: OptunaConfig) -> None:
         self.base_config = base_config
         self.optuna_config = optuna_config
+        if bool(getattr(self.optuna_config, "save_study", False)):
+            logger.warning("Raw Optuna study persistence is disabled; ignoring save_study=True")
+            self.optuna_config.save_study = False
         objectives = list(optuna_config.objectives or [])
         if not objectives:
             objectives = ["net_profit_pct"]
@@ -2150,22 +2213,15 @@ class OptunaOptimizer:
         sampler = self._create_sampler()
         self.pruner = self._create_pruner()
 
-        storage = None
-        if self.optuna_config.save_study:
-            storage = optuna.storages.RDBStorage(
-                url="sqlite:///optuna_study.db",
-                engine_kwargs={"connect_args": {"timeout": 30}},
-            )
-
         study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
 
         self.study = create_optimization_study(
             mo_config=self.mo_config,
             sampler=sampler,
             study_name=study_name,
-            storage=storage,
+            storage=None,
             pruner=self.pruner,
-            load_if_exists=self.optuna_config.save_study,
+            load_if_exists=False,
         )
         self._enqueue_coverage_trials(search_space, context_label="single-process")
 
@@ -2223,121 +2279,149 @@ class OptunaOptimizer:
         # Build search space early to validate config and prepare deterministic coverage.
         search_space = self._build_search_space()
 
-        csv_path, csv_cleanup = _materialize_csv_to_temp(self.base_config.csv_file)
+        csv_source_mode, csv_source_payload = _serialize_csv_source_for_worker(self.base_config.csv_file)
         base_config_dict = {
-            f.name: (csv_path if f.name == "csv_file" else getattr(self.base_config, f.name))
+            f.name: (None if f.name == "csv_file" else getattr(self.base_config, f.name))
             for f in fields(self.base_config)
         }
         optuna_config_dict = asdict(self.optuna_config)
 
         from optuna.storages import JournalStorage
-        from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+        manager = mp.Manager()
+        shared_logs = manager.list()
+        error_queue: mp.Queue = mp.Queue()
 
-        journal_dir = JOURNAL_DIR
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.time_ns()
-        study_name = self.optuna_config.study_name or f"strategy_opt_{timestamp}"
-        storage_path = str(journal_dir / f"{study_name}_{timestamp}_{uuid.uuid4().hex}.journal.log")
-
-        storage = JournalStorage(
-            JournalFileBackend(storage_path, lock_obj=JournalFileOpenLock(storage_path))
-        )
+        study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
+        storage = JournalStorage(InMemoryJournalBackend(shared_logs))
 
         sampler = self._create_sampler()
         self.pruner = self._create_pruner()
-
-        self.study = create_optimization_study(
-            mo_config=self.mo_config,
-            sampler=sampler,
-            study_name=study_name,
-            storage=storage,
-            pruner=self.pruner,
-            load_if_exists=False,
-        )
-        self._enqueue_coverage_trials(search_space, context_label="multiprocess")
-
-        timeout: Optional[int] = None
-        n_trials: Optional[int] = None
-
-        if self.optuna_config.budget_mode == "time":
-            timeout = max(60, int(self.optuna_config.time_limit))
-            logger.info("Time budget per study: %ss", timeout)
-        elif self.optuna_config.budget_mode == "trials":
-            n_trials = max(1, int(self.optuna_config.n_trials))
-            logger.info("Global trial budget: %s", n_trials)
-        elif self.optuna_config.budget_mode == "convergence":
-            logger.warning(
-                "Convergence budget is not fully supported in multi-process mode; "
-                "using trial cap of 10000."
-            )
-            n_trials = 10000
-
         processes: List[mp.Process] = []
-
         try:
-            for worker_id in range(n_workers):
-                proc = mp.Process(
-                    target=_worker_process_entry,
-                    args=(
-                        study_name,
-                        storage_path,
-                        base_config_dict,
-                        optuna_config_dict,
-                        n_trials,
-                        timeout,
-                        worker_id,
-                    ),
-                    name=f"OptunaWorker-{worker_id}",
+            self.study = create_optimization_study(
+                mo_config=self.mo_config,
+                sampler=sampler,
+                study_name=study_name,
+                storage=storage,
+                pruner=self.pruner,
+                load_if_exists=False,
+            )
+            self._enqueue_coverage_trials(search_space, context_label="multiprocess")
+
+            timeout: Optional[int] = None
+            n_trials: Optional[int] = None
+
+            if self.optuna_config.budget_mode == "time":
+                timeout = max(60, int(self.optuna_config.time_limit))
+                logger.info("Time budget per study: %ss", timeout)
+            elif self.optuna_config.budget_mode == "trials":
+                n_trials = max(1, int(self.optuna_config.n_trials))
+                logger.info("Global trial budget: %s", n_trials)
+            elif self.optuna_config.budget_mode == "convergence":
+                logger.warning(
+                    "Convergence budget is not fully supported in multi-process mode; "
+                    "using trial cap of 10000."
                 )
-                proc.start()
-                processes.append(proc)
-                logger.info("Started worker %s (pid=%s)", worker_id, proc.pid)
+                n_trials = 10000
 
-            logger.info("Waiting for %s workers to finish...", n_workers)
-            for worker_id, proc in enumerate(processes):
-                proc.join()
-                if proc.exitcode == 0:
-                    logger.info("Worker %s completed successfully", worker_id)
-                else:
-                    logger.error("Worker %s exited with code %s", worker_id, proc.exitcode)
+            worker_failures: List[Tuple[int, Optional[int]]] = []
 
-        except KeyboardInterrupt:
-            logger.info("Optimisation interrupted; terminating workers...")
-            for proc in processes:
-                if proc.is_alive():
-                    proc.terminate()
-            for proc in processes:
-                proc.join(timeout=5)
-
-        # Reload study to gather results from storage
-        self.study = optuna.load_study(study_name=study_name, storage=storage)
-
-        self.trial_results = []
-        for trial in self.study.trials:
-            if trial.state == TrialState.COMPLETE:
-                try:
-                    self.trial_results.append(_result_from_trial(trial))
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
-
-        results = self._finalize_results()
-
-        # Cleanup temp CSV and storage if not persisted (after finalization)
-        if csv_cleanup:
             try:
-                Path(csv_path).unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to cleanup temp CSV %s", csv_path)
+                for worker_id in range(n_workers):
+                    proc = mp.Process(
+                        target=_worker_process_entry,
+                        args=(
+                            study_name,
+                            shared_logs,
+                            csv_source_mode,
+                            csv_source_payload,
+                            base_config_dict,
+                            optuna_config_dict,
+                            n_trials,
+                            timeout,
+                            worker_id,
+                            error_queue,
+                        ),
+                        name=f"OptunaWorker-{worker_id}",
+                    )
+                    proc.start()
+                    processes.append(proc)
+                    logger.info("Started worker %s (pid=%s)", worker_id, proc.pid)
 
-        if not self.optuna_config.save_study:
+                logger.info("Waiting for %s workers to finish...", n_workers)
+                remaining_workers = set(range(len(processes)))
+                while remaining_workers:
+                    completed_this_pass = False
+                    for worker_id in list(remaining_workers):
+                        proc = processes[worker_id]
+                        proc.join(timeout=0.1)
+                        if proc.exitcode is None:
+                            continue
+
+                        remaining_workers.remove(worker_id)
+                        completed_this_pass = True
+
+                        if proc.exitcode == 0:
+                            logger.info("Worker %s completed successfully", worker_id)
+                            continue
+
+                        logger.error("Worker %s exited with code %s", worker_id, proc.exitcode)
+                        worker_failures.append((worker_id, proc.exitcode))
+                        _terminate_processes([processes[idx] for idx in remaining_workers])
+                        remaining_workers.clear()
+                        break
+
+                    if not completed_this_pass:
+                        time.sleep(0.05)
+
+            except KeyboardInterrupt:
+                logger.info("Optimisation interrupted; terminating workers...")
+                raise RuntimeError("Multi-process Optuna optimisation interrupted.")
+
+            if worker_failures:
+                failed_workers = ", ".join(
+                    f"{worker_id}:{exitcode}" for worker_id, exitcode in worker_failures
+                )
+                worker_error_details = _drain_worker_errors(error_queue)
+                for error_detail in worker_error_details:
+                    logger.error(
+                        "Worker %s failure detail: %s\n%s",
+                        error_detail.get("worker_id"),
+                        error_detail.get("message"),
+                        error_detail.get("traceback"),
+                    )
+                failure_message = f"Multi-process Optuna optimisation failed; worker exit codes: {failed_workers}"
+                if worker_error_details:
+                    first_detail = worker_error_details[0]
+                    failure_message = (
+                        f"{failure_message}; first error from worker {first_detail.get('worker_id')}: "
+                        f"{first_detail.get('message')}"
+                    )
+                raise RuntimeError(failure_message)
+
+            self.study = optuna.load_study(study_name=study_name, storage=storage)
+
+            self.trial_results = []
+            for trial in self.study.trials:
+                if trial.state == TrialState.COMPLETE:
+                    try:
+                        self.trial_results.append(_result_from_trial(trial))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
+
+            return self._finalize_results()
+        finally:
+            _terminate_processes(processes)
             try:
-                Path(storage_path).unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to cleanup journal file %s", storage_path)
-
-        self.pruner = None
-
-        return results
+                error_queue.close()
+                error_queue.join_thread()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to shutdown worker error queue", exc_info=True)
+            try:
+                manager.shutdown()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to shutdown multiprocessing Manager", exc_info=True)
+            self.pruner = None
 
     def _finalize_results(self) -> List[OptimizationResult]:
         end_time = time.time()
@@ -2483,7 +2567,7 @@ def run_optimization(config: OptimizationConfig) -> Tuple[List[OptimizationResul
         pruner=getattr(config, "optuna_pruner", "median"),
         warmup_trials=int(n_startup_trials or 20),
         coverage_mode=bool(getattr(config, "coverage_mode", False)),
-        save_study=bool(getattr(config, "optuna_save_study", False)),
+        save_study=False,
         study_name=getattr(config, "optuna_study_name", None),
     )
 

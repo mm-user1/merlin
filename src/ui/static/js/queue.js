@@ -732,9 +732,6 @@ function applyQueueConfigFallback(item) {
   if (Object.prototype.hasOwnProperty.call(config, 'coverage_mode')) {
     setCheckboxValue('optunaCoverageMode', Boolean(config.coverage_mode));
   }
-  if (Object.prototype.hasOwnProperty.call(config, 'optuna_save_study')) {
-    setCheckboxValue('optunaSaveStudy', Boolean(config.optuna_save_study));
-  }
   if (Object.prototype.hasOwnProperty.call(config, 'population_size')) {
     setInputValue('nsgaPopulationSize', config.population_size);
   }

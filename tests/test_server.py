@@ -384,6 +384,25 @@ def test_optuna_coverage_mode_parsed():
     assert config.coverage_mode is True
 
 
+def test_optuna_save_study_payload_is_ignored(caplog):
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["optuna_save_study"] = True
+
+    with caplog.at_level("WARNING"):
+        config = server_module._build_optimization_config(
+            "dummy.csv",
+            payload,
+            worker_processes=1,
+            strategy_id="s01_trailing_ma",
+            warmup_bars=1000,
+        )
+
+    assert not hasattr(config, "optuna_save_study")
+    assert any("optuna_save_study" in record.message for record in caplog.records)
+
+
 def test_optuna_score_config_migrates_legacy_consistency_bounds():
     from ui import server as server_module
 

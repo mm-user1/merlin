@@ -1683,6 +1683,8 @@ def _build_optimization_config(
     optuna_enable_pruning = _parse_bool(payload.get("optuna_enable_pruning", True), True)
     optuna_pruner = str(payload.get("optuna_pruner", "median")).strip().lower()
     optuna_save_study = _parse_bool(payload.get("optuna_save_study", False), False)
+    if optuna_save_study:
+        _get_logger().warning("Ignoring deprecated optuna_save_study request; raw Optuna persistence is disabled.")
 
     sanitize_enabled = _parse_bool(payload.get("sanitize_enabled", True), True)
     sanitize_trades_threshold_raw = payload.get("sanitize_trades_threshold", 0)
@@ -1753,7 +1755,6 @@ def _build_optimization_config(
         "optuna_convergence": optuna_convergence,
         "optuna_enable_pruning": optuna_enable_pruning,
         "optuna_pruner": optuna_pruner,
-        "optuna_save_study": optuna_save_study,
         "sanitize_enabled": sanitize_enabled,
         "sanitize_trades_threshold": sanitize_trades_threshold,
     }

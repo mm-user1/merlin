@@ -1136,7 +1136,6 @@ function buildOptunaConfig(state) {
   const optunaPruner = document.getElementById('optunaPruner');
   const optunaWarmupTrials = document.getElementById('optunaWarmupTrials');
   const optunaCoverageMode = document.getElementById('optunaCoverageMode');
-  const optunaSaveStudy = document.getElementById('optunaSaveStudy');
   const nsgaPopulation = document.getElementById('nsgaPopulationSize');
   const nsgaCrossover = document.getElementById('nsgaCrossoverProb');
   const nsgaMutation = document.getElementById('nsgaMutationProb');
@@ -1191,7 +1190,6 @@ function buildOptunaConfig(state) {
     optuna_pruner: optunaPruner ? optunaPruner.value : 'median',
     n_startup_trials: normalizedWarmup,
     coverage_mode: Boolean(optunaCoverageMode && optunaCoverageMode.checked),
-    optuna_save_study: Boolean(optunaSaveStudy && optunaSaveStudy.checked),
     objectives: selectedObjectives,
     primary_objective: objectiveConfig.primary_objective,
     constraints,

@@ -2206,7 +2206,7 @@ class WalkForwardEngine:
             pruner=self.optuna_settings["pruner"],
             warmup_trials=int(self.optuna_settings.get("warmup_trials") or 20),
             coverage_mode=bool(self.optuna_settings.get("coverage_mode", False)),
-            save_study=self.optuna_settings["save_study"],
+            save_study=False,
             study_name=None,
         )
 
