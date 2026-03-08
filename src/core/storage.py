@@ -1174,9 +1174,12 @@ def save_optuna_study_to_db(
 
     if study is not None:
         try:
-            completed_trials = sum(1 for t in study.trials if t.state == TrialState.COMPLETE)
-            pruned_trials = sum(1 for t in study.trials if t.state == TrialState.PRUNED)
-            total_trials = len(study.trials)
+            effective_trials = [
+                t for t in study.trials if not bool((getattr(t, "user_attrs", {}) or {}).get("merlin.duplicate_skipped", False))
+            ]
+            completed_trials = sum(1 for t in effective_trials if t.state == TrialState.COMPLETE)
+            pruned_trials = sum(1 for t in effective_trials if t.state == TrialState.PRUNED)
+            total_trials = len(effective_trials)
         except Exception:
             completed_trials = len(trial_results or [])
             pruned_trials = 0

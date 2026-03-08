@@ -2,6 +2,7 @@
 Integration test for multi-process composite score optimization.
 """
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -12,9 +13,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from core import storage  # noqa: E402
 from core.optuna_engine import (  # noqa: E402
     DEFAULT_SCORE_CONFIG,
+    NSGAIISampler,
     OptimizationConfig,
     OptunaConfig,
     OptunaOptimizer,
+    SamplerConfig,
 )
 
 DATA_PATH = (
@@ -155,3 +158,73 @@ class TestMultiProcessScore:
         optimizer = OptunaOptimizer(base_config, optuna_config)
         with pytest.raises(RuntimeError, match="worker exit codes"):
             optimizer.optimize()
+
+    def test_nsga_multiprocess_small_space_stops_without_duplicate_results(self):
+        """Centralized NSGA ask/tell should stop at unique combinations instead of repeating them."""
+        base_config = OptimizationConfig(
+            csv_file=str(DATA_PATH),
+            strategy_id="s01_trailing_ma",
+            enabled_params={"maType": True},
+            param_ranges={},
+            param_types={"maType": "select"},
+            fixed_params={
+                "maType_options": ["EMA", "SMA"],
+                "closeCountLong": 2,
+                "closeCountShort": 2,
+            },
+            worker_processes=2,
+        )
+        optuna_config = OptunaConfig(
+            objectives=["net_profit_pct", "max_drawdown_pct"],
+            sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+            budget_mode="trials",
+            n_trials=4,
+            coverage_mode=False,
+        )
+
+        optimizer = OptunaOptimizer(base_config, optuna_config)
+        results = optimizer.optimize()
+        signatures = {json.dumps(result.params, sort_keys=True) for result in results}
+        summary = getattr(base_config, "optuna_summary", {})
+
+        assert len(results) == 2
+        assert len(signatures) == 2
+        assert summary["completed_trials"] == 2
+        assert summary["total_trials"] == 2
+        assert optimizer._duplicate_skipped_count == 0
+
+    def test_nsga_multiprocess_preserves_coverage_trials_as_generation_zero(self):
+        """NSGA coverage mode should keep deterministic startup trials and generation metadata."""
+        base_config = OptimizationConfig(
+            csv_file=str(DATA_PATH),
+            strategy_id="s01_trailing_ma",
+            enabled_params={"maType": True},
+            param_ranges={},
+            param_types={"maType": "select"},
+            fixed_params={
+                "maType_options": ["EMA", "SMA"],
+                "closeCountLong": 2,
+                "closeCountShort": 2,
+            },
+            worker_processes=2,
+        )
+        optuna_config = OptunaConfig(
+            objectives=["net_profit_pct", "max_drawdown_pct"],
+            sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+            budget_mode="trials",
+            n_trials=2,
+            warmup_trials=2,
+            coverage_mode=True,
+        )
+
+        optimizer = OptunaOptimizer(base_config, optuna_config)
+        results = optimizer.optimize()
+        effective_trials = [
+            trial
+            for trial in optimizer.study.trials
+            if not bool((trial.user_attrs or {}).get("merlin.duplicate_skipped", False))
+        ]
+
+        assert {result.params["maType"] for result in results} == {"EMA", "SMA"}
+        assert len(effective_trials) == 2
+        assert all(trial.system_attrs.get(NSGAIISampler._GENERATION_KEY) == 0 for trial in effective_trials)

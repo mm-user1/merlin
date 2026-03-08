@@ -132,6 +132,58 @@ def test_optuna_optimizer_sets_tpe_startup_to_zero_in_coverage_mode():
     assert optimizer.sampler_config.n_startup_trials == 0
 
 
+def test_optuna_optimizer_routes_nsga_multiprocess_to_centralized_path(monkeypatch):
+    base_config = _base_config()
+    base_config.worker_processes = 2
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct", "max_drawdown_pct"],
+        sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+        budget_mode="trials",
+        n_trials=3,
+    )
+    optimizer = OptunaOptimizer(base_config, optuna_cfg)
+    called = {}
+
+    def fake_nsga(workers):
+        called["workers"] = workers
+        return []
+
+    def fail_legacy(_workers):
+        raise AssertionError("Legacy multiprocess path should not be used for NSGA.")
+
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess_nsga", fake_nsga)
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess", fail_legacy)
+
+    assert optimizer.optimize() == []
+    assert called["workers"] == 2
+
+
+def test_optuna_optimizer_keeps_tpe_on_legacy_multiprocess_path(monkeypatch):
+    base_config = _base_config()
+    base_config.worker_processes = 2
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=10),
+        budget_mode="trials",
+        n_trials=3,
+    )
+    optimizer = OptunaOptimizer(base_config, optuna_cfg)
+    called = {}
+
+    def fake_legacy(workers):
+        called["workers"] = workers
+        return []
+
+    def fail_nsga(_workers):
+        raise AssertionError("NSGA ask/tell path should not be used for TPE.")
+
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess", fake_legacy)
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess_nsga", fail_nsga)
+
+    assert optimizer.optimize() == []
+    assert called["workers"] == 2
+
+
 def test_optuna_summary_contains_coverage_warning_message():
     base_config = _base_config()
     optuna_cfg = OptunaConfig(
