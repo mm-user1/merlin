@@ -101,6 +101,13 @@ class S03ReversalV10(BaseStrategy):
 
         ma3_up_band = ma3 * (1 + p.tBandLongPct / 100.0)
         ma3_down_band = ma3 * (1 - p.tBandShortPct / 100.0)
+        timestamps_index = list(df.index)
+        close_values = close.to_numpy(copy=False)
+        high_values = high.to_numpy(copy=False)
+        low_values = low.to_numpy(copy=False)
+        ma3_values = ma3.to_numpy(copy=False)
+        ma3_up_band_values = ma3_up_band.to_numpy(copy=False)
+        ma3_down_band_values = ma3_down_band.to_numpy(copy=False)
 
         if p.use_date_filter:
             time_in_range = np.zeros(len(df), dtype=bool)
@@ -126,16 +133,17 @@ class S03ReversalV10(BaseStrategy):
         timestamps: List[pd.Timestamp] = []
 
         trading_disabled = not (p.useCloseCount or p.useTBands)
+        last_bar_index = len(timestamps_index) - 1
 
-        for i in range(len(df)):
-            timestamp = df.index[i]
-            close_val = float(close.iat[i])
-            high_val = float(high.iat[i])
-            low_val = float(low.iat[i])
+        for i in range(len(timestamps_index)):
+            timestamp = timestamps_index[i]
+            close_val = float(close_values[i])
+            high_val = float(high_values[i])
+            low_val = float(low_values[i])
 
-            ma_val = ma3.iat[i]
-            up_band = ma3_up_band.iat[i]
-            down_band = ma3_down_band.iat[i]
+            ma_val = ma3_values[i]
+            up_band = ma3_up_band_values[i]
+            down_band = ma3_down_band_values[i]
 
             break_up = False
             break_down = False
@@ -264,7 +272,7 @@ class S03ReversalV10(BaseStrategy):
                             entry_commission = entry_price * position_size * (p.commissionPct / 100.0)
                             entry_time = timestamp
 
-            if i == len(df) - 1 and position != 0:
+            if i == last_bar_index and position != 0:
                 trade, gross_pnl, exit_commission, _ = build_forced_close_trade(
                     position=position,
                     entry_time=entry_time,
