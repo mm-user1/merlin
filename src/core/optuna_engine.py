@@ -31,6 +31,7 @@ OPTUNA_LOGGER = optuna.logging.get_logger("optuna")
 
 _DUPLICATE_SKIPPED_ATTR = "merlin.duplicate_skipped"
 _DUPLICATE_SKIP_REASON_ATTR = "merlin.duplicate_skip_reason"
+_UNSET = object()
 
 
 class InMemoryJournalBackend(BaseJournalBackend):
@@ -355,6 +356,14 @@ def _estimate_search_space_size(search_space: Dict[str, Dict[str, Any]]) -> Opti
     return total
 
 
+def _resolve_strategy_param_type(
+    base_config: OptimizationConfig,
+    param_name: str,
+    param_spec: Dict[str, Any],
+) -> str:
+    return str(base_config.param_types.get(param_name, param_spec.get("type", "float"))).lower()
+
+
 def _is_duplicate_skipped_trial(trial: Any) -> bool:
     attrs = getattr(trial, "user_attrs", {}) or {}
     if not isinstance(attrs, dict):
@@ -395,6 +404,27 @@ def _normalize_bool_choices(raw_values: Any) -> List[bool]:
             continue
         normalized.append(parsed)
     return normalized
+
+
+def _normalize_param_dependencies(raw_value: Any) -> Tuple[str, ...]:
+    if raw_value is None:
+        return ()
+    if isinstance(raw_value, str):
+        source_values = [raw_value]
+    elif isinstance(raw_value, (list, tuple)):
+        source_values = list(raw_value)
+    else:
+        raise ValueError("Parameter 'depends_on' must be a string or list of strings.")
+
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in source_values:
+        name = str(item or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return tuple(normalized)
 
 
 def _extract_bool_group_rules(strategy_config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -473,8 +503,12 @@ def _infer_primary_numeric_param(
     numeric_names = list(numeric_specs.keys())
     if not numeric_names:
         return None
+    unconditional_names = [
+        name for name, spec in numeric_specs.items() if not tuple(spec.get("depends_on") or ())
+    ]
+    candidate_names = unconditional_names or numeric_names
     if not main_axis_name:
-        return numeric_names[0]
+        return candidate_names[0]
 
     axis_name = str(main_axis_name)
     axis_lower = axis_name.lower()
@@ -505,20 +539,22 @@ def _infer_primary_numeric_param(
     for candidate in candidates:
         if candidate and candidate not in seen:
             seen.add(candidate)
-            if candidate in numeric_specs:
+            if candidate in candidate_names:
                 return candidate
 
     digits = "".join(ch for ch in axis_name if ch.isdigit())
     if digits:
         for name in numeric_names:
-            if name.endswith(digits) and ("length" in name.lower() or "period" in name.lower()):
+            if name in candidate_names and (
+                name.endswith(digits) and ("length" in name.lower() or "period" in name.lower())
+            ):
                 return name
 
-    for name in numeric_names:
+    for name in candidate_names:
         if "length" in name.lower() or "period" in name.lower():
             return name
 
-    return numeric_names[0]
+    return candidate_names[0]
 
 
 def _fraction_to_level_index(fraction: float, levels: int) -> int:
@@ -1606,6 +1642,9 @@ class OptunaOptimizer:
         self.study: Optional[optuna.Study] = None
         self.pruner: Optional[optuna.pruners.BasePruner] = None
         self.param_type_map: Dict[str, str] = {}
+        self._param_defaults: Dict[str, Any] = {}
+        self._param_dependencies: Dict[str, Tuple[str, ...]] = {}
+        self._optimizable_param_names: Set[str] = set()
         self._multiprocess_mode: bool = False
         self._coverage_report: Optional[Dict[str, Any]] = None
         self._bool_group_choice_map: Dict[str, Dict[str, Dict[str, bool]]] = {}
@@ -1630,19 +1669,45 @@ class OptunaOptimizer:
 
         space: Dict[str, Dict[str, Any]] = {}
         self.param_type_map = {}
+        self._param_defaults = {}
+        self._param_dependencies = {}
+        self._optimizable_param_names = set()
         self._bool_group_choice_map = {}
+        resolved_param_types = {
+            param_name: _resolve_strategy_param_type(self.base_config, param_name, param_spec)
+            for param_name, param_spec in parameters.items()
+            if isinstance(param_spec, dict)
+        }
 
         for param_name, param_spec in parameters.items():
             if not isinstance(param_spec, dict):
                 continue
 
-            param_type = str(
-                self.base_config.param_types.get(param_name, param_spec.get("type", "float"))
-            ).lower()
+            self._param_defaults[param_name] = param_spec.get("default")
+            dependencies = _normalize_param_dependencies(param_spec.get("depends_on"))
+            for dependency_name in dependencies:
+                if dependency_name not in parameters:
+                    raise ValueError(
+                        "Parameter dependency references unknown parent "
+                        f"'{dependency_name}' for '{param_name}' in strategy "
+                        f"'{self.base_config.strategy_id}'"
+                    )
+                if resolved_param_types.get(dependency_name) != "bool":
+                    raise ValueError(
+                        "Parameter dependency requires a bool parent "
+                        f"for '{param_name}' in strategy '{self.base_config.strategy_id}': "
+                        f"'{dependency_name}' is typed as "
+                        f"'{resolved_param_types.get(dependency_name, 'unknown')}'"
+                    )
+            if dependencies:
+                self._param_dependencies[param_name] = dependencies
+
+            param_type = resolved_param_types[param_name]
             self.param_type_map[param_name] = param_type
 
             if not self.base_config.enabled_params.get(param_name, False):
                 continue
+            self._optimizable_param_names.add(param_name)
 
             optimize_spec = param_spec.get("optimize", {}) if isinstance(param_spec.get("optimize", {}), dict) else {}
             override_range = self.base_config.param_ranges.get(param_name)
@@ -1714,6 +1779,9 @@ class OptunaOptimizer:
                     "type": "categorical",
                     "choices": list(bool_choices),
                 }
+
+            if dependencies and param_name in space:
+                space[param_name]["depends_on"] = list(dependencies)
 
         return self._apply_bool_group_rules(space, strategy_config)
 
@@ -1885,7 +1953,10 @@ class OptunaOptimizer:
         if n_initial <= 0:
             return 0
 
-        coverage_trials = _generate_coverage_trials(search_space, n_initial)
+        coverage_trials = [
+            self._prune_inactive_trial_values(params)
+            for params in _generate_coverage_trials(search_space, n_initial)
+        ]
         for params in coverage_trials:
             self.study.enqueue_trial(params)
 
@@ -1996,46 +2067,54 @@ class OptunaOptimizer:
             return value
         return value
 
-    def _prepare_trial_parameters(self, trial: optuna.Trial, search_space: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        params_dict: Dict[str, Any] = {}
-
-        for key, spec in search_space.items():
-            p_type = spec["type"]
-            if p_type == "int":
-                params_dict[key] = trial.suggest_int(
+    def _suggest_trial_parameter(
+        self,
+        trial: optuna.Trial,
+        key: str,
+        spec: Dict[str, Any],
+    ) -> Any:
+        p_type = spec["type"]
+        if p_type == "int":
+            return trial.suggest_int(
+                key,
+                int(spec["low"]),
+                int(spec["high"]),
+                step=int(spec.get("step", 1)),
+            )
+        if p_type == "float":
+            if spec.get("log"):
+                return trial.suggest_float(
                     key,
-                    int(spec["low"]),
-                    int(spec["high"]),
-                    step=int(spec.get("step", 1)),
+                    float(spec["low"]),
+                    float(spec["high"]),
+                    log=True,
                 )
-            elif p_type == "float":
-                if spec.get("log"):
-                    params_dict[key] = trial.suggest_float(
-                        key,
-                        float(spec["low"]),
-                        float(spec["high"]),
-                        log=True,
-                    )
-                else:
-                    step = spec.get("step")
-                    if step:
-                        params_dict[key] = trial.suggest_float(
-                            key,
-                            float(spec["low"]),
-                            float(spec["high"]),
-                            step=float(step),
-                        )
-                    else:
-                        params_dict[key] = trial.suggest_float(
-                            key,
-                            float(spec["low"]),
-                            float(spec["high"]),
-                    )
-            elif p_type == "categorical":
-                params_dict[key] = trial.suggest_categorical(key, list(spec["choices"]))
+            step = spec.get("step")
+            if step:
+                return trial.suggest_float(
+                    key,
+                    float(spec["low"]),
+                    float(spec["high"]),
+                    step=float(step),
+                )
+            return trial.suggest_float(
+                key,
+                float(spec["low"]),
+                float(spec["high"]),
+            )
+        if p_type == "categorical":
+            return trial.suggest_categorical(key, list(spec["choices"]))
+        raise ValueError(f"Unsupported search space type '{p_type}' for parameter '{key}'")
 
+    def _decode_bool_group_params(
+        self,
+        params_dict: Dict[str, Any],
+        *,
+        remove_surrogates: bool,
+    ) -> Dict[str, Any]:
+        resolved = dict(params_dict)
         for surrogate_name, choice_map in self._bool_group_choice_map.items():
-            token = params_dict.pop(surrogate_name, None)
+            token = resolved.get(surrogate_name)
             if token is None:
                 continue
             decoded = choice_map.get(str(token))
@@ -2044,10 +2123,99 @@ class OptunaOptimizer:
                     f"Invalid bool-group token '{token}' for '{surrogate_name}' "
                     f"in strategy '{self.base_config.strategy_id}'"
                 )
-            params_dict.update(decoded)
+            if remove_surrogates:
+                resolved.pop(surrogate_name, None)
+            resolved.update(decoded)
+        return resolved
+
+    def _is_dependency_ready(self, dependency_name: str, params_dict: Dict[str, Any]) -> bool:
+        if dependency_name in params_dict:
+            return True
+        if dependency_name in self._optimizable_param_names:
+            return False
+        fixed_value = (self.base_config.fixed_params or {}).get(dependency_name, _UNSET)
+        if fixed_value is not _UNSET:
+            return True
+        return dependency_name in self._param_defaults
+
+    def _resolve_parameter_value(self, name: str, params_dict: Dict[str, Any]) -> Any:
+        if name in params_dict:
+            return params_dict[name]
+        fixed_value = (self.base_config.fixed_params or {}).get(name, _UNSET)
+        if fixed_value is not _UNSET:
+            return self._cast_param_value(name, fixed_value)
+        default_value = self._param_defaults.get(name, _UNSET)
+        if default_value is not _UNSET:
+            return self._cast_param_value(name, default_value)
+        return None
+
+    def _dependencies_ready(self, name: str, params_dict: Dict[str, Any]) -> bool:
+        dependencies = self._param_dependencies.get(name, ())
+        return all(self._is_dependency_ready(dep_name, params_dict) for dep_name in dependencies)
+
+    def _dependency_is_active(self, name: str, params_dict: Dict[str, Any]) -> bool:
+        dependencies = self._param_dependencies.get(name, ())
+        if not dependencies:
+            return True
+        for dep_name in dependencies:
+            dep_value = self._resolve_parameter_value(dep_name, params_dict)
+            parsed = _coerce_bool_value(dep_value)
+            dep_enabled = bool(dep_value) if parsed is None else parsed
+            if not dep_enabled:
+                return False
+        return True
+
+    def _prune_inactive_trial_values(self, params_dict: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._param_dependencies:
+            return dict(params_dict)
+        pruned = dict(params_dict)
+        context = self._decode_bool_group_params(pruned, remove_surrogates=False)
+        for name in list(pruned.keys()):
+            if name in self._param_dependencies and not self._dependency_is_active(name, context):
+                pruned.pop(name, None)
+        return pruned
+
+    def _prepare_trial_parameters(self, trial: optuna.Trial, search_space: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        params_dict: Dict[str, Any] = {}
+        pending_specs = list(search_space.items())
+
+        while pending_specs:
+            next_pending: List[Tuple[str, Dict[str, Any]]] = []
+            progressed = False
+
+            for key, spec in pending_specs:
+                if not self._dependencies_ready(key, params_dict):
+                    next_pending.append((key, spec))
+                    continue
+                if not self._dependency_is_active(key, params_dict):
+                    progressed = True
+                    continue
+
+                params_dict[key] = self._suggest_trial_parameter(trial, key, spec)
+                if key in self._bool_group_choice_map:
+                    params_dict = self._decode_bool_group_params(
+                        params_dict,
+                        remove_surrogates=True,
+                    )
+                progressed = True
+
+            if not progressed and next_pending:
+                unresolved_names = ", ".join(key for key, _ in next_pending)
+                raise ValueError(
+                    "Unable to resolve parameter dependencies for "
+                    f"strategy '{self.base_config.strategy_id}': {unresolved_names}"
+                )
+
+            pending_specs = next_pending
+
+        params_dict = self._decode_bool_group_params(params_dict, remove_surrogates=True)
 
         for key, value in (self.base_config.fixed_params or {}).items():
             if value is None or key in params_dict:
+                continue
+            if not self._dependencies_ready(key, params_dict):
+                continue
+            if not self._dependency_is_active(key, params_dict):
                 continue
             params_dict[key] = self._cast_param_value(key, value)
 
@@ -2341,7 +2509,7 @@ class OptunaOptimizer:
         self._prepare_data_and_strategy()
 
         sampler = self._create_sampler()
-        self.pruner = self._create_pruner()
+        self.pruner = None
 
         study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
 
@@ -2601,13 +2769,6 @@ class OptunaOptimizer:
                     constraint_values=list(payload.get("constraint_values") or []),
                     constraints_satisfied=bool(payload.get("constraints_satisfied", True)),
                 )
-
-                if self.pruner is not None:
-                    trial.report(objective_return, step=0)
-                    if trial.should_prune():
-                        self.pruned_trials += 1
-                        self.study.tell(trial, state=TrialState.PRUNED)
-                        continue
 
                 self.study.tell(trial, values=objective_return)
 

@@ -4,6 +4,7 @@ from collections import Counter
 from pathlib import Path
 
 import optuna
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -44,6 +45,37 @@ def _s03_bool_config() -> OptimizationConfig:
             "maType3": "select",
             "useCloseCount": "bool",
             "useTBands": "bool",
+        },
+        fixed_params={},
+    )
+
+
+def _s03_dependency_config() -> OptimizationConfig:
+    return OptimizationConfig(
+        csv_file="dummy.csv",
+        strategy_id="s03_reversal_v10",
+        enabled_params={
+            "maType3": True,
+            "maLength3": True,
+            "maOffset3": True,
+            "useCloseCount": True,
+            "closeCountLong": True,
+            "closeCountShort": True,
+            "useTBands": True,
+            "tBandLongPct": True,
+            "tBandShortPct": True,
+        },
+        param_ranges={},
+        param_types={
+            "maType3": "select",
+            "maLength3": "int",
+            "maOffset3": "float",
+            "useCloseCount": "bool",
+            "closeCountLong": "int",
+            "closeCountShort": "int",
+            "useTBands": "bool",
+            "tBandLongPct": "float",
+            "tBandShortPct": "float",
         },
         fixed_params={},
     )
@@ -371,3 +403,108 @@ def test_s03_bool_group_surrogate_is_decoded_to_real_bool_params():
     assert "useCloseCount" in captured
     assert "useTBands" in captured
     assert captured["useCloseCount"] or captured["useTBands"]
+
+
+def test_s03_conditional_params_are_omitted_when_parent_bool_is_false():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="random", n_startup_trials=0),
+        warmup_trials=0,
+        coverage_mode=False,
+    )
+    optimizer = OptunaOptimizer(_s03_dependency_config(), optuna_cfg)
+    space = optimizer._build_search_space()
+    surrogate_key = next(key for key in space if key.startswith("__bool_group__"))
+    token = next(
+        token
+        for token, decoded in optimizer._bool_group_choice_map[surrogate_key].items()
+        if decoded == {"useCloseCount": False, "useTBands": True}
+    )
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.RandomSampler(seed=7))
+    study.enqueue_trial(
+        {
+            surrogate_key: token,
+            "maType3": "SMA",
+            "maLength3": 75,
+            "maOffset3": 0.0,
+            "tBandLongPct": 1.0,
+            "tBandShortPct": 1.0,
+        }
+    )
+
+    captured = {}
+
+    def objective(trial):
+        params = optimizer._prepare_trial_parameters(trial, space)
+        captured.update(params)
+        return 0.0
+
+    study.optimize(objective, n_trials=1)
+
+    assert captured["useCloseCount"] is False
+    assert captured["useTBands"] is True
+    assert "closeCountLong" not in captured
+    assert "closeCountShort" not in captured
+    assert "tBandLongPct" in captured
+    assert "tBandShortPct" in captured
+
+
+def test_depends_on_parent_must_be_bool_typed():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="random", n_startup_trials=0),
+        warmup_trials=0,
+        coverage_mode=False,
+    )
+    bad_config = OptimizationConfig(
+        csv_file="dummy.csv",
+        strategy_id="s03_reversal_v10",
+        enabled_params={
+            "useCloseCount": True,
+            "closeCountLong": True,
+        },
+        param_ranges={},
+        param_types={
+            "useCloseCount": "int",
+            "closeCountLong": "int",
+        },
+        fixed_params={},
+    )
+    optimizer = OptunaOptimizer(bad_config, optuna_cfg)
+
+    with pytest.raises(ValueError, match="requires a bool parent"):
+        optimizer._build_search_space()
+
+
+def test_s03_coverage_prunes_inactive_child_params_without_reducing_trial_count():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=0),
+        warmup_trials=297,
+        coverage_mode=True,
+    )
+    optimizer = OptunaOptimizer(_s03_dependency_config(), optuna_cfg)
+    space = optimizer._build_search_space()
+
+    class FakeStudy:
+        def __init__(self):
+            self.enqueued = []
+
+        def enqueue_trial(self, params):
+            self.enqueued.append(dict(params))
+
+    optimizer.study = FakeStudy()
+    count = optimizer._enqueue_coverage_trials(space, context_label="test")
+
+    assert count == 297
+    assert len(optimizer.study.enqueued) == 297
+
+    for params in optimizer.study.enqueued:
+        resolved = optimizer._decode_bool_group_params(params, remove_surrogates=False)
+        if resolved.get("useCloseCount") is False:
+            assert "closeCountLong" not in params
+            assert "closeCountShort" not in params
+        if resolved.get("useTBands") is False:
+            assert "tBandLongPct" not in params
+            assert "tBandShortPct" not in params

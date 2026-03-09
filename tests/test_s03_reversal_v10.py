@@ -100,3 +100,71 @@ def test_s03_reference_performance(test_data):
     assert abs(basic.total_trades - expected_total_trades) <= 5, (
         f"Total trades mismatch: {basic.total_trades} vs expected {expected_total_trades}"
     )
+
+
+def test_s03_omitted_close_count_params_match_disabled_close_count_behavior(test_data):
+    df_prepared, trade_start_idx = backtest_engine.prepare_dataset_with_warmup(
+        test_data, TRADING_START, TRADING_END, WARMUP_BARS
+    )
+
+    base_params = {
+        "dateFilter": True,
+        "start": TRADING_START,
+        "end": TRADING_END,
+        "maType3": "SMA",
+        "maLength3": 75,
+        "maOffset3": 0.2,
+        "useCloseCount": False,
+        "useTBands": True,
+        "tBandLongPct": 1.0,
+        "tBandShortPct": 1.3,
+        "contractSize": 0.01,
+        "initialCapital": 100.0,
+        "commissionPct": 0.05,
+    }
+
+    explicit = dict(base_params)
+    explicit.update({"closeCountLong": 2, "closeCountShort": 7})
+    omitted = dict(base_params)
+
+    result_explicit = S03ReversalV10.run(df_prepared, explicit, trade_start_idx)
+    result_omitted = S03ReversalV10.run(df_prepared, omitted, trade_start_idx)
+
+    assert result_explicit.equity_curve == pytest.approx(result_omitted.equity_curve)
+    assert result_explicit.balance_curve == pytest.approx(result_omitted.balance_curve)
+    assert result_explicit.timestamps == result_omitted.timestamps
+    assert len(result_explicit.trades) == len(result_omitted.trades)
+
+
+def test_s03_omitted_tband_params_match_disabled_tband_behavior(test_data):
+    df_prepared, trade_start_idx = backtest_engine.prepare_dataset_with_warmup(
+        test_data, TRADING_START, TRADING_END, WARMUP_BARS
+    )
+
+    base_params = {
+        "dateFilter": True,
+        "start": TRADING_START,
+        "end": TRADING_END,
+        "maType3": "SMA",
+        "maLength3": 75,
+        "maOffset3": 0.2,
+        "useCloseCount": True,
+        "closeCountLong": 7,
+        "closeCountShort": 5,
+        "useTBands": False,
+        "contractSize": 0.01,
+        "initialCapital": 100.0,
+        "commissionPct": 0.05,
+    }
+
+    explicit = dict(base_params)
+    explicit.update({"tBandLongPct": 0.2, "tBandShortPct": 2.0})
+    omitted = dict(base_params)
+
+    result_explicit = S03ReversalV10.run(df_prepared, explicit, trade_start_idx)
+    result_omitted = S03ReversalV10.run(df_prepared, omitted, trade_start_idx)
+
+    assert result_explicit.equity_curve == pytest.approx(result_omitted.equity_curve)
+    assert result_explicit.balance_curve == pytest.approx(result_omitted.balance_curve)
+    assert result_explicit.timestamps == result_omitted.timestamps
+    assert len(result_explicit.trades) == len(result_omitted.trades)
