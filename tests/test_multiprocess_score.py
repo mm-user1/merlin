@@ -156,7 +156,7 @@ class TestMultiProcessScore:
         )
 
         optimizer = OptunaOptimizer(base_config, optuna_config)
-        with pytest.raises(RuntimeError, match="worker exit codes"):
+        with pytest.raises(RuntimeError, match="Multi-process .* optimisation failed"):
             optimizer.optimize()
 
     def test_nsga_multiprocess_small_space_stops_without_duplicate_results(self):
@@ -177,6 +177,40 @@ class TestMultiProcessScore:
         optuna_config = OptunaConfig(
             objectives=["net_profit_pct", "max_drawdown_pct"],
             sampler_config=SamplerConfig(sampler_type="nsga2", population_size=4),
+            budget_mode="trials",
+            n_trials=4,
+            coverage_mode=False,
+        )
+
+        optimizer = OptunaOptimizer(base_config, optuna_config)
+        results = optimizer.optimize()
+        signatures = {json.dumps(result.params, sort_keys=True) for result in results}
+        summary = getattr(base_config, "optuna_summary", {})
+
+        assert len(results) == 2
+        assert len(signatures) == 2
+        assert summary["completed_trials"] == 2
+        assert summary["total_trials"] == 2
+        assert optimizer._duplicate_skipped_count >= 0
+
+    def test_tpe_multiprocess_small_space_stops_without_duplicate_results(self):
+        """Centralized TPE ask/tell should stop at unique combinations instead of repeating them."""
+        base_config = OptimizationConfig(
+            csv_file=str(DATA_PATH),
+            strategy_id="s01_trailing_ma",
+            enabled_params={"maType": True},
+            param_ranges={},
+            param_types={"maType": "select"},
+            fixed_params={
+                "maType_options": ["EMA", "SMA"],
+                "closeCountLong": 2,
+                "closeCountShort": 2,
+            },
+            worker_processes=2,
+        )
+        optuna_config = OptunaConfig(
+            objectives=["net_profit_pct"],
+            sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=0),
             budget_mode="trials",
             n_trials=4,
             coverage_mode=False,

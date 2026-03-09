@@ -176,21 +176,21 @@ def test_optuna_optimizer_routes_nsga_multiprocess_to_centralized_path(monkeypat
     optimizer = OptunaOptimizer(base_config, optuna_cfg)
     called = {}
 
-    def fake_nsga(workers):
+    def fake_centralized(workers, **_kwargs):
         called["workers"] = workers
         return []
 
     def fail_legacy(_workers):
         raise AssertionError("Legacy multiprocess path should not be used for NSGA.")
 
-    monkeypatch.setattr(optimizer, "_optimize_multiprocess_nsga", fake_nsga)
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess_nsga", fake_centralized)
     monkeypatch.setattr(optimizer, "_optimize_multiprocess", fail_legacy)
 
     assert optimizer.optimize() == []
     assert called["workers"] == 2
 
 
-def test_optuna_optimizer_keeps_tpe_on_legacy_multiprocess_path(monkeypatch):
+def test_optuna_optimizer_routes_tpe_multiprocess_to_centralized_path(monkeypatch):
     base_config = _base_config()
     base_config.worker_processes = 2
     optuna_cfg = OptunaConfig(
@@ -202,18 +202,32 @@ def test_optuna_optimizer_keeps_tpe_on_legacy_multiprocess_path(monkeypatch):
     optimizer = OptunaOptimizer(base_config, optuna_cfg)
     called = {}
 
-    def fake_legacy(workers):
+    def fake_tpe(workers):
         called["workers"] = workers
         return []
 
-    def fail_nsga(_workers):
-        raise AssertionError("NSGA ask/tell path should not be used for TPE.")
+    def fail_legacy(_workers):
+        raise AssertionError("Legacy multiprocess path should not be used for TPE.")
 
-    monkeypatch.setattr(optimizer, "_optimize_multiprocess", fake_legacy)
-    monkeypatch.setattr(optimizer, "_optimize_multiprocess_nsga", fail_nsga)
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess_tpe", fake_tpe)
+    monkeypatch.setattr(optimizer, "_optimize_multiprocess", fail_legacy)
 
     assert optimizer.optimize() == []
     assert called["workers"] == 2
+
+
+def test_tpe_sampler_uses_grouped_constant_liar_mode():
+    optuna_cfg = OptunaConfig(
+        objectives=["net_profit_pct"],
+        sampler_config=SamplerConfig(sampler_type="tpe", n_startup_trials=7),
+    )
+    optimizer = OptunaOptimizer(_base_config(), optuna_cfg)
+    sampler = optimizer._create_sampler()
+
+    assert isinstance(sampler, optuna.samplers.TPESampler)
+    assert getattr(sampler, "_multivariate", False) is True
+    assert getattr(sampler, "_group", False) is True
+    assert getattr(sampler, "_constant_liar", False) is True
 
 
 def test_optuna_summary_contains_coverage_warning_message():

@@ -798,6 +798,8 @@ def create_sampler(
         return TPESampler(
             n_startup_trials=config.n_startup_trials,
             multivariate=True,
+            group=True,
+            constant_liar=True,
             constraints_func=constraints_func,
         )
     if config.sampler_type == "nsga2":
@@ -2482,13 +2484,32 @@ class OptunaOptimizer:
     # ------------------------------------------------------------------
     # Main execution entrypoint
     # ------------------------------------------------------------------
+    def _get_sampler_type(self) -> str:
+        return str(getattr(self.sampler_config, "sampler_type", "")).strip().lower()
+
+    def _log_centralized_trial_completion(
+        self,
+        trial_number: int,
+        objective_values: Sequence[float],
+        params_dict: Dict[str, Any],
+    ) -> None:
+        objective_map = dict(zip(self.mo_config.get_metric_names(), objective_values))
+        logger.info(
+            "Trial %s finished with values: %s and parameters: %s.",
+            trial_number,
+            objective_map,
+            params_dict,
+        )
+
     def optimize(self) -> List[OptimizationResult]:
         workers = max(1, int(getattr(self.base_config, "worker_processes", 1) or 1))
         if workers <= 1:
             return self._optimize_single_process()
-        sampler_type = str(getattr(self.sampler_config, "sampler_type", "")).strip().lower()
+        sampler_type = self._get_sampler_type()
         if sampler_type in {"nsga2", "nsga3"}:
             return self._optimize_multiprocess_nsga(workers)
+        if sampler_type == "tpe":
+            return self._optimize_multiprocess_tpe(workers)
         return self._optimize_multiprocess(workers)
 
     def _optimize_single_process(self) -> List[OptimizationResult]:
@@ -2559,10 +2580,40 @@ class OptunaOptimizer:
 
         return self._finalize_results()
 
+    def _optimize_multiprocess_tpe(self, n_workers: int) -> List[OptimizationResult]:
+        return self._optimize_multiprocess_centralized(
+            n_workers,
+            dispatcher_label="TPE",
+            worker_name_prefix="TPEEvaluator",
+            coverage_context_label="multiprocess-tpe",
+            mark_nsga_generation=False,
+            allow_pruning=not self.mo_config.is_multi_objective(),
+        )
+
     def _optimize_multiprocess_nsga(self, n_workers: int) -> List[OptimizationResult]:
+        return self._optimize_multiprocess_centralized(
+            n_workers,
+            dispatcher_label="NSGA",
+            worker_name_prefix="NSGAEvaluator",
+            coverage_context_label="multiprocess-nsga",
+            mark_nsga_generation=True,
+            allow_pruning=False,
+        )
+
+    def _optimize_multiprocess_centralized(
+        self,
+        n_workers: int,
+        *,
+        dispatcher_label: str,
+        worker_name_prefix: str,
+        coverage_context_label: str,
+        mark_nsga_generation: bool,
+        allow_pruning: bool,
+    ) -> List[OptimizationResult]:
         logger.info(
-            "Starting multi-process NSGA optimisation via centralized ask/tell: "
+            "Starting multi-process %s optimisation via centralized ask/tell: "
             "objectives=%s, budget_mode=%s, workers=%s",
+            dispatcher_label,
             ",".join(self.mo_config.objectives),
             self.optuna_config.budget_mode,
             n_workers,
@@ -2591,9 +2642,10 @@ class OptunaOptimizer:
         error_queue: mp.Queue = mp.Queue()
 
         sampler = self._create_sampler()
-        self.pruner = self._create_pruner()
+        self.pruner = self._create_pruner() if allow_pruning else None
         study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
         processes: List[mp.Process] = []
+        sampler_type = self._get_sampler_type()
 
         if self.optuna_config.budget_mode == "time":
             timeout = max(60, int(self.optuna_config.time_limit))
@@ -2631,7 +2683,7 @@ class OptunaOptimizer:
                 pruner=self.pruner,
                 load_if_exists=False,
             )
-            self._enqueue_coverage_trials(search_space, context_label="multiprocess-nsga")
+            self._enqueue_coverage_trials(search_space, context_label=coverage_context_label)
 
             for worker_id in range(n_workers):
                 proc = mp.Process(
@@ -2646,11 +2698,11 @@ class OptunaOptimizer:
                         worker_id,
                         error_queue,
                     ),
-                    name=f"NSGAEvaluator-{worker_id}",
+                    name=f"{worker_name_prefix}-{worker_id}",
                 )
                 proc.start()
                 processes.append(proc)
-                logger.info("Started NSGA evaluator worker %s (pid=%s)", worker_id, proc.pid)
+                logger.info("Started %s evaluator worker %s (pid=%s)", dispatcher_label, worker_id, proc.pid)
 
             while True:
                 error_details = _drain_worker_errors(error_queue)
@@ -2664,14 +2716,14 @@ class OptunaOptimizer:
                             error_detail.get("traceback"),
                         )
                     raise RuntimeError(
-                        "Multi-process NSGA optimisation failed; first error from worker "
+                        f"Multi-process {dispatcher_label} optimisation failed; first error from worker "
                         f"{first_detail.get('worker_id')}: {first_detail.get('message')}"
                     )
 
                 for worker_id, proc in enumerate(processes):
                     if proc.exitcode not in (None, 0):
                         raise RuntimeError(
-                            f"Multi-process NSGA optimisation failed; worker {worker_id} "
+                            f"Multi-process {dispatcher_label} optimisation failed; worker {worker_id} "
                             f"exited with code {proc.exitcode}"
                         )
 
@@ -2681,7 +2733,8 @@ class OptunaOptimizer:
                 if search_space_size is not None and (len(seen_keys) + len(in_flight_keys)) >= search_space_size:
                     if not dispatch_closed:
                         logger.info(
-                            "NSGA search space exhausted after %s unique evaluations; stopping early.",
+                            "%s search space exhausted after %s unique evaluations; stopping early.",
+                            dispatcher_label,
                             len(seen_keys),
                         )
                     dispatch_closed = True
@@ -2692,7 +2745,8 @@ class OptunaOptimizer:
                         break
 
                     trial = self.study.ask()
-                    self._mark_coverage_generation_for_nsga(trial)
+                    if mark_nsga_generation:
+                        self._mark_coverage_generation_for_nsga(trial)
                     params_dict = self._prepare_trial_parameters(trial, search_space)
                     params_key = _build_params_key(params_dict)
 
@@ -2703,13 +2757,15 @@ class OptunaOptimizer:
                         trial.set_user_attr(_DUPLICATE_SKIP_REASON_ATTR, "exact_params")
                         self.study.tell(trial, state=TrialState.FAIL)
                         logger.info(
-                            "Skipping duplicate NSGA proposal trial=%s sampler=%s",
+                            "Skipping duplicate %s proposal trial=%s sampler=%s",
+                            dispatcher_label,
                             trial.number,
-                            self.sampler_config.sampler_type,
+                            sampler_type,
                         )
                         if consecutive_duplicate_skips >= duplicate_retry_limit:
                             logger.warning(
-                                "NSGA generated %s consecutive duplicate proposals; stopping dispatch early.",
+                                "%s generated %s consecutive duplicate proposals; stopping dispatch early.",
+                                dispatcher_label,
                                 consecutive_duplicate_skips,
                             )
                             dispatch_closed = True
@@ -2738,7 +2794,11 @@ class OptunaOptimizer:
                 trial_number = int(result_message["trial_number"])
                 pending_entry = pending_trials.pop(trial_number, None)
                 if pending_entry is None:
-                    logger.warning("Received NSGA worker result for unknown trial %s", trial_number)
+                    logger.warning(
+                        "Received %s worker result for unknown trial %s",
+                        dispatcher_label,
+                        trial_number,
+                    )
                     continue
 
                 trial, params_key = pending_entry
@@ -2770,7 +2830,15 @@ class OptunaOptimizer:
                     constraints_satisfied=bool(payload.get("constraints_satisfied", True)),
                 )
 
+                if self.pruner is not None:
+                    trial.report(float(objective_return), step=0)
+                    if trial.should_prune():
+                        self.pruned_trials += 1
+                        self.study.tell(trial, state=TrialState.PRUNED)
+                        continue
+
                 self.study.tell(trial, values=objective_return)
+                self._log_centralized_trial_completion(trial.number, objective_values, result.params)
 
             self.trial_results = []
             for trial in self.study.trials:
@@ -2784,7 +2852,8 @@ class OptunaOptimizer:
 
             if self._duplicate_skipped_count:
                 logger.info(
-                    "NSGA dispatcher skipped %s duplicate proposals.",
+                    "%s dispatcher skipped %s duplicate proposals.",
+                    dispatcher_label,
                     self._duplicate_skipped_count,
                 )
 
