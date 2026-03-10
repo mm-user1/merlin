@@ -58,23 +58,23 @@ These results serve as the "golden standard" for regression testing during migra
 
 Based on user requirements, the baseline should produce:
 
-- **Net Profit:** 230.75% (Expected: ~230.75% ±0.5%)
-- **Max Drawdown:** 20.03% (Expected: ~20.03% ±0.5%)
-- **Total Trades:** 93 (Expected: ~93 ±2)
+- **Net Profit:** 230.75% (Expected: ~230.75% ï¿½0.5%)
+- **Max Drawdown:** 20.03% (Expected: ~20.03% ï¿½0.5%)
+- **Total Trades:** 93 (Expected: ~93 ï¿½2)
 
 ## Tolerance Levels for Regression Tests
 
 The following tolerances are used for regression validation:
 
-- **net_profit_pct:** ±0.01% (floating point tolerance)
-- **max_drawdown_pct:** ±0.01%
-- **total_trades:** exact match (±0)
+- **net_profit_pct:** ï¿½0.01% (floating point tolerance)
+- **max_drawdown_pct:** ï¿½0.01%
+- **total_trades:** exact match (ï¿½0)
 - **trade entry/exit times:** exact match
-- **trade PnL:** ±0.0001 (floating point epsilon)
+- **trade PnL:** ï¿½0.0001 (floating point epsilon)
 
 ## Files
 
-- `s01_metrics.json` - Basic and advanced metrics
+- `s01_metrics.json` - Basic and advanced metrics (incl. `consistency_score`)
 - `s01_trades.csv` - All trade records
 - `README.md` - This file
 

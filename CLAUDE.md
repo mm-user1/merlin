@@ -38,21 +38,23 @@ Key: Flask, pandas, numpy, matplotlib, optuna==4.6.0
 
 1. **Config-driven design** - Parameter schemas in `config.json`, UI renders dynamically
 2. **camelCase naming** - End-to-end: Pine Script -> config.json -> Python -> CSV
-3. **Optuna-only optimization** - Grid search removed
+3. **Optuna-only optimization** - Grid search removed; optional Initial Search Coverage mode for systematic parameter exploration
 4. **Strategy isolation** - Each strategy owns its params dataclass
 5. **Rolling WFA** - Calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers
-6. **Database persistence** - All optimization results automatically saved to SQLite, browsable through web UI
-7. **Multi-database support** - Multiple `.db` files with active DB switching
-8. **Three-page UI** - Start (configuration), Results (studies browser), Analytics (WFA research)
+6. **In-memory backend** - RAM-based Optuna journal storage for faster multiprocess optimization
+7. **Trial deduplication** - Automatic detection/skipping of duplicate parameter sets with search space exhaustion early stopping
+8. **Database persistence** - All optimization results automatically saved to SQLite, browsable through web UI
+9. **Multi-database support** - Multiple `.db` files with active DB switching
+10. **Three-page UI** - Start (configuration), Results (studies browser), Analytics (WFA research)
 
 ### Directory Structure
 ```
 src/
 |-- core/                     # Engines + utilities
 |   |-- backtest_engine.py    # Trade simulation, TradeRecord, StrategyResult
-|   |-- optuna_engine.py      # Optimization, OptimizationResult, OptunaConfig
+|   |-- optuna_engine.py      # Optimization, OptimizationResult, OptunaConfig, InMemoryJournalBackend, coverage, dedup
 |   |-- walkforward_engine.py # WFA orchestration
-|   |-- metrics.py            # BasicMetrics, AdvancedMetrics calculation
+|   |-- metrics.py            # BasicMetrics, AdvancedMetrics (incl. Consistency R²)
 |   |-- analytics.py          # Portfolio equity aggregation for Analytics page
 |   |-- storage.py            # SQLite database operations
 |   |-- export.py             # Trade CSV export functions
@@ -91,7 +93,7 @@ src/
         |   |-- api.js                # API client
         |   |-- strategy-config.js    # Dynamic form generation from config.json
         |   |-- ui-handlers.js        # Shared UI event handlers
-        |   |-- optuna-ui.js          # Optuna Start-page UI helpers
+        |   |-- optuna-ui.js          # Optuna Start-page UI helpers + coverage analysis
         |   |-- optuna-results-ui.js  # Optuna Results-page UI helpers
         |   |-- post-process-ui.js    # Post process UI helpers
         |   |-- oos-test-ui.js        # OOS test UI helpers
@@ -115,7 +117,7 @@ src/
 |-----------|--------|
 | `TradeRecord`, `StrategyResult` | `backtest_engine.py` |
 | `BasicMetrics`, `AdvancedMetrics` | `metrics.py` |
-| `OptimizationResult`, `OptunaConfig` | `optuna_engine.py` |
+| `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` | `optuna_engine.py` |
 | `WFConfig`, `WFResult`, `WindowResult` | `walkforward_engine.py` |
 | `aggregate_equity_curves` | `analytics.py` |
 | Strategy params dataclass | Each strategy's `strategy.py` |
@@ -197,7 +199,7 @@ result = S01TrailingMA.run(df_prepared, params, trade_start_idx)
 ```python
 from core import metrics
 basic = metrics.calculate_basic(result, initial_capital=100.0)
-advanced = metrics.calculate_advanced(result)
+advanced = metrics.calculate_advanced(result)  # includes consistency_score (R²)
 
 ### Walk-Forward Analysis (Rolling)
 ```python
@@ -259,6 +261,8 @@ pytest tests/ -v
 - `test_analytics.py` - Analytics equity aggregation tests
 - `test_adaptive_wfa.py` - Adaptive WFA trigger detection tests
 - `test_db_management.py` - Multi-database management tests
+- `test_coverage_startup.py` - Initial Search Coverage mode tests
+- `test_strategy_loop_regression.py` - Strategy loop performance regression tests
 
 ### Regenerate S01 Baseline
 ```bash
@@ -287,6 +291,26 @@ python tools/generate_baseline_s01.py
   - `constraints_func` is evaluated only after **successful** trials; it is not called for failed/pruned trials.
 - Sorting/labeling should follow: feasible Pareto -> feasible non-Pareto -> infeasible (then by total violation, then primary objective).
 
+- **Initial Search Coverage**
+  - Optional coverage mode (`coverage_mode: true`) for systematic parameter space exploration during startup.
+  - Generates structured coverage trials from categorical combinations and numeric quantiles.
+  - UI provides coverage analysis with block size hints (multipliers: 1, 3, 5, 9, 17) and auto-fill for warmup trials.
+  - Bool group rules (e.g., `at_least_one_true`) reduce coverage block size by excluding invalid combinations.
+
+- **Trial deduplication**
+  - Duplicate parameter sets are detected via deterministic JSON key comparison.
+  - Duplicates are marked FAIL with `merlin.duplicate_skipped` attribute and skipped.
+  - Soft duplicate cycle limit (`dispatcher_duplicate_cycle_limit`, default 18) prevents infinite loops.
+  - Search space exhaustion triggers early stopping.
+
+- **Trial logging**
+  - `trials_log` flag (default false) controls Optuna trial-level INFO logging.
+  - Togglable from UI via "Trials Log" checkbox.
+
+- **In-memory backend**
+  - `InMemoryJournalBackend` replaces file-based journal storage for multiprocess optimization.
+  - Uses `mp.Manager().list()` for process-shared storage.
+
 - **Concurrency**
 - Keep Merlin's existing multi-process optimization architecture. Do not replace it with `study.optimize(..., n_jobs=...)` threading.
 
@@ -298,6 +322,8 @@ python tools/generate_baseline_s01.py
 **Start Page (`/` - index.html):**
 - Strategy selection and parameter configuration
 - Optuna settings (objectives + primary objective, budget, sampler, pruner, constraints)
+- Initial Search Coverage mode toggle with coverage analysis and warmup auto-fill
+- Trials Log toggle for Optuna trial-level logging control
 - Walk-Forward Analysis settings (IS/OOS periods, adaptive mode)
 - Scheduled run queue management
 - CSV file browser
@@ -336,7 +362,7 @@ python tools/generate_baseline_s01.py
 - **api.js**: Centralized API calls for all pages
 - **strategy-config.js**: Dynamic form generation from `config.json`
 - **ui-handlers.js**: Shared UI event handlers
-- **optuna-ui.js**: Optuna Start-page UI helpers (objectives/constraints/sampler panels)
+- **optuna-ui.js**: Optuna Start-page UI helpers (objectives/constraints/sampler panels, coverage analysis)
 - **optuna-results-ui.js**: Optuna Results-page UI helpers (dynamic columns/badges)
 - **post-process-ui.js**: Post process UI helpers (Forward Test, DSR panels)
 - **oos-test-ui.js**: OOS test UI helpers
@@ -436,11 +462,14 @@ python tools/generate_baseline_s01.py
 ## Performance Considerations
 
 - Use vectorized pandas/numpy operations
+- Pre-extract NumPy arrays from DataFrame columns before strategy loops (`.to_numpy()`)
 - Reuse indicator calculations where possible
 - Avoid expensive logging in hot paths (optimization loops)
 - `trade_start_idx` skips warmup bars in simulation
 - Database uses WAL mode for concurrent read access
 - Bulk inserts used for saving trials (executemany, not loop)
+- In-memory Optuna backend eliminates file I/O for trial communication between processes
+- Trial deduplication prevents wasted evaluations of already-seen parameter sets
 
 ## Current Strategies
 
