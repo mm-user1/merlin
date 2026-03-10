@@ -5,6 +5,23 @@
     CHECKBOXES: 'setCheckboxes',
   };
 
+  const SET_COLOR_OPTIONS = [
+    { token: null, label: 'Default' },
+    { token: 'blue', label: 'Blue' },
+    { token: 'teal', label: 'Teal' },
+    { token: 'mint', label: 'Mint' },
+    { token: 'olive', label: 'Olive' },
+    { token: 'sand', label: 'Sand' },
+    { token: 'amber', label: 'Amber' },
+    { token: 'rose', label: 'Rose' },
+    { token: 'lavender', label: 'Lavender' },
+  ];
+  const SET_COLOR_TOKENS = new Set(
+    SET_COLOR_OPTIONS.map((option) => option.token).filter(Boolean)
+  );
+  const TABLE_HEIGHT_MIN = 0;
+  const TABLE_HEIGHT_MAX = 2;
+
   const state = {
     studies: [],
     studyMap: new Map(),
@@ -14,14 +31,20 @@
     viewMode: VIEW_MODES.ALL,
     checkedStudyIds: new Set(),
     forceAllStudies: false,
+    batchMode: false,
+    batchSelectedSetIds: new Set(),
+    batchAnchorSetId: null,
     moveMode: false,
     moveOriginalOrder: [],
+    moveSelectionIds: [],
+    moveInsertionIndex: 0,
     rangeAnchorSetId: null,
     rangeAnchorChecked: null,
     panelOpen: true,
     panelTouched: false,
-    expandedRows: false,
+    tableHeightLevel: TABLE_HEIGHT_MIN,
     updateMenuOpen: false,
+    colorMenuOpen: false,
     onStateChange: null,
     bound: false,
     metricsByGroupId: new Map(),
@@ -59,8 +82,24 @@
     return parsed;
   }
 
+  function normalizeColorToken(raw) {
+    const token = String(raw || '').trim().toLowerCase();
+    if (!token) return null;
+    return SET_COLOR_TOKENS.has(token) ? token : null;
+  }
+
+  function normalizeTableHeightLevel(raw) {
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed)) return TABLE_HEIGHT_MIN;
+    return Math.max(TABLE_HEIGHT_MIN, Math.min(TABLE_HEIGHT_MAX, parsed));
+  }
+
   function cloneCheckedSetIds() {
     return new Set(Array.from(state.checkedSetIds));
+  }
+
+  function cloneBatchSelectedSetIds() {
+    return new Set(Array.from(state.batchSelectedSetIds));
   }
 
   function cloneSetList(rawSets) {
@@ -77,6 +116,7 @@
           name: String(setItem?.name || '').trim(),
           sort_order: Number.isFinite(Number(setItem?.sort_order)) ? Number(setItem.sort_order) : 0,
           created_at: setItem?.created_at || null,
+          color_token: normalizeColorToken(setItem?.color_token),
           study_ids: studyIds,
         };
       })
@@ -105,6 +145,48 @@
     return Array.from(state.checkedSetIds)
       .map((setId) => getSetById(setId))
       .filter(Boolean);
+  }
+
+  function clearBatchSelection() {
+    state.batchSelectedSetIds = new Set();
+    state.batchAnchorSetId = null;
+  }
+
+  function getOrderedBatchSelectedSetIds() {
+    if (!(state.batchSelectedSetIds instanceof Set) || state.batchSelectedSetIds.size === 0) {
+      return [];
+    }
+    return state.sets
+      .map((setItem) => setItem.id)
+      .filter((setId) => state.batchSelectedSetIds.has(setId));
+  }
+
+  function getActiveActionSetIds() {
+    if (state.batchMode) {
+      return getOrderedBatchSelectedSetIds();
+    }
+    return state.focusedSetId !== null ? [state.focusedSetId] : [];
+  }
+
+  function getCommonColorToken(setIds) {
+    const orderedIds = Array.isArray(setIds) ? setIds : [];
+    if (!orderedIds.length) return undefined;
+    let common = null;
+    let initialized = false;
+    for (const setId of orderedIds) {
+      const setItem = getSetById(setId);
+      if (!setItem) continue;
+      const token = normalizeColorToken(setItem.color_token);
+      if (!initialized) {
+        common = token;
+        initialized = true;
+        continue;
+      }
+      if (token !== common) {
+        return undefined;
+      }
+    }
+    return initialized ? common : undefined;
   }
 
   function resolveViewMode() {
@@ -339,15 +421,18 @@
       root: document.getElementById('analytics-sets-collapsible'),
       header: document.getElementById('analyticsSetsHeader'),
       summary: document.getElementById('analyticsSetsSummary'),
-      updateWrap: document.getElementById('analyticsSetUpdateWrap'),
-      updateBtn: document.getElementById('analyticsSetUpdateBtn'),
-      updateMenu: document.getElementById('analyticsSetUpdateMenu'),
-      saveBtn: document.getElementById('analyticsSaveSetBtn'),
       tableWrap: document.getElementById('analyticsSetsTableWrap'),
       actions: document.getElementById('analyticsSetsActions'),
-      expandWrap: document.getElementById('analyticsSetsExpand'),
-      expandToggle: document.getElementById('analyticsSetsExpandToggle'),
     };
+  }
+
+  function findSetRow(setId) {
+    const normalized = normalizeSetId(setId);
+    if (normalized === null) return null;
+    const { tableWrap } = getDom();
+    if (!tableWrap) return null;
+    return Array.from(tableWrap.querySelectorAll('tr.analytics-set-row'))
+      .find((row) => normalizeSetId(row.dataset.setId || '') === normalized) || null;
   }
 
   function isEventInsideElement(event, element) {
@@ -362,6 +447,76 @@
     return false;
   }
 
+  function clearTextSelection() {
+    const selection = window.getSelection ? window.getSelection() : null;
+    if (selection && typeof selection.removeAllRanges === 'function') {
+      selection.removeAllRanges();
+    }
+  }
+
+  function closeColorMenu() {
+    state.colorMenuOpen = false;
+  }
+
+  function closeTransientMenus() {
+    state.updateMenuOpen = false;
+    closeColorMenu();
+  }
+
+  function clearMoveState() {
+    state.moveMode = false;
+    state.moveOriginalOrder = [];
+    state.moveSelectionIds = [];
+    state.moveInsertionIndex = 0;
+  }
+
+  function getMoveSelectionSet() {
+    return new Set(Array.isArray(state.moveSelectionIds) ? state.moveSelectionIds : []);
+  }
+
+  function getMoveableSelectionIds() {
+    if (state.batchMode) {
+      return getOrderedBatchSelectedSetIds();
+    }
+    return state.focusedSetId !== null ? [state.focusedSetId] : [];
+  }
+
+  function buildReorderedSetList(selectionIds, insertionIndex) {
+    const orderedSelection = Array.isArray(selectionIds)
+      ? selectionIds
+        .map((setId) => getSetById(setId))
+        .filter(Boolean)
+      : [];
+    if (!orderedSelection.length) return state.sets.slice();
+
+    const selectedIdSet = new Set(orderedSelection.map((setItem) => setItem.id));
+    const unselected = state.sets.filter((setItem) => !selectedIdSet.has(setItem.id));
+    const boundedIndex = Math.max(0, Math.min(unselected.length, Number(insertionIndex) || 0));
+    return [
+      ...unselected.slice(0, boundedIndex),
+      ...orderedSelection,
+      ...unselected.slice(boundedIndex),
+    ];
+  }
+
+  function getInitialMoveInsertionIndex(selectionIds) {
+    const selectedIdSet = new Set(Array.isArray(selectionIds) ? selectionIds : []);
+    let insertionIndex = 0;
+    for (const setItem of state.sets) {
+      if (selectedIdSet.has(setItem.id)) {
+        break;
+      }
+      insertionIndex += 1;
+    }
+    return insertionIndex;
+  }
+
+  function renderTableHeight() {
+    const { tableWrap } = getDom();
+    if (!tableWrap) return;
+    tableWrap.dataset.heightLevel = String(normalizeTableHeightLevel(state.tableHeightLevel));
+  }
+
   function setPanelOpen(open) {
     state.panelOpen = Boolean(open);
     state.panelTouched = true;
@@ -370,26 +525,30 @@
     root.classList.toggle('open', state.panelOpen);
   }
 
-  function moveFocusedToIndex(targetIndex) {
-    if (!state.moveMode || state.focusedSetId === null) return;
-    const sourceIndex = state.sets.findIndex((item) => item.id === state.focusedSetId);
-    if (sourceIndex < 0) return;
+  function moveSelectionToIndex(targetIndex) {
+    if (!state.moveMode) return;
+    const selectionIds = Array.isArray(state.moveSelectionIds) ? state.moveSelectionIds : [];
+    if (!selectionIds.length) return;
 
-    const boundedTarget = Math.max(0, Math.min(state.sets.length - 1, targetIndex));
-    if (boundedTarget === sourceIndex) return;
+    const unselectedCount = Math.max(0, state.sets.length - selectionIds.length);
+    const boundedTarget = Math.max(0, Math.min(unselectedCount, Number(targetIndex) || 0));
+    if (boundedTarget === state.moveInsertionIndex) return;
 
-    const reordered = state.sets.slice();
-    const [moved] = reordered.splice(sourceIndex, 1);
-    reordered.splice(boundedTarget, 0, moved);
-    state.sets = reordered;
+    state.moveInsertionIndex = boundedTarget;
+    state.sets = buildReorderedSetList(selectionIds, boundedTarget);
     render();
   }
 
   function startMoveMode() {
-    if (state.focusedSetId === null || state.moveMode) return;
-    state.updateMenuOpen = false;
+    if (state.moveMode) return;
+    const selectionIds = getMoveableSelectionIds();
+    if (!selectionIds.length) return;
+
+    closeTransientMenus();
     state.moveMode = true;
     state.moveOriginalOrder = state.sets.map((setItem) => setItem.id);
+    state.moveSelectionIds = selectionIds.slice();
+    state.moveInsertionIndex = getInitialMoveInsertionIndex(selectionIds);
     render();
   }
 
@@ -402,16 +561,14 @@
       : true;
 
     if (!changed) {
-      state.moveMode = false;
-      state.moveOriginalOrder = [];
+      clearMoveState();
       render();
       return;
     }
 
     try {
       await reorderAnalyticsSetsRequest(newOrder);
-      state.moveMode = false;
-      state.moveOriginalOrder = [];
+      clearMoveState();
       state.sets.forEach((setItem, index) => {
         setItem.sort_order = index;
       });
@@ -431,8 +588,7 @@
     if (restored.length === state.sets.length) {
       state.sets = restored;
     }
-    state.moveMode = false;
-    state.moveOriginalOrder = [];
+    clearMoveState();
     render();
   }
 
@@ -464,9 +620,100 @@
     state.rangeAnchorChecked = Boolean(checked);
   }
 
+  function clearFocusedSetForModeChange(reasonAll, reasonCheckboxes) {
+    if (state.focusedSetId === null) return false;
+    closeTransientMenus();
+    state.focusedSetId = null;
+    state.forceAllStudies = false;
+    resolveViewMode();
+    render();
+
+    if (state.viewMode === VIEW_MODES.CHECKBOXES) {
+      const unionIds = computeVisibleStudyIds();
+      emitStateChange({
+        reason: reasonCheckboxes,
+        syncCheckedStudyIds: Array.from(unionIds || []),
+      });
+    } else {
+      emitStateChange({ reason: reasonAll, syncCheckedStudyIds: null });
+    }
+    return true;
+  }
+
+  function enterBatchMode() {
+    if (state.moveMode || state.batchMode || !state.sets.length) return;
+    closeTransientMenus();
+    const seedSetId = state.focusedSetId;
+    if (seedSetId !== null) {
+      clearFocusedSetForModeChange('setFocusClearedForBatchToAll', 'setFocusClearedForBatchToCheckboxes');
+    }
+    state.batchMode = true;
+    clearBatchSelection();
+    if (seedSetId !== null && hasSet(seedSetId)) {
+      state.batchSelectedSetIds = new Set([seedSetId]);
+      state.batchAnchorSetId = seedSetId;
+    }
+    render();
+  }
+
+  function exitBatchMode() {
+    if (!state.batchMode) return false;
+    closeTransientMenus();
+    clearBatchSelection();
+    state.batchMode = false;
+    render();
+    return true;
+  }
+
+  function applyBatchRangeSelection(targetSetId) {
+    const target = normalizeSetId(targetSetId);
+    if (target === null || state.batchAnchorSetId === null) return false;
+
+    const ids = state.sets.map((item) => item.id);
+    const anchorIndex = ids.indexOf(state.batchAnchorSetId);
+    const targetIndex = ids.indexOf(target);
+    if (anchorIndex < 0 || targetIndex < 0) return false;
+
+    const [start, end] = anchorIndex <= targetIndex
+      ? [anchorIndex, targetIndex]
+      : [targetIndex, anchorIndex];
+    state.batchSelectedSetIds = new Set(ids.slice(start, end + 1));
+    return true;
+  }
+
+  function handleBatchSelection(setId, event) {
+    if (state.moveMode || !state.batchMode) return;
+    closeTransientMenus();
+    const normalized = normalizeSetId(setId);
+    if (normalized === null || !hasSet(normalized)) return;
+
+    if (event.shiftKey) {
+      if (!applyBatchRangeSelection(normalized)) {
+        state.batchSelectedSetIds = new Set([normalized]);
+      }
+      state.batchAnchorSetId = normalized;
+      render();
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      const next = cloneBatchSelectedSetIds();
+      if (next.has(normalized)) next.delete(normalized);
+      else next.add(normalized);
+      state.batchSelectedSetIds = next;
+      state.batchAnchorSetId = normalized;
+      render();
+      return;
+    }
+
+    state.batchSelectedSetIds = new Set([normalized]);
+    state.batchAnchorSetId = normalized;
+    render();
+  }
+
   function handleAllStudiesClick() {
-    if (state.moveMode) return;
-    state.updateMenuOpen = false;
+    if (state.moveMode || state.batchMode) return;
+    closeTransientMenus();
     const previousMode = state.viewMode;
     state.focusedSetId = null;
     state.forceAllStudies = true;
@@ -479,7 +726,7 @@
 
   function handleCheckboxToggle(setId, event) {
     if (state.moveMode) return;
-    state.updateMenuOpen = false;
+    closeTransientMenus();
     const normalized = normalizeSetId(setId);
     if (normalized === null) return;
     const focused = state.focusedSetId;
@@ -526,25 +773,13 @@
   }
 
   function toggleFocus(setId) {
-    if (state.moveMode) return;
-    state.updateMenuOpen = false;
+    if (state.moveMode || state.batchMode) return;
+    closeTransientMenus();
     const normalized = normalizeSetId(setId);
     if (normalized === null || !hasSet(normalized)) return;
 
     if (state.focusedSetId === normalized) {
-      state.focusedSetId = null;
-      state.forceAllStudies = false;
-      resolveViewMode();
-      render();
-      if (state.viewMode === VIEW_MODES.CHECKBOXES) {
-        const unionIds = computeVisibleStudyIds();
-        emitStateChange({
-          reason: 'setFocusClearedToCheckboxes',
-          syncCheckedStudyIds: Array.from(unionIds || []),
-        });
-      } else {
-        emitStateChange({ reason: 'setFocusClearedToAll', syncCheckedStudyIds: null });
-      }
+      clearFocusedSetForModeChange('setFocusClearedToAll', 'setFocusClearedToCheckboxes');
       return;
     }
 
@@ -580,6 +815,7 @@
   }
 
   async function handleRenameSet() {
+    if (state.batchMode) return;
     const focused = getSetById(state.focusedSetId);
     if (!focused) return;
     const nameRaw = window.prompt('Enter new set name:', focused.name);
@@ -599,13 +835,28 @@
   }
 
   async function handleDeleteSet() {
-    const focused = getSetById(state.focusedSetId);
-    if (!focused) return;
-    const confirmed = window.confirm(`Delete set "${focused.name}"?`);
+    const targetIds = getActiveActionSetIds();
+    if (!targetIds.length) return;
+    const targetSets = targetIds
+      .map((setId) => getSetById(setId))
+      .filter(Boolean);
+    if (!targetSets.length) return;
+
+    const confirmed = targetSets.length === 1
+      ? window.confirm(`Delete set "${targetSets[0].name}"?`)
+      : window.confirm(`Delete ${targetSets.length} selected sets? This cannot be undone.`);
     if (!confirmed) return;
 
     try {
-      await deleteAnalyticsSetRequest(focused.id);
+      closeTransientMenus();
+      if (targetSets.length === 1) {
+        await deleteAnalyticsSetRequest(targetSets[0].id);
+      } else {
+        await bulkDeleteAnalyticsSetsRequest(targetIds);
+      }
+      if (state.batchMode) {
+        clearBatchSelection();
+      }
       await loadSets({ preserveSelection: true, emitState: false, preferredFocusId: null });
       resolveViewMode();
       render();
@@ -635,7 +886,7 @@
     if (!confirmed) return;
 
     try {
-      state.updateMenuOpen = false;
+      closeTransientMenus();
       await updateAnalyticsSetRequest(setItem.id, { study_ids: selectedStudyIds });
       await loadSets({ preserveSelection: true, emitState: true, preferredFocusId });
     } catch (error) {
@@ -657,43 +908,228 @@
     await updateSetMembers(setItem, null);
   }
 
+  function renderColorMenuItems(currentToken) {
+    return SET_COLOR_OPTIONS.map((option) => {
+      const token = option.token;
+      const selected = token === currentToken;
+      const swatchAttr = token ? ` data-color-token="${token}"` : '';
+      return `
+        <button class="analytics-set-color-item${selected ? ' is-selected' : ''}" type="button"
+                data-set-color-token="${token || ''}">
+          <span class="analytics-set-color-swatch"${swatchAttr}></span>
+          <span class="analytics-set-color-item-label">${escapeHtml(option.label)}</span>
+          <span class="analytics-set-color-item-check" aria-hidden="true">${selected ? '&#10003;' : ''}</span>
+        </button>
+      `;
+    }).join('');
+  }
+
+  async function handleSetColorChange(colorTokenRaw) {
+    const targetIds = getActiveActionSetIds();
+    if (!targetIds.length) return;
+    const nextToken = normalizeColorToken(colorTokenRaw);
+    const currentToken = getCommonColorToken(targetIds);
+    if (targetIds.length === 1 && nextToken === currentToken) {
+      closeColorMenu();
+      renderActions();
+      return;
+    }
+
+    try {
+      closeColorMenu();
+      if (targetIds.length === 1) {
+        await updateAnalyticsSetRequest(targetIds[0], { color_token: nextToken });
+      } else {
+        await bulkUpdateAnalyticsSetColorRequest(targetIds, nextToken);
+      }
+      const preferredFocusId = state.batchMode ? null : targetIds[0];
+      await loadSets({ preserveSelection: true, emitState: true, preferredFocusId });
+    } catch (error) {
+      window.alert(error?.message || 'Failed to update set color.');
+    }
+  }
+
   function renderActions() {
     const { actions } = getDom();
     if (!actions) return;
 
     const focused = getSetById(state.focusedSetId);
-    if (!focused) {
-      actions.style.display = 'none';
-      actions.innerHTML = '';
-      return;
-    }
+    const hasSets = state.sets.length > 0;
+    const hasCheckedStudies = state.checkedStudyIds.size > 0;
+    const activeSetIds = getActiveActionSetIds();
+    const hasActionTarget = activeSetIds.length > 0;
+    const canToggleBatch = hasSets && !state.moveMode;
+    const canMove = hasActionTarget && !state.moveMode;
+    const canRename = !state.batchMode && Boolean(focused) && !state.moveMode;
+    const canDelete = hasActionTarget && !state.moveMode;
+    const canColor = hasActionTarget && !state.moveMode;
+    const canUpdate = hasSets && hasCheckedStudies && !state.moveMode;
+    const canSave = hasCheckedStudies && !state.moveMode;
+    const canDecreaseHeight = normalizeTableHeightLevel(state.tableHeightLevel) > TABLE_HEIGHT_MIN && !state.moveMode;
+    const canIncreaseHeight = normalizeTableHeightLevel(state.tableHeightLevel) < TABLE_HEIGHT_MAX && !state.moveMode;
+    const updateLabel = !state.batchMode && focused ? 'Update Current Set' : 'Update Set &#9662;';
+    const currentColorToken = getCommonColorToken(activeSetIds);
+    const moveHint = state.moveMode
+      ? `<span class="hint">Move mode active. Enter = save, Esc = cancel.</span>`
+      : '';
 
-    actions.style.display = 'flex';
-    if (state.moveMode) {
-      actions.innerHTML = '<span class="hint">Move mode active. Enter = save, Esc = cancel.</span>';
-      return;
+    if (!canUpdate && state.updateMenuOpen) {
+      state.updateMenuOpen = false;
+    }
+    if (!canColor && state.colorMenuOpen) {
+      closeColorMenu();
     }
 
     actions.innerHTML = `
-      <button class="sel-btn" id="analyticsSetMoveBtn" type="button">Move</button>
-      <button class="sel-btn" id="analyticsSetRenameBtn" type="button">Rename</button>
-      <button class="sel-btn" id="analyticsSetDeleteBtn" type="button">Delete</button>
+      <div class="analytics-sets-actions-left">
+        <button class="sel-btn${state.batchMode ? ' active' : ''}" id="analyticsSetBatchBtn"
+                type="button" aria-pressed="${state.batchMode ? 'true' : 'false'}"
+                ${canToggleBatch ? '' : ' disabled'}>Batch</button>
+        <button class="sel-btn" id="analyticsSetMoveBtn" type="button"${canMove ? '' : ' disabled'}>Move</button>
+        <button class="sel-btn" id="analyticsSetRenameBtn" type="button"${canRename ? '' : ' disabled'}>Rename</button>
+        <button class="sel-btn" id="analyticsSetDeleteBtn" type="button"${canDelete ? '' : ' disabled'}>Delete</button>
+        <div class="analytics-set-color-wrap" id="analyticsSetColorWrap">
+          <button class="sel-btn" id="analyticsSetColorBtn" type="button"
+                  aria-haspopup="menu" aria-expanded="${canColor && state.colorMenuOpen ? 'true' : 'false'}"
+                  ${canColor ? '' : ' disabled'}>Color &#9662;</button>
+          <div class="analytics-set-color-menu" id="analyticsSetColorMenu"${canColor && state.colorMenuOpen ? '' : ' hidden'}>
+            ${renderColorMenuItems(currentColorToken)}
+          </div>
+        </div>
+        ${moveHint}
+      </div>
+      <div class="analytics-sets-actions-center">
+        <div class="analytics-sets-height-controls">
+          <button class="sel-btn analytics-sets-height-btn" id="analyticsSetsHeightDownBtn"
+                  type="button" aria-label="Decrease sets table height"${canDecreaseHeight ? '' : ' disabled'}>Less</button>
+          <button class="sel-btn analytics-sets-height-btn" id="analyticsSetsHeightUpBtn"
+                  type="button" aria-label="Increase sets table height"${canIncreaseHeight ? '' : ' disabled'}>More</button>
+        </div>
+      </div>
+      <div class="analytics-sets-actions-right">
+        <div class="analytics-set-update-wrap" id="analyticsSetUpdateWrap">
+          <button class="sel-btn analytics-update-set-btn" id="analyticsSetUpdateBtn"
+                  type="button" aria-haspopup="${!state.batchMode && focused ? 'false' : 'menu'}"
+                  aria-expanded="${canUpdate && state.updateMenuOpen ? 'true' : 'false'}"
+                  ${canUpdate ? '' : ' disabled'}>${updateLabel}</button>
+          <div class="analytics-set-update-menu" id="analyticsSetUpdateMenu"${canUpdate && state.updateMenuOpen ? '' : ' hidden'}></div>
+        </div>
+        <button class="sel-btn analytics-save-set-btn" id="analyticsSaveSetBtn"
+                type="button"${canSave ? '' : ' disabled'}>+ Save Set</button>
+      </div>
     `;
 
+    const batchBtn = document.getElementById('analyticsSetBatchBtn');
     const moveBtn = document.getElementById('analyticsSetMoveBtn');
     const renameBtn = document.getElementById('analyticsSetRenameBtn');
     const deleteBtn = document.getElementById('analyticsSetDeleteBtn');
+    const colorBtn = document.getElementById('analyticsSetColorBtn');
+    const colorMenu = document.getElementById('analyticsSetColorMenu');
+    const updateBtn = document.getElementById('analyticsSetUpdateBtn');
+    const updateMenu = document.getElementById('analyticsSetUpdateMenu');
+    const saveBtn = document.getElementById('analyticsSaveSetBtn');
+    const heightDownBtn = document.getElementById('analyticsSetsHeightDownBtn');
+    const heightUpBtn = document.getElementById('analyticsSetsHeightUpBtn');
+
+    if (batchBtn) {
+      batchBtn.addEventListener('click', () => {
+        if (state.batchMode) {
+          exitBatchMode();
+        } else {
+          enterBatchMode();
+        }
+      });
+    }
     if (moveBtn) moveBtn.addEventListener('click', startMoveMode);
     if (renameBtn) renameBtn.addEventListener('click', handleRenameSet);
     if (deleteBtn) deleteBtn.addEventListener('click', handleDeleteSet);
+    if (colorBtn) {
+      colorBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!canColor) return;
+        state.colorMenuOpen = !state.colorMenuOpen;
+        renderActions();
+      });
+    }
+    if (colorMenu) {
+      colorMenu.querySelectorAll('[data-set-color-token]').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          await handleSetColorChange(button.getAttribute('data-set-color-token'));
+        });
+      });
+    }
+    if (updateBtn) {
+      updateBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!canUpdate) return;
+        if (!state.batchMode && focused) {
+          handleUpdateCurrentSet();
+          return;
+        }
+        state.updateMenuOpen = !state.updateMenuOpen;
+        renderActions();
+      });
+    }
+    if (updateMenu && canUpdate && state.updateMenuOpen) {
+      const menuItems = state.sets
+        .map((setItem) => (
+          `<button class="analytics-set-update-item" type="button" data-update-set-id="${setItem.id}">`
+          + `${escapeHtml(setItem.name)} (${setItem.study_ids.length})`
+          + '</button>'
+        ))
+        .join('');
+      updateMenu.innerHTML = menuItems || '<div class="analytics-set-update-empty">No sets available.</div>';
+      updateMenu.querySelectorAll('[data-update-set-id]').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const setIdRaw = button.getAttribute('data-update-set-id');
+          await handleDropdownUpdateSet(setIdRaw);
+        });
+      });
+    }
+    if (saveBtn) {
+      saveBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!canSave) return;
+        handleSaveSet();
+      });
+    }
+    if (heightDownBtn) {
+      heightDownBtn.addEventListener('click', () => {
+        state.tableHeightLevel = normalizeTableHeightLevel(state.tableHeightLevel - 1);
+        render();
+      });
+    }
+    if (heightUpBtn) {
+      heightUpBtn.addEventListener('click', () => {
+        state.tableHeightLevel = normalizeTableHeightLevel(state.tableHeightLevel + 1);
+        render();
+      });
+    }
   }
 
   function renderSummaryText() {
     const { summary } = getDom();
     if (!summary) return;
+    summary.classList.remove('align-left');
+    if (state.moveMode && state.moveSelectionIds.length > 0) {
+      summary.textContent = `Moving: ${state.moveSelectionIds.length} selected`;
+      return;
+    }
+    if (state.batchMode) {
+      summary.textContent = `Batch: ${state.batchSelectedSetIds.size} selected`;
+      return;
+    }
     if (state.focusedSetId !== null) {
       const focused = getSetById(state.focusedSetId);
       if (focused) {
+        summary.classList.add('align-left');
         summary.textContent = `Focused: ${focused.name} (${focused.study_ids.length})`;
         return;
       }
@@ -705,22 +1141,14 @@
     summary.textContent = '';
   }
 
-  function renderExpandToggle() {
-    const { tableWrap, expandWrap, expandToggle } = getDom();
-    if (!tableWrap || !expandWrap || !expandToggle) return;
-    const shouldShow = state.sets.length > 5;
-    expandWrap.style.display = shouldShow ? 'flex' : 'none';
-    tableWrap.classList.toggle('expanded', shouldShow && state.expandedRows);
-    expandToggle.dataset.expanded = shouldShow && state.expandedRows ? '1' : '0';
-    expandToggle.classList.toggle('expanded', shouldShow && state.expandedRows);
-  }
-
   function renderTable() {
     const { tableWrap } = getDom();
     if (!tableWrap) return;
+    renderTableHeight();
 
     scheduleMetricsAggregation();
     const allMetrics = computeMetrics(state.studies, 'all');
+    const moveSelectionSet = getMoveSelectionSet();
     const rows = [];
     rows.push(`
       <tr class="analytics-set-all-row" data-all-studies="1">
@@ -740,10 +1168,14 @@
       const metrics = computeMetrics(setStudies, `set:${setItem.id}`);
       const checked = state.checkedSetIds.has(setItem.id) ? ' checked' : '';
       const focusedClass = state.focusedSetId === setItem.id ? ' analytics-set-focused' : '';
-      const movingClass = state.moveMode && state.focusedSetId === setItem.id ? ' analytics-set-moving' : '';
+      const batchSelectedClass = state.batchMode && state.batchSelectedSetIds.has(setItem.id)
+        ? ' analytics-set-batch-selected'
+        : '';
+      const movingClass = state.moveMode && moveSelectionSet.has(setItem.id) ? ' analytics-set-moving' : '';
+      const colorTokenAttr = setItem.color_token ? ` data-color-token="${setItem.color_token}"` : '';
       const encodedName = escapeHtml(setItem.name || `Set ${setItem.id}`);
       rows.push(`
-        <tr class="analytics-set-row${focusedClass}${movingClass}" data-set-id="${setItem.id}">
+        <tr class="analytics-set-row${focusedClass}${batchSelectedClass}${movingClass}" data-set-id="${setItem.id}"${colorTokenAttr}>
           <td class="col-check"><input type="checkbox" class="analytics-set-check" data-set-id="${setItem.id}"${checked} /></td>
           <td title="${encodedName}">${encodedName} (${setItem.study_ids.length})</td>
           <td class="${getSignedClass(metrics.annProfitPct)}">${escapeHtml(formatSignedPercent(metrics.annProfitPct, 1))}</td>
@@ -790,6 +1222,7 @@
       if (checkbox) {
         checkbox.addEventListener('click', (event) => {
           event.preventDefault();
+          event.stopPropagation();
           if (event.altKey) {
             toggleFocus(setId);
             return;
@@ -801,6 +1234,10 @@
       row.addEventListener('click', (event) => {
         if (event.target && event.target.closest('input.analytics-set-check')) return;
         event.preventDefault();
+        if (state.batchMode) {
+          handleBatchSelection(setId, event);
+          return;
+        }
         if (event.altKey) {
           toggleFocus(setId);
           return;
@@ -810,17 +1247,11 @@
     });
   }
 
-  function renderHeaderAndButtons() {
-    const {
-      root,
-      updateWrap,
-      updateBtn,
-      updateMenu,
-      saveBtn,
-    } = getDom();
-    if (root) {
-      root.classList.toggle('open', state.panelOpen);
-    }
+  function renderHeader() {
+    const { root } = getDom();
+    if (!root) return;
+    root.classList.toggle('open', state.panelOpen);
+    return;
 
     const hasSets = state.sets.length > 0;
     const focusedSet = getSetById(state.focusedSetId);
@@ -833,6 +1264,9 @@
 
     if (!hasSets || isFocused || !canUpdate) {
       state.updateMenuOpen = false;
+    }
+    if (!isFocused) {
+      closeColorMenu();
     }
 
     if (updateBtn) {
@@ -873,11 +1307,10 @@
   }
 
   function render() {
-    renderHeaderAndButtons();
+    renderHeader();
     renderSummaryText();
     renderTable();
     renderActions();
-    renderExpandToggle();
   }
 
   function syncFromLoadedSets(newSets, options = {}) {
@@ -886,6 +1319,9 @@
     const prevChecked = cloneCheckedSetIds();
     const prevFocused = state.focusedSetId;
     const prevForceAll = state.forceAllStudies;
+    const prevBatchSelected = cloneBatchSelectedSetIds();
+    const prevBatchAnchor = state.batchAnchorSetId;
+    const prevBatchMode = state.batchMode;
 
     state.sets = cloneSetList(newSets);
     state.forceAllStudies = preserveSelection ? prevForceAll : false;
@@ -901,9 +1337,18 @@
       } else {
         state.focusedSetId = prevFocused !== null && availableIds.has(prevFocused) ? prevFocused : null;
       }
+      state.batchSelectedSetIds = new Set(
+        Array.from(prevBatchSelected).filter((setId) => availableIds.has(setId))
+      );
+      state.batchAnchorSetId = prevBatchAnchor !== null && availableIds.has(prevBatchAnchor)
+        ? prevBatchAnchor
+        : null;
+      state.batchMode = prevBatchMode && state.sets.length > 0;
     } else {
       state.checkedSetIds = new Set();
       state.focusedSetId = null;
+      clearBatchSelection();
+      state.batchMode = false;
     }
 
     resolveViewMode();
@@ -911,7 +1356,10 @@
       state.panelOpen = state.sets.length > 0;
     }
     if (!state.sets.length) {
-      state.updateMenuOpen = false;
+      clearBatchSelection();
+      state.batchMode = false;
+      closeTransientMenus();
+      clearMoveState();
     }
   }
 
@@ -935,28 +1383,11 @@
 
   function updateCheckedStudyIds(checkedStudyIds) {
     state.checkedStudyIds = new Set(Array.from(checkedStudyIds || []));
-    renderHeaderAndButtons();
     renderActions();
   }
 
   function handleEscapeFromSetFocus() {
-    if (state.focusedSetId === null) return false;
-    state.updateMenuOpen = false;
-    state.focusedSetId = null;
-    state.forceAllStudies = false;
-    resolveViewMode();
-    render();
-
-    if (state.viewMode === VIEW_MODES.CHECKBOXES) {
-      const unionIds = computeVisibleStudyIds();
-      emitStateChange({
-        reason: 'setFocusEscToCheckboxes',
-        syncCheckedStudyIds: Array.from(unionIds || []),
-      });
-    } else {
-      emitStateChange({ reason: 'setFocusEscToAll', syncCheckedStudyIds: null });
-    }
-    return true;
+    return clearFocusedSetForModeChange('setFocusEscToAll', 'setFocusEscToCheckboxes');
   }
 
   function bindEventsOnce() {
@@ -964,54 +1395,41 @@
     const {
       section,
       header,
-      updateWrap,
-      updateBtn,
-      saveBtn,
-      expandToggle,
     } = getDom();
     if (!section || !header) return;
 
+    section.addEventListener('mousedown', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || !event.shiftKey) return;
+      const row = target.closest('tr.analytics-set-row');
+      if (!row) return;
+      event.preventDefault();
+      clearTextSelection();
+    });
+
     header.addEventListener('click', (event) => {
-      if (event.target && event.target.closest('#analyticsSaveSetBtn')) return;
-      if (event.target && event.target.closest('#analyticsSetUpdateWrap')) return;
       setPanelOpen(!state.panelOpen);
       render();
     });
 
-    if (updateBtn) {
-      updateBtn.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (state.moveMode || state.sets.length === 0 || state.checkedStudyIds.size === 0) return;
-        if (state.focusedSetId !== null) {
-          handleUpdateCurrentSet();
-          return;
-        }
-        state.updateMenuOpen = !state.updateMenuOpen;
-        renderHeaderAndButtons();
-      });
-    }
-
-    if (saveBtn) {
-      saveBtn.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        handleSaveSet();
-      });
-    }
-
-    if (expandToggle) {
-      expandToggle.addEventListener('click', () => {
-        state.expandedRows = !state.expandedRows;
-        renderExpandToggle();
-      });
-    }
-
     document.addEventListener('keydown', (event) => {
+      if (state.colorMenuOpen && event.key === 'Escape') {
+        event.preventDefault();
+        closeColorMenu();
+        renderActions();
+        return;
+      }
+
       if (state.updateMenuOpen && event.key === 'Escape') {
         event.preventDefault();
         state.updateMenuOpen = false;
-        renderHeaderAndButtons();
+        renderActions();
+        return;
+      }
+
+      if (state.batchMode && event.key === 'Escape' && !state.moveMode) {
+        event.preventDefault();
+        exitBatchMode();
         return;
       }
 
@@ -1023,39 +1441,46 @@
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault();
-        moveFocusedToIndex(state.sets.findIndex((item) => item.id === state.focusedSetId) - 1);
+        moveSelectionToIndex(state.moveInsertionIndex - 1);
         return;
       }
       if (event.key === 'ArrowDown') {
         event.preventDefault();
-        moveFocusedToIndex(state.sets.findIndex((item) => item.id === state.focusedSetId) + 1);
+        moveSelectionToIndex(state.moveInsertionIndex + 1);
         return;
       }
       if (event.key === 'PageUp') {
         event.preventDefault();
-        moveFocusedToIndex(state.sets.findIndex((item) => item.id === state.focusedSetId) - 3);
+        moveSelectionToIndex(state.moveInsertionIndex - 3);
         return;
       }
       if (event.key === 'PageDown') {
         event.preventDefault();
-        moveFocusedToIndex(state.sets.findIndex((item) => item.id === state.focusedSetId) + 3);
+        moveSelectionToIndex(state.moveInsertionIndex + 3);
         return;
       }
       if (event.key === 'Home') {
         event.preventDefault();
-        moveFocusedToIndex(0);
+        moveSelectionToIndex(0);
         return;
       }
       if (event.key === 'End') {
         event.preventDefault();
-        moveFocusedToIndex(state.sets.length - 1);
+        moveSelectionToIndex(Math.max(0, state.sets.length - state.moveSelectionIds.length));
       }
     });
 
     document.addEventListener('pointerdown', (event) => {
+      const updateWrap = document.getElementById('analyticsSetUpdateWrap');
       if (state.updateMenuOpen && updateWrap && !isEventInsideElement(event, updateWrap)) {
         state.updateMenuOpen = false;
-        renderHeaderAndButtons();
+        renderActions();
+      }
+
+      const colorWrap = document.getElementById('analyticsSetColorWrap');
+      if (state.colorMenuOpen && colorWrap && !isEventInsideElement(event, colorWrap)) {
+        closeColorMenu();
+        renderActions();
       }
 
       if (!state.moveMode) return;
@@ -1072,10 +1497,12 @@
     state.forceAllStudies = false;
     state.panelTouched = false;
     state.panelOpen = true;
-    state.expandedRows = false;
+    state.tableHeightLevel = TABLE_HEIGHT_MIN;
     state.updateMenuOpen = false;
-    state.moveMode = false;
-    state.moveOriginalOrder = [];
+    state.colorMenuOpen = false;
+    state.batchMode = false;
+    clearBatchSelection();
+    clearMoveState();
     state.rangeAnchorSetId = null;
     state.rangeAnchorChecked = null;
     updateStudies(options.studies || []);
@@ -1103,7 +1530,7 @@
 
   function clearFocus() {
     if (state.focusedSetId === null) return;
-    state.updateMenuOpen = false;
+    closeTransientMenus();
     state.focusedSetId = null;
     state.forceAllStudies = false;
     resolveViewMode();
@@ -1112,10 +1539,11 @@
   }
 
   function setFocusedSetId(setId, options = {}) {
+    if (state.batchMode) return;
     const normalized = normalizeSetId(setId);
     if (normalized === null) {
       if (state.focusedSetId === null) return;
-      state.updateMenuOpen = false;
+      closeTransientMenus();
       state.focusedSetId = null;
       state.forceAllStudies = false;
       resolveViewMode();
@@ -1127,7 +1555,7 @@
     }
 
     if (!hasSet(normalized)) return;
-    state.updateMenuOpen = false;
+    closeTransientMenus();
     state.focusedSetId = normalized;
     state.forceAllStudies = false;
     resolveViewMode();
@@ -1151,8 +1579,26 @@
       name: setItem.name,
       sort_order: setItem.sort_order,
       created_at: setItem.created_at,
+      color_token: setItem.color_token,
       study_ids: setItem.study_ids.slice(),
     }));
+  }
+
+  function scrollSetIntoView(setId) {
+    const row = findSetRow(setId);
+    if (!row) return;
+    const container = row.closest('.analytics-sets-table-wrap');
+    if (!(container instanceof HTMLElement)) return;
+
+    const rowRect = row.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    if (rowRect.top < containerRect.top) {
+      container.scrollTop -= containerRect.top - rowRect.top;
+      return;
+    }
+    if (rowRect.bottom > containerRect.bottom) {
+      container.scrollTop += rowRect.bottom - containerRect.bottom;
+    }
   }
 
   window.AnalyticsSets = {
@@ -1170,5 +1616,6 @@
     cancelMoveMode,
     isMoveMode,
     getSets,
+    scrollSetIntoView,
   };
 })();

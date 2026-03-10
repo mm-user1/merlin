@@ -60,10 +60,6 @@
     </div>
 
     <div class="main-area">
-      <div class="results-header">
-        <h2>Analytics <span class="db-name" id="analyticsDbName">-</span></h2>
-      </div>
-
       <div class="analytics-message" id="analyticsMessage" hidden></div>
 
       <div class="chart-card">
@@ -92,48 +88,42 @@
             <span class="collapsible-icon">&#9660;</span>
             <span class="collapsible-title">Study Sets</span>
             <span class="analytics-sets-summary" id="analyticsSetsSummary"></span>
-            <div class="analytics-sets-header-actions">
-              <div class="analytics-set-update-wrap" id="analyticsSetUpdateWrap" style="display:none;">
-                <button class="sel-btn analytics-update-set-btn" id="analyticsSetUpdateBtn"
-                        type="button" aria-haspopup="menu" aria-expanded="false">Update Set &#9662;</button>
-                <div class="analytics-set-update-menu" id="analyticsSetUpdateMenu" hidden></div>
-              </div>
-              <button class="sel-btn analytics-save-set-btn" id="analyticsSaveSetBtn"
-                      type="button" style="display:none;">+ Save Set</button>
-            </div>
           </div>
           <div class="collapsible-content">
             <div class="analytics-sets-table-wrap" id="analyticsSetsTableWrap"></div>
-            <div class="analytics-sets-actions" id="analyticsSetsActions" style="display:none;"></div>
-            <div class="table-expand analytics-sets-expand" id="analyticsSetsExpand" style="display:none;">
-              <button class="table-expand-toggle" id="analyticsSetsExpandToggle" type="button" aria-label="Expand sets table"></button>
-            </div>
+            <div class="analytics-sets-actions" id="analyticsSetsActions"></div>
           </div>
         </div>
       </div>
 
-      <div class="selection-buttons">
-        <div class="selection-buttons-left">
-          <button class="sel-btn" id="analyticsSelectAllBtn" type="button">Select All</button>
-          <button class="sel-btn" id="analyticsDeselectAllBtn" type="button">Deselect All</button>
-        </div>
-        <label class="analytics-auto-select">
-          <input type="checkbox" id="analyticsAutoSelect" />
-          <span>Auto-select</span>
-        </label>
-      </div>
-
       <div class="analytics-filters-section">
-        <div class="analytics-filter-bar" id="analyticsFiltersBar"></div>
+        <div class="analytics-controls-row">
+          <div class="selection-buttons-left">
+            <button class="sel-btn" id="analyticsSelectAllBtn" type="button">Select All</button>
+            <button class="sel-btn" id="analyticsDeselectAllBtn" type="button">Deselect All</button>
+          </div>
+          <div class="analytics-filter-bar" id="analyticsFiltersBar"></div>
+          <div class="analytics-controls-right">
+            <label class="analytics-toggle-option">
+              <input type="checkbox" id="analyticsGroupDates" checked />
+              <span>Group Dates</span>
+            </label>
+            <label class="analytics-toggle-option analytics-auto-select">
+              <input type="checkbox" id="analyticsAutoSelect" />
+              <span>Auto-select</span>
+            </label>
+          </div>
+        </div>
         <div class="analytics-active-filters" id="analyticsActiveFilters" hidden></div>
       </div>
 
       <div class="table-card">
         <div class="table-card-header">
-          <div class="table-header-left">
+          <div class="table-header-left analytics-table-header-left">
             <h3>Summary Table</h3>
             <span class="subtitle" id="analyticsTableSubtitle">Sorted by date added (newest first)</span>
           </div>
+          <div class="analytics-table-header-meta" id="analyticsTableHeaderMeta" aria-live="polite"></div>
         </div>
         <div class="table-scroll analytics-table-scroll">
           <table class="data-table" id="analyticsSummaryTable">

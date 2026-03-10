@@ -13,10 +13,12 @@ from core.analytics import aggregate_equity_curves
 from core.storage import (
     create_study_set,
     delete_study_set,
+    delete_study_sets,
     get_active_db_name,
     get_db_connection,
     list_study_sets,
     reorder_study_sets,
+    update_study_sets_color,
     update_study_set,
 )
 
@@ -241,6 +243,24 @@ def register_routes(app):
             values.append(value)
         return values
 
+    def _parse_set_ids_payload(payload: Any) -> List[int]:
+        if not isinstance(payload, list):
+            raise ValueError("set_ids must be an array.")
+        values: List[int] = []
+        seen = set()
+        for raw in payload:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("set_ids must contain integer set IDs.") from exc
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        if not values:
+            raise ValueError("set_ids must contain at least one set ID.")
+        return values
+
     def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:
         start = 0
         total = len(values)
@@ -345,7 +365,7 @@ def register_routes(app):
         study_ids_raw = payload.get("study_ids")
         try:
             study_ids = _parse_study_ids_payload(study_ids_raw)
-            created = create_study_set(name, study_ids)
+            created = create_study_set(name, study_ids, color_token=payload.get("color_token"))
         except ValueError as exc:
             return _json_error(str(exc), HTTPStatus.BAD_REQUEST)
 
@@ -367,6 +387,8 @@ def register_routes(app):
                 return _json_error(str(exc), HTTPStatus.BAD_REQUEST)
         if "sort_order" in payload:
             kwargs["sort_order"] = payload.get("sort_order")
+        if "color_token" in payload:
+            kwargs["color_token"] = payload.get("color_token")
 
         if not kwargs:
             return _json_error("No fields provided to update.", HTTPStatus.BAD_REQUEST)
@@ -385,6 +407,38 @@ def register_routes(app):
         if not delete_study_set(set_id):
             return _json_error("Study set not found.", HTTPStatus.NOT_FOUND)
         return jsonify({"ok": True})
+
+    @app.put("/api/analytics/sets/bulk-color")
+    def analytics_sets_bulk_color() -> object:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _json_error("Expected JSON payload.", HTTPStatus.BAD_REQUEST)
+
+        try:
+            set_ids = _parse_set_ids_payload(payload.get("set_ids"))
+            update_study_sets_color(set_ids, payload.get("color_token"))
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "unknown study set ids" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+
+        return jsonify({"ok": True})
+
+    @app.post("/api/analytics/sets/bulk-delete")
+    def analytics_sets_bulk_delete() -> object:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _json_error("Expected JSON payload.", HTTPStatus.BAD_REQUEST)
+
+        try:
+            set_ids = _parse_set_ids_payload(payload.get("set_ids"))
+            deleted = delete_study_sets(set_ids)
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "unknown study set ids" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+
+        return jsonify({"ok": True, "deleted": deleted})
 
     @app.put("/api/analytics/sets/reorder")
     def analytics_sets_reorder() -> object:

@@ -32,6 +32,7 @@
       isOos: null,
     },
     autoSelect: false,
+    groupDatesEnabled: true,
     sortState: { ...DEFAULT_SORT_STATE },
     filtersInitialized: false,
     focusedStudyId: null,
@@ -96,6 +97,12 @@
   function toFiniteNumber(value) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function toNonNegativeInteger(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return 0;
+    return Math.max(0, Math.round(parsed));
   }
 
   function average(values) {
@@ -222,6 +229,65 @@
       wfa: source.wfa instanceof Set ? new Set(source.wfa) : null,
       isOos: source.isOos instanceof Set ? new Set(source.isOos) : null,
     };
+  }
+
+  function isTypingElement(element) {
+    if (!element) return false;
+    if (element.isContentEditable) return true;
+    const tagName = element.tagName ? element.tagName.toLowerCase() : '';
+    return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+  }
+
+  function hasOpenAnalyticsMenu() {
+    return Boolean(
+      document.querySelector('.analytics-filter.open')
+      || document.querySelector('#analyticsSetUpdateMenu:not([hidden])')
+      || document.querySelector('#analyticsSetColorMenu:not([hidden])')
+    );
+  }
+
+  function getVisibleOrderedStudyIds() {
+    if (!window.AnalyticsTable || typeof window.AnalyticsTable.getVisibleStudyIds !== 'function') {
+      return AnalyticsState.orderedStudyIds.slice();
+    }
+    return window.AnalyticsTable.getVisibleStudyIds()
+      .map((studyId) => String(studyId || '').trim())
+      .filter(Boolean);
+  }
+
+  function setAllStudiesChecked(checked) {
+    if (!window.AnalyticsTable || typeof window.AnalyticsTable.setAllChecked !== 'function') return;
+    window.AnalyticsTable.setAllChecked(Boolean(checked));
+  }
+
+  function deselectAllStudies() {
+    setAllStudiesChecked(false);
+  }
+
+  function scrollStudyIntoView(studyId) {
+    if (!window.AnalyticsTable || typeof window.AnalyticsTable.scrollStudyIntoView !== 'function') return;
+    window.AnalyticsTable.scrollStudyIntoView(studyId);
+  }
+
+  function scrollSetIntoView(setId) {
+    if (!window.AnalyticsSets || typeof window.AnalyticsSets.scrollSetIntoView !== 'function') return;
+    window.AnalyticsSets.scrollSetIntoView(setId);
+  }
+
+  function getVisibleStudyCount() {
+    return getVisibleOrderedStudyIds().length;
+  }
+
+  function getTotalWfaStudyCount() {
+    const researchCount = toFiniteNumber(AnalyticsState.researchInfo?.wfa_studies);
+    if (researchCount !== null) {
+      return Math.max(0, Math.round(researchCount));
+    }
+    return AnalyticsState.studies.length;
+  }
+
+  function formatHeaderCount(value) {
+    return toNonNegativeInteger(value).toLocaleString('en-US');
   }
 
   function filtersEqual(left, right) {
@@ -1003,26 +1069,18 @@
       return;
     }
 
-    const rowNumber = Math.max(1, AnalyticsState.orderedStudyIds.indexOf(String(study.study_id || '')) + 1);
+    if (String(AnalyticsState.focusedStudyId || '') === String(study.study_id || '')) {
+      const fullStudyName = String(study.study_name || '').trim();
+      const fallbackTitle = [study.symbol || '-', study.tf || '-'].join(' ').trim();
+      titleEl.textContent = `Stitched OOS Equity - ${fullStudyName || fallbackTitle}`;
+      return;
+    }
+
+    const visibleStudyIds = getVisibleOrderedStudyIds();
+    const rowNumber = Math.max(1, visibleStudyIds.indexOf(String(study.study_id || '')) + 1);
     const symbol = study.symbol || '-';
     const tf = study.tf || '-';
     titleEl.appendChild(document.createTextNode(`Stitched OOS Equity - #${rowNumber} ${symbol} ${tf}`));
-
-    if (String(AnalyticsState.focusedStudyId || '') === String(study.study_id || '')) {
-      const dismissBtn = document.createElement('button');
-      dismissBtn.type = 'button';
-      dismissBtn.className = 'focus-dismiss';
-      dismissBtn.id = 'analyticsFocusDismiss';
-      dismissBtn.title = 'Exit focus mode';
-      dismissBtn.setAttribute('aria-label', 'Exit focus mode');
-      dismissBtn.textContent = 'x';
-      dismissBtn.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        clearFocus();
-      });
-      titleEl.appendChild(dismissBtn);
-    }
   }
 
   function renderPortfolioChartTitle(selectedCount, portfolioData) {
@@ -1050,7 +1108,7 @@
   function getPrimaryCheckedStudy() {
     const map = getStudyMap();
     let selectedId = null;
-    for (const studyId of AnalyticsState.orderedStudyIds) {
+    for (const studyId of getVisibleOrderedStudyIds()) {
       if (AnalyticsState.checkedStudyIds.has(studyId)) {
         selectedId = studyId;
         break;
@@ -1147,6 +1205,7 @@
   }
 
   function updateVisualsForSelection() {
+    renderTableHeaderMeta();
     const focusedStudy = getFocusedStudy();
     if (focusedStudy) {
       renderFocusedSidebar(focusedStudy);
@@ -1217,10 +1276,30 @@
     subtitle.textContent = `Sorted by ${label} ${arrow}`;
   }
 
-  function renderDbName() {
-    const dbNameEl = document.getElementById('analyticsDbName');
-    if (!dbNameEl) return;
-    dbNameEl.textContent = AnalyticsState.dbName || '-';
+  function renderTableHeaderMeta() {
+    const meta = document.getElementById('analyticsTableHeaderMeta');
+    if (!meta) return;
+
+    const checkedCount = AnalyticsState.checkedStudyIds.size;
+    const shownCount = getVisibleStudyCount();
+    const totalCount = getTotalWfaStudyCount();
+
+    meta.innerHTML = `
+      <span class="analytics-table-header-metric">
+        <span class="analytics-table-header-value">${formatHeaderCount(checkedCount)}</span>
+        <span class="analytics-table-header-label">checked</span>
+      </span>
+      <span class="analytics-table-header-separator">|</span>
+      <span class="analytics-table-header-metric">
+        <span class="analytics-table-header-value">${formatHeaderCount(shownCount)}</span>
+        <span class="analytics-table-header-label">shown</span>
+      </span>
+      <span class="analytics-table-header-separator">/</span>
+      <span class="analytics-table-header-metric">
+        <span class="analytics-table-header-value">${formatHeaderCount(totalCount)}</span>
+        <span class="analytics-table-header-label">total</span>
+      </span>
+    `;
   }
 
   function renderDatabasesList(databases) {
@@ -1296,6 +1375,42 @@
     updateVisualsForSelection();
   }
 
+  function moveFocusedStudy(direction) {
+    const step = Number(direction);
+    if (!Number.isInteger(step) || step === 0 || !AnalyticsState.focusedStudyId) return false;
+    const visibleStudyIds = getVisibleOrderedStudyIds();
+    if (!visibleStudyIds.length) return false;
+    const currentIndex = visibleStudyIds.indexOf(String(AnalyticsState.focusedStudyId || ''));
+    if (currentIndex < 0) return false;
+    const targetIndex = currentIndex + step;
+    if (targetIndex < 0 || targetIndex >= visibleStudyIds.length) return false;
+    const targetStudyId = visibleStudyIds[targetIndex];
+    if (!targetStudyId || targetStudyId === AnalyticsState.focusedStudyId) return false;
+    setFocus(targetStudyId);
+    scrollStudyIntoView(targetStudyId);
+    return true;
+  }
+
+  function moveFocusedSet(direction) {
+    const step = Number(direction);
+    if (!Number.isInteger(step) || step === 0 || AnalyticsState.focusedSetId === null) return false;
+    const orderedSetIds = AnalyticsState.sets
+      .map((setItem) => Number(setItem?.id))
+      .filter((setId) => Number.isInteger(setId) && setId > 0);
+    if (!orderedSetIds.length) return false;
+    const currentIndex = orderedSetIds.indexOf(Number(AnalyticsState.focusedSetId));
+    if (currentIndex < 0) return false;
+    const targetIndex = currentIndex + step;
+    if (targetIndex < 0 || targetIndex >= orderedSetIds.length) return false;
+    const targetSetId = orderedSetIds[targetIndex];
+    if (!Number.isInteger(targetSetId) || targetSetId === Number(AnalyticsState.focusedSetId)) return false;
+    if (!window.AnalyticsSets || typeof window.AnalyticsSets.setFocusedSetId !== 'function') return false;
+    window.AnalyticsSets.setFocusedSetId(targetSetId);
+    syncSetStateFromModule();
+    scrollSetIntoView(targetSetId);
+    return true;
+  }
+
   function onTableFocusToggle(studyId) {
     setFocus(studyId);
   }
@@ -1311,6 +1426,31 @@
     updateVisualsForSelection();
   }
 
+  function syncTableStateFromModule(options) {
+    if (!window.AnalyticsTable) return;
+
+    AnalyticsState.orderedStudyIds = window.AnalyticsTable.getOrderedStudyIds();
+    const visibleStudyIds = typeof window.AnalyticsTable.getVisibleStudyIds === 'function'
+      ? new Set(window.AnalyticsTable.getVisibleStudyIds())
+      : new Set();
+
+    const nextFocusedStudyId = String(options?.focusedStudyId || '').trim();
+    if (nextFocusedStudyId) {
+      AnalyticsState.focusedStudyId = nextFocusedStudyId;
+    } else if (AnalyticsState.focusedStudyId && !visibleStudyIds.has(AnalyticsState.focusedStudyId)) {
+      AnalyticsState.focusedStudyId = null;
+    }
+
+    if (typeof window.AnalyticsTable.setFocusedStudyId === 'function') {
+      window.AnalyticsTable.setFocusedStudyId(AnalyticsState.focusedStudyId);
+    }
+  }
+
+  function onTableViewChange(focusedStudyId) {
+    syncTableStateFromModule({ focusedStudyId });
+    updateVisualsForSelection();
+  }
+
   function renderTableWithCurrentState() {
     const setVisibleStudyIds = getSetVisibleStudyIds();
     refreshFiltersForCurrentContext(setVisibleStudyIds);
@@ -1323,24 +1463,17 @@
         filters: AnalyticsState.filters,
         visibleStudyIds: setVisibleStudyIds,
         autoSelect: AnalyticsState.autoSelect,
+        groupDatesEnabled: AnalyticsState.groupDatesEnabled,
         sortState: AnalyticsState.sortState,
         onSortChange: onTableSortChange,
         onFocusToggle: onTableFocusToggle,
+        onViewChange: onTableViewChange,
         focusedStudyId: AnalyticsState.focusedStudyId,
       }
     );
 
     AnalyticsState.checkedStudyIds = new Set(window.AnalyticsTable.getCheckedStudyIds());
-    AnalyticsState.orderedStudyIds = window.AnalyticsTable.getOrderedStudyIds();
-    if (AnalyticsState.focusedStudyId && typeof window.AnalyticsTable.getVisibleStudyIds === 'function') {
-      const visibleSet = new Set(window.AnalyticsTable.getVisibleStudyIds());
-      if (!visibleSet.has(AnalyticsState.focusedStudyId)) {
-        AnalyticsState.focusedStudyId = null;
-      }
-    }
-    if (typeof window.AnalyticsTable.setFocusedStudyId === 'function') {
-      window.AnalyticsTable.setFocusedStudyId(AnalyticsState.focusedStudyId);
-    }
+    syncTableStateFromModule();
     if (window.AnalyticsSets && typeof window.AnalyticsSets.updateCheckedStudyIds === 'function') {
       window.AnalyticsSets.updateCheckedStudyIds(AnalyticsState.checkedStudyIds);
     }
@@ -1352,14 +1485,24 @@
     renderTableWithCurrentState();
   }
 
-  function bindAutoSelect() {
+  function bindTableToggles() {
     const autoSelectInput = document.getElementById('analyticsAutoSelect');
-    if (!autoSelectInput) return;
-    autoSelectInput.checked = AnalyticsState.autoSelect;
-    autoSelectInput.addEventListener('change', () => {
-      AnalyticsState.autoSelect = Boolean(autoSelectInput.checked);
-      renderTableWithCurrentState();
-    });
+    if (autoSelectInput) {
+      autoSelectInput.checked = AnalyticsState.autoSelect;
+      autoSelectInput.addEventListener('change', () => {
+        AnalyticsState.autoSelect = Boolean(autoSelectInput.checked);
+        renderTableWithCurrentState();
+      });
+    }
+
+    const groupDatesInput = document.getElementById('analyticsGroupDates');
+    if (groupDatesInput) {
+      groupDatesInput.checked = AnalyticsState.groupDatesEnabled;
+      groupDatesInput.addEventListener('change', () => {
+        AnalyticsState.groupDatesEnabled = Boolean(groupDatesInput.checked);
+        renderTableWithCurrentState();
+      });
+    }
   }
 
   function initSetsModule() {
@@ -1412,7 +1555,6 @@
     clearPortfolioState();
     clearFocusedWindowBoundariesState();
 
-    renderDbName();
     renderResearchInfo();
     showMessage(AnalyticsState.researchInfo.message || '');
 
@@ -1455,44 +1597,75 @@
 
     if (selectAllBtn) {
       selectAllBtn.addEventListener('click', () => {
-        window.AnalyticsTable.setAllChecked(true);
+        setAllStudiesChecked(true);
       });
     }
     if (deselectAllBtn) {
       deselectAllBtn.addEventListener('click', () => {
-        window.AnalyticsTable.setAllChecked(false);
+        deselectAllStudies();
       });
     }
   }
 
   function bindFocusHotkeys() {
     document.addEventListener('keydown', (event) => {
-      if (event.defaultPrevented || event.key !== 'Escape') return;
+      if (event.defaultPrevented) return;
 
-      if (AnalyticsState.focusedStudyId) {
-        event.preventDefault();
-        clearFocus();
+      if (event.key === 'Escape') {
+        if (AnalyticsState.focusedStudyId) {
+          event.preventDefault();
+          clearFocus();
+          return;
+        }
+
+        if (window.AnalyticsSets && typeof window.AnalyticsSets.isMoveMode === 'function'
+            && window.AnalyticsSets.isMoveMode()) {
+          event.preventDefault();
+          if (typeof window.AnalyticsSets.cancelMoveMode === 'function') {
+            window.AnalyticsSets.cancelMoveMode();
+            syncSetStateFromModule();
+            renderTableWithCurrentState();
+          }
+          return;
+        }
+
+        if (window.AnalyticsSets && typeof window.AnalyticsSets.handleEscapeFromSetFocus === 'function') {
+          const consumed = window.AnalyticsSets.handleEscapeFromSetFocus();
+          if (consumed) {
+            event.preventDefault();
+            syncSetStateFromModule();
+            return;
+          }
+        }
         return;
       }
+
+      if (event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey && event.code === 'KeyD') {
+        if (isTypingElement(document.activeElement)) return;
+        event.preventDefault();
+        deselectAllStudies();
+        return;
+      }
+
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      if (isTypingElement(document.activeElement) || hasOpenAnalyticsMenu()) return;
 
       if (window.AnalyticsSets && typeof window.AnalyticsSets.isMoveMode === 'function'
           && window.AnalyticsSets.isMoveMode()) {
-        event.preventDefault();
-        if (typeof window.AnalyticsSets.cancelMoveMode === 'function') {
-          window.AnalyticsSets.cancelMoveMode();
-          syncSetStateFromModule();
-          renderTableWithCurrentState();
+        return;
+      }
+
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      if (AnalyticsState.focusedStudyId) {
+        if (moveFocusedStudy(direction)) {
+          event.preventDefault();
         }
         return;
       }
 
-      if (window.AnalyticsSets && typeof window.AnalyticsSets.handleEscapeFromSetFocus === 'function') {
-        const consumed = window.AnalyticsSets.handleEscapeFromSetFocus();
-        if (consumed) {
-          event.preventDefault();
-          syncSetStateFromModule();
-          return;
-        }
+      if (AnalyticsState.focusedSetId !== null && moveFocusedSet(direction)) {
+        event.preventDefault();
       }
     });
   }
@@ -1500,7 +1673,7 @@
   async function initAnalyticsPage() {
     bindCollapsibleHeaders();
     bindSelectionButtons();
-    bindAutoSelect();
+    bindTableToggles();
     initSetsModule();
     bindFocusHotkeys();
     try {

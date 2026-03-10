@@ -1020,7 +1020,9 @@ def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
 def test_analytics_page_renders(client):
     response = client.get("/analytics")
     assert response.status_code == 200
-    assert "Analytics" in response.get_data(as_text=True)
+    body = response.get_data(as_text=True)
+    assert "Analytics" in body
+    assert "Group Dates" in body
 
 
 def test_analytics_window_boundaries_endpoint_success(client):
@@ -1630,6 +1632,7 @@ def test_analytics_sets_crud_and_reorder(client):
         assert create_response.status_code == 201
         created_first = create_response.get_json()
         assert created_first["name"] == "First Set"
+        assert created_first["color_token"] is None
         assert created_first["study_ids"] == ["wfa_set_1", "wfa_set_2"]
 
         second_response = client.post(
@@ -1646,7 +1649,7 @@ def test_analytics_sets_crud_and_reorder(client):
 
         update_response = client.put(
             f"/api/analytics/sets/{created_first['id']}",
-            json={"name": "First Set Updated", "study_ids": ["wfa_set_1"]},
+            json={"name": "First Set Updated", "study_ids": ["wfa_set_1"], "color_token": "blue"},
         )
         assert update_response.status_code == 200
         assert update_response.get_json()["ok"] is True
@@ -1665,6 +1668,7 @@ def test_analytics_sets_crud_and_reorder(client):
         ]
         by_id = {item["id"]: item for item in list_after_reorder["sets"]}
         assert by_id[created_first["id"]]["name"] == "First Set Updated"
+        assert by_id[created_first["id"]]["color_token"] == "blue"
         assert by_id[created_first["id"]]["study_ids"] == ["wfa_set_1"]
 
         delete_response = client.delete(f"/api/analytics/sets/{created_first['id']}")
@@ -1726,6 +1730,93 @@ def test_analytics_sets_reject_non_wfa_study_ids(client):
         assert response.status_code == 400
         payload = response.get_json()
         assert "non-WFA" in payload["error"]
+
+
+def test_analytics_sets_reject_invalid_color_token(client):
+    with _temporary_active_db(f"analytics_sets_bad_color_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_color_1",
+            study_name="WFA_COLOR_1",
+            optimization_mode="wfa",
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Color Set", "study_ids": ["wfa_color_1"]},
+        ).get_json()
+
+        response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"color_token": "magenta"},
+        )
+        assert response.status_code == 400
+        assert "Unsupported set color" in response.get_json()["error"]
+
+
+def test_analytics_sets_color_token_can_be_cleared(client):
+    with _temporary_active_db(f"analytics_sets_clear_color_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_color_clear_1",
+            study_name="WFA_COLOR_CLEAR_1",
+            optimization_mode="wfa",
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Clear Color Set", "study_ids": ["wfa_color_clear_1"], "color_token": "teal"},
+        ).get_json()
+        assert created["color_token"] == "teal"
+
+        response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"color_token": None},
+        )
+        assert response.status_code == 200
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert payload["sets"][0]["color_token"] is None
+
+
+def test_analytics_sets_bulk_color_and_delete(client):
+    with _temporary_active_db(f"analytics_sets_bulk_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_bulk_1",
+            study_name="WFA_BULK_1",
+            optimization_mode="wfa",
+        )
+        _insert_analytics_study(
+            study_id="wfa_bulk_2",
+            study_name="WFA_BULK_2",
+            optimization_mode="wfa",
+        )
+
+        first = client.post(
+            "/api/analytics/sets",
+            json={"name": "Bulk First", "study_ids": ["wfa_bulk_1"], "color_token": "blue"},
+        ).get_json()
+        second = client.post(
+            "/api/analytics/sets",
+            json={"name": "Bulk Second", "study_ids": ["wfa_bulk_2"], "color_token": "teal"},
+        ).get_json()
+
+        color_response = client.put(
+            "/api/analytics/sets/bulk-color",
+            json={"set_ids": [first["id"], second["id"]], "color_token": "amber"},
+        )
+        assert color_response.status_code == 200
+        assert color_response.get_json()["ok"] is True
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert [item["color_token"] for item in payload["sets"]] == ["amber", "amber"]
+
+        delete_response = client.post(
+            "/api/analytics/sets/bulk-delete",
+            json={"set_ids": [first["id"], second["id"]]},
+        )
+        assert delete_response.status_code == 200
+        assert delete_response.get_json()["ok"] is True
+        assert delete_response.get_json()["deleted"] == 2
+        assert client.get("/api/analytics/sets").get_json()["sets"] == []
 
 
 def test_analytics_sets_members_cascade_on_study_delete(client):

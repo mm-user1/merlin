@@ -463,6 +463,35 @@ async function deleteAnalyticsSetRequest(setId) {
   return response.json();
 }
 
+async function bulkUpdateAnalyticsSetColorRequest(setIds, colorToken) {
+  const response = await fetch('/api/analytics/sets/bulk-color', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      set_ids: Array.isArray(setIds) ? setIds : [],
+      color_token: colorToken ?? null,
+    })
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to update study set colors.');
+  }
+  return response.json();
+}
+
+async function bulkDeleteAnalyticsSetsRequest(setIds) {
+  const response = await fetch('/api/analytics/sets/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ set_ids: Array.isArray(setIds) ? setIds : [] })
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to delete study sets.');
+  }
+  return response.json();
+}
+
 async function reorderAnalyticsSetsRequest(order) {
   const response = await fetch('/api/analytics/sets/reorder', {
     method: 'PUT',

@@ -750,6 +750,10 @@ def _ensure_study_sets_tables_with_conn(conn: sqlite3.Connection) -> None:
         """
     )
 
+    set_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_sets)").fetchall()}
+    if "color_token" not in set_columns:
+        conn.execute("ALTER TABLE study_sets ADD COLUMN color_token TEXT")
+
     # Clean legacy orphans from pre-FK setups or manually edited DBs.
     conn.execute(
         """
@@ -782,6 +786,37 @@ def _study_set_name_with_suffix(base_name: str, suffix: int) -> str:
     return f"{trimmed}{suffix_text}"
 
 
+_STUDY_SET_COLOR_TOKENS = (
+    "blue",
+    "teal",
+    "mint",
+    "olive",
+    "sand",
+    "amber",
+    "rose",
+    "lavender",
+)
+_STUDY_SET_COLOR_TOKEN_SET = frozenset(_STUDY_SET_COLOR_TOKENS)
+_STUDY_SET_FIELD_UNSET = object()
+
+
+def _coerce_study_set_color_token(color_token: Any) -> Optional[str]:
+    token = str(color_token or "").strip().lower()
+    if not token:
+        return None
+    return token if token in _STUDY_SET_COLOR_TOKEN_SET else None
+
+
+def _normalize_study_set_color_token(color_token: Any) -> Optional[str]:
+    token = str(color_token or "").strip().lower()
+    if not token:
+        return None
+    if token not in _STUDY_SET_COLOR_TOKEN_SET:
+        allowed = ", ".join(_STUDY_SET_COLOR_TOKENS)
+        raise ValueError(f"Unsupported set color. Allowed values: {allowed}.")
+    return token
+
+
 def _normalize_set_study_ids(study_ids: Any) -> List[str]:
     if study_ids is None:
         return []
@@ -796,6 +831,29 @@ def _normalize_set_study_ids(study_ids: Any) -> List[str]:
             continue
         seen.add(value)
         normalized.append(value)
+    return normalized
+
+
+def _normalize_study_set_ids(set_ids: Any) -> List[int]:
+    if not isinstance(set_ids, (list, tuple, set)):
+        raise ValueError("set_ids must be an array of set IDs.")
+
+    normalized: List[int] = []
+    seen = set()
+    for raw in set_ids:
+        try:
+            set_id = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("set_ids must contain integer set IDs.") from exc
+        if set_id <= 0:
+            raise ValueError("set_ids must contain positive set IDs.")
+        if set_id in seen:
+            raise ValueError("set_ids contains duplicate set IDs.")
+        seen.add(set_id)
+        normalized.append(set_id)
+
+    if not normalized:
+        raise ValueError("set_ids must contain at least one set ID.")
     return normalized
 
 
@@ -825,7 +883,7 @@ def _validate_wfa_study_ids(conn: sqlite3.Connection, study_ids: Sequence[str]) 
 def _load_study_set_by_id(conn: sqlite3.Connection, set_id: int) -> Optional[Dict[str, Any]]:
     row = conn.execute(
         """
-        SELECT id, name, sort_order, created_at
+        SELECT id, name, sort_order, created_at, color_token
         FROM study_sets
         WHERE id = ?
         """,
@@ -848,8 +906,31 @@ def _load_study_set_by_id(conn: sqlite3.Connection, set_id: int) -> Optional[Dic
         "name": str(row["name"] or ""),
         "sort_order": int(row["sort_order"] or 0),
         "created_at": row["created_at"],
+        "color_token": _coerce_study_set_color_token(row["color_token"]),
         "study_ids": [str(member["study_id"] or "") for member in member_rows if member["study_id"]],
     }
+
+
+def _ensure_study_set_ids_exist(conn: sqlite3.Connection, set_ids: Sequence[int]) -> None:
+    normalized_ids = [int(set_id) for set_id in set_ids]
+    if not normalized_ids:
+        raise ValueError("set_ids must contain at least one set ID.")
+
+    placeholders = ",".join(["?"] * len(normalized_ids))
+    rows = conn.execute(
+        f"""
+        SELECT id
+        FROM study_sets
+        WHERE id IN ({placeholders})
+        """,
+        tuple(normalized_ids),
+    ).fetchall()
+    existing_ids = {int(row["id"]) for row in rows}
+    missing_ids = [set_id for set_id in normalized_ids if set_id not in existing_ids]
+    if missing_ids:
+        missing_preview = ", ".join(str(set_id) for set_id in missing_ids[:5])
+        suffix = "..." if len(missing_ids) > 5 else ""
+        raise ValueError(f"Unknown study set IDs: {missing_preview}{suffix}")
 
 
 def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -857,7 +938,7 @@ def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
         ensure_study_sets_tables(conn=conn)
         set_rows = conn.execute(
             """
-            SELECT id, name, sort_order, created_at
+            SELECT id, name, sort_order, created_at, color_token
             FROM study_sets
             ORDER BY sort_order ASC, id ASC
             """
@@ -884,15 +965,23 @@ def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
             "name": str(row["name"] or ""),
             "sort_order": int(row["sort_order"] or 0),
             "created_at": row["created_at"],
+            "color_token": _coerce_study_set_color_token(row["color_token"]),
             "study_ids": members_by_set.get(int(row["id"]), []),
         }
         for row in set_rows
     ]
 
 
-def create_study_set(name: Any, study_ids: Any, db_path: Optional[Path] = None) -> Dict[str, Any]:
+def create_study_set(
+    name: Any,
+    study_ids: Any,
+    db_path: Optional[Path] = None,
+    *,
+    color_token: Any = None,
+) -> Dict[str, Any]:
     normalized_name = _normalize_study_set_name(name)
     normalized_ids = _normalize_set_study_ids(study_ids)
+    normalized_color = _normalize_study_set_color_token(color_token)
     if not normalized_ids:
         raise ValueError("Set must contain at least one study_id.")
 
@@ -912,10 +1001,10 @@ def create_study_set(name: Any, study_ids: Any, db_path: Optional[Path] = None) 
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO study_sets (name, sort_order)
-                    VALUES (?, ?)
+                    INSERT INTO study_sets (name, sort_order, color_token)
+                    VALUES (?, ?, ?)
                     """,
-                    (candidate_name, next_order),
+                    (candidate_name, next_order, normalized_color),
                 )
                 break
             except sqlite3.IntegrityError:
@@ -946,10 +1035,17 @@ def update_study_set(
     study_ids: Any = None,
     sort_order: Any = None,
     db_path: Optional[Path] = None,
+    *,
+    color_token: Any = _STUDY_SET_FIELD_UNSET,
 ) -> Dict[str, Any]:
     set_id_int = int(set_id)
 
-    if name is None and study_ids is None and sort_order is None:
+    if (
+        name is None
+        and study_ids is None
+        and sort_order is None
+        and color_token is _STUDY_SET_FIELD_UNSET
+    ):
         raise ValueError("No fields provided to update.")
 
     with get_db_connection() as conn:
@@ -980,6 +1076,13 @@ def update_study_set(
                 (sort_value, set_id_int),
             )
 
+        if color_token is not _STUDY_SET_FIELD_UNSET:
+            normalized_color = _normalize_study_set_color_token(color_token)
+            conn.execute(
+                "UPDATE study_sets SET color_token = ? WHERE id = ?",
+                (normalized_color, set_id_int),
+            )
+
         if study_ids is not None:
             normalized_ids = _normalize_set_study_ids(study_ids)
             _validate_wfa_study_ids(conn, normalized_ids)
@@ -1007,6 +1110,44 @@ def delete_study_set(set_id: int, db_path: Optional[Path] = None) -> bool:
         cursor = conn.execute("DELETE FROM study_sets WHERE id = ?", (int(set_id),))
         conn.commit()
         return cursor.rowcount > 0
+
+
+def delete_study_sets(set_ids: Any, db_path: Optional[Path] = None) -> int:
+    normalized_ids = _normalize_study_set_ids(set_ids)
+
+    with get_db_connection() as conn:
+        ensure_study_sets_tables(conn=conn)
+        _ensure_study_set_ids_exist(conn, normalized_ids)
+        conn.executemany(
+            "DELETE FROM study_sets WHERE id = ?",
+            [(set_id,) for set_id in normalized_ids],
+        )
+        conn.commit()
+    return len(normalized_ids)
+
+
+def update_study_sets_color(
+    set_ids: Any,
+    color_token: Any,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    normalized_ids = _normalize_study_set_ids(set_ids)
+    normalized_color = _normalize_study_set_color_token(color_token)
+
+    with get_db_connection() as conn:
+        ensure_study_sets_tables(conn=conn)
+        _ensure_study_set_ids_exist(conn, normalized_ids)
+        conn.executemany(
+            "UPDATE study_sets SET color_token = ? WHERE id = ?",
+            [(normalized_color, set_id) for set_id in normalized_ids],
+        )
+        conn.commit()
+        updated = [
+            _load_study_set_by_id(conn, set_id)
+            for set_id in normalized_ids
+        ]
+
+    return [item for item in updated if item is not None]
 
 
 def reorder_study_sets(id_order: Any, db_path: Optional[Path] = None) -> None:

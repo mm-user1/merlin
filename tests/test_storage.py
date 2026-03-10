@@ -4,17 +4,20 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.storage import (
     create_study_set,
+    delete_study_sets,
     get_db_connection,
     list_study_sets,
     load_study_from_db,
     load_wfa_window_trials,
     reorder_study_sets,
     save_wfa_study_to_db,
+    update_study_sets_color,
     update_study_set,
 )
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
@@ -113,8 +116,10 @@ def test_study_sets_tables_created():
         members_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='study_set_members'"
         ).fetchone()
+        set_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_sets)").fetchall()}
         assert sets_table is not None
         assert members_table is not None
+        assert "color_token" in set_columns
 
 
 def test_wfa_window_new_columns():
@@ -221,10 +226,17 @@ def test_study_sets_storage_roundtrip():
 
     created = create_study_set("Storage Roundtrip Set", [study_id_a, study_id_b])
     assert created["name"] == "Storage Roundtrip Set"
+    assert created["color_token"] is None
     assert created["study_ids"] == [study_id_a, study_id_b]
 
-    updated = update_study_set(created["id"], name="Storage Roundtrip Set v2", study_ids=[study_id_b])
+    updated = update_study_set(
+        created["id"],
+        name="Storage Roundtrip Set v2",
+        study_ids=[study_id_b],
+        color_token="blue",
+    )
     assert updated["name"] == "Storage Roundtrip Set v2"
+    assert updated["color_token"] == "blue"
     assert updated["study_ids"] == [study_id_b]
 
     second = create_study_set("Storage Roundtrip Set v3", [study_id_a])
@@ -232,6 +244,70 @@ def test_study_sets_storage_roundtrip():
 
     sets = list_study_sets()
     assert [entry["id"] for entry in sets[:2]] == [second["id"], created["id"]]
+    assert sets[0]["color_token"] is None
+    assert sets[1]["color_token"] == "blue"
+
+
+def test_study_sets_reject_invalid_color_token():
+    wf_result = _build_dummy_wfa_result()
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    created = create_study_set("Invalid Color Set", [study_id])
+    with pytest.raises(ValueError):
+        update_study_set(created["id"], color_token="magenta")
+
+
+def test_study_sets_color_token_can_be_cleared():
+    wf_result = _build_dummy_wfa_result()
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    created = create_study_set("Clear Color Set", [study_id], color_token="teal")
+    assert created["color_token"] == "teal"
+
+    cleared = update_study_set(created["id"], color_token=None)
+    assert cleared["color_token"] is None
+
+
+def test_study_sets_bulk_color_update_and_delete():
+    first_study = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+    second_study = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    first = create_study_set("Bulk Color First", [first_study], color_token="blue")
+    second = create_study_set("Bulk Color Second", [second_study], color_token="teal")
+
+    updated = update_study_sets_color([first["id"], second["id"]], "rose")
+    assert [item["id"] for item in updated] == [first["id"], second["id"]]
+    assert [item["color_token"] for item in updated] == ["rose", "rose"]
+
+    deleted_count = delete_study_sets([first["id"], second["id"]])
+    assert deleted_count == 2
+    remaining_ids = {entry["id"] for entry in list_study_sets()}
+    assert first["id"] not in remaining_ids
+    assert second["id"] not in remaining_ids
 
 
 def test_save_wfa_study_layer1_aggregates_multi_window():

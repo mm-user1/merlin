@@ -65,6 +65,10 @@ def isolate_storage_for_test_session():
     if optuna_engine is not None:
         optuna_engine.JOURNAL_DIR = journal_dir
 
+    # Seed the default session database so tests that temporarily switch active DBs
+    # can always restore back to an existing file regardless of test order.
+    storage.init_database(db_path=storage._active_db_path)
+
     try:
         yield
     finally:
