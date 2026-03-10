@@ -1646,6 +1646,20 @@ def _build_optimization_config(
     score_config_payload = payload.get("score_config")
     score_config = _sanitize_score_config(score_config_payload)
     detailed_log = _parse_bool(payload.get("detailed_log", False), False)
+    trials_log = _parse_bool(payload.get("trials_log", False), False)
+    dispatcher_batch_result_processing = _parse_bool(
+        payload.get("dispatcher_batch_result_processing", True),
+        True,
+    )
+    dispatcher_soft_duplicate_cycle_limit_enabled = _parse_bool(
+        payload.get("dispatcher_soft_duplicate_cycle_limit_enabled", True),
+        True,
+    )
+    try:
+        dispatcher_duplicate_cycle_limit = int(payload.get("dispatcher_duplicate_cycle_limit", 18))
+    except (TypeError, ValueError):
+        dispatcher_duplicate_cycle_limit = 18
+    dispatcher_duplicate_cycle_limit = max(1, min(1000, dispatcher_duplicate_cycle_limit))
 
     optimization_mode_raw = payload.get("optimization_mode", "optuna")
     optimization_mode = str(optimization_mode_raw).strip().lower() or "optuna"
@@ -1749,6 +1763,9 @@ def _build_optimization_config(
         "swapping_prob": swapping_prob,
         "n_startup_trials": n_startup_trials,
         "coverage_mode": coverage_mode,
+        "dispatcher_batch_result_processing": dispatcher_batch_result_processing,
+        "dispatcher_soft_duplicate_cycle_limit_enabled": dispatcher_soft_duplicate_cycle_limit_enabled,
+        "dispatcher_duplicate_cycle_limit": dispatcher_duplicate_cycle_limit,
         "optuna_budget_mode": optuna_budget_mode,
         "optuna_n_trials": optuna_n_trials,
         "optuna_time_limit": optuna_time_limit,
@@ -1775,6 +1792,10 @@ def _build_optimization_config(
         min_profit_threshold=min_profit_threshold,
         score_config=score_config,
         detailed_log=detailed_log,
+        trials_log=trials_log,
+        dispatcher_batch_result_processing=dispatcher_batch_result_processing,
+        dispatcher_soft_duplicate_cycle_limit_enabled=dispatcher_soft_duplicate_cycle_limit_enabled,
+        dispatcher_duplicate_cycle_limit=dispatcher_duplicate_cycle_limit,
         optimization_mode=optimization_mode,
         objectives=objectives,
         primary_objective=primary_objective,

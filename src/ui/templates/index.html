@@ -126,9 +126,15 @@
                 </div>
 
                 <div class="form-group">
-                  <div class="checkbox-group">
-                    <input type="checkbox" id="detailedLog" />
-                    <label for="detailedLog">Detailed log</label>
+                  <div class="checkbox-group" style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                    <span style="display: flex; align-items: center; gap: 6px;">
+                      <input type="checkbox" id="detailedLog" />
+                      <label for="detailedLog">Detailed log</label>
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 6px;">
+                      <input type="checkbox" id="trialsLog" />
+                      <label for="trialsLog">Trials Log</label>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -509,20 +515,43 @@
                           </select>
                         </div>
 
-                        <div class="form-group">
+                        <div class="form-group" style="align-items: flex-start;">
                           <label for="optunaWarmupTrials">Initial trials:</label>
-                          <input type="number" id="optunaWarmupTrials" min="0" max="50000" value="20" style="width: 80px;" />
+                          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                            <input type="number" id="optunaWarmupTrials" min="0" max="50000" value="20" style="width: 80px;" />
+                            <span class="checkbox-group" style="margin: 0; display: flex; align-items: center; gap: 6px;">
+                              <input type="checkbox" id="optunaCoverageMode" />
+                              <label for="optunaCoverageMode">Coverage mode</label>
+                            </span>
+                            <small
+                              id="coverageInfo"
+                              class="form-hint"
+                              style="color: #888; font-size: 11px; display: none;"
+                            ></small>
+                          </div>
                         </div>
+
                         <div class="form-group">
                           <div class="checkbox-group">
-                            <input type="checkbox" id="optunaCoverageMode" />
-                            <label for="optunaCoverageMode">Coverage mode</label>
+                            <input type="checkbox" id="dispatcherBatchResultProcessing" checked />
+                            <label for="dispatcherBatchResultProcessing">Dispatcher batch result processing</label>
                           </div>
-                          <small
-                            id="coverageInfo"
-                            class="form-hint"
-                            style="color: #888; font-size: 11px; display: none;"
-                          ></small>
+                        </div>
+
+                        <div class="form-group" style="align-items: center; gap: 8px;">
+                          <div class="checkbox-group" style="margin: 0; display: flex; align-items: center; gap: 6px;">
+                            <input type="checkbox" id="softDuplicateCycleLimitEnabled" checked />
+                            <label for="softDuplicateCycleLimitEnabled">Soft duplicate-cycle limit</label>
+                          </div>
+                          <input
+                            type="number"
+                            id="dispatcherDuplicateCycleLimit"
+                            min="1"
+                            max="1000"
+                            step="1"
+                            value="18"
+                            style="width: 80px;"
+                          />
                         </div>
 
                         <div id="nsgaSettings" class="nsga-settings" style="display: none;">

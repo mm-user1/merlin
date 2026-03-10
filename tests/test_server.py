@@ -3,6 +3,7 @@ import sys
 import csv
 import json
 import uuid
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -30,6 +31,25 @@ def client():
     app.config["TESTING"] = True
     with app.test_client() as test_client:
         yield test_client
+
+
+def test_core_logger_console_handler_is_configured_once():
+    from ui import server as server_module
+
+    core_logger = logging.getLogger("core")
+    marked_handlers_before = [
+        handler for handler in core_logger.handlers if getattr(handler, "_merlin_core_console_handler", False)
+    ]
+
+    server_module._configure_core_console_logging()
+
+    marked_handlers_after = [
+        handler for handler in core_logger.handlers if getattr(handler, "_merlin_core_console_handler", False)
+    ]
+
+    assert marked_handlers_before
+    assert len(marked_handlers_after) == len(marked_handlers_before)
+    assert core_logger.level <= logging.INFO
 
 
 @contextmanager
@@ -382,6 +402,42 @@ def test_optuna_coverage_mode_parsed():
         warmup_bars=1000,
     )
     assert config.coverage_mode is True
+
+
+def test_optuna_trials_log_parsed():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["trials_log"] = True
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+    assert config.trials_log is True
+
+
+def test_optuna_dispatcher_controls_parsed():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["dispatcher_batch_result_processing"] = False
+    payload["dispatcher_soft_duplicate_cycle_limit_enabled"] = False
+    payload["dispatcher_duplicate_cycle_limit"] = 42
+
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+
+    assert config.dispatcher_batch_result_processing is False
+    assert config.dispatcher_soft_duplicate_cycle_limit_enabled is False
+    assert config.dispatcher_duplicate_cycle_limit == 42
 
 
 def test_optuna_save_study_payload_is_ignored(caplog):
@@ -1437,6 +1493,9 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                     "pruner": "median",
                     "warmup_trials": 132,
                     "coverage_mode": True,
+                    "dispatcher_batch_result_processing": False,
+                    "dispatcher_soft_duplicate_cycle_limit_enabled": True,
+                    "dispatcher_duplicate_cycle_limit": 18,
                     "sanitize_enabled": True,
                     "sanitize_trades_threshold": 3,
                 },
@@ -1510,6 +1569,9 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["optuna_settings"]["pruner"] == "median"
         assert first["optuna_settings"]["warmup_trials"] == 132
         assert first["optuna_settings"]["coverage_mode"] is True
+        assert first["optuna_settings"]["dispatcher_batch_result_processing"] is False
+        assert first["optuna_settings"]["dispatcher_soft_duplicate_cycle_limit_enabled"] is True
+        assert first["optuna_settings"]["dispatcher_duplicate_cycle_limit"] == 18
         assert first["optuna_settings"]["workers"] == 4
         assert first["optuna_settings"]["sanitize_enabled"] is True
         assert first["optuna_settings"]["sanitize_trades_threshold"] == 3
@@ -1535,6 +1597,9 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["optuna_settings"]["sampler_type"] == "random"
         assert second["optuna_settings"]["warmup_trials"] is None
         assert second["optuna_settings"]["coverage_mode"] is None
+        assert second["optuna_settings"]["dispatcher_batch_result_processing"] is None
+        assert second["optuna_settings"]["dispatcher_soft_duplicate_cycle_limit_enabled"] is None
+        assert second["optuna_settings"]["dispatcher_duplicate_cycle_limit"] is None
         assert second["optuna_settings"]["sanitize_enabled"] is False
         assert second["optuna_settings"]["sanitize_trades_threshold"] == 11
         assert second["optuna_settings"]["filter_min_profit"] is True

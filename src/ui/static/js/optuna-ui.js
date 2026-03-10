@@ -3,7 +3,7 @@
   const COVERAGE_HINT_COLOR = '#888';
   const COVERAGE_DEFAULT_WARMUP = 20;
   const COVERAGE_AUTO_BLOCKS = 3;
-  const COVERAGE_HINT_MULTIPLIERS = [1, 3, 5, 9];
+  const COVERAGE_HINT_MULTIPLIERS = [1, 3, 5, 9, 17];
   let coverageListenersBound = false;
 
   const OBJECTIVE_LABELS = {
@@ -488,6 +488,43 @@
     sync();
   }
 
+  function normalizeDispatcherDuplicateCycleLimit(input) {
+    if (!input) return 18;
+    const parsed = Number.parseInt(input.value, 10);
+    const normalized = Number.isFinite(parsed) ? Math.max(1, Math.min(1000, parsed)) : 18;
+    input.value = String(normalized);
+    return normalized;
+  }
+
+  function syncDispatcherControls() {
+    const checkbox = document.getElementById('softDuplicateCycleLimitEnabled');
+    const input = document.getElementById('dispatcherDuplicateCycleLimit');
+    if (!checkbox || !input) {
+      return;
+    }
+
+    normalizeDispatcherDuplicateCycleLimit(input);
+    input.disabled = !checkbox.checked;
+  }
+
+  function initDispatcherControls() {
+    const checkbox = document.getElementById('softDuplicateCycleLimitEnabled');
+    const input = document.getElementById('dispatcherDuplicateCycleLimit');
+    if (!checkbox || !input) {
+      return;
+    }
+
+    if (checkbox.dataset.bound !== '1') {
+      checkbox.dataset.bound = '1';
+      checkbox.addEventListener('change', syncDispatcherControls);
+      input.addEventListener('blur', () => {
+        normalizeDispatcherDuplicateCycleLimit(input);
+      });
+    }
+
+    syncDispatcherControls();
+  }
+
   function collectObjectives() {
     const checkboxes = getObjectiveCheckboxes();
     const selected = checkboxes.filter((cb) => cb.checked).map((cb) => cb.dataset.objective);
@@ -536,6 +573,8 @@
     updateCoverageInfo,
     initCoverageInfo,
     initSanitizeControls,
+    syncDispatcherControls,
+    initDispatcherControls,
     collectObjectives,
     collectSanitizeConfig,
     collectConstraints

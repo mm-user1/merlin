@@ -1,5 +1,6 @@
 import sys
 import time
+import queue
 from collections import Counter
 from pathlib import Path
 
@@ -16,7 +17,12 @@ from core.optuna_engine import (  # noqa: E402
     OptunaOptimizer,
     SamplerConfig,
     _analyze_coverage_requirements,
+    _drain_result_queue_nowait,
+    _drain_dispatch_results_nowait,
     _generate_coverage_trials,
+    _normalize_dispatch_cycle_duplicate_limit,
+    _wait_for_result_batch,
+    _wait_for_dispatch_results,
 )
 
 
@@ -228,6 +234,88 @@ def test_tpe_sampler_uses_grouped_constant_liar_mode():
     assert getattr(sampler, "_multivariate", False) is True
     assert getattr(sampler, "_group", False) is True
     assert getattr(sampler, "_constant_liar", False) is True
+
+
+def test_trials_log_controls_centralized_completion_logging(caplog):
+    optuna_cfg = OptunaConfig(objectives=["net_profit_pct"])
+    base_config = _base_config()
+    optimizer = OptunaOptimizer(base_config, optuna_cfg)
+
+    with caplog.at_level("INFO"):
+        optimizer._log_centralized_trial_completion(7, [12.5], {"x": 1})
+
+    assert not any("Trial 7 finished" in record.message for record in caplog.records)
+
+    caplog.clear()
+    base_config.trials_log = True
+    optimizer = OptunaOptimizer(base_config, optuna_cfg)
+
+    with caplog.at_level("INFO"):
+        optimizer._log_centralized_trial_completion(7, [12.5], {"x": 1})
+
+    assert any("Trial 7 finished" in record.message for record in caplog.records)
+
+
+def test_study_lifecycle_logs_include_csv_name(caplog):
+    base_config = _base_config()
+    base_config.csv_original_name = r"C:\data\OKX_SUIUSDT.P, 30 2024.02.01-2026.02.01.csv"
+    optuna_cfg = OptunaConfig(objectives=["net_profit_pct"], coverage_mode=True, warmup_trials=99)
+    optimizer = OptunaOptimizer(base_config, optuna_cfg)
+    optimizer.start_time = time.time() - 1.5
+    optimizer.pruned_trials = 2
+    optimizer._duplicate_skipped_count = 3
+
+    with caplog.at_level("INFO"):
+        optimizer._log_study_start("multi-process TPE", workers=6)
+        optimizer._log_study_end("multi-process TPE")
+
+    assert any(
+        "Starting multi-process TPE study for OKX_SUIUSDT.P, 30 2024.02.01-2026.02.01.csv" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Finished multi-process TPE study for OKX_SUIUSDT.P, 30 2024.02.01-2026.02.01.csv" in record.message
+        and "duplicate-skipped=3" in record.message
+        for record in caplog.records
+    )
+
+
+def test_result_batch_helpers_collect_all_ready_messages():
+    result_queue = queue.Queue()
+    result_queue.put({"trial_number": 1})
+    result_queue.put({"trial_number": 2})
+
+    drained = _drain_result_queue_nowait(result_queue)
+    assert drained == [{"trial_number": 1}, {"trial_number": 2}]
+    assert result_queue.empty()
+
+    result_queue.put({"trial_number": 3})
+    result_queue.put({"trial_number": 4})
+
+    waited = _wait_for_result_batch(result_queue, timeout=0.01)
+    assert waited == [{"trial_number": 3}, {"trial_number": 4}]
+    assert result_queue.empty()
+
+
+def test_dispatch_cycle_duplicate_limit_normalization():
+    assert _normalize_dispatch_cycle_duplicate_limit(None) == 18
+    assert _normalize_dispatch_cycle_duplicate_limit("bad") == 18
+    assert _normalize_dispatch_cycle_duplicate_limit(0) == 1
+    assert _normalize_dispatch_cycle_duplicate_limit(18) == 18
+    assert _normalize_dispatch_cycle_duplicate_limit(5001) == 1000
+
+
+def test_dispatch_result_helpers_support_single_result_mode():
+    result_queue = queue.Queue()
+    result_queue.put({"trial_number": 1})
+    result_queue.put({"trial_number": 2})
+
+    drained = _drain_dispatch_results_nowait(result_queue, batch_enabled=False)
+    assert drained == [{"trial_number": 1}]
+
+    waited = _wait_for_dispatch_results(result_queue, timeout=0.01, batch_enabled=False)
+    assert waited == [{"trial_number": 2}]
+    assert result_queue.empty()
 
 
 def test_optuna_summary_contains_coverage_warning_message():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+from contextlib import contextmanager
 import io
 import itertools
 import json
@@ -80,6 +81,10 @@ class OptimizationConfig:
     min_profit_threshold: float = 0.0
     score_config: Optional[Dict[str, Any]] = None
     detailed_log: bool = False
+    trials_log: bool = False
+    dispatcher_batch_result_processing: bool = True
+    dispatcher_soft_duplicate_cycle_limit_enabled: bool = True
+    dispatcher_duplicate_cycle_limit: int = 18
     optimization_mode: str = "optuna"
     objectives: List[str] = field(default_factory=list)
     primary_objective: Optional[str] = None
@@ -316,6 +321,15 @@ def _build_params_key(params: Dict[str, Any]) -> str:
     return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _normalize_dispatch_cycle_duplicate_limit(value: Any) -> int:
+    """Normalize the configurable soft duplicate limit for the centralized dispatcher."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 18
+    return max(1, min(1000, parsed))
+
+
 def _estimate_search_space_size(search_space: Dict[str, Dict[str, Any]]) -> Optional[int]:
     """Return the exact number of unique combinations for finite discrete spaces."""
     total = 1
@@ -369,10 +383,6 @@ def _is_duplicate_skipped_trial(trial: Any) -> bool:
     if not isinstance(attrs, dict):
         return False
     return bool(attrs.get(_DUPLICATE_SKIPPED_ATTR, False))
-    try:
-        return str(float(value))
-    except (TypeError, ValueError):
-        return "NaN"
 
 
 def _coerce_bool_value(value: Any) -> Optional[bool]:
@@ -1231,6 +1241,60 @@ def _drain_worker_errors(error_queue: Any) -> List[Dict[str, Any]]:
     return errors
 
 
+def _drain_result_queue_nowait(result_queue: Any) -> List[Dict[str, Any]]:
+    """Collect all currently queued result payloads without blocking."""
+    results: List[Dict[str, Any]] = []
+    while True:
+        try:
+            results.append(result_queue.get_nowait())
+        except queue.Empty:
+            break
+    return results
+
+
+def _wait_for_result_batch(result_queue: Any, timeout: float) -> List[Dict[str, Any]]:
+    """Wait for one result, then drain any additional ready payloads as one batch."""
+    try:
+        first = result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return []
+    return [first, *_drain_result_queue_nowait(result_queue)]
+
+
+def _drain_dispatch_results_nowait(result_queue: Any, batch_enabled: bool) -> List[Dict[str, Any]]:
+    """Drain ready dispatcher results using batch or single-result behavior."""
+    if batch_enabled:
+        return _drain_result_queue_nowait(result_queue)
+    try:
+        return [result_queue.get_nowait()]
+    except queue.Empty:
+        return []
+
+
+def _wait_for_dispatch_results(result_queue: Any, timeout: float, batch_enabled: bool) -> List[Dict[str, Any]]:
+    """Wait for dispatcher results using batch or single-result behavior."""
+    if batch_enabled:
+        return _wait_for_result_batch(result_queue, timeout)
+    try:
+        return [result_queue.get(timeout=timeout)]
+    except queue.Empty:
+        return []
+
+
+@contextmanager
+def _scoped_optuna_trial_logging(enabled: bool):
+    """Temporarily switch Optuna INFO trial logging on or off."""
+    previous_level = optuna.logging.get_verbosity()
+    target_level = optuna.logging.INFO if enabled else optuna.logging.WARNING
+    if previous_level != target_level:
+        optuna.logging.set_verbosity(target_level)
+    try:
+        yield
+    finally:
+        if previous_level != target_level:
+            optuna.logging.set_verbosity(previous_level)
+
+
 def _resolve_csv_path_for_study(csv_source: Any) -> str:
     if isinstance(csv_source, (str, Path)):
         return str(csv_source)
@@ -1289,14 +1353,15 @@ def _worker_process_entry(
         worker_logger.info(
             "Worker %s running optimise (n_trials=%s, timeout=%s)", worker_id, n_trials, timeout
         )
-        study.optimize(
-            worker_objective,
-            n_trials=None,
-            timeout=timeout,
-            callbacks=callbacks or None,
-            show_progress_bar=False,
-            n_jobs=1,
-        )
+        with _scoped_optuna_trial_logging(bool(getattr(base_config, "trials_log", False))):
+            study.optimize(
+                worker_objective,
+                n_trials=None,
+                timeout=timeout,
+                callbacks=callbacks or None,
+                show_progress_bar=False,
+                n_jobs=1,
+            )
         worker_logger.info("Worker %s finished", worker_id)
     except Exception as exc:  # pragma: no cover - defensive
         try:
@@ -2487,12 +2552,70 @@ class OptunaOptimizer:
     def _get_sampler_type(self) -> str:
         return str(getattr(self.sampler_config, "sampler_type", "")).strip().lower()
 
+    def _trials_log_enabled(self) -> bool:
+        return bool(getattr(self.base_config, "trials_log", False))
+
+    def _describe_execution_label(self, workers: int, dispatcher_label: Optional[str] = None) -> str:
+        sampler_label = dispatcher_label or (self._get_sampler_type().upper() or "OPTUNA")
+        mode_label = "single-process" if workers <= 1 else "multi-process"
+        return f"{mode_label} {sampler_label}"
+
+    def _get_dataset_label(self) -> str:
+        csv_name = getattr(self.base_config, "csv_original_name", None)
+        if csv_name:
+            return str(Path(str(csv_name)).name)
+        csv_path = _resolve_csv_path_for_study(getattr(self.base_config, "csv_file", ""))
+        if csv_path:
+            return str(Path(csv_path).name)
+        return "upload"
+
+    def _log_study_start(self, execution_label: str, workers: int) -> None:
+        coverage_label = "off"
+        if bool(getattr(self.optuna_config, "coverage_mode", False)):
+            coverage_label = str(max(0, int(getattr(self.optuna_config, "warmup_trials", 0) or 0)))
+        logger.info(
+            "Starting %s study for %s: objectives=%s, budget_mode=%s, workers=%s, coverage=%s",
+            execution_label,
+            self._get_dataset_label(),
+            ",".join(self.mo_config.objectives),
+            self.optuna_config.budget_mode,
+            workers,
+            coverage_label,
+        )
+
+    def _completed_trial_count(self) -> int:
+        study = getattr(self, "study", None)
+        if study is not None:
+            try:
+                return sum(
+                    1
+                    for trial in study.trials
+                    if trial.state == TrialState.COMPLETE and not _is_duplicate_skipped_trial(trial)
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to count completed trials from study state", exc_info=True)
+        return len(getattr(self, "trial_results", []) or [])
+
+    def _log_study_end(self, execution_label: str) -> None:
+        elapsed = max(0.0, time.time() - (self.start_time or time.time()))
+        logger.info(
+            "Finished %s study for %s: elapsed=%.1fs, complete=%s, pruned=%s, duplicate-skipped=%s",
+            execution_label,
+            self._get_dataset_label(),
+            elapsed,
+            self._completed_trial_count(),
+            int(getattr(self, "pruned_trials", 0) or 0),
+            int(getattr(self, "_duplicate_skipped_count", 0) or 0),
+        )
+
     def _log_centralized_trial_completion(
         self,
         trial_number: int,
         objective_values: Sequence[float],
         params_dict: Dict[str, Any],
     ) -> None:
+        if not self._trials_log_enabled():
+            return
         objective_map = dict(zip(self.mo_config.get_metric_names(), objective_values))
         logger.info(
             "Trial %s finished with values: %s and parameters: %s.",
@@ -2500,6 +2623,66 @@ class OptunaOptimizer:
             objective_map,
             params_dict,
         )
+
+    def _process_centralized_result_batch(
+        self,
+        result_messages: List[Dict[str, Any]],
+        pending_trials: Dict[int, Tuple[optuna.Trial, str]],
+        in_flight_keys: Set[str],
+        seen_keys: Set[str],
+        dispatcher_label: str,
+    ) -> int:
+        processed_count = 0
+        for result_message in result_messages:
+            trial_number = int(result_message["trial_number"])
+            pending_entry = pending_trials.pop(trial_number, None)
+            if pending_entry is None:
+                logger.warning(
+                    "Received %s worker result for unknown trial %s",
+                    dispatcher_label,
+                    trial_number,
+                )
+                continue
+
+            trial, params_key = pending_entry
+            in_flight_keys.discard(params_key)
+            seen_keys.add(params_key)
+            processed_count += 1
+
+            payload = dict(result_message["payload"])
+            sanitized = list(payload.get("sanitized_metrics") or [])
+            if sanitized:
+                trial.set_user_attr("merlin.sanitized_metrics", sanitized)
+
+            objective_values = list(payload.get("objective_values") or [])
+            all_metrics = dict(payload.get("all_metrics") or {})
+            objective_return = payload.get("objective_return")
+
+            if payload.get("should_fail"):
+                self._log_failed_objective(trial, objective_values, all_metrics)
+                self.study.tell(trial, state=TrialState.FAIL)
+                continue
+
+            result = payload["result"]
+            _trial_set_result_attrs(
+                trial=trial,
+                result=result,
+                objective_values=objective_values,
+                all_metrics=all_metrics,
+                constraint_values=list(payload.get("constraint_values") or []),
+                constraints_satisfied=bool(payload.get("constraints_satisfied", True)),
+            )
+
+            if self.pruner is not None:
+                trial.report(float(objective_return), step=0)
+                if trial.should_prune():
+                    self.pruned_trials += 1
+                    self.study.tell(trial, state=TrialState.PRUNED)
+                    continue
+
+            self.study.tell(trial, values=objective_return)
+            self._log_centralized_trial_completion(trial.number, objective_values, result.params)
+        return processed_count
 
     def optimize(self) -> List[OptimizationResult]:
         workers = max(1, int(getattr(self.base_config, "worker_processes", 1) or 1))
@@ -2513,18 +2696,15 @@ class OptunaOptimizer:
         return self._optimize_multiprocess(workers)
 
     def _optimize_single_process(self) -> List[OptimizationResult]:
-        logger.info(
-            "Starting single-process Optuna optimisation: objectives=%s, budget_mode=%s",
-            ",".join(self.mo_config.objectives),
-            self.optuna_config.budget_mode,
-        )
-
         self._multiprocess_mode = False
         self.start_time = time.time()
         self.trial_results = []
         self.best_value = float("-inf")
         self.trials_without_improvement = 0
         self.pruned_trials = 0
+        self._duplicate_skipped_count = 0
+        execution_label = self._describe_execution_label(workers=1)
+        self._log_study_start(execution_label, workers=1)
 
         search_space = self._build_search_space()
         self._prepare_data_and_strategy()
@@ -2566,19 +2746,22 @@ class OptunaOptimizer:
             callbacks.append(convergence_callback)
 
         try:
-            self.study.optimize(
-                lambda trial: self._objective(trial, search_space),
-                n_trials=n_trials,
-                timeout=timeout,
-                callbacks=callbacks or None,
-                show_progress_bar=False,
-            )
+            with _scoped_optuna_trial_logging(self._trials_log_enabled()):
+                self.study.optimize(
+                    lambda trial: self._objective(trial, search_space),
+                    n_trials=n_trials,
+                    timeout=timeout,
+                    callbacks=callbacks or None,
+                    show_progress_bar=False,
+                )
         except KeyboardInterrupt:
             logger.info("Optuna optimisation interrupted by user")
         finally:
             self.pruner = None
 
-        return self._finalize_results()
+        finalized = self._finalize_results()
+        self._log_study_end(execution_label)
+        return finalized
 
     def _optimize_multiprocess_tpe(self, n_workers: int) -> List[OptimizationResult]:
         return self._optimize_multiprocess_centralized(
@@ -2610,14 +2793,8 @@ class OptunaOptimizer:
         mark_nsga_generation: bool,
         allow_pruning: bool,
     ) -> List[OptimizationResult]:
-        logger.info(
-            "Starting multi-process %s optimisation via centralized ask/tell: "
-            "objectives=%s, budget_mode=%s, workers=%s",
-            dispatcher_label,
-            ",".join(self.mo_config.objectives),
-            self.optuna_config.budget_mode,
-            n_workers,
-        )
+        execution_label = self._describe_execution_label(n_workers, dispatcher_label)
+        logger.debug("Using centralized ask/tell dispatcher for %s", dispatcher_label)
 
         self._multiprocess_mode = True
         self.start_time = time.time()
@@ -2626,6 +2803,7 @@ class OptunaOptimizer:
         self.best_value = float("-inf")
         self.trials_without_improvement = 0
         self._duplicate_skipped_count = 0
+        self._log_study_start(execution_label, workers=n_workers)
 
         search_space = self._build_search_space()
         search_space_size = _estimate_search_space_size(search_space)
@@ -2650,11 +2828,11 @@ class OptunaOptimizer:
         if self.optuna_config.budget_mode == "time":
             timeout = max(60, int(self.optuna_config.time_limit))
             target_trials: Optional[int] = None
-            logger.info("Time budget per study: %ss", timeout)
+            logger.info("Time budget per study for %s: %ss", self._get_dataset_label(), timeout)
         elif self.optuna_config.budget_mode == "trials":
             timeout = None
             target_trials = max(1, int(self.optuna_config.n_trials))
-            logger.info("Global trial budget: %s", target_trials)
+            logger.info("Global trial budget for %s: %s", self._get_dataset_label(), target_trials)
         elif self.optuna_config.budget_mode == "convergence":
             timeout = None
             target_trials = 10000
@@ -2667,6 +2845,15 @@ class OptunaOptimizer:
             target_trials = max(1, int(self.optuna_config.n_trials))
 
         duplicate_retry_limit = 1000
+        batch_result_processing = bool(
+            getattr(self.base_config, "dispatcher_batch_result_processing", True)
+        )
+        soft_cycle_limit_enabled = bool(
+            getattr(self.base_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+        )
+        cycle_duplicate_limit = _normalize_dispatch_cycle_duplicate_limit(
+            getattr(self.base_config, "dispatcher_duplicate_cycle_limit", 18)
+        )
         pending_trials: Dict[int, Tuple[optuna.Trial, str]] = {}
         in_flight_keys: Set[str] = set()
         seen_keys: Set[str] = set()
@@ -2727,6 +2914,20 @@ class OptunaOptimizer:
                             f"exited with code {proc.exitcode}"
                         )
 
+                ready_results = _drain_dispatch_results_nowait(
+                    result_queue,
+                    batch_enabled=batch_result_processing,
+                )
+                if ready_results:
+                    completed_evaluations += self._process_centralized_result_batch(
+                        ready_results,
+                        pending_trials,
+                        in_flight_keys,
+                        seen_keys,
+                        dispatcher_label,
+                    )
+                    continue
+
                 if timeout is not None and (time.time() - (self.start_time or time.time())) >= timeout:
                     dispatch_closed = True
 
@@ -2739,6 +2940,7 @@ class OptunaOptimizer:
                         )
                     dispatch_closed = True
 
+                cycle_duplicate_skips = 0
                 while not dispatch_closed and len(pending_trials) < n_workers:
                     if target_trials is not None and (completed_evaluations + len(pending_trials)) >= target_trials:
                         dispatch_closed = True
@@ -2753,15 +2955,17 @@ class OptunaOptimizer:
                     if params_key in seen_keys or params_key in in_flight_keys:
                         self._duplicate_skipped_count += 1
                         consecutive_duplicate_skips += 1
+                        cycle_duplicate_skips += 1
                         trial.set_user_attr(_DUPLICATE_SKIPPED_ATTR, True)
                         trial.set_user_attr(_DUPLICATE_SKIP_REASON_ATTR, "exact_params")
                         self.study.tell(trial, state=TrialState.FAIL)
-                        logger.info(
-                            "Skipping duplicate %s proposal trial=%s sampler=%s",
-                            dispatcher_label,
-                            trial.number,
-                            sampler_type,
-                        )
+                        if self._trials_log_enabled():
+                            logger.info(
+                                "Skipping duplicate %s proposal trial=%s sampler=%s",
+                                dispatcher_label,
+                                trial.number,
+                                sampler_type,
+                            )
                         if consecutive_duplicate_skips >= duplicate_retry_limit:
                             logger.warning(
                                 "%s generated %s consecutive duplicate proposals; stopping dispatch early.",
@@ -2769,6 +2973,13 @@ class OptunaOptimizer:
                                 consecutive_duplicate_skips,
                             )
                             dispatch_closed = True
+                            break
+                        if soft_cycle_limit_enabled and cycle_duplicate_skips >= cycle_duplicate_limit:
+                            logger.debug(
+                                "%s reached per-cycle duplicate limit (%s); yielding dispatch to process results.",
+                                dispatcher_label,
+                                cycle_duplicate_limit,
+                            )
                             break
                         continue
 
@@ -2786,59 +2997,24 @@ class OptunaOptimizer:
                 if dispatch_closed and not pending_trials:
                     break
 
-                try:
-                    result_message = result_queue.get(timeout=0.1)
-                except queue.Empty:
+                if not pending_trials:
                     continue
 
-                trial_number = int(result_message["trial_number"])
-                pending_entry = pending_trials.pop(trial_number, None)
-                if pending_entry is None:
-                    logger.warning(
-                        "Received %s worker result for unknown trial %s",
-                        dispatcher_label,
-                        trial_number,
-                    )
-                    continue
-
-                trial, params_key = pending_entry
-                in_flight_keys.discard(params_key)
-                seen_keys.add(params_key)
-                completed_evaluations += 1
-
-                payload = dict(result_message["payload"])
-                sanitized = list(payload.get("sanitized_metrics") or [])
-                if sanitized:
-                    trial.set_user_attr("merlin.sanitized_metrics", sanitized)
-
-                objective_values = list(payload.get("objective_values") or [])
-                all_metrics = dict(payload.get("all_metrics") or {})
-                objective_return = payload.get("objective_return")
-
-                if payload.get("should_fail"):
-                    self._log_failed_objective(trial, objective_values, all_metrics)
-                    self.study.tell(trial, state=TrialState.FAIL)
-                    continue
-
-                result = payload["result"]
-                _trial_set_result_attrs(
-                    trial=trial,
-                    result=result,
-                    objective_values=objective_values,
-                    all_metrics=all_metrics,
-                    constraint_values=list(payload.get("constraint_values") or []),
-                    constraints_satisfied=bool(payload.get("constraints_satisfied", True)),
+                result_batch = _wait_for_dispatch_results(
+                    result_queue,
+                    timeout=0.1,
+                    batch_enabled=batch_result_processing,
                 )
+                if not result_batch:
+                    continue
 
-                if self.pruner is not None:
-                    trial.report(float(objective_return), step=0)
-                    if trial.should_prune():
-                        self.pruned_trials += 1
-                        self.study.tell(trial, state=TrialState.PRUNED)
-                        continue
-
-                self.study.tell(trial, values=objective_return)
-                self._log_centralized_trial_completion(trial.number, objective_values, result.params)
+                completed_evaluations += self._process_centralized_result_batch(
+                    result_batch,
+                    pending_trials,
+                    in_flight_keys,
+                    seen_keys,
+                    dispatcher_label,
+                )
 
             self.trial_results = []
             for trial in self.study.trials:
@@ -2857,7 +3033,9 @@ class OptunaOptimizer:
                     self._duplicate_skipped_count,
                 )
 
-            return self._finalize_results()
+            finalized = self._finalize_results()
+            self._log_study_end(execution_label)
+            return finalized
         finally:
             for _ in processes:
                 try:
@@ -2874,12 +3052,8 @@ class OptunaOptimizer:
             self.pruner = None
 
     def _optimize_multiprocess(self, n_workers: int) -> List[OptimizationResult]:
-        logger.info(
-            "Starting multi-process Optuna optimisation: objectives=%s, budget_mode=%s, workers=%s",
-            ",".join(self.mo_config.objectives),
-            self.optuna_config.budget_mode,
-            n_workers,
-        )
+        execution_label = self._describe_execution_label(n_workers)
+        logger.debug("Using legacy multiprocess Optuna path for sampler=%s", self._get_sampler_type())
 
         self._multiprocess_mode = True
         self.start_time = time.time()
@@ -2887,6 +3061,8 @@ class OptunaOptimizer:
         self.pruned_trials = 0
         self.best_value = float("-inf")
         self.trials_without_improvement = 0
+        self._duplicate_skipped_count = 0
+        self._log_study_start(execution_label, workers=n_workers)
 
         # Build search space early to validate config and prepare deterministic coverage.
         search_space = self._build_search_space()
@@ -2925,10 +3101,10 @@ class OptunaOptimizer:
 
             if self.optuna_config.budget_mode == "time":
                 timeout = max(60, int(self.optuna_config.time_limit))
-                logger.info("Time budget per study: %ss", timeout)
+                logger.info("Time budget per study for %s: %ss", self._get_dataset_label(), timeout)
             elif self.optuna_config.budget_mode == "trials":
                 n_trials = max(1, int(self.optuna_config.n_trials))
-                logger.info("Global trial budget: %s", n_trials)
+                logger.info("Global trial budget for %s: %s", self._get_dataset_label(), n_trials)
             elif self.optuna_config.budget_mode == "convergence":
                 logger.warning(
                     "Convergence budget is not fully supported in multi-process mode; "
@@ -3021,7 +3197,9 @@ class OptunaOptimizer:
                     except Exception as exc:  # pragma: no cover - defensive
                         logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
 
-            return self._finalize_results()
+            finalized = self._finalize_results()
+            self._log_study_end(execution_label)
+            return finalized
         finally:
             _terminate_processes(processes)
             try:

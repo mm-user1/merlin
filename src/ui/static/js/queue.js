@@ -684,6 +684,9 @@ function applyQueueConfigFallback(item) {
   if (Object.prototype.hasOwnProperty.call(config, 'detailed_log')) {
     setCheckboxValue('detailedLog', Boolean(config.detailed_log));
   }
+  if (Object.prototype.hasOwnProperty.call(config, 'trials_log')) {
+    setCheckboxValue('trialsLog', Boolean(config.trials_log));
+  }
 
   if (Object.prototype.hasOwnProperty.call(config, 'filter_min_profit')) {
     setCheckboxValue('minProfitFilter', Boolean(config.filter_min_profit));
@@ -731,6 +734,15 @@ function applyQueueConfigFallback(item) {
   }
   if (Object.prototype.hasOwnProperty.call(config, 'coverage_mode')) {
     setCheckboxValue('optunaCoverageMode', Boolean(config.coverage_mode));
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'dispatcher_batch_result_processing')) {
+    setCheckboxValue('dispatcherBatchResultProcessing', Boolean(config.dispatcher_batch_result_processing));
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'dispatcher_soft_duplicate_cycle_limit_enabled')) {
+    setCheckboxValue('softDuplicateCycleLimitEnabled', Boolean(config.dispatcher_soft_duplicate_cycle_limit_enabled));
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'dispatcher_duplicate_cycle_limit')) {
+    setInputValue('dispatcherDuplicateCycleLimit', config.dispatcher_duplicate_cycle_limit);
   }
   if (Object.prototype.hasOwnProperty.call(config, 'population_size')) {
     setInputValue('nsgaPopulationSize', config.population_size);
@@ -844,6 +856,9 @@ function refreshQueueFormUiAfterApply() {
   }
   if (window.OptunaUI && typeof window.OptunaUI.updateCoverageInfo === 'function') {
     window.OptunaUI.updateCoverageInfo();
+  }
+  if (window.OptunaUI && typeof window.OptunaUI.syncDispatcherControls === 'function') {
+    window.OptunaUI.syncDispatcherControls();
   }
   if (typeof syncMinProfitFilterUI === 'function') {
     syncMinProfitFilterUI();

@@ -370,6 +370,17 @@ def register_routes(app):
             "strategy_id": optimization_config.strategy_id,
             "warmup_bars": optimization_config.warmup_bars,
             "csv_original_name": original_csv_name,
+            "detailed_log": bool(getattr(optimization_config, "detailed_log", False)),
+            "trials_log": bool(getattr(optimization_config, "trials_log", False)),
+            "dispatcher_batch_result_processing": bool(
+                getattr(optimization_config, "dispatcher_batch_result_processing", True)
+            ),
+            "dispatcher_soft_duplicate_cycle_limit_enabled": bool(
+                getattr(optimization_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            "dispatcher_duplicate_cycle_limit": int(
+                getattr(optimization_config, "dispatcher_duplicate_cycle_limit", 18)
+            ),
             "objectives": list(getattr(optimization_config, "objectives", []) or []),
             "primary_objective": getattr(optimization_config, "primary_objective", None),
             "constraints": json.loads(json.dumps(getattr(optimization_config, "constraints", []) or [])),
@@ -401,6 +412,16 @@ def register_routes(app):
             "pruner": getattr(optimization_config, "optuna_pruner", "median"),
             "warmup_trials": int(getattr(optimization_config, "n_startup_trials", 20)),
             "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
+            "trials_log": bool(getattr(optimization_config, "trials_log", False)),
+            "dispatcher_batch_result_processing": bool(
+                getattr(optimization_config, "dispatcher_batch_result_processing", True)
+            ),
+            "dispatcher_soft_duplicate_cycle_limit_enabled": bool(
+                getattr(optimization_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            "dispatcher_duplicate_cycle_limit": int(
+                getattr(optimization_config, "dispatcher_duplicate_cycle_limit", 18)
+            ),
         }
         base_template["optuna_config"] = json.loads(json.dumps(optuna_settings))
 

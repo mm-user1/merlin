@@ -718,6 +718,27 @@ def register_routes(app):
             coverage_mode = _safe_bool(optuna_config.get("coverage_mode"))
             if coverage_mode is None:
                 coverage_mode = _safe_bool(config_payload.get("coverage_mode"))
+            dispatcher_batch_result_processing = _safe_bool(
+                optuna_config.get("dispatcher_batch_result_processing")
+            )
+            if dispatcher_batch_result_processing is None:
+                dispatcher_batch_result_processing = _safe_bool(
+                    config_payload.get("dispatcher_batch_result_processing")
+                )
+            dispatcher_soft_duplicate_cycle_limit_enabled = _safe_bool(
+                optuna_config.get("dispatcher_soft_duplicate_cycle_limit_enabled")
+            )
+            if dispatcher_soft_duplicate_cycle_limit_enabled is None:
+                dispatcher_soft_duplicate_cycle_limit_enabled = _safe_bool(
+                    config_payload.get("dispatcher_soft_duplicate_cycle_limit_enabled")
+                )
+            dispatcher_duplicate_cycle_limit = _safe_int(
+                optuna_config.get("dispatcher_duplicate_cycle_limit")
+            )
+            if dispatcher_duplicate_cycle_limit is None:
+                dispatcher_duplicate_cycle_limit = _safe_int(
+                    config_payload.get("dispatcher_duplicate_cycle_limit")
+                )
             workers_value = _safe_int(config_payload.get("worker_processes"))
             if workers_value is None:
                 workers_value = _safe_int(config_payload.get("workerProcesses"))
@@ -798,6 +819,9 @@ def register_routes(app):
                         "pruner": optuna_config.get("pruner"),
                         "warmup_trials": warmup_trials,
                         "coverage_mode": coverage_mode,
+                        "dispatcher_batch_result_processing": dispatcher_batch_result_processing,
+                        "dispatcher_soft_duplicate_cycle_limit_enabled": dispatcher_soft_duplicate_cycle_limit_enabled,
+                        "dispatcher_duplicate_cycle_limit": dispatcher_duplicate_cycle_limit,
                         "workers": workers_value,
                         "sanitize_enabled": (
                             _safe_bool(optuna_config.get("sanitize_enabled"))

@@ -277,6 +277,12 @@ def test_run_optuna_on_window_forwards_coverage_mode(monkeypatch):
         "filter_min_profit": False,
         "min_profit_threshold": 0.0,
         "score_config": {},
+        "csv_original_name": "OKX_LINKUSDT.P, 30 2025.05.01-2025.11.20.csv",
+        "detailed_log": True,
+        "trials_log": True,
+        "dispatcher_batch_result_processing": False,
+        "dispatcher_soft_duplicate_cycle_limit_enabled": False,
+        "dispatcher_duplicate_cycle_limit": 42,
         "objectives": ["net_profit_pct"],
         "primary_objective": None,
         "constraints": [],
@@ -322,6 +328,12 @@ def test_run_optuna_on_window_forwards_coverage_mode(monkeypatch):
 
     assert captured["base_config"].coverage_mode is True
     assert captured["base_config"].n_startup_trials == 33
+    assert captured["base_config"].csv_original_name == "OKX_LINKUSDT.P, 30 2025.05.01-2025.11.20.csv"
+    assert captured["base_config"].detailed_log is True
+    assert captured["base_config"].trials_log is True
+    assert captured["base_config"].dispatcher_batch_result_processing is False
+    assert captured["base_config"].dispatcher_soft_duplicate_cycle_limit_enabled is False
+    assert captured["base_config"].dispatcher_duplicate_cycle_limit == 42
     assert captured["optuna_cfg"].coverage_mode is True
     assert captured["optuna_cfg"].warmup_trials == 33
 

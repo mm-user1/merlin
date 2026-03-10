@@ -2157,12 +2157,24 @@ class WalkForwardEngine:
             fixed_params=fixed_params,
             worker_processes=int(self.base_config_template["worker_processes"]),
             warmup_bars=self.config.warmup_bars,
+            csv_original_name=self.base_config_template.get("csv_original_name"),
             risk_per_trade_pct=float(self.base_config_template["risk_per_trade_pct"]),
             contract_size=float(self.base_config_template["contract_size"]),
             commission_rate=float(self.base_config_template["commission_rate"]),
             filter_min_profit=bool(self.base_config_template["filter_min_profit"]),
             min_profit_threshold=float(self.base_config_template["min_profit_threshold"]),
             score_config=deepcopy(self.base_config_template.get("score_config", {})),
+            detailed_log=bool(self.base_config_template.get("detailed_log", False)),
+            trials_log=bool(self.base_config_template.get("trials_log", False)),
+            dispatcher_batch_result_processing=bool(
+                self.base_config_template.get("dispatcher_batch_result_processing", True)
+            ),
+            dispatcher_soft_duplicate_cycle_limit_enabled=bool(
+                self.base_config_template.get("dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            dispatcher_duplicate_cycle_limit=int(
+                self.base_config_template.get("dispatcher_duplicate_cycle_limit", 18)
+            ),
             optimization_mode="wfa",
             objectives=list(self.base_config_template.get("objectives") or []),
             primary_objective=self.base_config_template.get("primary_objective"),
