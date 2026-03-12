@@ -936,10 +936,20 @@
 
               <div id="queueItemsList" class="queue-items-list" style="display: none;"></div>
 
-              <div class="queue-actions" style="margin-top: 12px; display: flex; gap: 8px;">
+              <div class="queue-actions" style="margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap;">
                 <button type="button" id="addToQueueBtn" class="secondary">+ Add to Queue</button>
                 <button type="button" id="loadQueueBtn" class="secondary">Load Queue</button>
                 <button type="button" id="clearQueueBtn" class="secondary" style="display: none;">Clear</button>
+                <button type="button" id="batchQueueBtn" class="secondary" style="display: none;">Batch</button>
+                <button type="button" id="moveQueueBtn" class="secondary" style="display: none;">Move</button>
+              </div>
+
+              <div id="queueSecondaryRow" class="queue-secondary-row" hidden>
+                <label id="queueAutoCreateSetLabel" class="queue-auto-set-option" hidden>
+                  <input type="checkbox" id="queueAutoCreateSet" />
+                  <span>Auto-create Set</span>
+                </label>
+                <span id="queueMoveHint" class="queue-move-hint" hidden>Move mode: Enter save, Esc cancel</span>
               </div>
             </div>
 

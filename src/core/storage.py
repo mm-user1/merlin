@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 OBJECTIVE_DIRECTIONS: Dict[str, str] = {
     "net_profit_pct": "maximize",
@@ -786,6 +786,24 @@ def _study_set_name_with_suffix(base_name: str, suffix: int) -> str:
     return f"{trimmed}{suffix_text}"
 
 
+def _run_study_set_name_operation_with_suffix(
+    operation: Callable[[str], Any],
+    base_name: str,
+    *,
+    max_attempts: int = 1000,
+) -> tuple[Any, str]:
+    normalized_name = _normalize_study_set_name(base_name)
+    for suffix in range(max_attempts + 1):
+        candidate_name = _study_set_name_with_suffix(normalized_name, suffix)
+        try:
+            return operation(candidate_name), candidate_name
+        except sqlite3.IntegrityError:
+            if suffix >= max_attempts:
+                raise ValueError("Failed to resolve unique set name.") from None
+
+    raise RuntimeError("Failed to resolve unique set name.")
+
+
 _STUDY_SET_COLOR_TOKENS = (
     "blue",
     "teal",
@@ -979,7 +997,6 @@ def create_study_set(
     *,
     color_token: Any = None,
 ) -> Dict[str, Any]:
-    normalized_name = _normalize_study_set_name(name)
     normalized_ids = _normalize_set_study_ids(study_ids)
     normalized_color = _normalize_study_set_color_token(color_token)
     if not normalized_ids:
@@ -994,22 +1011,16 @@ def create_study_set(
         ).fetchone()
         next_order = int(next_order_row["next_order"] if next_order_row else 0)
 
-        cursor = None
-        max_attempts = 1000
-        for suffix in range(max_attempts + 1):
-            candidate_name = _study_set_name_with_suffix(normalized_name, suffix)
-            try:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO study_sets (name, sort_order, color_token)
-                    VALUES (?, ?, ?)
-                    """,
-                    (candidate_name, next_order, normalized_color),
-                )
-                break
-            except sqlite3.IntegrityError:
-                if suffix >= max_attempts:
-                    raise ValueError("Failed to resolve unique set name.") from None
+        cursor, _created_name = _run_study_set_name_operation_with_suffix(
+            lambda candidate_name: conn.execute(
+                """
+                INSERT INTO study_sets (name, sort_order, color_token)
+                VALUES (?, ?, ?)
+                """,
+                (candidate_name, next_order, normalized_color),
+            ),
+            name,
+        )
 
         if cursor is None:
             raise RuntimeError("Failed to create study set.")
@@ -1055,14 +1066,13 @@ def update_study_set(
             raise ValueError("Study set not found.")
 
         if name is not None:
-            normalized_name = _normalize_study_set_name(name)
-            try:
-                conn.execute(
+            _updated_name_cursor, _updated_name = _run_study_set_name_operation_with_suffix(
+                lambda candidate_name: conn.execute(
                     "UPDATE study_sets SET name = ? WHERE id = ?",
-                    (normalized_name, set_id_int),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("Set with this name already exists.") from exc
+                    (candidate_name, set_id_int),
+                ),
+                name,
+            )
 
         if sort_order is not None:
             try:

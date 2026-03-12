@@ -426,11 +426,18 @@ async function fetchAnalyticsStudyWindowBoundariesRequest(studyId, signal = null
   return response.json();
 }
 
-async function createAnalyticsSetRequest(name, studyIds) {
+async function createAnalyticsSetRequest(name, studyIds, options = {}) {
+  const payload = {
+    name,
+    study_ids: Array.isArray(studyIds) ? studyIds : []
+  };
+  if (Object.prototype.hasOwnProperty.call(options || {}, 'colorToken')) {
+    payload.color_token = options.colorToken ?? null;
+  }
   const response = await fetch('/api/analytics/sets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, study_ids: Array.isArray(studyIds) ? studyIds : [] })
+    body: JSON.stringify(payload)
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));

@@ -879,6 +879,7 @@
       font-size: 12px;
       line-height: 1.4;
       cursor: default;
+      user-select: none;
     }
 
     .queue-item:hover {
@@ -907,6 +908,7 @@
       white-space: nowrap;
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       color: #333333;
+      user-select: none;
     }
 
     .queue-item-remove {
@@ -953,6 +955,67 @@
     .queue-item.skipped {
       opacity: 0.45;
       text-decoration: line-through;
+    }
+
+    .queue-item.queue-item-focused {
+      border-color: #4a90e2;
+      box-shadow: 0 0 0 1px rgba(74, 144, 226, 0.22);
+    }
+
+    .queue-item.queue-item-batch-selected {
+      background: #eef5ff;
+      border-color: #8bb7f0;
+    }
+
+    .queue-item.queue-item-moving,
+    .queue-item.queue-item-moving:hover {
+      background: #fff3cf;
+      border-color: #d6b44c;
+    }
+
+    .queue-actions .secondary.active {
+      background: #dfeafc;
+      border-color: #7ca9e6;
+      color: #225d9c;
+    }
+
+    .queue-actions .secondary {
+      padding: 7px 17px;
+      font-size: 14px;
+      line-height: 1.1;
+    }
+
+    .queue-secondary-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 8px;
+      min-height: 20px;
+    }
+
+    .queue-auto-set-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #4f5f6f;
+      user-select: none;
+    }
+
+    .queue-auto-set-option.is-disabled {
+      color: #97a0a9;
+      opacity: 0.82;
+    }
+
+    .queue-auto-set-option input {
+      margin: 0;
+    }
+
+    .queue-move-hint {
+      font-size: 12px;
+      color: #7a5f18;
+      white-space: nowrap;
     }
 
     #runOptimizationBtn.queue-active {

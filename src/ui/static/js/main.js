@@ -224,15 +224,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const clearQueueBtn = document.getElementById('clearQueueBtn');
-  if (clearQueueBtn && typeof clearQueue === 'function') {
+  if (clearQueueBtn) {
     clearQueueBtn.addEventListener('click', async () => {
-      if (window.confirm('Clear all items from the queue?')) {
-        try {
+      try {
+        if (typeof handleQueueClearAction === 'function') {
+          await handleQueueClearAction();
+        } else if (typeof clearQueue === 'function' && window.confirm('Clear all items from the queue?')) {
           await clearQueue();
-        } catch (error) {
-          if (typeof showQueueError === 'function') {
-            showQueueError(error?.message || 'Failed to clear queue.');
-          }
+        }
+      } catch (error) {
+        if (typeof showQueueError === 'function') {
+          showQueueError(error?.message || 'Failed to clear queue.');
         }
       }
     });

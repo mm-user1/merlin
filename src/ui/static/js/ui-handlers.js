@@ -171,6 +171,9 @@ function setSelectedCsvPaths(paths) {
   }
   window.uiState.csvPath = window.selectedCsvPath;
   renderSelectedFiles([]);
+  if (typeof syncQueueAutoCreateSetUi === 'function') {
+    syncQueueAutoCreateSetUi();
+  }
 }
 
 const csvBrowserState = {
@@ -479,6 +482,9 @@ function toggleWFSettings() {
       adaptiveToggle.checked = false;
     }
     toggleAdaptiveWFSettings();
+    if (typeof syncQueueAutoCreateSetUi === 'function') {
+      syncQueueAutoCreateSetUi();
+    }
     return;
   }
   wfSettings.style.display = wfToggle.checked ? 'block' : 'none';
@@ -489,6 +495,9 @@ function toggleWFSettings() {
     }
   }
   toggleAdaptiveWFSettings();
+  if (typeof syncQueueAutoCreateSetUi === 'function') {
+    syncQueueAutoCreateSetUi();
+  }
 }
 
 window.toggleWFSettings = toggleWFSettings;

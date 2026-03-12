@@ -13,6 +13,15 @@ let queueUiLoaded = false;
 let queueStateLoaded = false;
 let queueStateLoadPromise = null;
 let queueItemLoadRequestId = 0;
+let queueUiEventsBound = false;
+let queueFocusedItemId = '';
+let queueBatchMode = false;
+let queueBatchAnchorItemId = '';
+let queueBatchSelectedItemIds = new Set();
+let queueMoveMode = false;
+let queueMoveOriginalPendingOrder = [];
+let queueMoveSelectionIds = [];
+let queueMoveInsertionIndex = 0;
 let queueState = {
   items: [],
   nextIndex: 1,
@@ -30,6 +39,34 @@ function isAbsoluteFilesystemPath(path) {
 
 function getPathFileName(path) {
   return String(path || '').split(/[/\\]/).pop() || '';
+}
+
+function isTypingElement(element) {
+  if (!element) return false;
+  if (element.isContentEditable) return true;
+  const tagName = element.tagName ? element.tagName.toLowerCase() : '';
+  return tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+}
+
+function uniqueStringValues(values) {
+  const items = Array.isArray(values) ? values : [];
+  const unique = [];
+  const seen = new Set();
+  items.forEach((value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    unique.push(normalized);
+  });
+  return unique;
+}
+
+function normalizeQueueStudySetStatus(rawStatus) {
+  const normalized = String(rawStatus || '').trim().toLowerCase();
+  if (normalized === 'created' || normalized === 'skipped' || normalized === 'error') {
+    return normalized;
+  }
+  return '';
 }
 
 function generateOptimizationRunId(prefix = 'run') {
@@ -106,6 +143,32 @@ function normalizeQueueFinalState(rawFinalState) {
   return '';
 }
 
+function normalizeQueueStudySet(rawStudySet, item) {
+  const source = rawStudySet && typeof rawStudySet === 'object' ? rawStudySet : {};
+  const createdSetIdRaw = Number(source.createdSetId);
+  const normalizedStatus = normalizeQueueStudySetStatus(source.status);
+  const configured = Boolean(
+    source.configured
+    || source.autoCreate
+    || uniqueStringValues(source.completedStudyIds).length
+    || (Number.isInteger(createdSetIdRaw) && createdSetIdRaw > 0)
+    || String(source.createdSetName || '').trim()
+    || normalizedStatus
+    || String(source.error || '').trim()
+    || String(source.lastUpdatedAt || '').trim()
+  );
+  return {
+    configured,
+    autoCreate: Boolean(source.autoCreate),
+    completedStudyIds: uniqueStringValues(source.completedStudyIds),
+    createdSetId: Number.isInteger(createdSetIdRaw) && createdSetIdRaw > 0 ? createdSetIdRaw : null,
+    createdSetName: String(source.createdSetName || '').trim(),
+    status: normalizedStatus,
+    error: String(source.error || '').trim(),
+    lastUpdatedAt: String(source.lastUpdatedAt || '').trim(),
+  };
+}
+
 function isQueueItemFinalized(item) {
   return normalizeQueueFinalState(item?.finalState) !== '';
 }
@@ -166,6 +229,8 @@ function normalizeQueueItem(raw, fallbackIndex) {
   if (typeof item.label !== 'string' || !item.label.trim()) {
     item.label = generateQueueLabel(item);
   }
+
+  item.studySet = normalizeQueueStudySet(raw.studySet, item);
 
   return item;
 }
@@ -355,6 +420,269 @@ function loadQueueRuntimeState() {
   return normalizeQueueRuntimeState(runtime);
 }
 
+function getQueueItemById(itemId, queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  const normalizedId = String(itemId || '').trim();
+  if (!normalizedId) return null;
+  return (Array.isArray(queue.items) ? queue.items : [])
+    .find((item) => String(item?.id || '').trim() === normalizedId) || null;
+}
+
+function isQueueItemPending(item) {
+  return Boolean(item) && !isQueueItemFinalized(item);
+}
+
+function getPendingQueueItemIds(queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  return (Array.isArray(queue.items) ? queue.items : [])
+    .filter((item) => isQueueItemPending(item))
+    .map((item) => String(item.id || '').trim())
+    .filter(Boolean);
+}
+
+function getOrderedQueueBatchSelectedIds(queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  const selected = queueBatchSelectedItemIds instanceof Set ? queueBatchSelectedItemIds : new Set();
+  return (Array.isArray(queue.items) ? queue.items : [])
+    .map((item) => String(item?.id || '').trim())
+    .filter((itemId) => itemId && selected.has(itemId));
+}
+
+function clearQueueFocus() {
+  queueFocusedItemId = '';
+}
+
+function setQueueFocusedItemId(itemId) {
+  const normalizedId = String(itemId || '').trim();
+  if (!normalizedId || queueBatchMode) {
+    queueFocusedItemId = '';
+    return;
+  }
+  const item = getQueueItemById(normalizedId);
+  queueFocusedItemId = item ? normalizedId : '';
+}
+
+function clearQueueBatchSelection() {
+  queueBatchSelectedItemIds = new Set();
+  queueBatchAnchorItemId = '';
+}
+
+function clearQueueMoveState() {
+  queueMoveMode = false;
+  queueMoveOriginalPendingOrder = [];
+  queueMoveSelectionIds = [];
+  queueMoveInsertionIndex = 0;
+}
+
+function getQueueMoveSelectionSet() {
+  return new Set(Array.isArray(queueMoveSelectionIds) ? queueMoveSelectionIds : []);
+}
+
+function syncQueueUiEphemeralState(queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  const itemIds = new Set((Array.isArray(queue.items) ? queue.items : [])
+    .map((item) => String(item?.id || '').trim())
+    .filter(Boolean));
+
+  if (!itemIds.has(queueFocusedItemId)) {
+    queueFocusedItemId = '';
+  }
+
+  queueBatchSelectedItemIds = new Set(
+    Array.from(queueBatchSelectedItemIds || []).filter((itemId) => itemIds.has(String(itemId || '').trim()))
+  );
+  if (!itemIds.has(queueBatchAnchorItemId)) {
+    queueBatchAnchorItemId = '';
+  }
+  const pendingIds = getPendingQueueItemIds(queue);
+  const pendingSet = new Set(pendingIds);
+  if (queueMoveMode) {
+    const selectionIds = (Array.isArray(queueMoveSelectionIds) ? queueMoveSelectionIds : [])
+      .map((itemId) => String(itemId || '').trim())
+      .filter((itemId) => pendingSet.has(itemId));
+    if (!selectionIds.length) {
+      clearQueueMoveState();
+      return;
+    }
+    const originalPendingOrder = Array.isArray(queueMoveOriginalPendingOrder)
+      ? queueMoveOriginalPendingOrder.map((itemId) => String(itemId || '').trim()).filter(Boolean)
+      : [];
+    if (
+      originalPendingOrder.length !== pendingIds.length
+      || originalPendingOrder.some((itemId) => !pendingSet.has(itemId))
+    ) {
+      clearQueueMoveState();
+      return;
+    }
+    queueMoveSelectionIds = pendingIds.filter((itemId) => selectionIds.includes(itemId));
+    const unselectedCount = Math.max(0, pendingIds.length - queueMoveSelectionIds.length);
+    queueMoveInsertionIndex = Math.max(0, Math.min(unselectedCount, Number(queueMoveInsertionIndex) || 0));
+  }
+
+  if (!queue.items.length) {
+    clearQueueFocus();
+    clearQueueBatchSelection();
+    queueBatchMode = false;
+    clearQueueMoveState();
+  }
+}
+
+function buildReorderedPendingIds(pendingIds, selectionIds, insertionIndex) {
+  const orderedPending = Array.isArray(pendingIds) ? pendingIds.slice() : [];
+  const orderedSelection = Array.isArray(selectionIds)
+    ? selectionIds.filter((itemId) => orderedPending.includes(itemId))
+    : [];
+  if (!orderedSelection.length) return orderedPending;
+
+  const selectedSet = new Set(orderedSelection);
+  const unselected = orderedPending.filter((itemId) => !selectedSet.has(itemId));
+  const boundedIndex = Math.max(0, Math.min(unselected.length, Number(insertionIndex) || 0));
+  return [
+    ...unselected.slice(0, boundedIndex),
+    ...orderedSelection,
+    ...unselected.slice(boundedIndex),
+  ];
+}
+
+function applyPendingOrderToQueueItems(items, reorderedPendingIds) {
+  const queueItems = Array.isArray(items) ? items.slice() : [];
+  const pendingIds = Array.isArray(reorderedPendingIds) ? reorderedPendingIds.slice() : [];
+  let pendingCursor = 0;
+
+  return queueItems.map((item) => {
+    if (!isQueueItemPending(item)) return item;
+    const nextPendingId = pendingIds[pendingCursor];
+    pendingCursor += 1;
+    if (!nextPendingId) return item;
+    return queueItems.find((candidate) => String(candidate?.id || '').trim() === nextPendingId) || item;
+  });
+}
+
+function getInitialQueueMoveInsertionIndex(queueLike, selectionIds) {
+  const pendingIds = getPendingQueueItemIds(queueLike);
+  const selectedSet = new Set(Array.isArray(selectionIds) ? selectionIds : []);
+  let insertionIndex = 0;
+  for (const itemId of pendingIds) {
+    if (selectedSet.has(itemId)) {
+      break;
+    }
+    insertionIndex += 1;
+  }
+  return insertionIndex;
+}
+
+function getQueueMoveableSelectionIds(queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  if (queueBatchMode) {
+    return getOrderedQueueBatchSelectedIds(queue);
+  }
+  return queueFocusedItemId ? [queueFocusedItemId] : [];
+}
+
+function moveQueueSelectionToIndex(targetIndex) {
+  if (!queueMoveMode) return;
+  const currentQueue = loadQueue();
+  const pendingIds = getPendingQueueItemIds(currentQueue);
+  const selectionIds = Array.isArray(queueMoveSelectionIds) ? queueMoveSelectionIds : [];
+  if (!selectionIds.length) return;
+
+  const unselectedCount = Math.max(0, pendingIds.length - selectionIds.length);
+  const boundedIndex = Math.max(0, Math.min(unselectedCount, Number(targetIndex) || 0));
+  if (boundedIndex === queueMoveInsertionIndex) return;
+
+  queueMoveInsertionIndex = boundedIndex;
+  const reorderedPendingIds = buildReorderedPendingIds(pendingIds, selectionIds, boundedIndex);
+  queueState = cloneQueueState({
+    ...currentQueue,
+    items: applyPendingOrderToQueueItems(currentQueue.items, reorderedPendingIds),
+  });
+  queueStateLoaded = true;
+  renderQueue();
+}
+
+function exitQueueBatchMode() {
+  if (!queueBatchMode) return false;
+  queueBatchMode = false;
+  clearQueueBatchSelection();
+  renderQueue();
+  return true;
+}
+
+function enterQueueBatchMode() {
+  if (queueRunning || queueMoveMode || queueBatchMode) return false;
+  const queue = getQueueForUi();
+  if (!queue.items.length) return false;
+
+  const seedItemId = queueFocusedItemId;
+  queueBatchMode = true;
+  clearQueueBatchSelection();
+  clearQueueFocus();
+  if (seedItemId && getQueueItemById(seedItemId, queue)) {
+    queueBatchSelectedItemIds = new Set([seedItemId]);
+    queueBatchAnchorItemId = seedItemId;
+  }
+  renderQueue();
+  return true;
+}
+
+function toggleQueueBatchMode() {
+  if (queueBatchMode) {
+    exitQueueBatchMode();
+    return;
+  }
+  enterQueueBatchMode();
+}
+
+function applyQueueBatchRangeSelection(targetItemId, queueLike = null) {
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  const normalizedTargetId = String(targetItemId || '').trim();
+  const normalizedAnchorId = String(queueBatchAnchorItemId || '').trim();
+  if (!normalizedTargetId || !normalizedAnchorId) return false;
+
+  const ids = (Array.isArray(queue.items) ? queue.items : [])
+    .map((item) => String(item?.id || '').trim())
+    .filter(Boolean);
+  const anchorIndex = ids.indexOf(normalizedAnchorId);
+  const targetIndex = ids.indexOf(normalizedTargetId);
+  if (anchorIndex < 0 || targetIndex < 0) return false;
+
+  const [start, end] = anchorIndex <= targetIndex
+    ? [anchorIndex, targetIndex]
+    : [targetIndex, anchorIndex];
+  queueBatchSelectedItemIds = new Set(ids.slice(start, end + 1));
+  return true;
+}
+
+function handleQueueBatchSelection(itemId, event, queueLike = null) {
+  if (queueMoveMode || !queueBatchMode) return;
+  const queue = queueLike && typeof queueLike === 'object' ? queueLike : loadQueue();
+  const normalizedId = String(itemId || '').trim();
+  if (!normalizedId || !getQueueItemById(normalizedId, queue)) return;
+
+  if (event.shiftKey) {
+    if (!applyQueueBatchRangeSelection(normalizedId, queue)) {
+      queueBatchSelectedItemIds = new Set([normalizedId]);
+    }
+    queueBatchAnchorItemId = normalizedId;
+    renderQueue();
+    return;
+  }
+
+  if (event.ctrlKey || event.metaKey) {
+    const next = new Set(Array.from(queueBatchSelectedItemIds));
+    if (next.has(normalizedId)) next.delete(normalizedId);
+    else next.add(normalizedId);
+    queueBatchSelectedItemIds = next;
+    queueBatchAnchorItemId = normalizedId;
+    renderQueue();
+    return;
+  }
+
+  queueBatchSelectedItemIds = new Set([normalizedId]);
+  queueBatchAnchorItemId = normalizedId;
+  renderQueue();
+}
+
 async function saveQueueRuntimeState(active) {
   const normalizedQueue = loadQueue();
   normalizedQueue.runtime = {
@@ -425,20 +753,149 @@ function requestQueueStopAfterCurrent() {
   return true;
 }
 
-function setQueueControlsDisabled(disabled) {
+function updateQueueSecondaryRow() {
+  const row = document.getElementById('queueSecondaryRow');
+  const autoCreateLabel = document.getElementById('queueAutoCreateSetLabel');
+  const moveHint = document.getElementById('queueMoveHint');
+  if (!row) return;
+  const showAutoCreate = Boolean(autoCreateLabel && !autoCreateLabel.hidden);
+  const showMoveHint = Boolean(moveHint && !moveHint.hidden);
+  row.hidden = !showAutoCreate && !showMoveHint;
+}
+
+function getQueueAutoCreateSetUiState() {
+  const selectedPaths = typeof getSelectedCsvPaths === 'function' ? getSelectedCsvPaths() : [];
+  const wfToggle = document.getElementById('enableWF');
+  const wfEnabled = Boolean(wfToggle && wfToggle.checked && !wfToggle.disabled);
+  const selectedCount = selectedPaths.length;
+  return {
+    visible: wfEnabled,
+    disabled: wfEnabled && selectedCount <= 1,
+    eligible: wfEnabled && selectedCount > 1,
+  };
+}
+
+function readQueueAutoCreateSetStoredPreference(input) {
+  const value = String(input?.dataset?.preference || '').trim();
+  if (value === '1') return true;
+  if (value === '0') return false;
+  return null;
+}
+
+function writeQueueAutoCreateSetStoredPreference(input, value) {
+  if (!input) return;
+  if (typeof value !== 'boolean') {
+    delete input.dataset.preference;
+    return;
+  }
+  input.dataset.preference = value ? '1' : '0';
+}
+
+function syncQueueAutoCreateSetUi(options = {}) {
+  const autoCreateLabel = document.getElementById('queueAutoCreateSetLabel');
+  const autoCreateInput = document.getElementById('queueAutoCreateSet');
+  if (!autoCreateLabel || !autoCreateInput) return;
+
+  if (options.resetPreference) {
+    writeQueueAutoCreateSetStoredPreference(autoCreateInput, null);
+  }
+  if (typeof options.forceValue === 'boolean') {
+    writeQueueAutoCreateSetStoredPreference(autoCreateInput, options.forceValue);
+  }
+
+  const uiState = getQueueAutoCreateSetUiState();
+  autoCreateLabel.hidden = !uiState.visible;
+  autoCreateLabel.classList.toggle('is-disabled', uiState.disabled);
+  autoCreateInput.disabled = uiState.disabled;
+
+  if (!uiState.visible) {
+    autoCreateInput.checked = false;
+    updateQueueSecondaryRow();
+    return;
+  }
+
+  if (uiState.disabled) {
+    autoCreateInput.checked = false;
+    updateQueueSecondaryRow();
+    return;
+  }
+
+  let storedPreference = readQueueAutoCreateSetStoredPreference(autoCreateInput);
+  if (storedPreference === null) {
+    storedPreference = true;
+    writeQueueAutoCreateSetStoredPreference(autoCreateInput, true);
+  }
+  autoCreateInput.checked = storedPreference;
+  updateQueueSecondaryRow();
+}
+
+function getQueueAutoCreateSetPreference() {
+  const autoCreateLabel = document.getElementById('queueAutoCreateSetLabel');
+  const autoCreateInput = document.getElementById('queueAutoCreateSet');
+  if (!autoCreateLabel || autoCreateLabel.hidden || !autoCreateInput || autoCreateInput.disabled) return false;
+  return Boolean(autoCreateInput.checked);
+}
+
+function updateQueueToolbarState() {
+  const queue = getQueueForUi();
+  const items = Array.isArray(queue.items) ? queue.items : [];
+  const hasItems = items.length > 0;
+  const hasStoredItems = hasPersistedQueueItems();
   const addBtn = document.getElementById('addToQueueBtn');
   const loadBtn = document.getElementById('loadQueueBtn');
   const clearBtn = document.getElementById('clearQueueBtn');
-  if (addBtn) addBtn.disabled = Boolean(disabled);
-  if (loadBtn) loadBtn.disabled = Boolean(disabled);
-  if (clearBtn) clearBtn.disabled = Boolean(disabled);
+  const batchBtn = document.getElementById('batchQueueBtn');
+  const moveBtn = document.getElementById('moveQueueBtn');
+  const moveHint = document.getElementById('queueMoveHint');
+
+  const batchSelectedIds = getOrderedQueueBatchSelectedIds(queue);
+  const moveTargetIds = getQueueMoveableSelectionIds(queue);
+  const canMove = !queueRunning
+    && !queueMoveMode
+    && moveTargetIds.length > 0
+    && moveTargetIds.every((itemId) => isQueueItemPending(getQueueItemById(itemId, queue)));
+
+  if (addBtn) {
+    addBtn.disabled = queueRunning;
+  }
+  if (loadBtn) {
+    loadBtn.style.display = queueRunning ? 'none' : 'inline-block';
+    loadBtn.disabled = queueRunning || !hasStoredItems || queueUiLoaded;
+  }
+  if (clearBtn) {
+    clearBtn.style.display = hasItems ? 'inline-block' : 'none';
+    clearBtn.textContent = queueBatchMode ? 'Delete' : 'Clear';
+    clearBtn.disabled = queueRunning || queueMoveMode || (
+      queueBatchMode ? batchSelectedIds.length === 0 : !hasItems
+    );
+  }
+  if (batchBtn) {
+    batchBtn.style.display = hasItems ? 'inline-block' : 'none';
+    batchBtn.disabled = queueRunning || queueMoveMode || !hasItems;
+    batchBtn.classList.toggle('active', queueBatchMode);
+  }
+  if (moveBtn) {
+    moveBtn.style.display = hasItems ? 'inline-block' : 'none';
+    moveBtn.disabled = !canMove;
+    moveBtn.classList.toggle('active', queueMoveMode);
+  }
+  if (moveHint) {
+    moveHint.hidden = !queueMoveMode;
+  }
 
   const removeButtons = document.querySelectorAll('.queue-item-remove');
   removeButtons.forEach((btn) => {
     const isLocked = btn.dataset.locked === '1';
-    btn.disabled = Boolean(disabled) || isLocked;
+    btn.disabled = queueRunning || isLocked;
     btn.style.visibility = btn.disabled ? 'hidden' : 'visible';
   });
+
+  updateQueueSecondaryRow();
+}
+
+function setQueueControlsDisabled(disabled) {
+  void disabled;
+  updateQueueToolbarState();
 }
 
 function requestServerCancelBestEffort(runId = '') {
@@ -446,6 +903,181 @@ function requestServerCancelBestEffort(runId = '') {
   return cancelOptimizationRequest(runId).catch((error) => {
     console.warn('Queue cancel: failed to notify server cancel endpoint', error);
   });
+}
+
+function startQueueMoveMode() {
+  if (queueRunning || queueMoveMode) return false;
+  const currentQueue = loadQueue();
+  const selectionIds = getQueueMoveableSelectionIds(currentQueue);
+  if (!selectionIds.length) return false;
+
+  const normalizedSelectionIds = selectionIds
+    .map((itemId) => String(itemId || '').trim())
+    .filter(Boolean);
+  const allPending = normalizedSelectionIds.every((itemId) => {
+    return isQueueItemPending(getQueueItemById(itemId, currentQueue));
+  });
+  if (!allPending) {
+    alert('Move works only for pending queue items.');
+    return false;
+  }
+
+  queueMoveMode = true;
+  queueMoveSelectionIds = getPendingQueueItemIds(currentQueue)
+    .filter((itemId) => normalizedSelectionIds.includes(itemId));
+  queueMoveOriginalPendingOrder = getPendingQueueItemIds(currentQueue);
+  queueMoveInsertionIndex = getInitialQueueMoveInsertionIndex(currentQueue, queueMoveSelectionIds);
+  renderQueue();
+  return true;
+}
+
+async function confirmQueueMoveMode() {
+  if (!queueMoveMode) return false;
+  const currentQueue = loadQueue();
+  const currentPendingOrder = getPendingQueueItemIds(currentQueue);
+  const originalOrder = Array.isArray(queueMoveOriginalPendingOrder)
+    ? queueMoveOriginalPendingOrder.slice()
+    : [];
+  const changed = originalOrder.length === currentPendingOrder.length
+    ? originalOrder.some((itemId, index) => itemId !== currentPendingOrder[index])
+    : true;
+
+  clearQueueMoveState();
+  if (!changed) {
+    renderQueue();
+    return true;
+  }
+
+  try {
+    await saveQueue(currentQueue);
+    renderQueue();
+    updateRunButtonState();
+    return true;
+  } catch (error) {
+    alert(error?.message || 'Failed to save new queue order.');
+    return false;
+  }
+}
+
+function cancelQueueMoveMode() {
+  if (!queueMoveMode) return false;
+  const currentQueue = loadQueue();
+  const originalPendingOrder = Array.isArray(queueMoveOriginalPendingOrder)
+    ? queueMoveOriginalPendingOrder.slice()
+    : [];
+  if (originalPendingOrder.length) {
+    queueState = cloneQueueState({
+      ...currentQueue,
+      items: applyPendingOrderToQueueItems(currentQueue.items, originalPendingOrder),
+    });
+    queueStateLoaded = true;
+  }
+  clearQueueMoveState();
+  renderQueue();
+  return true;
+}
+
+async function deleteSelectedQueueItems() {
+  if (queueRunning || !queueBatchMode) return false;
+  const queue = loadQueue();
+  const selectedIds = new Set(getOrderedQueueBatchSelectedIds(queue));
+  if (!selectedIds.size) return false;
+
+  queue.items = (Array.isArray(queue.items) ? queue.items : [])
+    .filter((item) => !selectedIds.has(String(item?.id || '').trim()));
+  await saveQueue(queue);
+  syncQueueUiEphemeralState(loadQueue());
+  renderQueue();
+  updateRunButtonState();
+  return true;
+}
+
+async function handleQueueClearAction() {
+  if (queueRunning) return false;
+  await ensureQueueStateLoaded();
+  const queue = loadQueue();
+
+  if (queueBatchMode) {
+    const selectedIds = getOrderedQueueBatchSelectedIds(queue);
+    if (!selectedIds.length) return false;
+    const confirmed = window.confirm(
+      selectedIds.length > 1
+        ? `Delete ${selectedIds.length} selected queue items?`
+        : 'Delete selected queue item?'
+    );
+    if (!confirmed) return false;
+    return deleteSelectedQueueItems();
+  }
+
+  if (!queue.items.length) return false;
+  const confirmed = window.confirm('Clear all items from the queue?');
+  if (!confirmed) return false;
+  await clearQueue();
+  return true;
+}
+
+function bindQueueUiEventsOnce() {
+  if (queueUiEventsBound) return;
+
+  const batchBtn = document.getElementById('batchQueueBtn');
+  if (batchBtn) {
+    batchBtn.addEventListener('click', () => {
+      toggleQueueBatchMode();
+    });
+  }
+
+  const moveBtn = document.getElementById('moveQueueBtn');
+  if (moveBtn) {
+    moveBtn.addEventListener('click', () => {
+      startQueueMoveMode();
+    });
+  }
+
+  const autoCreateInput = document.getElementById('queueAutoCreateSet');
+  if (autoCreateInput) {
+    autoCreateInput.addEventListener('change', () => {
+      if (!autoCreateInput.disabled) {
+        writeQueueAutoCreateSetStoredPreference(autoCreateInput, autoCreateInput.checked);
+      }
+      updateQueueSecondaryRow();
+    });
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.defaultPrevented) return;
+
+    if (event.key === 'Escape') {
+      if (queueMoveMode) {
+        event.preventDefault();
+        cancelQueueMoveMode();
+        return;
+      }
+      if (queueBatchMode) {
+        event.preventDefault();
+        exitQueueBatchMode();
+      }
+      return;
+    }
+
+    if (!queueMoveMode || isTypingElement(document.activeElement)) return;
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void confirmQueueMoveMode();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveQueueSelectionToIndex(queueMoveInsertionIndex - 1);
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      moveQueueSelectionToIndex(queueMoveInsertionIndex + 1);
+    }
+  });
+
+  queueUiEventsBound = true;
 }
 
 function collectQueueSources() {
@@ -981,6 +1613,12 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
 
   await applyQueueDatabaseTarget(item.dbTarget);
   if (!isCurrentRequest()) return false;
+  const studySetState = buildQueueStudySetState(item);
+  if (studySetState.configured) {
+    syncQueueAutoCreateSetUi({ forceValue: Boolean(studySetState.autoCreate) });
+  } else {
+    syncQueueAutoCreateSetUi({ resetPreference: true });
+  }
   refreshQueueFormUiAfterApply();
 
   const optimizerResultsEl = document.getElementById('optimizerResults');
@@ -991,6 +1629,212 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
   }
 
   return true;
+}
+
+function extractQueueStrategyShortLabel(item) {
+  const strategyId = String(item?.strategyId || '').trim();
+  const match = strategyId.match(/^s(\d+)_/i);
+  if (match) {
+    return `S${String(match[1]).padStart(2, '0')}`;
+  }
+  const strategyName = String(item?.strategyConfig?.name || '').trim();
+  return strategyName ? strategyName.split(/\s+/)[0] : 'Study';
+}
+
+function normalizeQueueTimeframeToken(rawToken) {
+  const token = String(rawToken || '').trim();
+  if (!token) return '';
+
+  const numeric = token.match(/^(\d+)$/);
+  if (numeric) {
+    const minutes = Number(numeric[1]);
+    if (!Number.isFinite(minutes)) return token;
+    if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}D`;
+    if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60}h`;
+    return `${minutes}m`;
+  }
+
+  const lower = token.toLowerCase();
+  const withMinutes = lower.match(/^(\d+)m$/);
+  if (withMinutes) {
+    const minutes = Number(withMinutes[1]);
+    if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}D`;
+    if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60}h`;
+    return `${minutes}m`;
+  }
+  if (/^\d+h$/i.test(token)) return lower;
+  if (/^\d+d$/i.test(token)) return `${token.slice(0, -1)}D`;
+  if (/^\d+w$/i.test(token)) return lower;
+  return token;
+}
+
+function extractQueueTimeframeLabel(item) {
+  const firstSource = getQueueSources(item)[0];
+  const fileName = getPathFileName(firstSource?.path || '');
+  if (!fileName) return 'TF';
+
+  const match = fileName.match(/,\s*([^,\s]+)\s+\d{4}[.\-]/);
+  if (match) {
+    return normalizeQueueTimeframeToken(match[1]) || 'TF';
+  }
+
+  const fallback = fileName.split(',')[1] || '';
+  const token = fallback.trim().split(/\s+/)[0] || '';
+  return normalizeQueueTimeframeToken(token) || 'TF';
+}
+
+function formatQueueSamplerLabel(rawSampler) {
+  const sampler = String(rawSampler || '').trim().toLowerCase();
+  if (sampler === 'nsga2') return 'NSGA-2';
+  if (sampler === 'nsga3') return 'NSGA-3';
+  if (sampler === 'tpe') return 'TPE';
+  if (sampler === 'random') return 'Random';
+  return sampler ? sampler.toUpperCase() : 'TPE';
+}
+
+function formatQueueCompactTrialCount(rawCount) {
+  const count = Number(rawCount);
+  if (!Number.isFinite(count) || count <= 0) return '0';
+  if (count >= 1000) {
+    const compact = count / 1000;
+    return Number.isInteger(compact) ? `${compact}k` : `${compact.toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return String(Math.round(count));
+}
+
+function buildQueueAutoSetBudgetLabel(item) {
+  const budgetMode = String(item?.config?.optuna_budget_mode || 'trials').trim().toLowerCase();
+  if (budgetMode === 'time') {
+    const minutes = Math.max(1, Math.round(Number(item?.config?.optuna_time_limit || 3600) / 60));
+    return `${minutes}m`;
+  }
+  if (budgetMode === 'convergence') {
+    const convergence = Math.max(1, Math.round(Number(item?.config?.optuna_convergence || 50)));
+    return `conv${convergence}`;
+  }
+  return formatQueueCompactTrialCount(item?.config?.optuna_n_trials || 0);
+}
+
+function buildQueueAutoSetModeLabel(item) {
+  const isPeriod = Math.max(1, Math.round(Number(item?.wfa?.isPeriodDays || 0))) || '?';
+  const oosPeriod = Math.max(1, Math.round(Number(item?.wfa?.oosPeriodDays || 0))) || '?';
+  return `${item?.wfa?.adaptiveMode ? 'WFA-A' : 'WFA-F'} ${isPeriod}/${oosPeriod}`;
+}
+
+function buildQueueStudySetState(item, patch = {}) {
+  return normalizeQueueStudySet({
+    ...(item?.studySet || {}),
+    ...(patch || {}),
+  }, item);
+}
+
+function shouldQueueItemAutoCreateSet(item) {
+  return Boolean(
+    item
+    && item.mode === 'wfa'
+    && getQueueSources(item).length > 1
+    && item.studySet
+    && item.studySet.autoCreate
+  );
+}
+
+function buildQueueStudySetNameLegacy(item) {
+  const itemIndex = Number(item?.index);
+  const queueLabel = Number.isFinite(itemIndex) && itemIndex > 0 ? `#${Math.round(itemIndex)}` : '#?';
+  const strategyLabel = extractQueueStrategyShortLabel(item);
+  const timeframeLabel = extractQueueTimeframeLabel(item);
+  const samplerLabel = formatQueueSamplerLabel(item?.config?.sampler);
+  const initialTrials = Math.max(0, Math.round(Number(item?.config?.n_startup_trials || 0)));
+  const budgetLabel = buildQueueAutoSetBudgetLabel(item);
+  const modeLabel = buildQueueAutoSetModeLabel(item);
+  return [
+    queueLabel,
+    strategyLabel,
+    timeframeLabel,
+    `${samplerLabel} (${initialTrials})`,
+    budgetLabel,
+    modeLabel,
+  ].join(' · ');
+}
+
+function buildQueueStudySetName(item) {
+  const itemIndex = Number(item?.index);
+  const queueLabel = Number.isFinite(itemIndex) && itemIndex > 0 ? `#${Math.round(itemIndex)}` : '#?';
+  const strategyLabel = extractQueueStrategyShortLabel(item);
+  const timeframeLabel = extractQueueTimeframeLabel(item);
+  const samplerLabel = formatQueueSamplerLabel(item?.config?.sampler);
+  const initialTrials = Math.max(0, Math.round(Number(item?.config?.n_startup_trials || 0)));
+  const budgetLabel = buildQueueAutoSetBudgetLabel(item);
+  const modeLabel = buildQueueAutoSetModeLabel(item);
+  return [
+    queueLabel,
+    strategyLabel,
+    timeframeLabel,
+    `${samplerLabel} (${initialTrials})`,
+    budgetLabel,
+    modeLabel,
+  ].join(' \u00B7 ');
+}
+
+async function finalizeQueueStudySetIfNeeded(item, studySetState) {
+  const baseState = buildQueueStudySetState(item, studySetState);
+  if (!shouldQueueItemAutoCreateSet({ ...item, studySet: baseState })) {
+    return { studySet: baseState, created: false, warning: false };
+  }
+  if (baseState.createdSetId) {
+    return { studySet: baseState, created: false, warning: false };
+  }
+
+  const completedStudyIds = uniqueStringValues(baseState.completedStudyIds);
+  const lastUpdatedAt = new Date().toISOString();
+  if (completedStudyIds.length < 2) {
+    return {
+      studySet: buildQueueStudySetState(item, {
+        ...baseState,
+        configured: true,
+        status: 'skipped',
+        error: '',
+        lastUpdatedAt,
+      }),
+      created: false,
+      warning: false,
+    };
+  }
+
+  const requestedName = buildQueueStudySetName(item);
+  try {
+    const createdSet = await createAnalyticsSetRequest(requestedName, completedStudyIds, {
+      colorToken: 'lavender',
+    });
+    return {
+      studySet: buildQueueStudySetState(item, {
+        ...baseState,
+        configured: true,
+        createdSetId: Number(createdSet?.id) || null,
+        createdSetName: String(createdSet?.name || requestedName).trim(),
+        status: 'created',
+        error: '',
+        lastUpdatedAt,
+      }),
+      created: true,
+      warning: false,
+    };
+  } catch (error) {
+    const message = String(error?.message || 'Failed to create study set.').trim();
+    console.warn('Queue study set auto-create failed for item #' + (item?.index || '?'), error);
+    return {
+      studySet: buildQueueStudySetState(item, {
+        ...baseState,
+        configured: true,
+        status: 'error',
+        error: message,
+        lastUpdatedAt,
+      }),
+      created: false,
+      warning: true,
+      warningMessage: message,
+    };
+  }
 }
 
 function collectQueueItem() {
@@ -1061,6 +1905,17 @@ function collectQueueItem() {
     successCount: 0,
     failureCount: 0
   };
+
+  item.studySet = buildQueueStudySetState(item, {
+    configured: true,
+    autoCreate: getQueueAutoCreateSetPreference(),
+    completedStudyIds: [],
+    createdSetId: null,
+    createdSetName: '',
+    status: '',
+    error: '',
+    lastUpdatedAt: '',
+  });
 
   if (mode === 'wfa') {
     const adaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
@@ -1142,7 +1997,11 @@ async function addToQueue(item) {
   queue.items.push(item);
   queue.nextIndex = Math.max(queue.nextIndex || 1, item.index + 1);
   await saveQueue(queue);
+  if (!queueBatchMode) {
+    setQueueFocusedItemId(item.id);
+  }
   renderQueue();
+  syncQueueAutoCreateSetUi();
   updateRunButtonState();
   return true;
 }
@@ -1158,6 +2017,7 @@ async function removeFromQueue(itemId) {
     return true;
   });
   await saveQueue(queue);
+  syncQueueUiEphemeralState(loadQueue());
   renderQueue();
   updateRunButtonState();
 }
@@ -1169,6 +2029,7 @@ async function clearQueue() {
   queue.items = [];
   // Empty queue resets label numbering to keep UX predictable.
   await saveQueue(queue);
+  syncQueueUiEphemeralState(loadQueue());
   renderQueue();
   updateRunButtonState();
 }
@@ -1223,6 +2084,22 @@ function buildQueueTooltip(item) {
     lines.push('Objectives: ' + objectiveNames.join(', '));
   }
 
+  if (shouldQueueItemAutoCreateSet(item)) {
+    const studySet = buildQueueStudySetState(item);
+    lines.push('Auto-create Set: On');
+    lines.push('Set Name: ' + (studySet.createdSetName || buildQueueStudySetName(item)));
+    if (studySet.createdSetName) {
+      lines.push(`Set Created: ${studySet.createdSetName}`);
+    } else if (studySet.status === 'error' && studySet.error) {
+      lines.push(`Set Error: ${studySet.error}`);
+    } else if (studySet.status === 'skipped') {
+      lines.push('Set Status: Skipped');
+    }
+    if (studySet.completedStudyIds.length) {
+      lines.push(`Successful Studies: ${studySet.completedStudyIds.length}`);
+    }
+  }
+
   const constraints = Array.isArray(item.config?.constraints) ? item.config.constraints : [];
   const enabledConstraints = constraints.filter((constraint) => constraint && constraint.enabled && constraint.threshold != null);
   if (enabledConstraints.length) {
@@ -1267,7 +2144,10 @@ function renderQueue() {
   const itemsList = document.getElementById('queueItemsList');
   const loadBtn = document.getElementById('loadQueueBtn');
   const clearBtn = document.getElementById('clearQueueBtn');
+  const batchBtn = document.getElementById('batchQueueBtn');
+  const moveBtn = document.getElementById('moveQueueBtn');
   const queue = getQueueForUi();
+  syncQueueUiEphemeralState(queue);
   const hasStoredItems = hasPersistedQueueItems();
 
   if (loadBtn) {
@@ -1289,19 +2169,25 @@ function renderQueue() {
       itemsList.innerHTML = '';
     }
     if (clearBtn) clearBtn.style.display = 'none';
+    if (batchBtn) batchBtn.style.display = 'none';
+    if (moveBtn) moveBtn.style.display = 'none';
     setQueueControlsDisabled(queueRunning);
     return;
   }
 
   if (emptyState) emptyState.style.display = 'none';
   if (clearBtn) clearBtn.style.display = 'inline-block';
+  if (batchBtn) batchBtn.style.display = 'inline-block';
+  if (moveBtn) moveBtn.style.display = 'inline-block';
   if (!itemsList) return;
 
   itemsList.innerHTML = '';
   itemsList.style.display = 'flex';
 
   const fragment = document.createDocumentFragment();
+  const moveSelectionSet = getQueueMoveSelectionSet();
   queue.items.forEach((item) => {
+    const itemId = String(item.id || '').trim();
     const row = document.createElement('div');
     row.className = 'queue-item';
     row.classList.add('queue-item-clickable');
@@ -1309,13 +2195,29 @@ function renderQueue() {
     if (finalState) {
       row.classList.add(finalState);
     }
+    if (!queueBatchMode && itemId && itemId === queueFocusedItemId) {
+      row.classList.add('queue-item-focused');
+    }
+    if (queueBatchMode && queueBatchSelectedItemIds.has(itemId)) {
+      row.classList.add('queue-item-batch-selected');
+    }
+    if (queueMoveMode && moveSelectionSet.has(itemId)) {
+      row.classList.add('queue-item-moving');
+    }
     row.tabIndex = 0;
     row.setAttribute('role', 'button');
     row.setAttribute('aria-label', 'Load settings from queue item #' + (item.index || '?'));
     row.dataset.queueId = item.id;
     row.title = buildQueueTooltip(item);
 
-    const handleLoadQueueItem = () => {
+    const handleQueueRowClick = (event) => {
+      if (queueMoveMode) return;
+      if (queueBatchMode) {
+        handleQueueBatchSelection(itemId, event, queue);
+        return;
+      }
+
+      setQueueFocusedItemId(itemId);
       const runningNow = queueRunning;
       const requestId = ++queueItemLoadRequestId;
       void loadQueueItemIntoForm(item.id, {
@@ -1329,13 +2231,20 @@ function renderQueue() {
           return;
         }
         showQueueError(error?.message || 'Failed to load queue item settings.');
+      }).finally(() => {
+        renderQueue();
       });
     };
-    row.addEventListener('click', handleLoadQueueItem);
+    row.addEventListener('click', handleQueueRowClick);
+    row.addEventListener('mousedown', (event) => {
+      if (queueBatchMode || queueMoveMode) {
+        event.preventDefault();
+      }
+    });
     row.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
-      handleLoadQueueItem();
+      handleQueueRowClick(event);
     });
 
     const label = document.createElement('span');
@@ -1347,10 +2256,12 @@ function renderQueue() {
     removeBtn.className = 'queue-item-remove';
     removeBtn.setAttribute('aria-label', 'Remove from queue');
     removeBtn.innerHTML = '&times;';
-    if (finalState) {
+    if (queueMoveMode || finalState === 'running') {
       removeBtn.disabled = true;
       removeBtn.dataset.locked = '1';
       removeBtn.style.visibility = 'hidden';
+    } else {
+      removeBtn.dataset.locked = '0';
     }
     removeBtn.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1411,11 +2322,16 @@ function setQueueItemState(itemId, state) {
   const removeBtn = row.querySelector('.queue-item-remove');
   if (!removeBtn) return;
 
-  if (state === 'running' || state === 'completed' || state === 'failed' || state === 'skipped') {
+  if (state === 'running') {
     removeBtn.disabled = true;
     removeBtn.dataset.locked = '1';
     removeBtn.style.visibility = 'hidden';
+    return;
   }
+
+  removeBtn.dataset.locked = '0';
+  removeBtn.disabled = queueRunning;
+  removeBtn.style.visibility = queueRunning ? 'hidden' : 'visible';
 }
 
 function buildStrategySummary(item) {
@@ -1477,7 +2393,12 @@ async function persistItemProgress(itemId, patch) {
   const item = queue.items.find((entry) => entry.id === itemId);
   if (!item) return;
 
-  Object.assign(item, patch || {});
+  const normalizedPatch = patch && typeof patch === 'object' ? { ...patch } : {};
+  if (Object.prototype.hasOwnProperty.call(normalizedPatch, 'studySet')) {
+    item.studySet = buildQueueStudySetState(item, normalizedPatch.studySet);
+    delete normalizedPatch.studySet;
+  }
+  Object.assign(item, normalizedPatch);
   await saveQueue(queue);
 }
 
@@ -1542,6 +2463,8 @@ async function runQueue() {
   let fullySucceededItems = 0;
   let partiallySucceededItems = 0;
   let failedItems = 0;
+  let createdStudySets = 0;
+  let studySetWarnings = 0;
   let aborted = false;
   let lastStudyId = '';
   let lastSummary = null;
@@ -1572,6 +2495,7 @@ async function runQueue() {
       const totalSources = sources.length;
       let itemSuccess = Number.isFinite(Number(item.successCount)) ? Math.max(0, Math.floor(Number(item.successCount))) : 0;
       let itemFailure = Number.isFinite(Number(item.failureCount)) ? Math.max(0, Math.floor(Number(item.failureCount))) : 0;
+      let studySetState = buildQueueStudySetState(item);
 
       if (totalSources === 0) {
         setQueueItemState(item.id, 'failed');
@@ -1671,7 +2595,16 @@ async function runQueue() {
           }
 
           itemSuccess += 1;
-          lastStudyId = data && data.study_id ? data.study_id : lastStudyId;
+          const currentStudyId = String(data?.study_id || '').trim();
+          if (currentStudyId) {
+            studySetState = buildQueueStudySetState(item, {
+              ...studySetState,
+              configured: true,
+              completedStudyIds: uniqueStringValues([...studySetState.completedStudyIds, currentStudyId]),
+              lastUpdatedAt: new Date().toISOString(),
+            });
+            lastStudyId = currentStudyId;
+          }
           lastSummary = data && data.summary ? data.summary : lastSummary;
           lastDataPath = data && data.data_path ? data.data_path : (sourceName || lastDataPath);
           inFlightRunId = '';
@@ -1688,11 +2621,15 @@ async function runQueue() {
         }
 
         processedCursor = sourceIndex + 1;
-        await persistItemProgress(item.id, {
+        const progressPatch = {
           sourceCursor: processedCursor,
           successCount: itemSuccess,
           failureCount: itemFailure
-        });
+        };
+        if (studySetState.completedStudyIds.length || studySetState.status || studySetState.error) {
+          progressPatch.studySet = studySetState;
+        }
+        await persistItemProgress(item.id, progressPatch);
 
         if (queueStopRequested) {
           stopAfterCurrent = true;
@@ -1728,10 +2665,18 @@ async function runQueue() {
             failedItems += 1;
           }
 
+          if (finalState === 'completed') {
+            const studySetResult = await finalizeQueueStudySetIfNeeded(item, studySetState);
+            studySetState = studySetResult.studySet;
+            if (studySetResult.created) createdStudySets += 1;
+            if (studySetResult.warning) studySetWarnings += 1;
+          }
+
           await finalizeQueueItem(item.id, finalState, {
             sourceCursor: processedCursor,
             successCount: itemSuccess,
-            failureCount: itemFailure
+            failureCount: itemFailure,
+            studySet: studySetState
           });
         }
         break;
@@ -1751,6 +2696,13 @@ async function runQueue() {
         failedItems += 1;
       }
 
+      if (finalState === 'completed') {
+        const studySetResult = await finalizeQueueStudySetIfNeeded(item, studySetState);
+        studySetState = studySetResult.studySet;
+        if (studySetResult.created) createdStudySets += 1;
+        if (studySetResult.warning) studySetWarnings += 1;
+      }
+
       if (lastStudyId) {
         updateOptimizationState({
           status: 'running',
@@ -1765,7 +2717,8 @@ async function runQueue() {
       await finalizeQueueItem(item.id, finalState, {
         sourceCursor: processedCursor,
         successCount: itemSuccess,
-        failureCount: itemFailure
+        failureCount: itemFailure,
+        studySet: studySetState
       });
     }
 
@@ -1791,6 +2744,17 @@ async function runQueue() {
           + ', Partial: ' + partiallySucceededItems
           + ', Failed: ' + failedItems + '.'
         );
+      }
+
+      const studySetSummary = [];
+      if (createdStudySets > 0) {
+        studySetSummary.push('Study Sets created: ' + createdStudySets);
+      }
+      if (studySetWarnings > 0) {
+        studySetSummary.push('Set warnings: ' + studySetWarnings);
+      }
+      if (studySetSummary.length) {
+        optimizerResultsEl.textContent += '\n' + studySetSummary.join(', ') + '.';
       }
     }
 
@@ -1852,11 +2816,13 @@ async function runQueue() {
 
 async function initQueue() {
   queueUiLoaded = false;
+  bindQueueUiEventsOnce();
   await ensureQueueStateLoaded();
   const runtimeState = loadQueueRuntimeState();
   if (runtimeState.active && hasPersistedQueueItems()) {
     queueUiLoaded = true;
   }
+  syncQueueAutoCreateSetUi();
   renderQueue();
   updateRunButtonState();
 }

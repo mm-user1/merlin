@@ -280,6 +280,31 @@ def test_study_sets_color_token_can_be_cleared():
     assert cleared["color_token"] is None
 
 
+def test_study_sets_rename_auto_suffixes_duplicate_names():
+    study_id = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    first = create_study_set("Rename Duplicate", [study_id])
+    second = create_study_set("Rename Duplicate", [study_id])
+    target = create_study_set("Rename Target", [study_id])
+
+    updated = update_study_set(target["id"], name="Rename Duplicate")
+    assert updated["name"] == "Rename Duplicate (2)"
+
+    same_name = update_study_set(second["id"], name="Rename Duplicate")
+    assert same_name["name"] == "Rename Duplicate (1)"
+
+    by_id = {entry["id"]: entry for entry in list_study_sets()}
+    assert by_id[first["id"]]["name"] == "Rename Duplicate"
+    assert by_id[second["id"]]["name"] == "Rename Duplicate (1)"
+    assert by_id[target["id"]]["name"] == "Rename Duplicate (2)"
+
+
 def test_study_sets_bulk_color_update_and_delete():
     first_study = save_wfa_study_to_db(
         wf_result=_build_dummy_wfa_result(),

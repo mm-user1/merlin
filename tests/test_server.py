@@ -586,6 +586,63 @@ def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
     assert not queue_file.exists()
 
 
+def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch):
+    queue_file = _patch_queue_storage_path(monkeypatch, "queue_extended_metadata.json")
+
+    payload = {
+        "items": [
+            {
+                "id": "q_test_meta",
+                "index": 73,
+                "label": "#73 example",
+                "mode": "wfa",
+                "finalState": "completed",
+                "dbTarget": "analytics_01.sqlite",
+                "sources": [
+                    {"type": "path", "path": r"C:\data\alpha_30m.csv"},
+                    {"type": "path", "path": r"C:\data\beta_30m.csv"},
+                ],
+                "sourceCursor": 2,
+                "successCount": 2,
+                "failureCount": 0,
+                "studySet": {
+                    "autoCreate": True,
+                    "completedStudyIds": ["study_a", "study_b"],
+                    "createdSetId": 11,
+                    "createdSetName": "#73 · S03 · 30m · NSGA-2 (357) · 1.5k · WFA-F 60/30",
+                    "status": "created",
+                    "error": "",
+                    "lastUpdatedAt": "2026-03-12T10:15:00Z",
+                },
+                "uiSnapshot": {
+                    "selectedTab": "optimizer",
+                    "dbTarget": {"value": "analytics_01.sqlite"},
+                },
+            }
+        ],
+        "nextIndex": 74,
+        "runtime": {"active": False, "updatedAt": 0},
+    }
+
+    response_put = client.put("/api/queue", json=payload)
+    assert response_put.status_code == 200
+    stored = response_put.get_json()
+    assert stored["items"][0]["finalState"] == "completed"
+    assert stored["items"][0]["studySet"]["createdSetId"] == 11
+    assert stored["items"][0]["studySet"]["completedStudyIds"] == ["study_a", "study_b"]
+    assert stored["items"][0]["uiSnapshot"]["dbTarget"]["value"] == "analytics_01.sqlite"
+
+    response_get = client.get("/api/queue")
+    assert response_get.status_code == 200
+    loaded = response_get.get_json()
+    assert loaded["items"][0]["studySet"]["createdSetName"].startswith("#73")
+    assert loaded["items"][0]["dbTarget"] == "analytics_01.sqlite"
+
+    on_disk = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert on_disk["items"][0]["studySet"]["status"] == "created"
+    assert on_disk["items"][0]["uiSnapshot"]["selectedTab"] == "optimizer"
+
+
 def test_queue_api_rejects_non_object_payload(client):
     response = client.put("/api/queue", json=["not", "an", "object"])
     assert response.status_code == 400
@@ -1713,6 +1770,50 @@ def test_analytics_sets_create_auto_suffixes_duplicate_names(client):
             "Duplicate Set",
             "Duplicate Set (1)",
             "Duplicate Set (2)",
+        ]
+
+
+def test_analytics_sets_rename_auto_suffixes_duplicate_names(client):
+    with _temporary_active_db(f"analytics_sets_rename_duplicates_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_rename_dup_1",
+            study_name="WFA_RENAME_DUP_1",
+            optimization_mode="wfa",
+        )
+
+        first = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Duplicate", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert first.status_code == 201
+        assert first.get_json()["name"] == "Rename Duplicate"
+
+        second = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Duplicate", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert second.status_code == 201
+        assert second.get_json()["name"] == "Rename Duplicate (1)"
+
+        target = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Target", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert target.status_code == 201
+        target_id = target.get_json()["id"]
+
+        rename_response = client.put(
+            f"/api/analytics/sets/{target_id}",
+            json={"name": "Rename Duplicate"},
+        )
+        assert rename_response.status_code == 200
+        assert rename_response.get_json()["ok"] is True
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert [item["name"] for item in payload["sets"]] == [
+            "Rename Duplicate",
+            "Rename Duplicate (1)",
+            "Rename Duplicate (2)",
         ]
 
 
