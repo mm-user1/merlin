@@ -53,6 +53,8 @@ class WFConfig:
     cusum_threshold: float = 5.0
     dd_threshold_multiplier: float = 1.5
     inactivity_multiplier: float = 5.0
+    cooldown_enabled: bool = False
+    cooldown_days: int = 15
 
 
 @dataclass
@@ -158,6 +160,8 @@ class WindowResult:
     cusum_threshold: Optional[float] = None
     dd_threshold: Optional[float] = None
     oos_actual_days: Optional[float] = None
+    cooldown_days_applied: Optional[float] = None
+    oos_elapsed_days: Optional[float] = None
 
 
 @dataclass
@@ -1471,6 +1475,33 @@ class WalkForwardEngine:
             trigger_time,
         )
 
+    def _resolve_adaptive_roll_end(
+        self,
+        trigger_result: TriggerResult,
+        oos_actual_end: pd.Timestamp,
+        trading_end: pd.Timestamp,
+    ) -> Tuple[pd.Timestamp, Optional[float]]:
+        cooldown_enabled = bool(getattr(self.config, "cooldown_enabled", False))
+        cooldown_days = int(getattr(self.config, "cooldown_days", 0) or 0)
+        cooldown_trigger = (
+            trigger_result.triggered
+            and trigger_result.trigger_type in {"cusum", "drawdown"}
+            and cooldown_enabled
+            and cooldown_days > 0
+        )
+        if not cooldown_trigger:
+            return oos_actual_end, None
+
+        cooldown_end = min(
+            oos_actual_end + pd.Timedelta(days=cooldown_days),
+            trading_end,
+        )
+        cooldown_days_applied = self._duration_days(oos_actual_end, cooldown_end)
+        if cooldown_days_applied <= 0.0:
+            return oos_actual_end, None
+
+        return cooldown_end, cooldown_days_applied
+
     def _run_adaptive_wfa(self, df: pd.DataFrame) -> tuple[WFResult, Optional[str]]:
         print("Starting Walk-Forward Analysis (adaptive mode)...")
         start_time = time.time()
@@ -1481,6 +1512,8 @@ class WalkForwardEngine:
             raise ValueError("min_oos_trades must be positive for adaptive WFA.")
         if self.config.check_interval_trades <= 0:
             raise ValueError("check_interval_trades must be positive for adaptive WFA.")
+        if self.config.cooldown_enabled and self.config.cooldown_days <= 0:
+            raise ValueError("cooldown_days must be positive when cooldown is enabled.")
 
         trading_start, trading_end = self._resolve_trading_bounds(df)
         trading_start_normalized = trading_start.normalize()
@@ -1591,6 +1624,12 @@ class WalkForwardEngine:
                 trigger_result=trigger_result,
                 oos_max_end=oos_max_end,
             )
+            adaptive_roll_end, cooldown_days_applied = self._resolve_adaptive_roll_end(
+                trigger_result=trigger_result,
+                oos_actual_end=oos_actual_end,
+                trading_end=trading_end,
+            )
+            oos_elapsed_days = self._duration_days(oos_start, adaptive_roll_end)
             oos_basic = metrics.calculate_basic(truncated_oos_result, initial_balance=100.0)
             oos_adv = metrics.calculate_advanced(truncated_oos_result, initial_balance=100.0)
 
@@ -1598,6 +1637,11 @@ class WalkForwardEngine:
                 print(
                     "Warning: Window "
                     f"{window_id} produced no OOS trades before trigger."
+                )
+            if cooldown_days_applied is not None:
+                print(
+                    "  Cooldown activated: "
+                    f"{cooldown_days_applied:.1f}d after {trigger_result.trigger_type} trigger"
                 )
 
             dense_stitch_windows.append(
@@ -1687,10 +1731,12 @@ class WalkForwardEngine:
                     cusum_threshold=trigger_result.cusum_threshold,
                     dd_threshold=trigger_result.dd_threshold,
                     oos_actual_days=trigger_result.oos_actual_days,
+                    cooldown_days_applied=cooldown_days_applied,
+                    oos_elapsed_days=oos_elapsed_days,
                 )
             )
 
-            shift = oos_actual_end - oos_start
+            shift = adaptive_roll_end - oos_start
             if shift <= pd.Timedelta(0):
                 shift = pd.Timedelta(days=1)
 
@@ -1883,7 +1929,9 @@ class WalkForwardEngine:
                 total_oos_profit = sum(w.oos_net_profit_pct for w in windows)
                 total_oos_days = 0.0
                 for window in windows:
-                    oos_days = getattr(window, "oos_actual_days", None)
+                    oos_days = getattr(window, "oos_elapsed_days", None)
+                    if oos_days is None:
+                        oos_days = getattr(window, "oos_actual_days", None)
                     if oos_days is None:
                         oos_days = self._duration_days(window.oos_start, window.oos_end)
                     if oos_days > 0:

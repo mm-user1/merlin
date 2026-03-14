@@ -783,6 +783,10 @@
     const adaptiveMode = adaptiveModeRaw === null || adaptiveModeRaw === undefined
       ? null
       : Boolean(adaptiveModeRaw);
+    const cooldownEnabledRaw = wfaSettings.cooldown_enabled;
+    const cooldownEnabled = cooldownEnabledRaw === null || cooldownEnabledRaw === undefined
+      ? null
+      : Boolean(cooldownEnabledRaw);
     const wfaRows = [
       {
         key: 'IS (days)',
@@ -799,6 +803,14 @@
       { key: 'Adaptive', val: adaptiveMode === null ? MISSING_TEXT : (adaptiveMode ? 'On' : 'Off') },
     ];
     if (adaptiveMode === true) {
+      if (cooldownEnabled) {
+        wfaRows.push({
+          key: 'Cooldown (days)',
+          val: toFiniteNumber(wfaSettings.cooldown_days) === null
+            ? '15d'
+            : `${Math.max(1, Math.round(Number(wfaSettings.cooldown_days)))}d`,
+        });
+      }
       wfaRows.push(
         {
           key: 'Max OOS (days)',

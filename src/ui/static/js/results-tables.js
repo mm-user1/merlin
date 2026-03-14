@@ -105,12 +105,17 @@ function setSettingRowVisible(rowId, visible) {
 }
 
 function setAdaptiveWfaRowsVisible(visible) {
+  setSettingRowVisible('wfa-cooldown-row', visible);
   setSettingRowVisible('wfa-max-oos-row', visible);
   setSettingRowVisible('wfa-min-trades-row', visible);
   setSettingRowVisible('wfa-check-interval-row', visible);
   setSettingRowVisible('wfa-cusum-row', visible);
   setSettingRowVisible('wfa-dd-mult-row', visible);
   setSettingRowVisible('wfa-inactivity-row', visible);
+}
+
+function setAdaptiveCooldownRowVisible(visible) {
+  setSettingRowVisible('wfa-cooldown-row', visible);
 }
 
 function renderOptunaTable(results) {
@@ -1243,8 +1248,20 @@ function updateSidebarSettings() {
     const adaptiveModeLabel = adaptiveModeRaw === null || adaptiveModeRaw === undefined
       ? '-'
       : (Boolean(adaptiveModeRaw) ? 'On' : 'Off');
+    const cooldownEnabledRaw = ResultsState.wfa.cooldownEnabled ?? ResultsState.wfa.cooldown_enabled;
+    const cooldownEnabled = cooldownEnabledRaw === null || cooldownEnabledRaw === undefined
+      ? null
+      : Boolean(cooldownEnabledRaw);
+    const cooldownDays = ResultsState.wfa.cooldownDays ?? ResultsState.wfa.cooldown_days;
     setText('wfa-adaptive-mode', adaptiveModeLabel);
     setAdaptiveWfaRowsVisible(Boolean(adaptiveModeRaw));
+    setAdaptiveCooldownRowVisible(Boolean(adaptiveModeRaw) && Boolean(cooldownEnabled));
+    setText(
+      'wfa-cooldown-days',
+      cooldownEnabled
+        ? `${Math.max(1, Math.round(Number(cooldownDays || 15)))}d`
+        : '-'
+    );
     setText('wfa-max-oos-days', ResultsState.wfa.maxOosPeriodDays ?? ResultsState.wfa.max_oos_period_days ?? '-');
     setText('wfa-min-trades', ResultsState.wfa.minOosTrades ?? ResultsState.wfa.min_oos_trades ?? '-');
     setText('wfa-check-interval', ResultsState.wfa.checkIntervalTrades ?? ResultsState.wfa.check_interval_trades ?? '-');
@@ -1274,6 +1291,7 @@ function updateSidebarSettings() {
     setElementVisible('wfa-progress-section', false);
     setElementVisible('wfa-settings-section', false);
     setAdaptiveWfaRowsVisible(true);
+    setAdaptiveCooldownRowVisible(true);
   }
 
   setText('strategy-name', ResultsState.strategy.name || ResultsState.strategyId || '-');

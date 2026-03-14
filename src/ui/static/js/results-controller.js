@@ -768,6 +768,7 @@ async function applyStudyPayload(data) {
   const config = study.config_json || {};
   const configWfa = config.wfa || {};
   const adaptiveModeRaw = study.adaptive_mode ?? configWfa.adaptive_mode ?? config.adaptive_mode;
+  const cooldownEnabledRaw = study.cooldown_enabled ?? configWfa.cooldown_enabled ?? config.cooldown_enabled;
   ResultsState.wfa = {
     postProcess: config.postProcess || {},
     isPeriodDays: study.is_period_days ?? configWfa.is_period_days ?? config.is_period_days ?? null,
@@ -776,6 +777,10 @@ async function applyStudyPayload(data) {
     adaptiveMode: adaptiveModeRaw === undefined || adaptiveModeRaw === null
       ? null
       : Boolean(adaptiveModeRaw),
+    cooldownEnabled: cooldownEnabledRaw === undefined || cooldownEnabledRaw === null
+      ? null
+      : Boolean(cooldownEnabledRaw),
+    cooldownDays: study.cooldown_days ?? configWfa.cooldown_days ?? config.cooldown_days ?? null,
     maxOosPeriodDays: study.max_oos_period_days ?? configWfa.max_oos_period_days ?? config.max_oos_period_days ?? null,
     minOosTrades: study.min_oos_trades ?? configWfa.min_oos_trades ?? config.min_oos_trades ?? null,
     checkIntervalTrades: study.check_interval_trades ?? configWfa.check_interval_trades ?? config.check_interval_trades ?? null,

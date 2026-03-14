@@ -6,6 +6,7 @@ import uuid
 import logging
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
@@ -618,6 +619,20 @@ def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatc
                     "selectedTab": "optimizer",
                     "dbTarget": {"value": "analytics_01.sqlite"},
                 },
+                "wfa": {
+                    "isPeriodDays": 60,
+                    "oosPeriodDays": 30,
+                    "storeTopNTrials": 50,
+                    "adaptiveMode": True,
+                    "cooldownEnabled": True,
+                    "cooldownDays": 15,
+                    "maxOosPeriodDays": 120,
+                    "minOosTrades": 7,
+                    "checkIntervalTrades": 4,
+                    "cusumThreshold": 5.5,
+                    "ddThresholdMultiplier": 1.7,
+                    "inactivityMultiplier": 6.2,
+                },
             }
         ],
         "nextIndex": 74,
@@ -631,16 +646,22 @@ def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatc
     assert stored["items"][0]["studySet"]["createdSetId"] == 11
     assert stored["items"][0]["studySet"]["completedStudyIds"] == ["study_a", "study_b"]
     assert stored["items"][0]["uiSnapshot"]["dbTarget"]["value"] == "analytics_01.sqlite"
+    assert stored["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert stored["items"][0]["wfa"]["cooldownDays"] == 15
 
     response_get = client.get("/api/queue")
     assert response_get.status_code == 200
     loaded = response_get.get_json()
     assert loaded["items"][0]["studySet"]["createdSetName"].startswith("#73")
     assert loaded["items"][0]["dbTarget"] == "analytics_01.sqlite"
+    assert loaded["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert loaded["items"][0]["wfa"]["cooldownDays"] == 15
 
     on_disk = json.loads(queue_file.read_text(encoding="utf-8"))
     assert on_disk["items"][0]["studySet"]["status"] == "created"
     assert on_disk["items"][0]["uiSnapshot"]["selectedTab"] == "optimizer"
+    assert on_disk["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert on_disk["items"][0]["wfa"]["cooldownDays"] == 15
 
 
 def test_queue_api_rejects_non_object_payload(client):
@@ -754,6 +775,86 @@ def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert data["run_id"] == "run_cancel_wfa"
     assert data["study_id"] is None
     assert deleted_studies == ["study_cancel_wfa"]
+
+
+def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = _ensure_local_test_tmp_dir() / "wfa_cooldown_route.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n"
+        "2026-01-02 00:00:00,1,1,1,1,1\n"
+        "2026-01-03 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 1.1, 1.2],
+            "high": [1.0, 1.1, 1.2],
+            "low": [1.0, 1.1, 1.2],
+            "close": [1.0, 1.1, 1.2],
+            "volume": [1.0, 1.0, 1.0],
+        },
+        index=pd.to_datetime(
+            ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"],
+            utc=True,
+        ),
+    )
+
+    captured = {}
+
+    class DummyWalkForwardEngine:
+        def __init__(self, config, base_template, optuna_settings, csv_file_path=None):
+            captured["config"] = config
+            captured["base_template"] = base_template
+            captured["optuna_settings"] = optuna_settings
+            captured["csv_file_path"] = csv_file_path
+
+        def run_wf_optimization(self, _dataframe):
+            return (
+                SimpleNamespace(
+                    total_windows=1,
+                    stitched_oos=SimpleNamespace(
+                        final_net_profit_pct=0.0,
+                        max_drawdown_pct=0.0,
+                        total_trades=0,
+                        wfe=0.0,
+                        oos_win_rate=0.0,
+                    ),
+                ),
+                "study_route_cooldown",
+            )
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["primary_objective"] = "net_profit_pct"
+
+    response = client.post(
+        "/api/walkforward",
+        data={
+            "strategy": "s01_trailing_ma",
+            "csvPath": str(csv_path),
+            "config": json.dumps(payload),
+            "wf_adaptive_mode": "true",
+            "wf_cooldown_enabled": "true",
+            "wf_cooldown_days": "21",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["config"].adaptive_mode is True
+    assert captured["config"].cooldown_enabled is True
+    assert captured["config"].cooldown_days == 21
+    assert captured["base_template"]["cooldown_enabled"] is True
+    assert captured["base_template"]["cooldown_days"] == 21
+    assert captured["base_template"]["wfa"]["cooldown_enabled"] is True
+    assert captured["base_template"]["wfa"]["cooldown_days"] == 21
 
 
 def _build_params_from_config(strategy_id: str):
@@ -1584,6 +1685,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                 """
                 UPDATE studies
                 SET
+                    cooldown_enabled = 1,
+                    cooldown_days = 15,
                     max_oos_period_days = 110,
                     min_oos_trades = 9,
                     check_interval_trades = 8,
@@ -1642,6 +1745,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["wfa_settings"]["is_period_days"] == 60
         assert first["wfa_settings"]["oos_period_days"] == 30
         assert first["wfa_settings"]["adaptive_mode"] is True
+        assert first["wfa_settings"]["cooldown_enabled"] is True
+        assert first["wfa_settings"]["cooldown_days"] == 15
         assert first["wfa_settings"]["max_oos_period_days"] == 110
         assert first["wfa_settings"]["min_oos_trades"] == 9
         assert first["wfa_settings"]["check_interval_trades"] == 8

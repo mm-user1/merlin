@@ -677,6 +677,15 @@
       const actualDays = hasActualDays
         ? `${Math.round(Number(actualDaysRaw))}d`
         : null;
+      const cooldownDaysRaw = window.cooldown_days_applied;
+      const hasCooldownDays = cooldownDaysRaw !== null
+        && cooldownDaysRaw !== undefined
+        && String(cooldownDaysRaw).trim() !== ''
+        && Number.isFinite(Number(cooldownDaysRaw))
+        && Number(cooldownDaysRaw) > 0;
+      const cooldownDays = hasCooldownDays
+        ? `${Math.round(Number(cooldownDaysRaw))}d cooldown`
+        : null;
       const triggerType = String(window.trigger_type || '').toLowerCase();
       const triggerLabels = {
         cusum: 'CUSUM',
@@ -692,10 +701,10 @@
       const adaptiveMode = adaptiveModeRaw === null || adaptiveModeRaw === undefined
         ? null
         : Boolean(adaptiveModeRaw);
-      const hasAdaptiveMeta = Boolean(triggerLabel || actualDays);
+      const hasAdaptiveMeta = Boolean(triggerLabel || actualDays || cooldownDays);
       const showAdaptiveMeta = adaptiveMode === true || (adaptiveMode === null && hasAdaptiveMeta);
       const adaptiveSuffix = showAdaptiveMeta && hasAdaptiveMeta
-        ? ` (${actualDays || '-'}) ${triggerBadge}`
+        ? ` (${[actualDays || '-', cooldownDays].filter(Boolean).join(' + ')}) ${triggerBadge}`
         : '';
 
       const headerRow = document.createElement('tr');

@@ -853,6 +853,22 @@
 
                   <div id="adaptiveWFSettings" style="display: none; margin-top: 12px;">
                     <div class="form-group" style="margin-bottom: 10px;">
+                      <label style="min-width: 170px; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="wfCooldownEnabled" onchange="toggleAdaptiveWFSettings()" />
+                        <span>Cooldown (days):</span>
+                      </label>
+                      <input
+                        type="number"
+                        id="wfCooldownDays"
+                        value="15"
+                        min="1"
+                        max="365"
+                        step="1"
+                        style="width: 100px;"
+                        disabled
+                      />
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
                       <label style="min-width: 170px;">Max OOS (days):</label>
                       <input type="number" id="wfMaxOosPeriodDays" value="90" min="30" max="365" style="width: 100px;" />
                     </div>
@@ -877,16 +893,6 @@
                       <input type="number" id="wfInactivityMultiplier" value="5.0" min="2.0" max="20.0" step="0.1" style="width: 100px;" />
                     </div>
                   </div>
-                </div>
-
-                <div style="background-color: #e8f4f8; padding: 15px; border-radius: 5px;">
-                  <strong>Behavior (Phase 2):</strong>
-                  <ul style="margin-top: 10px; font-size: 13px; color: #555; padding-left: 18px;">
-                    <li>Rolling windows (shift forward by OOS period)</li>
-                    <li>Calendar-based sizing (days)</li>
-                    <li>Single best parameter set per window</li>
-                    <li>Stitched OOS equity curve + annualized WFE</li>
-                  </ul>
                 </div>
               </div>
             </div>

@@ -143,6 +143,8 @@ def test_wfa_window_new_columns():
     assert "cusum_threshold" in columns
     assert "dd_threshold" in columns
     assert "oos_actual_days" in columns
+    assert "cooldown_days_applied" in columns
+    assert "oos_elapsed_days" in columns
     assert "oos_winning_trades" in columns
 
 
@@ -171,6 +173,8 @@ def test_studies_stitched_columns():
     assert "cusum_threshold" in columns
     assert "dd_threshold_multiplier" in columns
     assert "inactivity_multiplier" in columns
+    assert "cooldown_enabled" in columns
+    assert "cooldown_days" in columns
 
 
 def test_save_wfa_study_with_trials():
@@ -438,6 +442,12 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     wf_result.config.cusum_threshold = 6.5
     wf_result.config.dd_threshold_multiplier = 1.8
     wf_result.config.inactivity_multiplier = 6.0
+    wf_result.config.cooldown_enabled = True
+    wf_result.config.cooldown_days = 15
+    wf_result.windows[0].trigger_type = "cusum"
+    wf_result.windows[0].oos_actual_days = 4.0
+    wf_result.windows[0].cooldown_days_applied = 15.0
+    wf_result.windows[0].oos_elapsed_days = 19.0
 
     config = {
         "sampler_type": "nsga2",
@@ -462,6 +472,8 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
             "is_period_days": 10,
             "oos_period_days": 5,
             "adaptive_mode": True,
+            "cooldown_enabled": True,
+            "cooldown_days": 15,
         },
     }
 
@@ -495,10 +507,20 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     assert study.get("cusum_threshold") == 6.5
     assert study.get("dd_threshold_multiplier") == 1.8
     assert study.get("inactivity_multiplier") == 6.0
+    assert study.get("cooldown_enabled") == 1
+    assert study.get("cooldown_days") == 15
 
     config_json = study.get("config_json") or {}
     assert config_json.get("optuna_config", {}).get("pruner") == "median"
     assert config_json.get("wfa", {}).get("oos_period_days") == 5
+    assert config_json.get("wfa", {}).get("cooldown_enabled") is True
+    assert config_json.get("wfa", {}).get("cooldown_days") == 15
+
+    window = loaded["windows"][0]
+    assert window.get("trigger_type") == "cusum"
+    assert window.get("oos_actual_days") == 4.0
+    assert window.get("cooldown_days_applied") == 15.0
+    assert window.get("oos_elapsed_days") == 19.0
 
 
 def test_save_wfa_study_persists_runtime_seconds():

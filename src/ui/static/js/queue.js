@@ -1402,10 +1402,13 @@ function applyQueueConfigFallback(item) {
   const isWfaMode = item.mode === 'wfa';
   setCheckboxValue('enableWF', isWfaMode);
   if (isWfaMode && item.wfa && typeof item.wfa === 'object') {
+    const adaptiveMode = Boolean(item.wfa.adaptiveMode);
     setInputValue('wfIsPeriodDays', item.wfa.isPeriodDays);
     setInputValue('wfOosPeriodDays', item.wfa.oosPeriodDays);
     setInputValue('wfStoreTopNTrials', item.wfa.storeTopNTrials);
-    setCheckboxValue('enableAdaptiveWF', Boolean(item.wfa.adaptiveMode));
+    setCheckboxValue('enableAdaptiveWF', adaptiveMode);
+    setCheckboxValue('wfCooldownEnabled', adaptiveMode && Boolean(item.wfa.cooldownEnabled));
+    setInputValue('wfCooldownDays', item.wfa.cooldownDays ?? 15);
     setInputValue('wfMaxOosPeriodDays', item.wfa.maxOosPeriodDays);
     setInputValue('wfMinOosTrades', item.wfa.minOosTrades);
     setInputValue('wfCheckIntervalTrades', item.wfa.checkIntervalTrades);
@@ -1414,6 +1417,8 @@ function applyQueueConfigFallback(item) {
     setInputValue('wfInactivityMultiplier', item.wfa.inactivityMultiplier);
   } else {
     setCheckboxValue('enableAdaptiveWF', false);
+    setCheckboxValue('wfCooldownEnabled', false);
+    setInputValue('wfCooldownDays', 15);
   }
 
   const postProcess = config && typeof config.postProcess === 'object' ? config.postProcess : {};
@@ -1919,11 +1924,14 @@ function collectQueueItem() {
 
   if (mode === 'wfa') {
     const adaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
+    const cooldownEnabled = adaptiveMode && Boolean(document.getElementById('wfCooldownEnabled')?.checked);
     item.wfa = {
       isPeriodDays: Number(document.getElementById('wfIsPeriodDays')?.value) || 90,
       oosPeriodDays: Number(document.getElementById('wfOosPeriodDays')?.value) || 30,
       storeTopNTrials: Number(document.getElementById('wfStoreTopNTrials')?.value) || 50,
       adaptiveMode,
+      cooldownEnabled,
+      cooldownDays: Number(document.getElementById('wfCooldownDays')?.value) || 15,
       maxOosPeriodDays: Number(document.getElementById('wfMaxOosPeriodDays')?.value) || 90,
       minOosTrades: Number(document.getElementById('wfMinOosTrades')?.value) || 5,
       checkIntervalTrades: Number(document.getElementById('wfCheckIntervalTrades')?.value) || 3,
@@ -2583,6 +2591,8 @@ async function runQueue() {
             formData.append('wf_oos_period_days', String(item.wfa.oosPeriodDays));
             formData.append('wf_store_top_n_trials', String(item.wfa.storeTopNTrials));
             formData.append('wf_adaptive_mode', item.wfa.adaptiveMode ? 'true' : 'false');
+            formData.append('wf_cooldown_enabled', item.wfa.cooldownEnabled ? 'true' : 'false');
+            formData.append('wf_cooldown_days', String(item.wfa.cooldownDays ?? 15));
             formData.append('wf_max_oos_period_days', String(item.wfa.maxOosPeriodDays));
             formData.append('wf_min_oos_trades', String(item.wfa.minOosTrades));
             formData.append('wf_check_interval_trades', String(item.wfa.checkIntervalTrades));

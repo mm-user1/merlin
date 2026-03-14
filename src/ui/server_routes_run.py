@@ -440,6 +440,19 @@ def register_routes(app):
         else:
             adaptive_mode = bool(adaptive_raw)
 
+        cooldown_enabled_raw = data.get("wf_cooldown_enabled", False)
+        if isinstance(cooldown_enabled_raw, str):
+            cooldown_enabled = cooldown_enabled_raw.strip().lower() in {"true", "1", "yes", "on"}
+        else:
+            cooldown_enabled = bool(cooldown_enabled_raw)
+        cooldown_enabled = adaptive_mode and cooldown_enabled
+
+        try:
+            cooldown_days = int(data.get("wf_cooldown_days", 15))
+        except (TypeError, ValueError):
+            cooldown_days = 15
+        cooldown_days = max(1, min(365, cooldown_days))
+
         try:
             max_oos_period_days = int(data.get("wf_max_oos_period_days", 90))
         except (TypeError, ValueError):
@@ -542,6 +555,8 @@ def register_routes(app):
             cusum_threshold=cusum_threshold,
             dd_threshold_multiplier=dd_threshold_multiplier,
             inactivity_multiplier=inactivity_multiplier,
+            cooldown_enabled=cooldown_enabled,
+            cooldown_days=cooldown_days,
         )
 
         base_template["adaptive_mode"] = adaptive_mode
@@ -551,6 +566,8 @@ def register_routes(app):
         base_template["cusum_threshold"] = cusum_threshold
         base_template["dd_threshold_multiplier"] = dd_threshold_multiplier
         base_template["inactivity_multiplier"] = inactivity_multiplier
+        base_template["cooldown_enabled"] = cooldown_enabled
+        base_template["cooldown_days"] = cooldown_days
 
         base_template["wfa"] = {
             "is_period_days": is_period_days,
@@ -563,6 +580,8 @@ def register_routes(app):
             "cusum_threshold": cusum_threshold,
             "dd_threshold_multiplier": dd_threshold_multiplier,
             "inactivity_multiplier": inactivity_multiplier,
+            "cooldown_enabled": cooldown_enabled,
+            "cooldown_days": cooldown_days,
         }
         engine = WalkForwardEngine(wf_config, base_template, optuna_settings, csv_file_path=data_path)
 
@@ -589,6 +608,8 @@ def register_routes(app):
                     "cusum_threshold": cusum_threshold,
                     "dd_threshold_multiplier": dd_threshold_multiplier,
                     "inactivity_multiplier": inactivity_multiplier,
+                    "cooldown_enabled": cooldown_enabled,
+                    "cooldown_days": cooldown_days,
                 },
             }
         )
@@ -677,6 +698,20 @@ def register_routes(app):
                 "data_path": data_path,
                 "summary": response_payload.get("summary", {}),
                 "study_id": study_id,
+                "wfa": {
+                    "is_period_days": is_period_days,
+                    "oos_period_days": oos_period_days,
+                    "store_top_n_trials": store_top_n_trials,
+                    "adaptive_mode": adaptive_mode,
+                    "max_oos_period_days": max_oos_period_days,
+                    "min_oos_trades": min_oos_trades,
+                    "check_interval_trades": check_interval_trades,
+                    "cusum_threshold": cusum_threshold,
+                    "dd_threshold_multiplier": dd_threshold_multiplier,
+                    "inactivity_multiplier": inactivity_multiplier,
+                    "cooldown_enabled": cooldown_enabled,
+                    "cooldown_days": cooldown_days,
+                },
             }
         )
         _clear_cancelled_run(run_id)

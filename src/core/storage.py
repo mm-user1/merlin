@@ -182,6 +182,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             cusum_threshold REAL,
             dd_threshold_multiplier REAL,
             inactivity_multiplier REAL,
+            cooldown_enabled INTEGER DEFAULT 0,
+            cooldown_days INTEGER,
 
             dsr_enabled INTEGER DEFAULT 0,
             dsr_top_k INTEGER,
@@ -394,6 +396,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             oos_total_trades INTEGER,
             oos_winning_trades INTEGER,
             oos_equity_curve TEXT,
+            trigger_type TEXT,
+            cusum_final REAL,
+            cusum_threshold REAL,
+            dd_threshold REAL,
+            oos_actual_days REAL,
+            cooldown_days_applied REAL,
+            oos_elapsed_days REAL,
 
             wfe REAL,
 
@@ -461,6 +470,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "cusum_threshold", "REAL")
     ensure("studies", "dd_threshold_multiplier", "REAL")
     ensure("studies", "inactivity_multiplier", "REAL")
+    ensure("studies", "cooldown_enabled", "INTEGER DEFAULT 0")
+    ensure("studies", "cooldown_days", "INTEGER")
 
     ensure("trials", "max_consecutive_losses", "INTEGER")
     ensure("trials", "ft_max_consecutive_losses", "INTEGER")
@@ -615,6 +626,8 @@ def _ensure_wfa_schema_updated(conn: sqlite3.Connection) -> None:
     add_col("ALTER TABLE wfa_windows ADD COLUMN cusum_threshold REAL;", "cusum_threshold")
     add_col("ALTER TABLE wfa_windows ADD COLUMN dd_threshold REAL;", "dd_threshold")
     add_col("ALTER TABLE wfa_windows ADD COLUMN oos_actual_days REAL;", "oos_actual_days")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN cooldown_days_applied REAL;", "cooldown_days_applied")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN oos_elapsed_days REAL;", "oos_elapsed_days")
 
     conn.commit()
 
@@ -1782,6 +1795,8 @@ def save_wfa_study_to_db(
             cusum_threshold = getattr(wf_cfg, "cusum_threshold", None)
             dd_threshold_multiplier = getattr(wf_cfg, "dd_threshold_multiplier", None)
             inactivity_multiplier = getattr(wf_cfg, "inactivity_multiplier", None)
+            cooldown_enabled = 1 if bool(getattr(wf_cfg, "cooldown_enabled", False)) else 0
+            cooldown_days = getattr(wf_cfg, "cooldown_days", None)
             sampler_type = (
                 optuna_config.get("sampler_type")
                 or optuna_config.get("sampler")
@@ -1820,6 +1835,7 @@ def save_wfa_study_to_db(
                 "adaptive_mode", "max_oos_period_days", "min_oos_trades",
                 "check_interval_trades", "cusum_threshold",
                 "dd_threshold_multiplier", "inactivity_multiplier",
+                "cooldown_enabled", "cooldown_days",
                 "optimization_time_seconds",
                 "completed_at",
                 "filter_min_profit", "min_profit_threshold",
@@ -1872,6 +1888,8 @@ def save_wfa_study_to_db(
                 cusum_threshold,
                 dd_threshold_multiplier,
                 inactivity_multiplier,
+                cooldown_enabled,
+                cooldown_days,
                 optimization_time_seconds,
                 _utc_now_iso(),
                 1 if isinstance(config, dict) and config.get("filter_min_profit") else 0,
@@ -1972,6 +1990,8 @@ def save_wfa_study_to_db(
                         getattr(window, "cusum_threshold", None),
                         getattr(window, "dd_threshold", None),
                         getattr(window, "oos_actual_days", None),
+                        getattr(window, "cooldown_days_applied", None),
+                        getattr(window, "oos_elapsed_days", None),
                         getattr(window, "wfe", None),
                     )
                 )
@@ -2002,6 +2022,7 @@ def save_wfa_study_to_db(
                     "oos_win_rate", "oos_max_consecutive_losses", "oos_romad", "oos_sharpe_ratio",
                     "oos_profit_factor", "oos_sqn", "oos_ulcer_index", "oos_consistency_score",
                     "trigger_type", "cusum_final", "cusum_threshold", "dd_threshold", "oos_actual_days",
+                    "cooldown_days_applied", "oos_elapsed_days",
                     "wfe",
                 )
                 placeholders = ", ".join(["?"] * len(window_columns))

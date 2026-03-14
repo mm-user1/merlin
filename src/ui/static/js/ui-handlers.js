@@ -507,6 +507,8 @@ function toggleAdaptiveWFSettings() {
   const adaptiveToggle = document.getElementById('enableAdaptiveWF');
   const adaptiveSettings = document.getElementById('adaptiveWFSettings');
   const oosInput = document.getElementById('wfOosPeriodDays');
+  const cooldownToggle = document.getElementById('wfCooldownEnabled');
+  const cooldownDaysInput = document.getElementById('wfCooldownDays');
   if (!adaptiveToggle || !adaptiveSettings || !oosInput) {
     return;
   }
@@ -520,6 +522,15 @@ function toggleAdaptiveWFSettings() {
   );
   adaptiveSettings.style.display = enabled ? 'block' : 'none';
   oosInput.disabled = enabled;
+  if (cooldownToggle) {
+    cooldownToggle.disabled = !enabled;
+    if (!enabled) {
+      cooldownToggle.checked = false;
+    }
+  }
+  if (cooldownDaysInput) {
+    cooldownDaysInput.disabled = !enabled || !(cooldownToggle && cooldownToggle.checked);
+  }
 }
 
 window.toggleAdaptiveWFSettings = toggleAdaptiveWFSettings;
@@ -1298,6 +1309,8 @@ async function runWalkForward({ sources, state }) {
   const wfOosPeriodDays = document.getElementById('wfOosPeriodDays').value;
   const wfStoreTopNTrials = document.getElementById('wfStoreTopNTrials')?.value || '50';
   const wfAdaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
+  const wfCooldownEnabled = wfAdaptiveMode && Boolean(document.getElementById('wfCooldownEnabled')?.checked);
+  const wfCooldownDays = document.getElementById('wfCooldownDays')?.value || '15';
   const wfMaxOosPeriodDays = document.getElementById('wfMaxOosPeriodDays')?.value || '90';
   const wfMinOosTrades = document.getElementById('wfMinOosTrades')?.value || '5';
   const wfCheckIntervalTrades = document.getElementById('wfCheckIntervalTrades')?.value || '3';
@@ -1337,6 +1350,8 @@ async function runWalkForward({ sources, state }) {
       oosPeriodDays: Number(wfOosPeriodDays),
       storeTopNTrials: Number(wfStoreTopNTrials),
       adaptiveMode: wfAdaptiveMode,
+      cooldownEnabled: wfCooldownEnabled,
+      cooldownDays: Number(wfCooldownDays),
       maxOosPeriodDays: Number(wfMaxOosPeriodDays),
       minOosTrades: Number(wfMinOosTrades),
       checkIntervalTrades: Number(wfCheckIntervalTrades),
@@ -1392,6 +1407,8 @@ async function runWalkForward({ sources, state }) {
     formData.append('wf_oos_period_days', wfOosPeriodDays);
     formData.append('wf_store_top_n_trials', wfStoreTopNTrials);
     formData.append('wf_adaptive_mode', wfAdaptiveMode ? 'true' : 'false');
+    formData.append('wf_cooldown_enabled', wfCooldownEnabled ? 'true' : 'false');
+    formData.append('wf_cooldown_days', wfCooldownDays);
     formData.append('wf_max_oos_period_days', wfMaxOosPeriodDays);
     formData.append('wf_min_oos_trades', wfMinOosTrades);
     formData.append('wf_check_interval_trades', wfCheckIntervalTrades);

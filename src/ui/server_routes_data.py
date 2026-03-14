@@ -878,6 +878,8 @@ def register_routes(app):
             "cusum_threshold": window.get("cusum_threshold"),
             "dd_threshold": window.get("dd_threshold"),
             "oos_actual_days": window.get("oos_actual_days"),
+            "cooldown_days_applied": window.get("cooldown_days_applied"),
+            "oos_elapsed_days": window.get("oos_elapsed_days"),
         }
 
         return jsonify({"window": _json_safe(window_payload), "modules": _json_safe(modules)})

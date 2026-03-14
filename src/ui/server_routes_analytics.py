@@ -27,7 +27,10 @@ def register_routes(app):
     analytics_equity_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, Dict[str, Any]]] = {}
     analytics_equity_cache_ttl_seconds = 10.0
     analytics_equity_cache_max_entries = 256
-    analytics_equity_max_study_ids = 500
+    # Batch analytics requests always include the synthetic "all studies" group.
+    # The equity loader already reads rows in chunks, so a low hard limit here
+    # only breaks Analytics once the DB grows past that threshold.
+    analytics_equity_max_study_ids = 5000
     analytics_equity_chunk_size = 200
 
     def _parse_date_flexible(date_str: Any) -> Optional[datetime]:
@@ -625,6 +628,8 @@ def register_routes(app):
                     csv_file_name,
                     adaptive_mode,
                     is_period_days,
+                    cooldown_enabled,
+                    cooldown_days,
                     max_oos_period_days,
                     min_oos_trades,
                     check_interval_trades,
@@ -908,6 +913,16 @@ def register_routes(app):
                         ),
                         "oos_period_days": oos_period_days,
                         "adaptive_mode": adaptive_mode_bool,
+                        "cooldown_enabled": (
+                            _safe_bool(row_dict.get("cooldown_enabled"))
+                            if _safe_bool(row_dict.get("cooldown_enabled")) is not None
+                            else _safe_bool(wfa_config.get("cooldown_enabled"))
+                        ),
+                        "cooldown_days": (
+                            _safe_int(row_dict.get("cooldown_days"))
+                            if _safe_int(row_dict.get("cooldown_days")) is not None
+                            else _safe_int(wfa_config.get("cooldown_days"))
+                        ),
                         "max_oos_period_days": (
                             _safe_int(row_dict.get("max_oos_period_days"))
                             if _safe_int(row_dict.get("max_oos_period_days")) is not None
