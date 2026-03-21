@@ -168,3 +168,93 @@ def test_s03_omitted_tband_params_match_disabled_tband_behavior(test_data):
     assert result_explicit.balance_curve == pytest.approx(result_omitted.balance_curve)
     assert result_explicit.timestamps == result_omitted.timestamps
     assert len(result_explicit.trades) == len(result_omitted.trades)
+
+
+def _default_s03_params() -> dict:
+    return {
+        "dateFilter": True,
+        "start": TRADING_START,
+        "end": TRADING_END,
+        "maType3": "SMA",
+        "maLength3": 75,
+        "maOffset3": 0.2,
+        "useCloseCount": True,
+        "closeCountLong": 7,
+        "closeCountShort": 5,
+        "useTBands": True,
+        "tBandLongPct": 1.0,
+        "tBandShortPct": 1.3,
+        "contractSize": 0.01,
+        "initialCapital": 100.0,
+        "commissionPct": 0.05,
+    }
+
+
+def _find_prefix_with_open_position(df_prepared: pd.DataFrame, trade_start_idx: int) -> pd.DataFrame:
+    for length in range(len(df_prepared), trade_start_idx, -1):
+        result = S03ReversalV10.run(
+            df_prepared.iloc[:length].copy(),
+            _default_s03_params(),
+            trade_start_idx,
+            force_close_last_bar=False,
+        )
+        if result.last_position.get("direction") is not None:
+            return df_prepared.iloc[:length].copy()
+    raise AssertionError("Expected to find an S03 data slice ending with an open position")
+
+
+def test_s03_force_close_last_bar_true_matches_legacy_behavior(test_data):
+    df_prepared, trade_start_idx = backtest_engine.prepare_dataset_with_warmup(
+        test_data, TRADING_START, TRADING_END, WARMUP_BARS
+    )
+
+    legacy_result = S03ReversalV10.run(df_prepared, _default_s03_params(), trade_start_idx)
+    explicit_result = S03ReversalV10.run(
+        df_prepared,
+        _default_s03_params(),
+        trade_start_idx,
+        force_close_last_bar=True,
+    )
+
+    assert explicit_result.trades == legacy_result.trades
+    assert explicit_result.equity_curve == pytest.approx(legacy_result.equity_curve)
+    assert explicit_result.balance_curve == pytest.approx(legacy_result.balance_curve)
+    assert explicit_result.timestamps == legacy_result.timestamps
+    assert explicit_result.to_dict() == legacy_result.to_dict()
+
+
+def test_s03_force_close_last_bar_true_keeps_last_position_empty(test_data):
+    df_prepared, trade_start_idx = backtest_engine.prepare_dataset_with_warmup(
+        test_data, TRADING_START, TRADING_END, WARMUP_BARS
+    )
+
+    result = S03ReversalV10.run(
+        df_prepared,
+        _default_s03_params(),
+        trade_start_idx,
+        force_close_last_bar=True,
+    )
+
+    assert result.last_position == {}
+
+
+def test_s03_force_close_last_bar_false_populates_last_position(test_data):
+    df_prepared, trade_start_idx = backtest_engine.prepare_dataset_with_warmup(
+        test_data, TRADING_START, TRADING_END, WARMUP_BARS
+    )
+    open_slice = _find_prefix_with_open_position(df_prepared, trade_start_idx)
+
+    result = S03ReversalV10.run(
+        open_slice,
+        _default_s03_params(),
+        trade_start_idx,
+        force_close_last_bar=False,
+    )
+
+    last_position = result.last_position
+
+    assert last_position["direction"] in {"long", "short"}
+    assert last_position["entry_price"] is not None
+    assert last_position["entry_time"] is not None
+    assert last_position["sl_price"] is None
+    assert last_position["trail_price"] is None

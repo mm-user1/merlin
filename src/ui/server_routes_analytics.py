@@ -28,8 +28,9 @@ def register_routes(app):
     analytics_equity_cache_ttl_seconds = 10.0
     analytics_equity_cache_max_entries = 256
     # Batch analytics requests always include the synthetic "all studies" group.
-    # The equity loader already reads rows in chunks, so a low hard limit here
-    # only breaks Analytics once the DB grows past that threshold.
+    # The equity loader already reads rows in chunks, so this guard exists to
+    # reject pathological payload sizes without blocking the intended working
+    # Analytics range.
     analytics_equity_max_study_ids = 5000
     analytics_equity_chunk_size = 200
 

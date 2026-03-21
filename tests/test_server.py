@@ -1323,10 +1323,10 @@ def test_analytics_equity_endpoint_rejects_empty_study_ids(client):
 def test_analytics_equity_endpoint_rejects_study_ids_over_cap(client):
     response = client.post(
         "/api/analytics/equity",
-        json={"study_ids": [f"id_{i}" for i in range(501)]},
+        json={"study_ids": [f"id_{i}" for i in range(5001)]},
     )
     assert response.status_code == 400
-    assert "Maximum allowed is 500" in response.get_json()["error"]
+    assert "Maximum allowed is 5000" in response.get_json()["error"]
 
 
 def test_analytics_equity_endpoint_no_overlap_returns_warning(client):

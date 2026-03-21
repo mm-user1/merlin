@@ -84,7 +84,12 @@ class S03ReversalV10(BaseStrategy):
     STRATEGY_VERSION = "v10"
 
     @staticmethod
-    def run(df: pd.DataFrame, params: Dict[str, Any], trade_start_idx: int = 0) -> StrategyResult:
+    def run(
+        df: pd.DataFrame,
+        params: Dict[str, Any],
+        trade_start_idx: int = 0,
+        force_close_last_bar: bool = True,
+    ) -> StrategyResult:
         p = S03Params.from_dict(params)
 
         if df.empty:
@@ -272,7 +277,7 @@ class S03ReversalV10(BaseStrategy):
                             entry_commission = entry_price * position_size * (p.commissionPct / 100.0)
                             entry_time = timestamp
 
-            if i == last_bar_index and position != 0:
+            if force_close_last_bar and i == last_bar_index and position != 0:
                 trade, gross_pnl, exit_commission, _ = build_forced_close_trade(
                     position=position,
                     entry_time=entry_time,
@@ -312,6 +317,15 @@ class S03ReversalV10(BaseStrategy):
             balance_curve=balance_curve,
             timestamps=timestamps,
         )
+
+        if not force_close_last_bar:
+            result.last_position = {
+                "direction": "long" if position > 0 else ("short" if position < 0 else None),
+                "entry_price": None if position == 0 or math.isnan(entry_price) else entry_price,
+                "sl_price": None,
+                "trail_price": None,
+                "entry_time": entry_time if position != 0 else None,
+            }
 
         metrics.enrich_strategy_result(result, initial_balance=p.initialCapital, risk_free_rate=0.02)
 
