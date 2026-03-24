@@ -1513,6 +1513,67 @@ async function runManualTestFromModal() {
   }
 }
 
+function getLancelotExportSelection() {
+  if (!ResultsState.studyId) {
+    throw new Error('Select a study first.');
+  }
+  if (ResultsState.mode === 'wfa') {
+    const wfaSelection = ResultsState.wfaSelection || {};
+    const windowNumber = Number.isFinite(Number(wfaSelection.windowNumber))
+      ? parseInt(wfaSelection.windowNumber, 10)
+      : (
+        Number.isFinite(Number(ResultsState.selectedRowId))
+          ? parseInt(ResultsState.selectedRowId, 10)
+          : null
+      );
+    if (!windowNumber) {
+      throw new Error('Select a WFA window in the table.');
+    }
+    return { windowNumber };
+  }
+  if (!ResultsState.selectedRowId) {
+    throw new Error('Select a trial in the table.');
+  }
+  return { trialNumber: ResultsState.selectedRowId };
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) {
+      throw new Error('Clipboard copy is unavailable.');
+    }
+  } finally {
+    textarea.remove();
+  }
+}
+
+function downloadJsonText(text, filename) {
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 function bindEventHandlers() {
   const cancelBtn = document.querySelector('.control-btn.cancel');
   if (cancelBtn) {
@@ -1630,6 +1691,43 @@ function bindEventHandlers() {
         window.URL.revokeObjectURL(url);
       } catch (error) {
         alert(error.message || 'Trade export failed.');
+      }
+    });
+  }
+
+  const exportBtn = document.getElementById('exportLancelotBtn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', async () => {
+      try {
+        const selection = getLancelotExportSelection();
+        const response = await fetch(
+          `/api/studies/${encodeURIComponent(ResultsState.studyId)}/export/lancelot`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(selection),
+          }
+        );
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || 'Bundle export failed.');
+        }
+
+        const payload = await response.json();
+        const formatted = JSON.stringify(payload, null, 2);
+        try {
+          await copyTextToClipboard(formatted);
+          alert('Partial Bundle copied to clipboard.');
+        } catch (_clipboardError) {
+          const selectionLabel = selection.windowNumber
+            ? `wfa_window_${selection.windowNumber}`
+            : `trial_${selection.trialNumber}`;
+          const strategyLabel = String(payload?.strategyId || 'strategy').trim() || 'strategy';
+          downloadJsonText(formatted, `${strategyLabel}_${selectionLabel}_lancelot_bundle.json`);
+          alert('Clipboard copy is unavailable. Partial Bundle JSON was downloaded instead.');
+        }
+      } catch (error) {
+        alert(error.message || 'Bundle export failed.');
       }
     });
   }

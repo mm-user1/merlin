@@ -17,6 +17,7 @@ from core.backtest_engine import (
     parse_timestamp_utc,
     prepare_dataset_with_warmup,
 )
+from core.bundle_export import build_lancelot_partial_bundle
 from core.export import export_trades_csv
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
@@ -828,6 +829,88 @@ def register_routes(app):
             study=study,
             filename=filename,
         )
+
+
+
+    @app.post("/api/studies/<string:study_id>/export/lancelot")
+    def export_lancelot_bundle_endpoint(study_id: str) -> object:
+        if not request.is_json:
+            return jsonify({"error": "Expected JSON payload."}), HTTPStatus.BAD_REQUEST
+
+        payload = request.get_json(silent=True) or {}
+        study_data = load_study_from_db(study_id)
+        if not study_data:
+            return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
+
+        study = study_data["study"]
+        csv_path = study.get("csv_file_path")
+        csv_path, error_response = _resolve_csv_path_for_response(
+            csv_path,
+            missing_error="CSV file is missing for this study.",
+            not_found_error="CSV file is missing for this study.",
+        )
+        if error_response:
+            return error_response
+
+        params: Dict[str, Any] = {}
+        source_trial_number = 0
+        mode = str(study.get("optimization_mode") or "").lower()
+
+        if mode == "wfa":
+            raw_window_number = payload.get("windowNumber")
+            if raw_window_number in (None, ""):
+                return jsonify({"error": "windowNumber is required for WFA bundle export."}), HTTPStatus.BAD_REQUEST
+            try:
+                window_number = int(raw_window_number)
+            except (TypeError, ValueError):
+                return jsonify({"error": "windowNumber must be an integer."}), HTTPStatus.BAD_REQUEST
+
+            window = _find_wfa_window(study_data, window_number)
+            if not window:
+                return jsonify({"error": "WFA window not found."}), HTTPStatus.NOT_FOUND
+
+            params = dict(window.get("best_params") or {})
+            source_trial_number = int(window.get("is_best_trial_number") or 0)
+
+            if source_trial_number <= 0:
+                window_id = window.get("window_id") or f"{study_id}_w{window_number}"
+                modules = load_wfa_window_trials(window_id)
+                preferred_module = str(window.get("best_params_source") or "optuna_is")
+                module_trials = modules.get(preferred_module) or []
+                selected_trial = next((trial for trial in module_trials if trial.get("is_selected")), None)
+                if selected_trial is None and module_trials:
+                    selected_trial = module_trials[0]
+                if selected_trial:
+                    source_trial_number = int(selected_trial.get("trial_number") or 0)
+        elif mode == "optuna":
+            raw_trial_number = payload.get("trialNumber")
+            if raw_trial_number in (None, ""):
+                return jsonify({"error": "trialNumber is required for bundle export."}), HTTPStatus.BAD_REQUEST
+            try:
+                source_trial_number = int(raw_trial_number)
+            except (TypeError, ValueError):
+                return jsonify({"error": "trialNumber must be an integer."}), HTTPStatus.BAD_REQUEST
+
+            trial = get_study_trial(study_id, source_trial_number)
+            if not trial:
+                return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
+            params = dict(trial.get("params") or {})
+        else:
+            return jsonify({"error": "Bundle export is only supported for Optuna and WFA studies."}), HTTPStatus.BAD_REQUEST
+
+        try:
+            bundle = build_lancelot_partial_bundle(
+                study=study,
+                params=params,
+                trial_number=source_trial_number,
+                csv_path=csv_path,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        except OSError:
+            return jsonify({"error": "Failed to read CSV file for bundle export."}), HTTPStatus.BAD_REQUEST
+
+        return jsonify(_json_safe(bundle))
 
 
 

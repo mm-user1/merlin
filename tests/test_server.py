@@ -1,6 +1,7 @@
 import io
 import sys
 import csv
+import hashlib
 import json
 import uuid
 import logging
@@ -199,6 +200,140 @@ def _insert_analytics_wfa_window(
                 oos_start_date,
                 is_end_ts,
                 is_end_date,
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_study(
+    *,
+    study_id: str,
+    study_name: str,
+    optimization_mode: str,
+    csv_file_path: str,
+    csv_file_name: str,
+    strategy_id: str = "s03_reversal_v10",
+    strategy_version: str = "v10",
+    warmup_bars: int = 1000,
+    config_json: dict | None = None,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO studies (
+                study_id,
+                study_name,
+                strategy_id,
+                strategy_version,
+                optimization_mode,
+                csv_file_path,
+                csv_file_name,
+                warmup_bars,
+                config_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                study_id,
+                study_name,
+                strategy_id,
+                strategy_version,
+                optimization_mode,
+                csv_file_path,
+                csv_file_name,
+                int(warmup_bars),
+                json.dumps(config_json or {"fixed_params": {}}),
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_trial(*, study_id: str, trial_number: int, params: dict):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO trials (
+                study_id,
+                trial_number,
+                params_json,
+                objective_values_json,
+                constraint_values_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                study_id,
+                int(trial_number),
+                json.dumps(params),
+                json.dumps([]),
+                json.dumps([]),
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_wfa_window(
+    *,
+    study_id: str,
+    window_number: int,
+    best_params: dict,
+    best_params_source: str = "optuna_is",
+    is_best_trial_number: int | None = None,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO wfa_windows (
+                window_id,
+                study_id,
+                window_number,
+                best_params_json,
+                best_params_source,
+                is_best_trial_number
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{study_id}_w{window_number}",
+                study_id,
+                int(window_number),
+                json.dumps(best_params),
+                best_params_source,
+                is_best_trial_number,
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_wfa_trial(
+    *,
+    study_id: str,
+    window_number: int,
+    module_type: str,
+    trial_number: int,
+    params: dict,
+    is_selected: bool,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO wfa_window_trials (
+                window_id,
+                module_type,
+                trial_number,
+                params_json,
+                objective_values_json,
+                constraint_values_json,
+                is_selected,
+                module_metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{study_id}_w{window_number}",
+                module_type,
+                int(trial_number),
+                json.dumps(params),
+                json.dumps([]),
+                json.dumps([]),
+                1 if is_selected else 0,
+                json.dumps({}),
             ),
         )
         conn.commit()
@@ -1170,6 +1305,178 @@ def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
         rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
         # Header + 2 rows (entry/exit) for exactly one trade within precise OOS end.
         assert len(rows) == 3
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_from_optuna_trial(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_optuna.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_optuna_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_optuna_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_optuna_1",
+                optimization_mode="optuna",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv",
+            )
+            _insert_lancelot_export_trial(
+                study_id=study_id,
+                trial_number=42,
+                params={"closeCountLong": 3, "useTBands": True},
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"trialNumber": 42},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["bundleSchemaVersion"] == 2
+            assert payload["strategyId"] == "s03_reversal_v10"
+            assert payload["strategyVersion"] == "v10"
+            assert payload["symbol"] == "LINK/USDT:USDT"
+            assert payload["timeframe"] == "15m"
+            assert payload["warmupBars"] == 1000
+            assert payload["exportMode"] == "live"
+            assert payload["params"] == {"closeCountLong": 3, "useTBands": True}
+            assert payload["source"]["studyId"] == study_id
+            assert payload["source"]["trialNumber"] == 42
+            assert payload["source"]["studyName"] == "bundle_optuna_1"
+            assert payload["source"]["exportedAt"].endswith("Z")
+            assert payload["source"]["merlinVersion"]
+            assert payload["source"]["merlinCommit"]
+            assert payload["source"]["dataFingerprint"] == (
+                f"sha256:{hashlib.sha256(csv_path.read_bytes()).hexdigest()}"
+            )
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_wfa_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_wfa_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_wfa_1",
+                optimization_mode="wfa",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_BTCUSDT.P, 1h 2025.05.01-2025.11.20.csv",
+                warmup_bars=1500,
+            )
+            _insert_lancelot_export_wfa_window(
+                study_id=study_id,
+                window_number=1,
+                best_params={"maLength3": 75},
+                is_best_trial_number=7,
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"windowNumber": 1},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "BTC/USDT:USDT"
+            assert payload["timeframe"] == "1h"
+            assert payload["warmupBars"] == 1500
+            assert payload["params"] == {"maLength3": 75}
+            assert payload["source"]["trialNumber"] == 7
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa_selected.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_wfa_sel_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_wfa_selected_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_wfa_selected_1",
+                optimization_mode="wfa",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_ETHUSDT.P, 60 2025.05.01-2025.11.20.csv",
+            )
+            _insert_lancelot_export_wfa_window(
+                study_id=study_id,
+                window_number=1,
+                best_params={"maLength3": 125},
+                best_params_source="forward_test",
+                is_best_trial_number=None,
+            )
+            _insert_lancelot_export_wfa_trial(
+                study_id=study_id,
+                window_number=1,
+                module_type="forward_test",
+                trial_number=19,
+                params={"maLength3": 125},
+                is_selected=True,
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"windowNumber": 1},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "ETH/USDT:USDT"
+            assert payload["timeframe"] == "1h"
+            assert payload["source"]["trialNumber"] == 19
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_requires_selection_payload(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_missing.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_missing_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_missing_selection"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_missing_selection",
+                optimization_mode="optuna",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv",
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={},
+            )
+
+            assert response.status_code == 400
+            assert response.get_json()["error"] == "trialNumber is required for bundle export."
     finally:
         if csv_path.exists():
             csv_path.unlink()
