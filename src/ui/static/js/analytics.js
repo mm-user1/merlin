@@ -564,6 +564,7 @@
           overlap_days_exact: 0.0,
           studies_used: 0,
           studies_excluded: studyIds.length,
+          return_profile: null,
           warning: error?.message || 'Failed to aggregate portfolio equity.',
         };
       }
@@ -1213,7 +1214,9 @@
       return;
     }
 
-    window.AnalyticsEquity.renderChart(curve, timestamps);
+    window.AnalyticsEquity.renderChart(curve, timestamps, {
+      returnProfile: portfolio?.return_profile || null,
+    });
   }
 
   function updateVisualsForSelection() {

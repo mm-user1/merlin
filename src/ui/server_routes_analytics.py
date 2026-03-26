@@ -526,6 +526,7 @@ def register_routes(app):
                 group_result["missing_study_ids"] = []
             else:
                 group_result = _compute_equity_for_study_ids(study_ids)
+            group_result.pop("return_profile", None)
             results.append(
                 {
                     "group_id": group_id,

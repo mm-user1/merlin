@@ -1601,6 +1601,12 @@ def test_analytics_equity_endpoint_success(client):
         assert payload["selected_count"] == 2
         assert payload["missing_study_ids"] == []
         assert payload["profit_pct"] == pytest.approx(0.0, abs=1e-6)
+        assert payload["return_profile"] == {
+            "stems": [20.0, -20.0],
+            "source_count": 2,
+            "display_count": 2,
+            "is_binned": False,
+        }
 
 
 def test_analytics_equity_endpoint_rejects_missing_payload(client):
@@ -1667,6 +1673,12 @@ def test_analytics_equity_endpoint_no_overlap_returns_warning(client):
         payload = response.get_json()
         assert payload["curve"] is None
         assert payload["warning"] == "Selected studies have no overlapping time period."
+        assert payload["return_profile"] == {
+            "stems": [],
+            "source_count": 0,
+            "display_count": 0,
+            "is_binned": False,
+        }
 
 
 def test_analytics_equity_batch_endpoint_success(client):
@@ -1710,6 +1722,9 @@ def test_analytics_equity_batch_endpoint_success(client):
         assert by_id["all"]["studies_used"] == 2
         assert by_id["subset"]["studies_used"] == 1
         assert by_id["empty"]["curve"] is None
+        assert "return_profile" not in by_id["all"]
+        assert "return_profile" not in by_id["subset"]
+        assert "return_profile" not in by_id["empty"]
 
 
 def test_analytics_summary_empty_db_returns_expected_message(client):

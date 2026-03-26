@@ -1,7 +1,181 @@
 (function () {
+  const CHART_VIEWBOX_WIDTH = 800;
+  const CHART_VIEWBOX_HEIGHT = 260;
+  const RETURN_PROFILE_BOX_X = 10;
+  const RETURN_PROFILE_BOX_Y = 10;
+  const RETURN_PROFILE_BOX_HEIGHT = 76;
+  const RETURN_PROFILE_MAX_STEMS = 60;
+  const RETURN_PROFILE_STEM_WIDTH = 3;
+  const RETURN_PROFILE_STEM_GAP = 4;
+  const RETURN_PROFILE_LOSS_CAP = 100;
+
+  function toFiniteNumber(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function parseTimestamp(value) {
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizeReturnProfile(profile) {
+    if (!profile || typeof profile !== 'object') return null;
+    const stems = Array.isArray(profile.stems)
+      ? profile.stems
+        .map((value) => toFiniteNumber(value))
+        .filter((value) => value !== null)
+      : [];
+    if (stems.length < 2) return null;
+    return {
+      stems,
+      sourceCount: Math.max(0, Math.round(toFiniteNumber(profile.source_count) || stems.length)),
+      displayCount: Math.max(0, Math.round(toFiniteNumber(profile.display_count) || stems.length)),
+      isBinned: Boolean(profile.is_binned),
+    };
+  }
+
+  function getRenderedChartScale(svg) {
+    const bounds = typeof svg?.getBoundingClientRect === 'function'
+      ? svg.getBoundingClientRect()
+      : null;
+    const width = Number(bounds?.width);
+    const height = Number(bounds?.height);
+    return {
+      x: Number.isFinite(width) && width > 0 ? width / CHART_VIEWBOX_WIDTH : 1,
+      y: Number.isFinite(height) && height > 0 ? height / CHART_VIEWBOX_HEIGHT : 1,
+    };
+  }
+
+  function alignStrokeCenterPx(valuePx, strokeWidthPx) {
+    if (strokeWidthPx % 2 === 0) {
+      return Math.round(valuePx);
+    }
+    return Math.round(valuePx - 0.5) + 0.5;
+  }
+
+  function alignStrokeCenterView(value, scale, strokeWidthPx) {
+    return alignStrokeCenterPx(value * scale, strokeWidthPx) / scale;
+  }
+
+  function buildReturnProfileStemLayout(svg, stemCount) {
+    if (!Number.isInteger(stemCount) || stemCount <= 0) return null;
+
+    const stemWidthPx = RETURN_PROFILE_STEM_WIDTH;
+    const scale = getRenderedChartScale(svg);
+    const boxLeftPx = Math.round(RETURN_PROFILE_BOX_X * scale.x);
+    const innerPaddingPx = Math.max(1, Math.round(scale.x));
+    if (stemCount === 1) {
+      const centerPx = alignStrokeCenterPx(boxLeftPx + innerPaddingPx + (stemWidthPx / 2), stemWidthPx);
+      const firstStemLeftPx = centerPx - (stemWidthPx / 2);
+      const lastStemRightPx = centerPx + (stemWidthPx / 2);
+      const boxWidthPx = stemWidthPx + (innerPaddingPx * 2);
+      return {
+        positions: [centerPx / scale.x],
+        stemWidthPx,
+        boxX: boxLeftPx / scale.x,
+        boxWidth: boxWidthPx / scale.x,
+        firstStemLeftX: firstStemLeftPx / scale.x,
+        lastStemRightX: lastStemRightPx / scale.x,
+        zeroY: alignStrokeCenterView(RETURN_PROFILE_BOX_Y + (RETURN_PROFILE_BOX_HEIGHT / 2), scale.y, 1),
+      };
+    }
+
+    const gapPx = RETURN_PROFILE_STEM_GAP;
+    const stepPx = gapPx + stemWidthPx;
+    const contentWidthPx = (stepPx * Math.max(stemCount - 1, 0)) + stemWidthPx;
+    const startLeftPx = boxLeftPx + innerPaddingPx;
+    const firstCenterPx = alignStrokeCenterPx(startLeftPx + (stemWidthPx / 2), stemWidthPx);
+    const firstStemLeftPx = firstCenterPx - (stemWidthPx / 2);
+    const positions = Array.from({ length: stemCount }, (_, index) => (firstCenterPx + (stepPx * index)) / scale.x);
+    const dynamicBoxWidthPx = contentWidthPx + (innerPaddingPx * 2);
+    return {
+      positions,
+      stemWidthPx,
+      boxX: boxLeftPx / scale.x,
+      boxWidth: dynamicBoxWidthPx / scale.x,
+      firstStemLeftX: firstStemLeftPx / scale.x,
+      lastStemRightX: (firstStemLeftPx + contentWidthPx) / scale.x,
+      zeroY: alignStrokeCenterView(RETURN_PROFILE_BOX_Y + (RETURN_PROFILE_BOX_HEIGHT / 2), scale.y, 1),
+    };
+  }
+
+  function renderReturnProfile(svg, profile) {
+    if (!svg) return;
+    const normalized = normalizeReturnProfile(profile);
+    if (!normalized) return;
+
+    const stems = normalized.stems.slice().reverse();
+    const layout = buildReturnProfileStemLayout(svg, stems.length);
+    if (!layout) return;
+
+    const {
+      positions,
+      stemWidthPx,
+      boxX,
+      boxWidth,
+      firstStemLeftX,
+      lastStemRightX,
+      zeroY,
+    } = layout;
+    const positiveMax = Math.max(0, ...stems.filter((value) => value > 0));
+    const topEdgeY = RETURN_PROFILE_BOX_Y;
+    const bottomEdgeY = RETURN_PROFILE_BOX_Y + RETURN_PROFILE_BOX_HEIGHT;
+    const positiveExtent = zeroY - topEdgeY;
+    const negativeExtent = bottomEdgeY - zeroY;
+
+    const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    group.setAttribute('data-return-profile', 'true');
+
+    const area = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    area.setAttribute('x', String(boxX));
+    area.setAttribute('y', String(RETURN_PROFILE_BOX_Y));
+    area.setAttribute('width', String(boxWidth));
+    area.setAttribute('height', String(RETURN_PROFILE_BOX_HEIGHT));
+    area.setAttribute('fill', 'rgba(255, 255, 255, 0.32)');
+    area.setAttribute('stroke', 'rgba(120, 120, 120, 0.14)');
+    area.setAttribute('stroke-width', '1');
+    group.appendChild(area);
+
+    const zeroLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    zeroLine.setAttribute('x1', String(firstStemLeftX));
+    zeroLine.setAttribute('y1', String(zeroY));
+    zeroLine.setAttribute('x2', String(lastStemRightX));
+    zeroLine.setAttribute('y2', String(zeroY));
+    zeroLine.setAttribute('stroke', 'rgba(92, 92, 92, 0.34)');
+    zeroLine.setAttribute('stroke-width', '1');
+    zeroLine.setAttribute('vector-effect', 'non-scaling-stroke');
+    zeroLine.setAttribute('stroke-linecap', 'butt');
+    zeroLine.setAttribute('shape-rendering', 'crispEdges');
+    group.appendChild(zeroLine);
+
+    stems.forEach((value, index) => {
+      let scaled = 0;
+      if (value > 0 && positiveMax > 0) {
+        scaled = value / positiveMax;
+      } else if (value < 0) {
+        scaled = -Math.min(Math.abs(value), RETURN_PROFILE_LOSS_CAP) / RETURN_PROFILE_LOSS_CAP;
+      }
+      if (scaled === 0) return;
+
+      const x = positions[index];
+      const y2 = scaled > 0
+        ? zeroY - (positiveExtent * scaled)
+        : zeroY + (negativeExtent * Math.abs(scaled));
+      const stem = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      stem.setAttribute('x1', String(x));
+      stem.setAttribute('y1', String(zeroY));
+      stem.setAttribute('x2', String(x));
+      stem.setAttribute('y2', String(y2));
+      stem.setAttribute('stroke', 'rgba(0, 0, 0, 0.2)');
+      stem.setAttribute('stroke-width', String(stemWidthPx));
+      stem.setAttribute('vector-effect', 'non-scaling-stroke');
+      stem.setAttribute('stroke-linecap', 'butt');
+      stem.setAttribute('shape-rendering', 'crispEdges');
+      group.appendChild(stem);
+    });
+
+    svg.appendChild(group);
   }
 
   function renderEmpty(message) {
@@ -10,6 +184,12 @@
     if (!svg) return;
 
     svg.innerHTML = '';
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('width', '100%');
+    bg.setAttribute('height', '100%');
+    bg.setAttribute('fill', '#fafafa');
+    svg.appendChild(bg);
+
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     text.setAttribute('x', '400');
     text.setAttribute('y', '130');
@@ -38,8 +218,8 @@
       return;
     }
 
-    const width = 800;
-    const height = 260;
+    const width = CHART_VIEWBOX_WIDTH;
+    const height = CHART_VIEWBOX_HEIGHT;
     const padding = 20;
     const hasTimestamps = Array.isArray(timestamps) && timestamps.length === curve.length;
 
@@ -205,6 +385,8 @@
     line.setAttribute('stroke', '#4a90e2');
     line.setAttribute('stroke-width', '1.5');
     svg.appendChild(line);
+
+    renderReturnProfile(svg, options?.returnProfile || null);
   }
 
   window.AnalyticsEquity = {

@@ -21,6 +21,11 @@
   );
   const TABLE_HEIGHT_MIN = 0;
   const TABLE_HEIGHT_MAX = 2;
+  const TABLE_HEIGHT_OPTIONS = [
+    { id: 'analyticsSetsHeightMinBtn', label: 'Min', level: 0, ariaLabel: 'Set minimum sets table height' },
+    { id: 'analyticsSetsHeightMedBtn', label: 'Med', level: 1, ariaLabel: 'Set medium sets table height' },
+    { id: 'analyticsSetsHeightMaxBtn', label: 'Max', level: 2, ariaLabel: 'Set maximum sets table height' },
+  ];
 
   const state = {
     studies: [],
@@ -965,13 +970,22 @@
     const canColor = hasActionTarget && !state.moveMode;
     const canUpdate = hasSets && hasCheckedStudies && !state.moveMode;
     const canSave = hasCheckedStudies && !state.moveMode;
-    const canDecreaseHeight = normalizeTableHeightLevel(state.tableHeightLevel) > TABLE_HEIGHT_MIN && !state.moveMode;
-    const canIncreaseHeight = normalizeTableHeightLevel(state.tableHeightLevel) < TABLE_HEIGHT_MAX && !state.moveMode;
+    const currentHeightLevel = normalizeTableHeightLevel(state.tableHeightLevel);
     const updateLabel = !state.batchMode && focused ? 'Update Current Set' : 'Update Set &#9662;';
     const currentColorToken = getCommonColorToken(activeSetIds);
     const moveHint = state.moveMode
       ? `<span class="hint">Move mode active. Enter = save, Esc = cancel.</span>`
       : '';
+    const heightButtons = TABLE_HEIGHT_OPTIONS.map((option) => {
+      const isActive = currentHeightLevel === option.level;
+      const isDisabled = state.moveMode || isActive;
+      return `
+          <button class="sel-btn analytics-sets-height-btn${isActive ? ' analytics-sets-height-btn-active' : ''}"
+                  id="${option.id}" type="button"
+                  aria-label="${option.ariaLabel}"
+                  aria-pressed="${isActive ? 'true' : 'false'}"${isDisabled ? ' disabled' : ''}>${option.label}</button>
+      `;
+    }).join('');
 
     if (!canUpdate && state.updateMenuOpen) {
       state.updateMenuOpen = false;
@@ -1000,10 +1014,7 @@
       </div>
       <div class="analytics-sets-actions-center">
         <div class="analytics-sets-height-controls">
-          <button class="sel-btn analytics-sets-height-btn" id="analyticsSetsHeightDownBtn"
-                  type="button" aria-label="Decrease sets table height"${canDecreaseHeight ? '' : ' disabled'}>Less</button>
-          <button class="sel-btn analytics-sets-height-btn" id="analyticsSetsHeightUpBtn"
-                  type="button" aria-label="Increase sets table height"${canIncreaseHeight ? '' : ' disabled'}>More</button>
+          ${heightButtons}
         </div>
       </div>
       <div class="analytics-sets-actions-right">
@@ -1028,8 +1039,12 @@
     const updateBtn = document.getElementById('analyticsSetUpdateBtn');
     const updateMenu = document.getElementById('analyticsSetUpdateMenu');
     const saveBtn = document.getElementById('analyticsSaveSetBtn');
-    const heightDownBtn = document.getElementById('analyticsSetsHeightDownBtn');
-    const heightUpBtn = document.getElementById('analyticsSetsHeightUpBtn');
+    const heightButtonsByLevel = TABLE_HEIGHT_OPTIONS
+      .map((option) => ({
+        level: option.level,
+        button: document.getElementById(option.id),
+      }))
+      .filter((entry) => entry.button);
 
     if (batchBtn) {
       batchBtn.addEventListener('click', () => {
@@ -1100,18 +1115,12 @@
         handleSaveSet();
       });
     }
-    if (heightDownBtn) {
-      heightDownBtn.addEventListener('click', () => {
-        state.tableHeightLevel = normalizeTableHeightLevel(state.tableHeightLevel - 1);
+    heightButtonsByLevel.forEach(({ level, button }) => {
+      button.addEventListener('click', () => {
+        state.tableHeightLevel = normalizeTableHeightLevel(level);
         render();
       });
-    }
-    if (heightUpBtn) {
-      heightUpBtn.addEventListener('click', () => {
-        state.tableHeightLevel = normalizeTableHeightLevel(state.tableHeightLevel + 1);
-        render();
-      });
-    }
+    });
   }
 
   function renderSummaryText() {

@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.analytics import (  # noqa: E402
+    RETURN_PROFILE_STEM_LIMIT,
     WARNING_NO_OVERLAP,
     WARNING_NO_VALID_DATA,
     aggregate_equity_curves,
@@ -47,6 +48,12 @@ def test_aggregate_two_studies_full_overlap():
     assert result["profit_pct"] == pytest.approx(5.0, abs=1e-6)
     assert result["max_drawdown_pct"] == pytest.approx(0.0, abs=1e-6)
     assert result["ann_profit_pct"] is None  # only 2 days overlap
+    assert result["return_profile"] == {
+        "stems": [20.0, -10.0],
+        "source_count": 2,
+        "display_count": 2,
+        "is_binned": False,
+    }
 
 
 def test_aggregate_partial_overlap_uses_intersection():
@@ -97,6 +104,12 @@ def test_aggregate_no_overlap_returns_warning_payload():
     assert result["timestamps"] is None
     assert result["warning"] == WARNING_NO_OVERLAP
     assert result["studies_used"] == 2
+    assert result["return_profile"] == {
+        "stems": [],
+        "source_count": 0,
+        "display_count": 0,
+        "is_binned": False,
+    }
 
 
 def test_aggregate_empty_input_returns_no_valid_data_payload():
@@ -193,3 +206,25 @@ def test_duplicate_timestamps_keep_last_value():
     assert result["curve"] is not None
     # Dedup should keep 110 at start timestamp.
     assert result["profit_pct"] == pytest.approx(10.0, abs=1e-6)
+
+
+def test_return_profile_bins_sorted_overlap_returns_when_over_limit():
+    studies = []
+    for idx in range(RETURN_PROFILE_STEM_LIMIT + 1):
+        studies.append(
+            _study(
+                [
+                    ("2025-01-01T00:00:00+00:00", 100.0),
+                    ("2025-02-15T00:00:00+00:00", 100.0 + idx),
+                ]
+            )
+        )
+
+    result = aggregate_equity_curves(studies)
+
+    profile = result["return_profile"]
+    assert profile["source_count"] == RETURN_PROFILE_STEM_LIMIT + 1
+    assert profile["display_count"] == RETURN_PROFILE_STEM_LIMIT
+    assert profile["is_binned"] is True
+    assert len(profile["stems"]) == RETURN_PROFILE_STEM_LIMIT
+    assert profile["stems"] == sorted(profile["stems"], reverse=True)
