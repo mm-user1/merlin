@@ -26,6 +26,40 @@
     { id: 'analyticsSetsHeightMedBtn', label: 'Med', level: 1, ariaLabel: 'Set medium sets table height' },
     { id: 'analyticsSetsHeightMaxBtn', label: 'Max', level: 2, ariaLabel: 'Set maximum sets table height' },
   ];
+  const SET_SORT_META = {
+    set_name: {
+      label: 'Set Name',
+      directionLabels: { asc: 'A-Z', desc: 'Z-A' },
+    },
+    ann_profit_pct: {
+      label: 'Ann.P%',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    profit_pct: {
+      label: 'Profit%',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    max_drawdown_pct: {
+      label: 'MaxDD%',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    profitable_pct: {
+      label: 'Profitable',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    wfe_pct: {
+      label: 'WFE%',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    oos_wins_pct: {
+      label: 'OOS Wins',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+    consistency: {
+      label: 'Consist',
+      directionLabels: { asc: 'lowest first', desc: 'highest first' },
+    },
+  };
 
   const state = {
     studies: [],
@@ -163,6 +197,229 @@
     return state.sets.map((item) => item.id);
   }
 
+  function getActiveSetSortState() {
+    if (!window.AnalyticsSetsView || typeof window.AnalyticsSetsView.getSortState !== 'function') {
+      return { sortColumn: null, sortDirection: null, sortClickCount: 0 };
+    }
+    const sortState = window.AnalyticsSetsView.getSortState();
+    return {
+      sortColumn: sortState?.sortColumn || null,
+      sortDirection: sortState?.sortDirection || null,
+      sortClickCount: Number(sortState?.sortClickCount || 0),
+    };
+  }
+
+  function hasActiveSetSort() {
+    return Boolean(
+      window.AnalyticsSetsView
+      && typeof window.AnalyticsSetsView.hasActiveSort === 'function'
+      && window.AnalyticsSetsView.hasActiveSort()
+    );
+  }
+
+  function hasActiveSetFilters() {
+    return Boolean(
+      window.AnalyticsSetsView
+      && typeof window.AnalyticsSetsView.hasActiveFilters === 'function'
+      && window.AnalyticsSetsView.hasActiveFilters()
+    );
+  }
+
+  function compareNumbersWithNulls(left, right, sortDirection) {
+    const leftValue = toFiniteNumber(left);
+    const rightValue = toFiniteNumber(right);
+    if (leftValue === null && rightValue === null) return 0;
+    if (leftValue === null) return 1;
+    if (rightValue === null) return -1;
+    if (leftValue === rightValue) return 0;
+    if (sortDirection === 'asc') return leftValue - rightValue;
+    return rightValue - leftValue;
+  }
+
+  function compareTextValues(left, right, sortDirection) {
+    const leftValue = String(left || '');
+    const rightValue = String(right || '');
+    const cmp = leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: 'base' });
+    return sortDirection === 'asc' ? cmp : -cmp;
+  }
+
+  function buildVisibleSetRows() {
+    const visibleIds = !window.AnalyticsSetsView || typeof window.AnalyticsSetsView.getVisibleSetIds !== 'function'
+      ? new Set(getAllSetIds())
+      : new Set(
+        window.AnalyticsSetsView.getVisibleSetIds()
+          .map((setId) => normalizeSetId(setId))
+          .filter((setId) => setId !== null && hasSet(setId))
+      );
+    const rows = state.sets
+      .map((setItem, index) => {
+        const normalizedId = normalizeSetId(setItem?.id);
+        if (normalizedId === null || !visibleIds.has(normalizedId)) return null;
+        const setStudies = resolveStudiesForSet(setItem);
+        const metrics = computeMetrics(setStudies, setItem.metrics);
+        return {
+          setItem,
+          metrics,
+          defaultIndex: index,
+        };
+      })
+      .filter(Boolean);
+
+    const sortState = getActiveSetSortState();
+    const hasSort = !state.moveMode && Boolean(sortState.sortColumn && sortState.sortDirection);
+    if (!hasSort) return rows;
+
+    return rows.slice().sort((leftRow, rightRow) => {
+      const sortColumn = sortState.sortColumn;
+      const sortDirection = sortState.sortDirection;
+      let cmp = 0;
+
+      if (sortColumn === 'set_name') {
+        cmp = compareTextValues(leftRow.setItem.name, rightRow.setItem.name, sortDirection);
+      } else if (sortColumn === 'ann_profit_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.annProfitPct, rightRow.metrics.annProfitPct, sortDirection);
+      } else if (sortColumn === 'profit_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.profitPct, rightRow.metrics.profitPct, sortDirection);
+      } else if (sortColumn === 'max_drawdown_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.maxDdPct, rightRow.metrics.maxDdPct, sortDirection);
+      } else if (sortColumn === 'profitable_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.profitablePct, rightRow.metrics.profitablePct, sortDirection);
+        if (cmp === 0) {
+          cmp = compareNumbersWithNulls(
+            leftRow.metrics.profitableCount,
+            rightRow.metrics.profitableCount,
+            sortDirection
+          );
+        }
+      } else if (sortColumn === 'wfe_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.wfePct, rightRow.metrics.wfePct, sortDirection);
+      } else if (sortColumn === 'oos_wins_pct') {
+        cmp = compareNumbersWithNulls(leftRow.metrics.oosWinsPct, rightRow.metrics.oosWinsPct, sortDirection);
+      } else if (sortColumn === 'consistency') {
+        cmp = compareNumbersWithNulls(
+          leftRow.metrics.consistencyRecent,
+          rightRow.metrics.consistencyRecent,
+          sortDirection
+        );
+        if (cmp === 0) {
+          cmp = compareNumbersWithNulls(
+            leftRow.metrics.consistencyFull,
+            rightRow.metrics.consistencyFull,
+            sortDirection
+          );
+        }
+      }
+
+      if (cmp !== 0) return cmp;
+      return leftRow.defaultIndex - rightRow.defaultIndex;
+    });
+  }
+
+  function getVisibleOrderedSetIds() {
+    return buildVisibleSetRows().map((row) => row.setItem.id);
+  }
+
+  function getVisibleSetRows() {
+    return buildVisibleSetRows();
+  }
+
+  function getVisibleSetIdSet() {
+    return new Set(getVisibleOrderedSetIds());
+  }
+
+  function getInteractiveSetIds() {
+    return getVisibleOrderedSetIds();
+  }
+
+  function hasActiveViewControls() {
+    return Boolean(
+      window.AnalyticsSetsView
+      && typeof window.AnalyticsSetsView.hasActiveControls === 'function'
+      && window.AnalyticsSetsView.hasActiveControls()
+    );
+  }
+
+  function describeActiveSetSort() {
+    const sortState = getActiveSetSortState();
+    if (!sortState.sortColumn || !sortState.sortDirection) return '';
+    const meta = SET_SORT_META[sortState.sortColumn];
+    if (!meta) return '';
+    const directionLabel = meta.directionLabels?.[sortState.sortDirection]
+      || (sortState.sortDirection === 'asc' ? 'ascending' : 'descending');
+    return `Sorted by ${meta.label} (${directionLabel})`;
+  }
+
+  function getMoveDisabledHintText() {
+    const hasFilters = hasActiveSetFilters();
+    const hasSort = hasActiveSetSort();
+    if (hasFilters && hasSort) return 'Clear set filters or reset sorting before moving rows.';
+    if (hasSort) return 'Reset set sorting before moving rows.';
+    if (hasFilters) return 'Clear set filters before moving rows.';
+    return '';
+  }
+
+  function renderHeaderControls() {
+    if (!window.AnalyticsSetsView || typeof window.AnalyticsSetsView.renderControls !== 'function') return;
+    window.AnalyticsSetsView.renderControls({ disabled: state.moveMode });
+  }
+
+  function buildSyncCheckedStudyIdsForCurrentView() {
+    if (state.viewMode === VIEW_MODES.FOCUS) {
+      const focused = getSetById(state.focusedSetId);
+      return Array.from(new Set((focused?.study_ids || []).slice()));
+    }
+    if (state.viewMode === VIEW_MODES.CHECKBOXES) {
+      const unionIds = computeVisibleStudyIds();
+      return Array.from(unionIds || []);
+    }
+    return null;
+  }
+
+  function syncSelectionToVisibleSets() {
+    const visibleIds = getVisibleSetIdSet();
+    let changed = false;
+
+    if (state.focusedSetId !== null && !visibleIds.has(state.focusedSetId)) {
+      state.focusedSetId = null;
+      state.forceAllStudies = false;
+      changed = true;
+    }
+
+    const nextChecked = new Set(
+      Array.from(state.checkedSetIds).filter((setId) => visibleIds.has(setId))
+    );
+    if (nextChecked.size !== state.checkedSetIds.size) {
+      state.checkedSetIds = nextChecked;
+      changed = true;
+    }
+
+    const nextBatchSelected = new Set(
+      Array.from(state.batchSelectedSetIds).filter((setId) => visibleIds.has(setId))
+    );
+    if (nextBatchSelected.size !== state.batchSelectedSetIds.size) {
+      state.batchSelectedSetIds = nextBatchSelected;
+      changed = true;
+    }
+
+    if (state.batchAnchorSetId !== null && !visibleIds.has(state.batchAnchorSetId)) {
+      state.batchAnchorSetId = null;
+      changed = true;
+    }
+    if (state.rangeAnchorSetId !== null && !visibleIds.has(state.rangeAnchorSetId)) {
+      state.rangeAnchorSetId = null;
+      state.rangeAnchorChecked = null;
+      changed = true;
+    }
+
+    if (state.batchMode && state.batchSelectedSetIds.size === 0) {
+      state.batchMode = false;
+      changed = true;
+    }
+
+    resolveViewMode();
+    return changed;
+  }
+
   function getCheckedSetArray() {
     return Array.from(state.checkedSetIds)
       .map((setId) => getSetById(setId))
@@ -178,8 +435,7 @@
     if (!(state.batchSelectedSetIds instanceof Set) || state.batchSelectedSetIds.size === 0) {
       return [];
     }
-    return state.sets
-      .map((setItem) => setItem.id)
+    return getInteractiveSetIds()
       .filter((setId) => state.batchSelectedSetIds.has(setId));
   }
 
@@ -264,6 +520,9 @@
     if (!list.length) {
       return {
         profitableText: '0/0 (0%)',
+        profitableCount: 0,
+        profitableTotal: 0,
+        profitablePct: 0,
         wfePct: null,
         oosWinsPct: null,
       };
@@ -281,6 +540,9 @@
 
     return {
       profitableText,
+      profitableCount,
+      profitableTotal: list.length,
+      profitablePct,
       wfePct,
       oosWinsPct,
     };
@@ -298,6 +560,9 @@
       consistencyFull: toFiniteNumber(curve?.consistency_full),
       consistencyRecent: toFiniteNumber(curve?.consistency_recent),
       profitableText: nonCurve.profitableText,
+      profitableCount: nonCurve.profitableCount,
+      profitableTotal: nonCurve.profitableTotal,
+      profitablePct: nonCurve.profitablePct,
       wfePct: nonCurve.wfePct,
       oosWinsPct: nonCurve.oosWinsPct,
     };
@@ -491,6 +756,13 @@
     tableWrap.dataset.heightLevel = String(normalizeTableHeightLevel(state.tableHeightLevel));
   }
 
+  function focusMoveKeyboardTarget() {
+    const { tableWrap } = getDom();
+    if (!(tableWrap instanceof HTMLElement)) return;
+    tableWrap.tabIndex = -1;
+    tableWrap.focus({ preventScroll: true });
+  }
+
   function setPanelOpen(open) {
     state.panelOpen = Boolean(open);
     state.panelTouched = true;
@@ -514,7 +786,7 @@
   }
 
   function startMoveMode() {
-    if (state.moveMode) return;
+    if (state.moveMode || hasActiveViewControls()) return;
     const selectionIds = getMoveableSelectionIds();
     if (!selectionIds.length) return;
 
@@ -524,6 +796,11 @@
     state.moveSelectionIds = selectionIds.slice();
     state.moveInsertionIndex = getInitialMoveInsertionIndex(selectionIds);
     render();
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(focusMoveKeyboardTarget);
+    } else {
+      window.setTimeout(focusMoveKeyboardTarget, 0);
+    }
   }
 
   async function confirmMoveMode() {
@@ -575,7 +852,7 @@
 
   function applyRangeSelection(targetSetId) {
     if (state.rangeAnchorSetId === null || typeof state.rangeAnchorChecked !== 'boolean') return false;
-    const ids = state.sets.map((item) => item.id);
+    const ids = getInteractiveSetIds();
     const anchorIndex = ids.indexOf(state.rangeAnchorSetId);
     const targetIndex = ids.indexOf(targetSetId);
     if (anchorIndex < 0 || targetIndex < 0) return false;
@@ -615,7 +892,7 @@
   }
 
   function enterBatchMode() {
-    if (state.moveMode || state.batchMode || !state.sets.length) return;
+    if (state.moveMode || state.batchMode || !getInteractiveSetIds().length) return;
     closeTransientMenus();
     const seedSetId = state.focusedSetId;
     if (seedSetId !== null) {
@@ -643,7 +920,7 @@
     const target = normalizeSetId(targetSetId);
     if (target === null || state.batchAnchorSetId === null) return false;
 
-    const ids = state.sets.map((item) => item.id);
+    const ids = getInteractiveSetIds();
     const anchorIndex = ids.indexOf(state.batchAnchorSetId);
     const targetIndex = ids.indexOf(target);
     if (anchorIndex < 0 || targetIndex < 0) return false;
@@ -709,7 +986,7 @@
 
     if (event.ctrlKey) {
       const next = !wasChecked;
-      getAllSetIds().forEach((id) => setCheckedSet(id, next));
+      getInteractiveSetIds().forEach((id) => setCheckedSet(id, next));
       rememberRangeAnchor(normalized, next);
     } else if (event.shiftKey) {
       if (!applyRangeSelection(normalized)) {
@@ -765,6 +1042,18 @@
     emitStateChange({
       reason: 'setFocused',
       syncCheckedStudyIds: Array.from(new Set((focusedSet?.study_ids || []).slice())),
+    });
+  }
+
+  function handleViewControlsChange() {
+    if (state.moveMode) return;
+    closeTransientMenus();
+    const selectionChanged = syncSelectionToVisibleSets();
+    render();
+    if (!selectionChanged) return;
+    emitStateChange({
+      reason: 'setViewControlsChanged',
+      syncCheckedStudyIds: buildSyncCheckedStudyIdsForCurrentView(),
     });
   }
 
@@ -929,11 +1218,14 @@
 
     const focused = getSetById(state.focusedSetId);
     const hasSets = state.sets.length > 0;
+    const visibleSetCount = getVisibleOrderedSetIds().length;
     const hasCheckedStudies = state.checkedStudyIds.size > 0;
     const activeSetIds = getActiveActionSetIds();
     const hasActionTarget = activeSetIds.length > 0;
-    const canToggleBatch = hasSets && !state.moveMode;
-    const canMove = hasActionTarget && !state.moveMode;
+    const hasBlockingViewControls = hasActiveViewControls();
+    const moveDisabledHintText = getMoveDisabledHintText();
+    const canToggleBatch = visibleSetCount > 0 && !state.moveMode;
+    const canMove = hasActionTarget && !state.moveMode && !hasBlockingViewControls;
     const canRename = !state.batchMode && Boolean(focused) && !state.moveMode;
     const canDelete = hasActionTarget && !state.moveMode;
     const canColor = hasActionTarget && !state.moveMode;
@@ -944,7 +1236,9 @@
     const currentColorToken = getCommonColorToken(activeSetIds);
     const moveHint = state.moveMode
       ? `<span class="hint">Move mode active. Enter = save, Esc = cancel.</span>`
-      : '';
+      : (moveDisabledHintText
+        ? `<span class="hint">${escapeHtml(moveDisabledHintText)}</span>`
+        : '');
     const heightButtons = TABLE_HEIGHT_OPTIONS.map((option) => {
       const isActive = currentHeightLevel === option.level;
       const isDisabled = state.moveMode || isActive;
@@ -968,7 +1262,9 @@
         <button class="sel-btn${state.batchMode ? ' active' : ''}" id="analyticsSetBatchBtn"
                 type="button" aria-pressed="${state.batchMode ? 'true' : 'false'}"
                 ${canToggleBatch ? '' : ' disabled'}>Batch</button>
-        <button class="sel-btn" id="analyticsSetMoveBtn" type="button"${canMove ? '' : ' disabled'}>Move</button>
+        <button class="sel-btn" id="analyticsSetMoveBtn" type="button"
+                ${canMove ? '' : ' disabled'}
+                ${moveDisabledHintText ? `title="${escapeHtml(moveDisabledHintText)}"` : ''}>Move</button>
         <button class="sel-btn" id="analyticsSetRenameBtn" type="button"${canRename ? '' : ' disabled'}>Rename</button>
         <button class="sel-btn" id="analyticsSetDeleteBtn" type="button"${canDelete ? '' : ' disabled'}>Delete</button>
         <div class="analytics-set-color-wrap" id="analyticsSetColorWrap">
@@ -1096,6 +1392,7 @@
     const { summary } = getDom();
     if (!summary) return;
     summary.classList.remove('align-left');
+    const visibleCount = getVisibleOrderedSetIds().length;
     if (state.moveMode && state.moveSelectionIds.length > 0) {
       summary.textContent = `Moving: ${state.moveSelectionIds.length} selected`;
       return;
@@ -1116,6 +1413,21 @@
       summary.textContent = `Checked sets: ${state.checkedSetIds.size}`;
       return;
     }
+    if (hasActiveSetFilters() && state.sets.length > 0) {
+      const sortDescription = describeActiveSetSort();
+      summary.textContent = sortDescription
+        ? `Shown: ${visibleCount}/${state.sets.length} | ${sortDescription}`
+        : `Shown: ${visibleCount}/${state.sets.length}`;
+      return;
+    }
+    if (hasActiveSetSort() && state.sets.length > 0) {
+      summary.textContent = describeActiveSetSort();
+      return;
+    }
+    if (hasActiveViewControls() && state.sets.length > 0) {
+      summary.textContent = `Shown: ${visibleCount}/${state.sets.length}`;
+      return;
+    }
     summary.textContent = '';
   }
 
@@ -1126,6 +1438,8 @@
 
     const allMetrics = computeMetrics(state.studies, state.allMetrics);
     const moveSelectionSet = getMoveSelectionSet();
+    const visibleRows = getVisibleSetRows();
+    const sortState = getActiveSetSortState();
     const rows = [];
     rows.push(`
       <tr class="analytics-set-all-row" data-all-studies="1">
@@ -1141,9 +1455,16 @@
       </tr>
     `);
 
-    state.sets.forEach((setItem) => {
-      const setStudies = resolveStudiesForSet(setItem);
-      const metrics = computeMetrics(setStudies, setItem.metrics);
+    if (!visibleRows.length) {
+      rows.push(`
+        <tr class="analytics-sets-empty-row">
+          <td class="col-check"></td>
+          <td colspan="8">No study sets match the current filters.</td>
+        </tr>
+      `);
+    }
+
+    visibleRows.forEach(({ setItem, metrics }) => {
       const checked = state.checkedSetIds.has(setItem.id) ? ' checked' : '';
       const focusedClass = state.focusedSetId === setItem.id ? ' analytics-set-focused' : '';
       const batchSelectedClass = state.batchMode && state.batchSelectedSetIds.has(setItem.id)
@@ -1172,19 +1493,48 @@
         <thead>
           <tr>
             <th class="col-check"></th>
-            <th>Set Name</th>
-            <th>Ann.P%</th>
-            <th>Profit%</th>
-            <th>MaxDD%</th>
-            <th>Profitable</th>
-            <th>WFE%</th>
-            <th>OOS Wins</th>
-            <th title="Recent / Full signed R² for the aggregated portfolio curve">Consist</th>
+            <th class="analytics-sortable${sortState.sortColumn === 'set_name' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="set_name">
+              <span class="sort-label">Set Name</span><span class="sort-arrow">${sortState.sortColumn === 'set_name' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'ann_profit_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="ann_profit_pct">
+              <span class="sort-label">Ann.P%</span><span class="sort-arrow">${sortState.sortColumn === 'ann_profit_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'profit_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="profit_pct">
+              <span class="sort-label">Profit%</span><span class="sort-arrow">${sortState.sortColumn === 'profit_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'max_drawdown_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="max_drawdown_pct">
+              <span class="sort-label">MaxDD%</span><span class="sort-arrow">${sortState.sortColumn === 'max_drawdown_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'profitable_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="profitable_pct">
+              <span class="sort-label">Profitable</span><span class="sort-arrow">${sortState.sortColumn === 'profitable_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'wfe_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="wfe_pct">
+              <span class="sort-label">WFE%</span><span class="sort-arrow">${sortState.sortColumn === 'wfe_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'oos_wins_pct' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="oos_wins_pct">
+              <span class="sort-label">OOS Wins</span><span class="sort-arrow">${sortState.sortColumn === 'oos_wins_pct' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
+            <th class="analytics-sortable${sortState.sortColumn === 'consistency' ? ` sort-active sort-${sortState.sortDirection}` : ''}" data-sort-key="consistency" title="Recent / Full signed R² for the aggregated portfolio curve">
+              <span class="sort-label">Consist</span><span class="sort-arrow">${sortState.sortColumn === 'consistency' ? (sortState.sortDirection === 'asc' ? '▲' : '▼') : '↕'}</span>
+            </th>
           </tr>
         </thead>
         <tbody>${rows.join('')}</tbody>
       </table>
     `;
+
+    tableWrap.querySelectorAll('thead th.analytics-sortable').forEach((header) => {
+      header.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state.moveMode) return;
+        const sortKey = header.dataset.sortKey || '';
+        if (!sortKey || !window.AnalyticsSetsView || typeof window.AnalyticsSetsView.cycleSortForColumn !== 'function') {
+          return;
+        }
+        window.AnalyticsSetsView.cycleSortForColumn(sortKey);
+      });
+    });
 
     const allRow = tableWrap.querySelector('tr[data-all-studies="1"]');
     if (allRow) {
@@ -1231,6 +1581,7 @@
     const { root } = getDom();
     if (!root) return;
     root.classList.toggle('open', state.panelOpen);
+    renderHeaderControls();
     return;
 
     const hasSets = state.sets.length > 0;
@@ -1304,6 +1655,9 @@
     const prevBatchMode = state.batchMode;
 
     state.sets = cloneSetList(newSets);
+    if (window.AnalyticsSetsView && typeof window.AnalyticsSetsView.updateSets === 'function') {
+      window.AnalyticsSetsView.updateSets(state.sets, { emitChange: false });
+    }
     state.forceAllStudies = preserveSelection ? prevForceAll : false;
     const availableIds = new Set(state.sets.map((setItem) => setItem.id));
 
@@ -1332,6 +1686,7 @@
     }
 
     resolveViewMode();
+    syncSelectionToVisibleSets();
     if (!state.panelTouched) {
       state.panelOpen = state.sets.length > 0;
     }
@@ -1349,7 +1704,10 @@
     syncFromLoadedSets(payload?.sets || [], options);
     render();
     if (options.emitState !== false) {
-      emitStateChange({ reason: 'setsLoaded', syncCheckedStudyIds: null });
+      emitStateChange({
+        reason: 'setsLoaded',
+        syncCheckedStudyIds: buildSyncCheckedStudyIdsForCurrentView(),
+      });
     }
   }
 
@@ -1484,6 +1842,12 @@
     clearMoveState();
     state.rangeAnchorSetId = null;
     state.rangeAnchorChecked = null;
+    if (window.AnalyticsSetsView && typeof window.AnalyticsSetsView.init === 'function') {
+      window.AnalyticsSetsView.init({ onChange: handleViewControlsChange });
+      if (typeof window.AnalyticsSetsView.updateSets === 'function') {
+        window.AnalyticsSetsView.updateSets(state.sets, { emitChange: false });
+      }
+    }
     updateStudies(options.studies || []);
     bindEventsOnce();
     render();
@@ -1533,7 +1897,7 @@
       return;
     }
 
-    if (!hasSet(normalized)) return;
+    if (!hasSet(normalized) || !getVisibleSetIdSet().has(normalized)) return;
     closeTransientMenus();
     state.focusedSetId = normalized;
     state.forceAllStudies = false;
@@ -1568,6 +1932,10 @@
     return state.allMetrics ? { ...state.allMetrics } : null;
   }
 
+  function getVisibleSetIds() {
+    return getVisibleOrderedSetIds().slice();
+  }
+
   function scrollSetIntoView(setId) {
     const row = findSetRow(setId);
     if (!row) return;
@@ -1600,6 +1968,7 @@
     cancelMoveMode,
     isMoveMode,
     getSets,
+    getVisibleSetIds,
     getAllMetrics,
     scrollSetIntoView,
   };

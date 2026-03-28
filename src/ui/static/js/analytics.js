@@ -1896,8 +1896,10 @@
   function moveFocusedSet(direction) {
     const step = Number(direction);
     if (!Number.isInteger(step) || step === 0 || AnalyticsState.focusedSetId === null) return false;
-    const orderedSetIds = AnalyticsState.sets
-      .map((setItem) => Number(setItem?.id))
+    const orderedSetIds = (window.AnalyticsSets && typeof window.AnalyticsSets.getVisibleSetIds === 'function'
+      ? window.AnalyticsSets.getVisibleSetIds()
+      : AnalyticsState.sets.map((setItem) => Number(setItem?.id)))
+      .map((setId) => Number(setId))
       .filter((setId) => Number.isInteger(setId) && setId > 0);
     if (!orderedSetIds.length) return false;
     const currentIndex = orderedSetIds.indexOf(Number(AnalyticsState.focusedSetId));
