@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -9,18 +10,34 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.storage import (
+    create_new_db,
     create_study_set,
     delete_study_sets,
+    get_active_db_name,
+    get_or_build_all_studies_analytics_cache,
+    get_or_build_study_set_analytics_cache,
     get_db_connection,
     list_study_sets,
+    list_study_sets_with_analytics_cache,
     load_study_from_db,
     load_wfa_window_trials,
     reorder_study_sets,
     save_wfa_study_to_db,
+    set_active_db,
     update_study_sets_color,
     update_study_set,
 )
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
+
+
+@contextmanager
+def _temporary_active_db(label: str):
+    previous_db = get_active_db_name()
+    create_new_db(label)
+    try:
+        yield
+    finally:
+        set_active_db(previous_db)
 
 
 def _build_dummy_wfa_result():
@@ -116,10 +133,27 @@ def test_study_sets_tables_created():
         members_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='study_set_members'"
         ).fetchone()
+        analytics_cache_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_group_cache'"
+        ).fetchone()
         set_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_sets)").fetchall()}
+        analytics_cache_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(analytics_group_cache)").fetchall()
+        }
         assert sets_table is not None
         assert members_table is not None
+        assert analytics_cache_table is not None
         assert "color_token" in set_columns
+        assert "group_key" in analytics_cache_columns
+        assert "group_type" in analytics_cache_columns
+        assert "set_id" in analytics_cache_columns
+        assert "members_hash" in analytics_cache_columns
+        assert "curve_json" in analytics_cache_columns
+        assert "timestamps_json" in analytics_cache_columns
+        assert "ann_profit_pct" in analytics_cache_columns
+        assert "profit_pct" in analytics_cache_columns
+        assert "max_drawdown_pct" in analytics_cache_columns
+        assert "computed_at" in analytics_cache_columns
 
 
 def test_wfa_window_new_columns():
@@ -175,6 +209,9 @@ def test_studies_stitched_columns():
     assert "inactivity_multiplier" in columns
     assert "cooldown_enabled" in columns
     assert "cooldown_days" in columns
+    assert "stitched_oos_start_ts" in columns
+    assert "stitched_oos_end_ts" in columns
+    assert "stitched_oos_point_count" in columns
 
 
 def test_save_wfa_study_with_trials():
@@ -206,6 +243,9 @@ def test_save_wfa_study_with_trials():
     assert study.get("median_window_wr") == 50.0
     assert study.get("worst_window_profit") == 2.0
     assert study.get("worst_window_dd") == 0.7
+    assert study.get("stitched_oos_start_ts") == "2025-01-11T00:00:00+00:00"
+    assert study.get("stitched_oos_end_ts") == "2025-01-15T00:00:00+00:00"
+    assert study.get("stitched_oos_point_count") == 2
 
 
 def test_study_sets_storage_roundtrip():
@@ -337,6 +377,84 @@ def test_study_sets_bulk_color_update_and_delete():
     remaining_ids = {entry["id"] for entry in list_study_sets()}
     assert first["id"] not in remaining_ids
     assert second["id"] not in remaining_ids
+
+
+def test_study_set_analytics_cache_roundtrip_and_invalidation():
+    with _temporary_active_db("storage_cache_roundtrip"):
+        first_result = _build_dummy_wfa_result()
+        first_study_id = save_wfa_study_to_db(
+            wf_result=first_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        second_result = _build_dummy_wfa_result()
+        second_result.windows[0].window_id = 2
+        second_result.windows[0].param_id = "EMA 75_test"
+        second_result.windows[0].best_params = {"maType": "EMA", "maLength": 75, "closeCountLong": 7}
+        second_result.windows[0].oos_net_profit_pct = 5.0
+        second_result.windows[0].oos_equity_curve = [100.0, 105.0]
+        second_result.stitched_oos.final_net_profit_pct = 5.0
+        second_result.stitched_oos.equity_curve = [100.0, 105.0]
+        second_study_id = save_wfa_study_to_db(
+            wf_result=second_result,
+            config={},
+            csv_file_path="",
+            start_time=1.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Cache Set", [first_study_id, second_study_id])
+
+        initial_cache = get_or_build_study_set_analytics_cache(created["id"])
+        repeated_cache = get_or_build_study_set_analytics_cache(created["id"])
+        assert initial_cache["selected_count"] == 2
+        assert initial_cache["has_curve"] is True
+        assert initial_cache["computed_at"] == repeated_cache["computed_at"]
+        assert len(initial_cache["curve"]) == len(initial_cache["timestamps"]) == 2
+
+        updated = update_study_set(created["id"], study_ids=[first_study_id])
+        refreshed_cache = get_or_build_study_set_analytics_cache(updated["id"])
+        assert refreshed_cache["selected_count"] == 1
+        assert refreshed_cache["profit_pct"] == pytest.approx(2.0)
+        assert refreshed_cache["computed_at"] != initial_cache["computed_at"]
+
+        sets_payload = list_study_sets_with_analytics_cache()
+        assert sets_payload["all_metrics"]["selected_count"] == 2
+        assert sets_payload["sets"][0]["metrics"]["selected_count"] == 1
+        assert sets_payload["sets"][0]["metrics"]["profit_pct"] == pytest.approx(2.0)
+
+
+def test_all_studies_analytics_cache_invalidates_after_new_wfa_study_saved():
+    with _temporary_active_db("storage_all_cache_invalidation"):
+        save_wfa_study_to_db(
+            wf_result=_build_dummy_wfa_result(),
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+        first_cache = get_or_build_all_studies_analytics_cache()
+        assert first_cache["selected_count"] == 1
+        assert first_cache["has_curve"] is True
+
+        second_result = _build_dummy_wfa_result()
+        second_result.windows[0].window_id = 2
+        second_result.windows[0].param_id = "EMA 90_test"
+        second_result.windows[0].best_params = {"maType": "EMA", "maLength": 90, "closeCountLong": 7}
+        save_wfa_study_to_db(
+            wf_result=second_result,
+            config={},
+            csv_file_path="",
+            start_time=2.0,
+            score_config=None,
+        )
+
+        second_cache = get_or_build_all_studies_analytics_cache()
+        assert second_cache["selected_count"] == 2
+        assert second_cache["computed_at"] != first_cache["computed_at"]
 
 
 def test_save_wfa_study_layer1_aggregates_multi_window():

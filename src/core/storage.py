@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -29,6 +30,10 @@ OBJECTIVE_DIRECTIONS: Dict[str, str] = {
     "consistency_score": "maximize",
     "composite_score": "maximize",
 }
+
+ANALYTICS_GROUP_KEY_ALL = "all"
+ANALYTICS_GROUP_TYPE_ALL = "all"
+ANALYTICS_GROUP_TYPE_SET = "set"
 
 DB_INIT_LOCK = threading.Lock()
 DB_ACCESS_LOCK = threading.RLock()
@@ -222,6 +227,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             stitched_oos_equity_curve TEXT,
             stitched_oos_timestamps_json TEXT,
             stitched_oos_window_ids_json TEXT,
+            stitched_oos_start_ts TEXT,
+            stitched_oos_end_ts TEXT,
+            stitched_oos_point_count INTEGER,
             stitched_oos_net_profit_pct REAL,
             stitched_oos_max_drawdown_pct REAL,
             stitched_oos_total_trades INTEGER,
@@ -417,6 +425,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _ensure_columns(conn)
     _ensure_wfa_schema_updated(conn)
     ensure_study_sets_tables(conn=conn)
+    ensure_analytics_group_cache_tables(conn=conn)
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -452,6 +461,9 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "stitched_oos_equity_curve", "TEXT")
     ensure("studies", "stitched_oos_timestamps_json", "TEXT")
     ensure("studies", "stitched_oos_window_ids_json", "TEXT")
+    ensure("studies", "stitched_oos_start_ts", "TEXT")
+    ensure("studies", "stitched_oos_end_ts", "TEXT")
+    ensure("studies", "stitched_oos_point_count", "INTEGER")
     ensure("studies", "stitched_oos_net_profit_pct", "REAL")
     ensure("studies", "stitched_oos_max_drawdown_pct", "REAL")
     ensure("studies", "stitched_oos_total_trades", "INTEGER")
@@ -777,6 +789,512 @@ def _ensure_study_sets_tables_with_conn(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_analytics_group_cache_tables(
+    db_path: Optional[Path] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    if conn is not None:
+        _ensure_analytics_group_cache_tables_with_conn(conn)
+        return
+
+    path = db_path or _active_db_path
+    init_database(db_path=path)
+    with sqlite3.connect(
+        str(path),
+        check_same_thread=False,
+        timeout=30.0,
+        isolation_level="DEFERRED",
+    ) as local_conn:
+        _configure_connection(local_conn)
+        _ensure_analytics_group_cache_tables_with_conn(local_conn)
+        local_conn.commit()
+
+
+def _ensure_analytics_group_cache_tables_with_conn(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS analytics_group_cache (
+            group_key TEXT PRIMARY KEY,
+            group_type TEXT NOT NULL CHECK(group_type IN ('all', 'set')),
+            set_id INTEGER,
+            members_hash TEXT NOT NULL,
+            selected_count INTEGER NOT NULL DEFAULT 0,
+            curve_json TEXT,
+            timestamps_json TEXT,
+            return_profile_json TEXT,
+            profit_pct REAL,
+            max_drawdown_pct REAL,
+            ann_profit_pct REAL,
+            overlap_days INTEGER NOT NULL DEFAULT 0,
+            overlap_days_exact REAL NOT NULL DEFAULT 0,
+            studies_used INTEGER NOT NULL DEFAULT 0,
+            studies_excluded INTEGER NOT NULL DEFAULT 0,
+            warning TEXT,
+            computed_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (set_id) REFERENCES study_sets(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_analytics_group_cache_set_id
+            ON analytics_group_cache(set_id);
+        CREATE INDEX IF NOT EXISTS idx_analytics_group_cache_type
+            ON analytics_group_cache(group_type);
+        """
+    )
+
+
+def _parse_json_array_text(raw_value: Any) -> List[Any]:
+    if isinstance(raw_value, list):
+        return raw_value
+    if not raw_value:
+        return []
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _parse_json_object_text(raw_value: Any) -> Dict[str, Any]:
+    if isinstance(raw_value, dict):
+        return raw_value
+    if not raw_value:
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_stitched_oos_metadata(
+    raw_curve: Any,
+    raw_timestamps: Any,
+) -> tuple[Optional[str], Optional[str], int]:
+    curve = _parse_json_array_text(raw_curve)
+    timestamps = _parse_json_array_text(raw_timestamps)
+    if not curve or len(curve) != len(timestamps):
+        return None, None, 0
+
+    start_ts = str(timestamps[0] or "").strip()
+    end_ts = str(timestamps[-1] or "").strip()
+    if not start_ts or not end_ts:
+        return None, None, 0
+    return start_ts, end_ts, len(timestamps)
+
+
+def backfill_stitched_oos_metadata(
+    db_path: Optional[Path] = None,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
+    if conn is not None:
+        return _backfill_stitched_oos_metadata_with_conn(conn)
+
+    updated_count = 0
+    with get_db_connection() as local_conn:
+        updated_count = _backfill_stitched_oos_metadata_with_conn(local_conn)
+        if updated_count > 0:
+            local_conn.commit()
+    return updated_count
+
+
+def _backfill_stitched_oos_metadata_with_conn(conn: sqlite3.Connection) -> int:
+    rows = conn.execute(
+        """
+        SELECT
+            study_id,
+            stitched_oos_equity_curve,
+            stitched_oos_timestamps_json
+        FROM studies
+        WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
+          AND (
+              stitched_oos_point_count IS NULL
+              OR stitched_oos_start_ts IS NULL
+              OR stitched_oos_end_ts IS NULL
+          )
+        """
+    ).fetchall()
+
+    updates: List[tuple[Optional[str], Optional[str], int, str]] = []
+    for row in rows:
+        start_ts, end_ts, point_count = _extract_stitched_oos_metadata(
+            row["stitched_oos_equity_curve"],
+            row["stitched_oos_timestamps_json"],
+        )
+        updates.append((start_ts, end_ts, point_count, str(row["study_id"])))
+
+    if not updates:
+        return 0
+
+    conn.executemany(
+        """
+        UPDATE studies
+        SET
+            stitched_oos_start_ts = ?,
+            stitched_oos_end_ts = ?,
+            stitched_oos_point_count = ?
+        WHERE study_id = ?
+        """,
+        updates,
+    )
+    return len(updates)
+
+
+def _hash_analytics_group_members(study_ids: Sequence[str]) -> str:
+    normalized = sorted(
+        {str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()}
+    )
+    return hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
+
+
+def _load_all_wfa_study_ids_with_conn(conn: sqlite3.Connection) -> List[str]:
+    rows = conn.execute(
+        """
+        SELECT study_id
+        FROM studies
+        WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
+        ORDER BY study_id ASC
+        """
+    ).fetchall()
+    return [str(row["study_id"] or "") for row in rows if row["study_id"]]
+
+
+def _load_study_curve_rows_by_id_with_conn(
+    conn: sqlite3.Connection,
+    study_ids: Sequence[str],
+    *,
+    chunk_size: int = 200,
+) -> Dict[str, Dict[str, Any]]:
+    rows_by_id: Dict[str, Dict[str, Any]] = {}
+    normalized_ids = [str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()]
+    if not normalized_ids:
+        return rows_by_id
+
+    start = 0
+    total = len(normalized_ids)
+    while start < total:
+        chunk = normalized_ids[start : start + max(1, int(chunk_size))]
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = conn.execute(
+            f"""
+            SELECT
+                study_id,
+                stitched_oos_equity_curve,
+                stitched_oos_timestamps_json
+            FROM studies
+            WHERE study_id IN ({placeholders})
+              AND LOWER(COALESCE(optimization_mode, '')) = 'wfa'
+            """,
+            tuple(chunk),
+        )
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            rows_by_id[str(row_dict.get("study_id") or "")] = row_dict
+        start += max(1, int(chunk_size))
+
+    return rows_by_id
+
+
+def _compute_analytics_group_result_with_conn(
+    conn: sqlite3.Connection,
+    study_ids: Sequence[str],
+) -> Dict[str, Any]:
+    from .analytics import aggregate_equity_curves
+
+    normalized_ids = [str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()]
+    if not normalized_ids:
+        result = dict(aggregate_equity_curves([]))
+        result["selected_count"] = 0
+        result["missing_study_ids"] = []
+        return result
+
+    rows_by_id = _load_study_curve_rows_by_id_with_conn(conn, normalized_ids)
+    studies_data: List[Dict[str, Any]] = []
+    missing_study_ids: List[str] = []
+
+    for study_id in normalized_ids:
+        row = rows_by_id.get(study_id)
+        if row is None:
+            missing_study_ids.append(study_id)
+            continue
+        studies_data.append(
+            {
+                "equity_curve": _parse_json_array_text(row.get("stitched_oos_equity_curve")),
+                "timestamps": _parse_json_array_text(row.get("stitched_oos_timestamps_json")),
+            }
+        )
+
+    result = dict(aggregate_equity_curves(studies_data))
+    if missing_study_ids:
+        result["studies_excluded"] = int(result.get("studies_excluded") or 0) + len(missing_study_ids)
+        warning = str(result.get("warning") or "").strip()
+        missing_note = f"{len(missing_study_ids)} selected studies were not found."
+        result["warning"] = f"{warning} {missing_note}".strip() if warning else missing_note
+
+    result["selected_count"] = len(normalized_ids)
+    result["missing_study_ids"] = missing_study_ids
+    return result
+
+
+def _normalize_analytics_group_cache_payload(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(row)
+    payload["curve"] = _parse_json_array_text(payload.get("curve_json"))
+    payload["timestamps"] = _parse_json_array_text(payload.get("timestamps_json"))
+    payload["return_profile"] = _parse_json_object_text(payload.get("return_profile_json"))
+    payload["selected_count"] = int(payload.get("selected_count") or 0)
+    payload["overlap_days"] = int(payload.get("overlap_days") or 0)
+    payload["overlap_days_exact"] = float(payload.get("overlap_days_exact") or 0.0)
+    payload["studies_used"] = int(payload.get("studies_used") or 0)
+    payload["studies_excluded"] = int(payload.get("studies_excluded") or 0)
+    payload["missing_study_ids"] = []
+    payload["has_curve"] = bool(payload["curve"] and len(payload["curve"]) == len(payload["timestamps"]))
+    payload.pop("curve_json", None)
+    payload.pop("timestamps_json", None)
+    payload.pop("return_profile_json", None)
+    return payload
+
+
+def _analytics_group_cache_summary_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    curve = payload.get("curve")
+    timestamps = payload.get("timestamps")
+    has_curve = bool(
+        isinstance(curve, list)
+        and isinstance(timestamps, list)
+        and len(curve) > 0
+        and len(curve) == len(timestamps)
+    )
+    return {
+        "ann_profit_pct": payload.get("ann_profit_pct"),
+        "profit_pct": payload.get("profit_pct"),
+        "max_drawdown_pct": payload.get("max_drawdown_pct"),
+        "overlap_days": payload.get("overlap_days"),
+        "overlap_days_exact": payload.get("overlap_days_exact"),
+        "studies_used": payload.get("studies_used"),
+        "studies_excluded": payload.get("studies_excluded"),
+        "selected_count": payload.get("selected_count"),
+        "warning": payload.get("warning"),
+        "computed_at": payload.get("computed_at"),
+        "has_curve": has_curve,
+        "curve_point_count": len(curve) if isinstance(curve, list) else 0,
+    }
+
+
+def _upsert_analytics_group_cache_with_conn(
+    conn: sqlite3.Connection,
+    *,
+    group_key: str,
+    group_type: str,
+    set_id: Optional[int],
+    study_ids: Sequence[str],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized_ids = [str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()]
+    stored_payload = {
+        "group_key": group_key,
+        "group_type": group_type,
+        "set_id": set_id,
+        "members_hash": _hash_analytics_group_members(normalized_ids),
+        "selected_count": len(normalized_ids),
+        "curve_json": (
+            json.dumps(payload.get("curve"))
+            if isinstance(payload.get("curve"), list)
+            else None
+        ),
+        "timestamps_json": (
+            json.dumps(payload.get("timestamps"))
+            if isinstance(payload.get("timestamps"), list)
+            else None
+        ),
+        "return_profile_json": json.dumps(payload.get("return_profile") or {}),
+        "profit_pct": payload.get("profit_pct"),
+        "max_drawdown_pct": payload.get("max_drawdown_pct"),
+        "ann_profit_pct": payload.get("ann_profit_pct"),
+        "overlap_days": int(payload.get("overlap_days") or 0),
+        "overlap_days_exact": float(payload.get("overlap_days_exact") or 0.0),
+        "studies_used": int(payload.get("studies_used") or 0),
+        "studies_excluded": int(payload.get("studies_excluded") or 0),
+        "warning": payload.get("warning"),
+        "computed_at": _utc_now_iso(),
+    }
+    conn.execute(
+        """
+        INSERT INTO analytics_group_cache (
+            group_key,
+            group_type,
+            set_id,
+            members_hash,
+            selected_count,
+            curve_json,
+            timestamps_json,
+            return_profile_json,
+            profit_pct,
+            max_drawdown_pct,
+            ann_profit_pct,
+            overlap_days,
+            overlap_days_exact,
+            studies_used,
+            studies_excluded,
+            warning,
+            computed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(group_key) DO UPDATE SET
+            group_type = excluded.group_type,
+            set_id = excluded.set_id,
+            members_hash = excluded.members_hash,
+            selected_count = excluded.selected_count,
+            curve_json = excluded.curve_json,
+            timestamps_json = excluded.timestamps_json,
+            return_profile_json = excluded.return_profile_json,
+            profit_pct = excluded.profit_pct,
+            max_drawdown_pct = excluded.max_drawdown_pct,
+            ann_profit_pct = excluded.ann_profit_pct,
+            overlap_days = excluded.overlap_days,
+            overlap_days_exact = excluded.overlap_days_exact,
+            studies_used = excluded.studies_used,
+            studies_excluded = excluded.studies_excluded,
+            warning = excluded.warning,
+            computed_at = excluded.computed_at
+        """,
+        (
+            stored_payload["group_key"],
+            stored_payload["group_type"],
+            stored_payload["set_id"],
+            stored_payload["members_hash"],
+            stored_payload["selected_count"],
+            stored_payload["curve_json"],
+            stored_payload["timestamps_json"],
+            stored_payload["return_profile_json"],
+            stored_payload["profit_pct"],
+            stored_payload["max_drawdown_pct"],
+            stored_payload["ann_profit_pct"],
+            stored_payload["overlap_days"],
+            stored_payload["overlap_days_exact"],
+            stored_payload["studies_used"],
+            stored_payload["studies_excluded"],
+            stored_payload["warning"],
+            stored_payload["computed_at"],
+        ),
+    )
+    return _normalize_analytics_group_cache_payload(stored_payload)
+
+
+def _get_or_build_analytics_group_cache_with_conn(
+    conn: sqlite3.Connection,
+    *,
+    group_key: str,
+    group_type: str,
+    study_ids: Sequence[str],
+    set_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    ensure_analytics_group_cache_tables(conn=conn)
+    normalized_ids = [str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()]
+    members_hash = _hash_analytics_group_members(normalized_ids)
+    row = conn.execute(
+        "SELECT * FROM analytics_group_cache WHERE group_key = ?",
+        (group_key,),
+    ).fetchone()
+    if row is not None:
+        cached = _normalize_analytics_group_cache_payload(row)
+        if (
+            str(cached.get("members_hash") or "") == members_hash
+            and int(cached.get("selected_count") or 0) == len(normalized_ids)
+        ):
+            return cached
+
+    computed = _compute_analytics_group_result_with_conn(conn, normalized_ids)
+    return _upsert_analytics_group_cache_with_conn(
+        conn,
+        group_key=group_key,
+        group_type=group_type,
+        set_id=set_id,
+        study_ids=normalized_ids,
+        payload=computed,
+    )
+
+
+def invalidate_analytics_group_cache_for_set_ids(
+    set_ids: Sequence[int],
+    *,
+    conn: sqlite3.Connection,
+) -> None:
+    normalized_ids = [int(set_id) for set_id in set_ids if int(set_id) > 0]
+    if not normalized_ids:
+        return
+    ensure_analytics_group_cache_tables(conn=conn)
+    placeholders = ",".join("?" for _ in normalized_ids)
+    conn.execute(
+        f"DELETE FROM analytics_group_cache WHERE set_id IN ({placeholders})",
+        tuple(normalized_ids),
+    )
+
+
+def invalidate_all_studies_analytics_cache(*, conn: sqlite3.Connection) -> None:
+    ensure_analytics_group_cache_tables(conn=conn)
+    conn.execute(
+        "DELETE FROM analytics_group_cache WHERE group_key = ?",
+        (ANALYTICS_GROUP_KEY_ALL,),
+    )
+
+
+def invalidate_analytics_group_cache_for_study(
+    study_id: str,
+    *,
+    conn: sqlite3.Connection,
+) -> None:
+    ensure_analytics_group_cache_tables(conn=conn)
+    affected_rows = conn.execute(
+        """
+        SELECT DISTINCT set_id
+        FROM study_set_members
+        WHERE study_id = ?
+        """,
+        (study_id,),
+    ).fetchall()
+    affected_set_ids = [int(row["set_id"]) for row in affected_rows if row["set_id"] is not None]
+    invalidate_all_studies_analytics_cache(conn=conn)
+    invalidate_analytics_group_cache_for_set_ids(affected_set_ids, conn=conn)
+
+
+def get_or_build_all_studies_analytics_cache(
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    _ = db_path
+    with get_db_connection() as conn:
+        ensure_study_sets_tables(conn=conn)
+        backfill_stitched_oos_metadata(conn=conn)
+        payload = _get_or_build_analytics_group_cache_with_conn(
+            conn,
+            group_key=ANALYTICS_GROUP_KEY_ALL,
+            group_type=ANALYTICS_GROUP_TYPE_ALL,
+            study_ids=_load_all_wfa_study_ids_with_conn(conn),
+            set_id=None,
+        )
+        conn.commit()
+        return payload
+
+
+def get_or_build_study_set_analytics_cache(
+    set_id: int,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    _ = db_path
+    with get_db_connection() as conn:
+        ensure_study_sets_tables(conn=conn)
+        backfill_stitched_oos_metadata(conn=conn)
+        study_set = _load_study_set_by_id(conn, int(set_id))
+        if study_set is None:
+            raise ValueError("Study set not found.")
+        payload = _get_or_build_analytics_group_cache_with_conn(
+            conn,
+            group_key=f"set:{int(set_id)}",
+            group_type=ANALYTICS_GROUP_TYPE_SET,
+            study_ids=study_set.get("study_ids") or [],
+            set_id=int(set_id),
+        )
+        conn.commit()
+        return payload
+
+
 def _normalize_study_set_name(name: Any) -> str:
     normalized = str(name or "").strip()
     if not normalized:
@@ -964,23 +1482,22 @@ def _ensure_study_set_ids_exist(conn: sqlite3.Connection, set_ids: Sequence[int]
         raise ValueError(f"Unknown study set IDs: {missing_preview}{suffix}")
 
 
-def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
-    with get_db_connection() as conn:
-        ensure_study_sets_tables(conn=conn)
-        set_rows = conn.execute(
-            """
-            SELECT id, name, sort_order, created_at, color_token
-            FROM study_sets
-            ORDER BY sort_order ASC, id ASC
-            """
-        ).fetchall()
-        member_rows = conn.execute(
-            """
-            SELECT set_id, study_id
-            FROM study_set_members
-            ORDER BY set_id ASC, rowid ASC
-            """
-        ).fetchall()
+def _list_study_sets_with_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    ensure_study_sets_tables(conn=conn)
+    set_rows = conn.execute(
+        """
+        SELECT id, name, sort_order, created_at, color_token
+        FROM study_sets
+        ORDER BY sort_order ASC, id ASC
+        """
+    ).fetchall()
+    member_rows = conn.execute(
+        """
+        SELECT set_id, study_id
+        FROM study_set_members
+        ORDER BY set_id ASC, rowid ASC
+        """
+    ).fetchall()
 
     members_by_set: Dict[int, List[str]] = {}
     for row in member_rows:
@@ -1003,6 +1520,92 @@ def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     ]
 
 
+def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
+    _ = db_path
+    with get_db_connection() as conn:
+        return _list_study_sets_with_conn(conn)
+
+
+def list_study_sets_with_analytics_cache(
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    _ = db_path
+    with get_db_connection() as conn:
+        backfill_stitched_oos_metadata(conn=conn)
+        study_sets = _list_study_sets_with_conn(conn)
+        all_metrics = _get_or_build_analytics_group_cache_with_conn(
+            conn,
+            group_key=ANALYTICS_GROUP_KEY_ALL,
+            group_type=ANALYTICS_GROUP_TYPE_ALL,
+            study_ids=_load_all_wfa_study_ids_with_conn(conn),
+            set_id=None,
+        )
+        enriched_sets = []
+        for study_set in study_sets:
+            metrics = _get_or_build_analytics_group_cache_with_conn(
+                conn,
+                group_key=f"set:{int(study_set['id'])}",
+                group_type=ANALYTICS_GROUP_TYPE_SET,
+                study_ids=study_set.get("study_ids") or [],
+                set_id=int(study_set["id"]),
+            )
+            enriched_sets.append(
+                {
+                    **study_set,
+                    "metrics": _analytics_group_cache_summary_payload(metrics),
+                }
+            )
+
+        conn.commit()
+        return {
+            "sets": enriched_sets,
+            "all_metrics": _analytics_group_cache_summary_payload(all_metrics),
+        }
+
+
+def load_study_analytics_equity(
+    study_id: str,
+    db_path: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    _ = db_path
+    normalized_study_id = str(study_id or "").strip()
+    if not normalized_study_id:
+        return None
+
+    with get_db_connection() as conn:
+        backfill_stitched_oos_metadata(conn=conn)
+        row = conn.execute(
+            """
+            SELECT
+                study_id,
+                optimization_mode,
+                stitched_oos_equity_curve,
+                stitched_oos_timestamps_json,
+                stitched_oos_start_ts,
+                stitched_oos_end_ts,
+                stitched_oos_point_count
+            FROM studies
+            WHERE study_id = ?
+            """,
+            (normalized_study_id,),
+        ).fetchone()
+        conn.commit()
+
+    if row is None:
+        return None
+
+    payload = dict(row)
+    payload["curve"] = _parse_json_array_text(payload.get("stitched_oos_equity_curve"))
+    payload["timestamps"] = _parse_json_array_text(payload.get("stitched_oos_timestamps_json"))
+    point_count = int(payload.get("stitched_oos_point_count") or 0)
+    payload["point_count"] = point_count
+    payload["has_equity_curve"] = bool(
+        point_count > 0
+        and len(payload["curve"]) == len(payload["timestamps"])
+    )
+    return payload
+
+
 def create_study_set(
     name: Any,
     study_ids: Any,
@@ -1017,6 +1620,7 @@ def create_study_set(
 
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
+        ensure_analytics_group_cache_tables(conn=conn)
         _validate_wfa_study_ids(conn, normalized_ids)
 
         next_order_row = conn.execute(
@@ -1074,6 +1678,7 @@ def update_study_set(
 
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
+        ensure_analytics_group_cache_tables(conn=conn)
         current = _load_study_set_by_id(conn, set_id_int)
         if current is None:
             raise ValueError("Study set not found.")
@@ -1118,6 +1723,7 @@ def update_study_set(
                     """,
                     [(set_id_int, study_id) for study_id in normalized_ids],
                 )
+            invalidate_analytics_group_cache_for_set_ids([set_id_int], conn=conn)
 
         conn.commit()
         updated = _load_study_set_by_id(conn, set_id_int)
@@ -1130,6 +1736,7 @@ def update_study_set(
 def delete_study_set(set_id: int, db_path: Optional[Path] = None) -> bool:
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
+        ensure_analytics_group_cache_tables(conn=conn)
         cursor = conn.execute("DELETE FROM study_sets WHERE id = ?", (int(set_id),))
         conn.commit()
         return cursor.rowcount > 0
@@ -1140,6 +1747,7 @@ def delete_study_sets(set_ids: Any, db_path: Optional[Path] = None) -> int:
 
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
+        ensure_analytics_group_cache_tables(conn=conn)
         _ensure_study_set_ids_exist(conn, normalized_ids)
         conn.executemany(
             "DELETE FROM study_sets WHERE id = ?",
@@ -1660,6 +2268,9 @@ def save_wfa_study_to_db(
             stitched_equity = None
             stitched_timestamps = None
             stitched_window_ids = None
+            stitched_start_ts = None
+            stitched_end_ts = None
+            stitched_point_count = 0
             stitched_net_profit_pct = None
             stitched_max_drawdown_pct = None
             stitched_total_trades = None
@@ -1714,6 +2325,12 @@ def save_wfa_study_to_db(
                     if getattr(stitched, "window_ids", None)
                     else None
                 )
+                stitched_timestamps_values = list(getattr(stitched, "timestamps", None) or [])
+                stitched_curve_values = list(getattr(stitched, "equity_curve", None) or [])
+                if stitched_curve_values and len(stitched_curve_values) == len(stitched_timestamps_values):
+                    stitched_point_count = len(stitched_timestamps_values)
+                    stitched_start_ts = _format_timestamp(stitched_timestamps_values[0])
+                    stitched_end_ts = _format_timestamp(stitched_timestamps_values[-1])
                 stitched_net_profit_pct = getattr(stitched, "final_net_profit_pct", None)
                 stitched_max_drawdown_pct = getattr(stitched, "max_drawdown_pct", None)
                 stitched_total_trades = getattr(stitched, "total_trades", None)
@@ -1840,7 +2457,9 @@ def save_wfa_study_to_db(
                 "completed_at",
                 "filter_min_profit", "min_profit_threshold",
                 "stitched_oos_equity_curve", "stitched_oos_timestamps_json",
-                "stitched_oos_window_ids_json", "stitched_oos_net_profit_pct",
+                "stitched_oos_window_ids_json", "stitched_oos_start_ts",
+                "stitched_oos_end_ts", "stitched_oos_point_count",
+                "stitched_oos_net_profit_pct",
                 "stitched_oos_max_drawdown_pct", "stitched_oos_total_trades",
                 "stitched_oos_winning_trades", "stitched_oos_win_rate",
                 "profitable_windows", "total_windows",
@@ -1897,6 +2516,9 @@ def save_wfa_study_to_db(
                 stitched_equity,
                 stitched_timestamps,
                 stitched_window_ids,
+                stitched_start_ts,
+                stitched_end_ts,
+                stitched_point_count,
                 stitched_net_profit_pct,
                 stitched_max_drawdown_pct,
                 stitched_total_trades,
@@ -1914,6 +2536,7 @@ def save_wfa_study_to_db(
                 f"INSERT INTO studies ({', '.join(study_columns)}) VALUES ({study_placeholders})",
                 study_values,
             )
+            invalidate_all_studies_analytics_cache(conn=conn)
 
             window_rows = []
             for window in wf_result.windows:
@@ -3032,6 +3655,7 @@ def delete_manual_test(study_id: str, test_id: int) -> bool:
 
 def delete_study(study_id: str) -> bool:
     with get_db_connection() as conn:
+        invalidate_analytics_group_cache_for_study(study_id, conn=conn)
         cursor = conn.execute("DELETE FROM studies WHERE study_id = ?", (study_id,))
         conn.commit()
         return cursor.rowcount > 0

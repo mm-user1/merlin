@@ -1868,16 +1868,22 @@ def test_analytics_summary_wfa_phase1_contract(client):
         assert first["wfa_mode"] == "Adaptive"
         assert first["is_oos"] == "60/30"
         assert first["has_equity_curve"] is True
-        assert len(first["equity_curve"]) == 3
-        assert len(first["equity_timestamps"]) == 3
+        assert first["equity_point_count"] == 3
+        assert first["equity_start_ts"] == "2025-01-01T00:00:00+00:00"
+        assert first["equity_end_ts"] == "2025-01-31T00:00:00+00:00"
+        assert first["oos_span_days_exact"] == pytest.approx(30.0)
+        assert "equity_curve" not in first
+        assert "equity_timestamps" not in first
 
         second = studies[1]
         assert second["strategy"] == "S02 v3.0"
         assert second["wfa_mode"] == "Fixed"
         assert second["is_oos"] == "?/30"
         assert second["has_equity_curve"] is False
-        assert second["equity_curve"] == []
-        assert second["equity_timestamps"] == []
+        assert second["equity_point_count"] == 0
+        assert second["equity_start_ts"] is None
+        assert second["equity_end_ts"] is None
+        assert second["oos_span_days_exact"] is None
 
         third = studies[2]
         assert third["strategy"] == "custom_strategy"
@@ -1935,6 +1941,8 @@ def test_analytics_summary_includes_study_name_and_timestamps(client):
         assert first["created_at_epoch"] > 0
         assert first["completed_at_epoch"] > 0
         assert first["wfa_settings"]["run_time_seconds"] == 300
+        assert "equity_curve" not in first
+        assert "equity_timestamps" not in first
 
         second = by_id["wfa_ts_2"]
         assert second["study_name"] == "S03_OKX_ETHUSDT.P, 240 2025.01.01-2025.01.31_WFA"
@@ -1944,6 +1952,111 @@ def test_analytics_summary_includes_study_name_and_timestamps(client):
         assert isinstance(second["completed_at_epoch"], int)
         assert second["completed_at_epoch"] > 0
         assert second["wfa_settings"]["run_time_seconds"] is None
+
+
+def test_analytics_study_equity_endpoint_returns_lazy_curve_payload(client):
+    with _temporary_active_db(f"analytics_study_equity_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_study_curve",
+            study_name="WFA_STUDY_CURVE",
+            optimization_mode="wfa",
+            stitched_oos_equity_curve=[100.0, 110.0, 108.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-05T00:00:00+00:00",
+                "2025-01-08T00:00:00+00:00",
+            ],
+        )
+        _insert_analytics_study(
+            study_id="optuna_curve",
+            study_name="OPTUNA_CURVE",
+            optimization_mode="optuna",
+        )
+
+        response = client.get("/api/analytics/studies/wfa_study_curve/equity")
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["study_id"] == "wfa_study_curve"
+        assert payload["has_equity_curve"] is True
+        assert payload["point_count"] == 3
+        assert payload["curve"] == [100.0, 110.0, 108.0]
+        assert payload["timestamps"] == [
+            "2025-01-01T00:00:00+00:00",
+            "2025-01-05T00:00:00+00:00",
+            "2025-01-08T00:00:00+00:00",
+        ]
+
+        missing = client.get("/api/analytics/studies/missing/equity")
+        assert missing.status_code == 404
+
+        non_wfa = client.get("/api/analytics/studies/optuna_curve/equity")
+        assert non_wfa.status_code == 400
+        assert "WFA" in non_wfa.get_json()["error"]
+
+
+def test_analytics_set_and_all_studies_equity_endpoints_return_cached_payloads(client):
+    with _temporary_active_db(f"analytics_cached_equity_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_cache_a",
+            study_name="WFA_CACHE_A",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=10.0,
+            stitched_oos_max_drawdown_pct=4.0,
+            stitched_oos_equity_curve=[100.0, 110.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-10T00:00:00+00:00",
+            ],
+        )
+        _insert_analytics_study(
+            study_id="wfa_cache_b",
+            study_name="WFA_CACHE_B",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=5.0,
+            stitched_oos_max_drawdown_pct=2.0,
+            stitched_oos_equity_curve=[100.0, 105.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-10T00:00:00+00:00",
+            ],
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Cached Set", "study_ids": ["wfa_cache_a", "wfa_cache_b"]},
+        ).get_json()
+
+        sets_payload = client.get("/api/analytics/sets").get_json()
+        assert sets_payload["all_metrics"]["selected_count"] == 2
+        assert sets_payload["all_metrics"]["has_curve"] is True
+        assert sets_payload["sets"][0]["metrics"]["selected_count"] == 2
+        assert sets_payload["sets"][0]["metrics"]["has_curve"] is True
+
+        set_equity = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert set_equity.status_code == 200
+        set_payload = set_equity.get_json()
+        assert set_payload["selected_count"] == 2
+        assert set_payload["has_curve"] is True
+        assert len(set_payload["curve"]) == len(set_payload["timestamps"]) == 2
+
+        all_equity = client.get("/api/analytics/all-studies/equity")
+        assert all_equity.status_code == 200
+        all_payload = all_equity.get_json()
+        assert all_payload["selected_count"] == 2
+        assert all_payload["has_curve"] is True
+        assert len(all_payload["curve"]) == len(all_payload["timestamps"]) == 2
+
+        update_response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"study_ids": ["wfa_cache_a"]},
+        )
+        assert update_response.status_code == 200
+
+        refreshed = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert refreshed.status_code == 200
+        refreshed_payload = refreshed.get_json()
+        assert refreshed_payload["selected_count"] == 1
+        assert refreshed_payload["profit_pct"] == pytest.approx(10.0)
 
 
 def test_analytics_summary_includes_focus_settings_payload(client):
@@ -2129,7 +2242,10 @@ def test_analytics_sets_crud_and_reorder(client):
         list_response = client.get("/api/analytics/sets")
         assert list_response.status_code == 200
         payload = list_response.get_json()
+        assert "all_metrics" in payload
+        assert payload["all_metrics"]["selected_count"] == 2
         assert [item["name"] for item in payload["sets"]] == ["First Set", "Second Set"]
+        assert all("metrics" in item for item in payload["sets"])
 
         update_response = client.put(
             f"/api/analytics/sets/{created_first['id']}",
@@ -2154,6 +2270,7 @@ def test_analytics_sets_crud_and_reorder(client):
         assert by_id[created_first["id"]]["name"] == "First Set Updated"
         assert by_id[created_first["id"]]["color_token"] == "blue"
         assert by_id[created_first["id"]]["study_ids"] == ["wfa_set_1"]
+        assert by_id[created_first["id"]]["metrics"]["selected_count"] == 1
 
         delete_response = client.delete(f"/api/analytics/sets/{created_first['id']}")
         assert delete_response.status_code == 200
@@ -2365,6 +2482,7 @@ def test_analytics_sets_members_cascade_on_study_delete(client):
         payload = client.get("/api/analytics/sets").get_json()
         assert payload["sets"][0]["name"] == "Cascade Set"
         assert payload["sets"][0]["study_ids"] == []
+        assert payload["sets"][0]["metrics"]["selected_count"] == 0
 
 
 def test_analytics_sets_reorder_requires_complete_order(client):

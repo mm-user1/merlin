@@ -31,6 +31,7 @@
     studies: [],
     studyMap: new Map(),
     sets: [],
+    allMetrics: null,
     focusedSetId: null,
     checkedSetIds: new Set(),
     viewMode: VIEW_MODES.ALL,
@@ -52,11 +53,6 @@
     colorMenuOpen: false,
     onStateChange: null,
     bound: false,
-    metricsByGroupId: new Map(),
-    metricsBatchKey: null,
-    metricsPending: false,
-    metricsRequestToken: 0,
-    metricsAbortController: null,
   };
 
   function escapeHtml(value) {
@@ -107,6 +103,24 @@
     return new Set(Array.from(state.batchSelectedSetIds));
   }
 
+  function cloneMetrics(rawMetrics) {
+    if (!rawMetrics || typeof rawMetrics !== 'object') return null;
+    return {
+      ann_profit_pct: toFiniteNumber(rawMetrics.ann_profit_pct),
+      profit_pct: toFiniteNumber(rawMetrics.profit_pct),
+      max_drawdown_pct: toFiniteNumber(rawMetrics.max_drawdown_pct),
+      overlap_days: toFiniteNumber(rawMetrics.overlap_days),
+      overlap_days_exact: toFiniteNumber(rawMetrics.overlap_days_exact),
+      studies_used: toFiniteNumber(rawMetrics.studies_used),
+      studies_excluded: toFiniteNumber(rawMetrics.studies_excluded),
+      selected_count: toFiniteNumber(rawMetrics.selected_count),
+      warning: rawMetrics.warning == null ? null : String(rawMetrics.warning),
+      computed_at: rawMetrics.computed_at || null,
+      has_curve: Boolean(rawMetrics.has_curve),
+      curve_point_count: toFiniteNumber(rawMetrics.curve_point_count),
+    };
+  }
+
   function cloneSetList(rawSets) {
     if (!Array.isArray(rawSets)) return [];
     return rawSets
@@ -123,6 +137,7 @@
           created_at: setItem?.created_at || null,
           color_token: normalizeColorToken(setItem?.color_token),
           study_ids: studyIds,
+          metrics: cloneMetrics(setItem?.metrics),
         };
       })
       .filter(Boolean)
@@ -269,10 +284,10 @@
     };
   }
 
-  function computeMetrics(studies, groupId) {
+  function computeMetrics(studies, curveMetrics) {
     const list = Array.isArray(studies) ? studies : [];
     const nonCurve = computeNonCurveMetrics(list);
-    const curve = state.metricsByGroupId.get(String(groupId || ''));
+    const curve = curveMetrics && typeof curveMetrics === 'object' ? curveMetrics : null;
 
     return {
       annProfitPct: toFiniteNumber(curve?.ann_profit_pct),
@@ -282,92 +297,6 @@
       wfePct: nonCurve.wfePct,
       oosWinsPct: nonCurve.oosWinsPct,
     };
-  }
-
-  function buildMetricsGroups() {
-    const groups = [];
-    groups.push({
-      group_id: 'all',
-      study_ids: state.studies
-        .map((study) => String(study?.study_id || '').trim())
-        .filter(Boolean),
-    });
-
-    state.sets.forEach((setItem) => {
-      groups.push({
-        group_id: `set:${setItem.id}`,
-        study_ids: Array.from(new Set(
-          (Array.isArray(setItem?.study_ids) ? setItem.study_ids : [])
-            .map((studyId) => String(studyId || '').trim())
-            .filter(Boolean)
-        )),
-      });
-    });
-    return groups;
-  }
-
-  function buildMetricsBatchKey(groups) {
-    return (Array.isArray(groups) ? groups : [])
-      .map((group) => {
-        const groupId = String(group?.group_id || '').trim();
-        const ids = Array.isArray(group?.study_ids) ? group.study_ids : [];
-        return `${groupId}=${ids.join(',')}`;
-      })
-      .join('|');
-  }
-
-  function cancelMetricsRequest() {
-    if (state.metricsAbortController) {
-      state.metricsAbortController.abort();
-      state.metricsAbortController = null;
-    }
-    state.metricsPending = false;
-    state.metricsRequestToken += 1;
-  }
-
-  function scheduleMetricsAggregation() {
-    if (typeof fetchAnalyticsEquityBatchRequest !== 'function') return;
-    const groups = buildMetricsGroups();
-    const batchKey = buildMetricsBatchKey(groups);
-    if (state.metricsBatchKey === batchKey && state.metricsByGroupId.size) {
-      return;
-    }
-
-    cancelMetricsRequest();
-    state.metricsByGroupId = new Map();
-    state.metricsBatchKey = batchKey;
-
-    const requestToken = state.metricsRequestToken + 1;
-    state.metricsRequestToken = requestToken;
-    state.metricsPending = true;
-    const controller = new AbortController();
-    state.metricsAbortController = controller;
-
-    fetchAnalyticsEquityBatchRequest(groups, controller.signal)
-      .then((payload) => {
-        if (requestToken !== state.metricsRequestToken) return;
-        if (!payload || !Array.isArray(payload.results)) return;
-
-        const nextMap = new Map();
-        payload.results.forEach((item) => {
-          const key = String(item?.group_id || '').trim();
-          if (!key) return;
-          nextMap.set(key, item);
-        });
-        state.metricsByGroupId = nextMap;
-        state.metricsPending = false;
-        state.metricsAbortController = null;
-        renderTable();
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || error?.name === 'AbortError') {
-          return;
-        }
-        if (requestToken !== state.metricsRequestToken) return;
-        state.metricsPending = false;
-        state.metricsAbortController = null;
-        console.warn('Analytics sets metrics aggregation failed:', error);
-      });
   }
 
   function formatSignedPercent(value, digits = 1) {
@@ -1155,8 +1084,7 @@
     if (!tableWrap) return;
     renderTableHeight();
 
-    scheduleMetricsAggregation();
-    const allMetrics = computeMetrics(state.studies, 'all');
+    const allMetrics = computeMetrics(state.studies, state.allMetrics);
     const moveSelectionSet = getMoveSelectionSet();
     const rows = [];
     rows.push(`
@@ -1174,7 +1102,7 @@
 
     state.sets.forEach((setItem) => {
       const setStudies = resolveStudiesForSet(setItem);
-      const metrics = computeMetrics(setStudies, `set:${setItem.id}`);
+      const metrics = computeMetrics(setStudies, setItem.metrics);
       const checked = state.checkedSetIds.has(setItem.id) ? ' checked' : '';
       const focusedClass = state.focusedSetId === setItem.id ? ' analytics-set-focused' : '';
       const batchSelectedClass = state.batchMode && state.batchSelectedSetIds.has(setItem.id)
@@ -1374,6 +1302,7 @@
 
   async function loadSets(options = {}) {
     const payload = await fetchAnalyticsSetsRequest();
+    state.allMetrics = cloneMetrics(payload?.all_metrics);
     syncFromLoadedSets(payload?.sets || [], options);
     render();
     if (options.emitState !== false) {
@@ -1382,9 +1311,7 @@
   }
 
   function updateStudies(studies) {
-    cancelMetricsRequest();
-    state.metricsByGroupId = new Map();
-    state.metricsBatchKey = null;
+    state.allMetrics = null;
     state.studies = Array.isArray(studies) ? studies.slice() : [];
     updateStudyMap();
     render();
@@ -1590,7 +1517,12 @@
       created_at: setItem.created_at,
       color_token: setItem.color_token,
       study_ids: setItem.study_ids.slice(),
+      metrics: setItem.metrics ? { ...setItem.metrics } : null,
     }));
+  }
+
+  function getAllMetrics() {
+    return state.allMetrics ? { ...state.allMetrics } : null;
   }
 
   function scrollSetIntoView(setId) {
@@ -1625,6 +1557,7 @@
     cancelMoveMode,
     isMoveMode,
     getSets,
+    getAllMetrics,
     scrollSetIntoView,
   };
 })();

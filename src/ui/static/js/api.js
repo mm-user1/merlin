@@ -385,6 +385,39 @@ async function fetchAnalyticsSetsRequest() {
   return response.json();
 }
 
+async function fetchAnalyticsAllStudiesEquityRequest(signal = null) {
+  const response = await fetch('/api/analytics/all-studies/equity', {
+    signal: signal || undefined
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || 'Failed to load all-studies analytics equity.');
+  }
+  return response.json();
+}
+
+async function fetchAnalyticsSetEquityRequest(setId, signal = null) {
+  const response = await fetch(`/api/analytics/sets/${encodeURIComponent(setId)}/equity`, {
+    signal: signal || undefined
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || 'Failed to load analytics set equity.');
+  }
+  return response.json();
+}
+
+async function fetchAnalyticsStudyEquityRequest(studyId, signal = null) {
+  const response = await fetch(`/api/analytics/studies/${encodeURIComponent(studyId)}/equity`, {
+    signal: signal || undefined
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || 'Failed to load analytics study equity.');
+  }
+  return response.json();
+}
+
 async function fetchAnalyticsEquityRequest(studyIds, signal = null) {
   const response = await fetch('/api/analytics/equity', {
     method: 'POST',

@@ -37,6 +37,7 @@
     filtersInitialized: false,
     focusedStudyId: null,
     sets: [],
+    allStudiesMetrics: null,
     focusedSetId: null,
     checkedSetIds: new Set(),
     setViewMode: 'allStudies',
@@ -53,6 +54,18 @@
     focusedWindowBoundariesPendingStudyId: null,
     focusedWindowBoundariesAbortController: null,
     focusedWindowBoundariesRequestToken: 0,
+    studyEquityByStudyId: new Map(),
+    studyEquityPendingStudyId: null,
+    studyEquityAbortController: null,
+    studyEquityRequestToken: 0,
+    setEquityBySetId: new Map(),
+    setEquityPendingSetId: null,
+    setEquityAbortController: null,
+    setEquityRequestToken: 0,
+    allStudiesEquity: null,
+    allStudiesEquityPending: false,
+    allStudiesEquityAbortController: null,
+    allStudiesEquityRequestToken: 0,
   };
 
   const EMPTY_FILTERS = {
@@ -220,6 +233,55 @@
     return map;
   }
 
+  function cloneAnalyticsCurvePayload(payload) {
+    const curve = Array.isArray(payload?.curve) ? payload.curve.slice() : [];
+    const timestamps = Array.isArray(payload?.timestamps) ? payload.timestamps.slice() : [];
+    return {
+      curve,
+      timestamps,
+      return_profile: payload?.return_profile && typeof payload.return_profile === 'object'
+        ? payload.return_profile
+        : null,
+      profit_pct: toFiniteNumber(payload?.profit_pct),
+      max_drawdown_pct: toFiniteNumber(payload?.max_drawdown_pct),
+      ann_profit_pct: toFiniteNumber(payload?.ann_profit_pct),
+      overlap_days: toFiniteNumber(payload?.overlap_days),
+      overlap_days_exact: toFiniteNumber(payload?.overlap_days_exact),
+      studies_used: toFiniteNumber(payload?.studies_used),
+      studies_excluded: toFiniteNumber(payload?.studies_excluded),
+      selected_count: toFiniteNumber(payload?.selected_count),
+      warning: String(payload?.warning || '').trim(),
+      has_curve: curve.length > 0 && curve.length === timestamps.length,
+    };
+  }
+
+  function cloneStudyEquityPayload(payload) {
+    const curve = Array.isArray(payload?.curve) ? payload.curve.slice() : [];
+    const timestamps = Array.isArray(payload?.timestamps) ? payload.timestamps.slice() : [];
+    const pointCount = toNonNegativeInteger(payload?.point_count);
+    return {
+      curve,
+      timestamps,
+      point_count: pointCount,
+      has_equity_curve: Boolean(payload?.has_equity_curve) && curve.length === timestamps.length,
+      warning: String(payload?.warning || '').trim(),
+    };
+  }
+
+  function normalizeStudyIdList(studyIds) {
+    return (Array.isArray(studyIds) ? studyIds : [])
+      .map((studyId) => String(studyId || '').trim())
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+  }
+
+  function studyIdListsMatch(leftIds, rightIds) {
+    const left = normalizeStudyIdList(leftIds);
+    const right = normalizeStudyIdList(rightIds);
+    if (left.length !== right.length) return false;
+    return left.every((studyId, index) => studyId === right[index]);
+  }
+
   function cloneFilters(filters) {
     const source = filters || EMPTY_FILTERS;
     return {
@@ -309,9 +371,41 @@
 
   function syncSetStateFromModule() {
     if (!window.AnalyticsSets) return;
-    AnalyticsState.sets = typeof window.AnalyticsSets.getSets === 'function'
+    const previousSets = AnalyticsState.sets;
+    const nextSets = typeof window.AnalyticsSets.getSets === 'function'
       ? window.AnalyticsSets.getSets()
       : [];
+    const nextSetIds = new Set(
+      nextSets
+        .map((setItem) => toNonNegativeInteger(setItem?.id))
+        .filter((setId) => setId > 0)
+    );
+    previousSets.forEach((setItem) => {
+      const setId = toNonNegativeInteger(setItem?.id);
+      if (setId > 0 && !nextSetIds.has(setId)) {
+        AnalyticsState.setEquityBySetId.delete(setId);
+        if (AnalyticsState.setEquityPendingSetId === setId) {
+          cancelFocusedSetEquityFetch();
+        }
+      }
+    });
+    nextSets.forEach((setItem) => {
+      const setId = toNonNegativeInteger(setItem?.id);
+      if (setId <= 0) return;
+      const previous = previousSets.find((item) => toNonNegativeInteger(item?.id) === setId) || null;
+      if (!previous) return;
+      if (!studyIdListsMatch(previous.study_ids, setItem.study_ids)) {
+        AnalyticsState.setEquityBySetId.delete(setId);
+        if (AnalyticsState.setEquityPendingSetId === setId) {
+          cancelFocusedSetEquityFetch();
+        }
+      }
+    });
+
+    AnalyticsState.sets = nextSets;
+    AnalyticsState.allStudiesMetrics = typeof window.AnalyticsSets.getAllMetrics === 'function'
+      ? window.AnalyticsSets.getAllMetrics()
+      : null;
     AnalyticsState.focusedSetId = typeof window.AnalyticsSets.getFocusedSetId === 'function'
       ? window.AnalyticsSets.getFocusedSetId()
       : null;
@@ -399,6 +493,15 @@
       .map((study) => String(study?.study_id || '').trim())
       .filter(Boolean)
       .sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+  }
+
+  function getAllStudyIds() {
+    return normalizeStudyIdList(AnalyticsState.studies.map((study) => study?.study_id));
+  }
+
+  function isAllStudiesSelection(studyIds) {
+    const selectedIds = Array.isArray(studyIds) ? studyIds : getSelectedStudyIds();
+    return studyIdListsMatch(selectedIds, getAllStudyIds());
   }
 
   function buildSelectionKey(studyIds) {
@@ -509,13 +612,258 @@
       });
   }
 
+  function cancelFocusedStudyEquityFetch() {
+    if (AnalyticsState.studyEquityAbortController) {
+      AnalyticsState.studyEquityAbortController.abort();
+      AnalyticsState.studyEquityAbortController = null;
+    }
+    AnalyticsState.studyEquityPendingStudyId = null;
+    AnalyticsState.studyEquityRequestToken += 1;
+  }
+
+  function clearFocusedStudyEquityState() {
+    cancelFocusedStudyEquityFetch();
+    AnalyticsState.studyEquityByStudyId = new Map();
+  }
+
+  function getCachedStudyEquity(studyId) {
+    const normalizedStudyId = String(studyId || '').trim();
+    if (!normalizedStudyId) return null;
+    return AnalyticsState.studyEquityByStudyId.get(normalizedStudyId) || null;
+  }
+
+  function ensureStudyEquity(study) {
+    if (!study || typeof fetchAnalyticsStudyEquityRequest !== 'function') return;
+    const studyId = String(study.study_id || '').trim();
+    if (!studyId || !study?.has_equity_curve) return;
+    if (AnalyticsState.studyEquityByStudyId.has(studyId)) return;
+    if (AnalyticsState.studyEquityPendingStudyId === studyId) return;
+
+    cancelFocusedStudyEquityFetch();
+    AnalyticsState.studyEquityPendingStudyId = studyId;
+
+    const requestToken = AnalyticsState.studyEquityRequestToken + 1;
+    AnalyticsState.studyEquityRequestToken = requestToken;
+
+    const controller = new AbortController();
+    AnalyticsState.studyEquityAbortController = controller;
+
+    fetchAnalyticsStudyEquityRequest(studyId, controller.signal)
+      .then((payload) => {
+        if (requestToken !== AnalyticsState.studyEquityRequestToken) return;
+        if (AnalyticsState.studyEquityPendingStudyId !== studyId) return;
+        AnalyticsState.studyEquityByStudyId.set(studyId, cloneStudyEquityPayload(payload));
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          return;
+        }
+        if (requestToken !== AnalyticsState.studyEquityRequestToken) return;
+        if (AnalyticsState.studyEquityPendingStudyId !== studyId) return;
+        AnalyticsState.studyEquityByStudyId.set(
+          studyId,
+          cloneStudyEquityPayload({
+            curve: [],
+            timestamps: [],
+            point_count: 0,
+            has_equity_curve: false,
+            warning: error?.message || 'Failed to load stitched OOS equity.',
+          })
+        );
+        console.warn('Failed to load analytics study equity', error);
+      })
+      .finally(() => {
+        if (requestToken !== AnalyticsState.studyEquityRequestToken) return;
+        if (AnalyticsState.studyEquityPendingStudyId !== studyId) return;
+        AnalyticsState.studyEquityPendingStudyId = null;
+        AnalyticsState.studyEquityAbortController = null;
+        renderSelectedStudyChart();
+      });
+  }
+
+  function cancelFocusedSetEquityFetch() {
+    if (AnalyticsState.setEquityAbortController) {
+      AnalyticsState.setEquityAbortController.abort();
+      AnalyticsState.setEquityAbortController = null;
+    }
+    AnalyticsState.setEquityPendingSetId = null;
+    AnalyticsState.setEquityRequestToken += 1;
+  }
+
+  function clearFocusedSetEquityState() {
+    cancelFocusedSetEquityFetch();
+    AnalyticsState.setEquityBySetId = new Map();
+  }
+
+  function getCachedSetEquity(setId) {
+    const normalizedSetId = toNonNegativeInteger(setId);
+    if (normalizedSetId <= 0) return null;
+    return AnalyticsState.setEquityBySetId.get(normalizedSetId) || null;
+  }
+
+  function ensureFocusedSetEquity(setId) {
+    if (typeof fetchAnalyticsSetEquityRequest !== 'function') return;
+    const normalizedSetId = toNonNegativeInteger(setId);
+    if (normalizedSetId <= 0) return;
+    if (AnalyticsState.setEquityBySetId.has(normalizedSetId)) return;
+    if (AnalyticsState.setEquityPendingSetId === normalizedSetId) return;
+
+    const focusedSet = AnalyticsState.sets.find((setItem) => toNonNegativeInteger(setItem?.id) === normalizedSetId);
+    const selectedCount = Array.isArray(focusedSet?.study_ids) ? focusedSet.study_ids.length : 0;
+
+    cancelFocusedSetEquityFetch();
+    AnalyticsState.setEquityPendingSetId = normalizedSetId;
+
+    const requestToken = AnalyticsState.setEquityRequestToken + 1;
+    AnalyticsState.setEquityRequestToken = requestToken;
+
+    const controller = new AbortController();
+    AnalyticsState.setEquityAbortController = controller;
+
+    fetchAnalyticsSetEquityRequest(normalizedSetId, controller.signal)
+      .then((payload) => {
+        if (requestToken !== AnalyticsState.setEquityRequestToken) return;
+        if (AnalyticsState.setEquityPendingSetId !== normalizedSetId) return;
+        AnalyticsState.setEquityBySetId.set(normalizedSetId, cloneAnalyticsCurvePayload(payload));
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          return;
+        }
+        if (requestToken !== AnalyticsState.setEquityRequestToken) return;
+        if (AnalyticsState.setEquityPendingSetId !== normalizedSetId) return;
+        AnalyticsState.setEquityBySetId.set(
+          normalizedSetId,
+          cloneAnalyticsCurvePayload({
+            curve: [],
+            timestamps: [],
+            profit_pct: null,
+            max_drawdown_pct: null,
+            ann_profit_pct: null,
+            overlap_days: 0,
+            overlap_days_exact: 0.0,
+            studies_used: 0,
+            studies_excluded: selectedCount,
+            selected_count: selectedCount,
+            return_profile: null,
+            warning: error?.message || 'Failed to load set equity.',
+          })
+        );
+        console.warn('Failed to load analytics set equity', error);
+      })
+      .finally(() => {
+        if (requestToken !== AnalyticsState.setEquityRequestToken) return;
+        if (AnalyticsState.setEquityPendingSetId !== normalizedSetId) return;
+        AnalyticsState.setEquityPendingSetId = null;
+        AnalyticsState.setEquityAbortController = null;
+        renderSummaryCards();
+        renderSelectedStudyChart();
+      });
+  }
+
+  function cancelAllStudiesEquityFetch() {
+    if (AnalyticsState.allStudiesEquityAbortController) {
+      AnalyticsState.allStudiesEquityAbortController.abort();
+      AnalyticsState.allStudiesEquityAbortController = null;
+    }
+    AnalyticsState.allStudiesEquityPending = false;
+    AnalyticsState.allStudiesEquityRequestToken += 1;
+  }
+
+  function clearAllStudiesEquityState() {
+    cancelAllStudiesEquityFetch();
+    AnalyticsState.allStudiesEquity = null;
+  }
+
+  function getCurrentAllStudiesData() {
+    return AnalyticsState.allStudiesEquity || AnalyticsState.allStudiesMetrics || null;
+  }
+
+  function ensureAllStudiesEquity() {
+    if (typeof fetchAnalyticsAllStudiesEquityRequest !== 'function') return;
+    if (AnalyticsState.allStudiesEquity) return;
+    if (AnalyticsState.allStudiesEquityPending) return;
+
+    const selectedCount = getAllStudyIds().length;
+    AnalyticsState.allStudiesEquityPending = true;
+
+    const requestToken = AnalyticsState.allStudiesEquityRequestToken + 1;
+    AnalyticsState.allStudiesEquityRequestToken = requestToken;
+
+    const controller = new AbortController();
+    AnalyticsState.allStudiesEquityAbortController = controller;
+
+    fetchAnalyticsAllStudiesEquityRequest(controller.signal)
+      .then((payload) => {
+        if (requestToken !== AnalyticsState.allStudiesEquityRequestToken) return;
+        if (!AnalyticsState.allStudiesEquityPending) return;
+        AnalyticsState.allStudiesEquity = cloneAnalyticsCurvePayload(payload);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          return;
+        }
+        if (requestToken !== AnalyticsState.allStudiesEquityRequestToken) return;
+        if (!AnalyticsState.allStudiesEquityPending) return;
+        AnalyticsState.allStudiesEquity = cloneAnalyticsCurvePayload({
+          curve: [],
+          timestamps: [],
+          profit_pct: null,
+          max_drawdown_pct: null,
+          ann_profit_pct: null,
+          overlap_days: 0,
+          overlap_days_exact: 0.0,
+          studies_used: 0,
+          studies_excluded: selectedCount,
+          selected_count: selectedCount,
+          return_profile: null,
+          warning: error?.message || 'Failed to load all-studies equity.',
+        });
+        console.warn('Failed to load all-studies analytics equity', error);
+      })
+      .finally(() => {
+        if (requestToken !== AnalyticsState.allStudiesEquityRequestToken) return;
+        AnalyticsState.allStudiesEquityPending = false;
+        AnalyticsState.allStudiesEquityAbortController = null;
+        renderSummaryCards();
+        renderSelectedStudyChart();
+      });
+  }
+
   function ensurePortfolioDataForSelection() {
     const focusedStudy = getFocusedStudy();
-    const studyIds = focusedStudy ? [] : getSelectedStudyIds();
-    if (studyIds.length < 2) {
+    const focusedSet = getFocusedSet();
+
+    if (focusedStudy) {
       clearPortfolioState();
+      cancelFocusedSetEquityFetch();
+      cancelAllStudiesEquityFetch();
       return;
     }
+
+    if (focusedSet) {
+      clearPortfolioState();
+      cancelAllStudiesEquityFetch();
+      ensureFocusedSetEquity(focusedSet.id);
+      return;
+    }
+
+    cancelFocusedSetEquityFetch();
+
+    const studyIds = getSelectedStudyIds();
+    if (studyIds.length < 2) {
+      clearPortfolioState();
+      cancelAllStudiesEquityFetch();
+      return;
+    }
+
+    if (isAllStudiesSelection(studyIds)) {
+      clearPortfolioState();
+      ensureAllStudiesEquity();
+      return;
+    }
+
+    cancelAllStudiesEquityFetch();
 
     const selectionKey = buildSelectionKey(studyIds);
     if (AnalyticsState.portfolioSelectionKey !== selectionKey) {
@@ -546,7 +894,7 @@
         if (AnalyticsState.portfolioSelectionKey !== selectionKey) return;
         AnalyticsState.portfolioPendingKey = null;
         AnalyticsState.portfolioAbortController = null;
-        AnalyticsState.portfolioData = payload || null;
+        AnalyticsState.portfolioData = cloneAnalyticsCurvePayload(payload);
       } catch (error) {
         if (controller.signal.aborted || error?.name === 'AbortError') {
           return;
@@ -554,7 +902,7 @@
         if (requestToken !== AnalyticsState.portfolioRequestToken) return;
         AnalyticsState.portfolioPendingKey = null;
         AnalyticsState.portfolioAbortController = null;
-        AnalyticsState.portfolioData = {
+        AnalyticsState.portfolioData = cloneAnalyticsCurvePayload({
           curve: null,
           timestamps: null,
           profit_pct: null,
@@ -566,7 +914,7 @@
           studies_excluded: studyIds.length,
           return_profile: null,
           warning: error?.message || 'Failed to aggregate portfolio equity.',
-        };
+        });
       }
       updateVisualsForSelection();
     }, 300);
@@ -868,6 +1216,12 @@
     return getStudyMap().get(focusedId) || null;
   }
 
+  function getFocusedSet() {
+    const focusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
+    if (focusedSetId <= 0) return null;
+    return AnalyticsState.sets.find((setItem) => toNonNegativeInteger(setItem?.id) === focusedSetId) || null;
+  }
+
   function renderFocusedCards(study) {
     const container = document.getElementById('analyticsSummaryRow');
     if (!container || !study) return;
@@ -966,6 +1320,19 @@
     };
   }
 
+  function renderEmptySummaryCards(container) {
+    container.innerHTML = `
+      <div class="summary-card"><div class="value">-</div><div class="label">Portfolio Ann.P%</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Portfolio Profit</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Portfolio MaxDD</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Total Trades</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Profitable</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS Wins</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Avg WFE</div></div>
+      <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS P(med)</div></div>
+    `;
+  }
+
   function renderSummaryCards() {
     const container = document.getElementById('analyticsSummaryRow');
     if (!container) return;
@@ -978,20 +1345,13 @@
 
     const selected = getSelectedStudies();
     if (!selected.length) {
-      container.innerHTML = `
-        <div class="summary-card"><div class="value">-</div><div class="label">Portfolio Ann.P%</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Portfolio Profit</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Portfolio MaxDD</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Total Trades</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Profitable</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS Wins</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Avg WFE</div></div>
-        <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS P(med)</div></div>
-      `;
+      renderEmptySummaryCards(container);
       return;
     }
 
     const tail = computePortfolioTailMetrics(selected);
+    const selectedStudyIds = getSelectedStudyIds();
+    const focusedSet = getFocusedSet();
     const avgOosProfitClass = tail.avgOosProfitMed === null
       ? ''
       : (tail.avgOosProfitMed >= 0 ? 'positive' : 'negative');
@@ -1003,7 +1363,18 @@
     let annTooltip = '';
     let loadingPrimaryMetrics = false;
 
-    if (selected.length === 1) {
+    if (focusedSet) {
+      const focusedSetData = getCachedSetEquity(focusedSet.id) || focusedSet.metrics || null;
+      loadingPrimaryMetrics = !focusedSetData && AnalyticsState.setEquityPendingSetId === focusedSet.id;
+      portfolioProfit = toFiniteNumber(focusedSetData?.profit_pct);
+      portfolioAnn = toFiniteNumber(focusedSetData?.ann_profit_pct);
+      portfolioMaxDd = toFiniteNumber(focusedSetData?.max_drawdown_pct);
+
+      const overlapDaysExact = toFiniteNumber(focusedSetData?.overlap_days_exact);
+      if (portfolioAnn !== null && overlapDaysExact !== null && overlapDaysExact >= 31 && overlapDaysExact < 90) {
+        annTooltip = `Short overlap period (${Math.round(overlapDaysExact)} days) - annualized value may be misleading`;
+      }
+    } else if (selected.length === 1) {
       const study = selected[0];
       const annDisplay = computeAnnualizedProfitDisplay(study);
       portfolioProfit = toFiniteNumber(study?.profit_pct);
@@ -1012,9 +1383,14 @@
       portfolioMaxDd = toFiniteNumber(study?.max_dd_pct);
       annTooltip = annDisplay.tooltip || '';
     } else {
-      const key = buildSelectionKey(getSelectedStudyIds());
-      const portfolio = getCurrentPortfolioData();
-      loadingPrimaryMetrics = !portfolio && AnalyticsState.portfolioPendingKey === key;
+      const usingAllStudiesCache = isAllStudiesSelection(selectedStudyIds);
+      const key = buildSelectionKey(selectedStudyIds);
+      const portfolio = usingAllStudiesCache
+        ? getCurrentAllStudiesData()
+        : getCurrentPortfolioData();
+      loadingPrimaryMetrics = usingAllStudiesCache
+        ? (!portfolio && AnalyticsState.allStudiesEquityPending)
+        : (!portfolio && AnalyticsState.portfolioPendingKey === key);
       portfolioProfit = toFiniteNumber(portfolio?.profit_pct);
       portfolioAnn = toFiniteNumber(portfolio?.ann_profit_pct);
       portfolioMaxDd = toFiniteNumber(portfolio?.max_drawdown_pct);
@@ -1118,6 +1494,47 @@
     }
   }
 
+  function renderSetChartTitle(setItem, portfolioData) {
+    const titleEl = document.getElementById('analyticsChartTitle');
+    if (!titleEl) return;
+    titleEl.textContent = '';
+
+    const overlapDays = Math.max(0, Math.round(toFiniteNumber(portfolioData?.overlap_days) || 0));
+    const overlapText = overlapDays > 0 ? `, ${overlapDays} days` : '';
+    const studyCount = Array.isArray(setItem?.study_ids) ? setItem.study_ids.length : 0;
+    const setName = String(setItem?.name || 'Unnamed Set').trim() || 'Unnamed Set';
+    titleEl.appendChild(
+      document.createTextNode(`Set Equity - ${setName} (${studyCount} studies${overlapText})`)
+    );
+
+    const warning = String(portfolioData?.warning || '').trim();
+    if (warning) {
+      const indicator = document.createElement('span');
+      indicator.className = 'chart-title-indicator';
+      indicator.textContent = ' [!]';
+      indicator.title = warning;
+      indicator.setAttribute('aria-label', warning);
+      titleEl.appendChild(indicator);
+    }
+  }
+
+  function renderPortfolioChartMeta(totalSelected, portfolioData) {
+    const warning = String(portfolioData?.warning || '').trim();
+    setChartWarning(warning);
+
+    if (!portfolioData) {
+      setChartSubtitle('');
+      return;
+    }
+
+    const used = Math.max(0, Math.round(toFiniteNumber(portfolioData?.studies_used) || 0));
+    if (used >= 0 && used < totalSelected) {
+      setChartSubtitle(`${used} of ${totalSelected} studies used`);
+      return;
+    }
+    setChartSubtitle('');
+  }
+
   function getPrimaryCheckedStudy() {
     const map = getStudyMap();
     let selectedId = null;
@@ -1142,17 +1559,58 @@
         window.AnalyticsEquity.renderEmpty('No stitched OOS equity data for selected study');
         return;
       }
+      const studyEquity = getCachedStudyEquity(focusedStudy.study_id);
       const focusedBoundaries = getFocusedWindowBoundaries(focusedStudy.study_id) || [];
       ensureFocusedWindowBoundaries(focusedStudy);
+      if (!studyEquity) {
+        ensureStudyEquity(focusedStudy);
+        window.AnalyticsEquity.renderEmpty('Loading stitched OOS equity...');
+        return;
+      }
+      if (!studyEquity.has_equity_curve) {
+        window.AnalyticsEquity.renderEmpty(
+          studyEquity.warning || 'No stitched OOS equity data for selected study'
+        );
+        return;
+      }
       window.AnalyticsEquity.renderChart(
-        focusedStudy.equity_curve || [],
-        focusedStudy.equity_timestamps || [],
+        studyEquity.curve || [],
+        studyEquity.timestamps || [],
         { windowBoundaries: focusedBoundaries }
       );
       return;
     }
     if (AnalyticsState.focusedWindowBoundariesPendingStudyId) {
       cancelFocusedWindowBoundariesFetch();
+    }
+
+    const focusedSet = getFocusedSet();
+    if (focusedSet) {
+      const setData = getCachedSetEquity(focusedSet.id);
+      clearChartMeta();
+      renderSetChartTitle(focusedSet, setData || focusedSet.metrics);
+      renderPortfolioChartMeta(focusedSet.study_ids.length, setData || focusedSet.metrics);
+
+      if (!setData) {
+        ensureFocusedSetEquity(focusedSet.id);
+        window.AnalyticsEquity.renderEmpty('Loading set equity...');
+        return;
+      }
+
+      const curve = Array.isArray(setData.curve) ? setData.curve : [];
+      const timestamps = Array.isArray(setData.timestamps) ? setData.timestamps : [];
+      if (!curve.length || curve.length !== timestamps.length) {
+        const emptyMessage = focusedSet.study_ids.length
+          ? (setData.warning || 'No overlapping equity data to display')
+          : 'No studies in selected set';
+        window.AnalyticsEquity.renderEmpty(emptyMessage);
+        return;
+      }
+
+      window.AnalyticsEquity.renderChart(curve, timestamps, {
+        returnProfile: setData?.return_profile || null,
+      });
+      return;
     }
 
     const selected = getSelectedStudies();
@@ -1171,31 +1629,60 @@
         window.AnalyticsEquity.renderEmpty('No stitched OOS equity data for selected study');
         return;
       }
-      window.AnalyticsEquity.renderChart(singleStudy.equity_curve || [], singleStudy.equity_timestamps || []);
+      const singleStudyEquity = getCachedStudyEquity(singleStudy.study_id);
+      if (!singleStudyEquity) {
+        ensureStudyEquity(singleStudy);
+        window.AnalyticsEquity.renderEmpty('Loading stitched OOS equity...');
+        return;
+      }
+      if (!singleStudyEquity.has_equity_curve) {
+        window.AnalyticsEquity.renderEmpty(
+          singleStudyEquity.warning || 'No stitched OOS equity data for selected study'
+        );
+        return;
+      }
+      window.AnalyticsEquity.renderChart(singleStudyEquity.curve || [], singleStudyEquity.timestamps || []);
       return;
     }
 
-    const selectionKey = buildSelectionKey(getSelectedStudyIds());
+    const selectedStudyIds = getSelectedStudyIds();
+    if (isAllStudiesSelection(selectedStudyIds)) {
+      const allStudiesData = getCurrentAllStudiesData();
+      clearChartMeta();
+      renderPortfolioChartTitle(selected.length, allStudiesData);
+      renderPortfolioChartMeta(selected.length, allStudiesData);
+
+      if (!AnalyticsState.allStudiesEquity) {
+        ensureAllStudiesEquity();
+        window.AnalyticsEquity.renderEmpty('Loading portfolio equity...');
+        return;
+      }
+
+      const curve = Array.isArray(AnalyticsState.allStudiesEquity.curve)
+        ? AnalyticsState.allStudiesEquity.curve
+        : [];
+      const timestamps = Array.isArray(AnalyticsState.allStudiesEquity.timestamps)
+        ? AnalyticsState.allStudiesEquity.timestamps
+        : [];
+      if (!curve.length || curve.length !== timestamps.length) {
+        window.AnalyticsEquity.renderEmpty(
+          String(allStudiesData?.warning || '').trim() || 'No overlapping equity data to display'
+        );
+        return;
+      }
+
+      window.AnalyticsEquity.renderChart(curve, timestamps, {
+        returnProfile: AnalyticsState.allStudiesEquity?.return_profile || null,
+      });
+      return;
+    }
+
+    const selectionKey = buildSelectionKey(selectedStudyIds);
     const isLoading = AnalyticsState.portfolioPendingKey === selectionKey && !getCurrentPortfolioData();
     const portfolio = getCurrentPortfolioData();
+    clearChartMeta();
     renderPortfolioChartTitle(selected.length, portfolio);
-
-    if (portfolio?.warning) {
-      setChartWarning(portfolio.warning);
-    } else {
-      setChartWarning('');
-    }
-
-    if (portfolio) {
-      const used = Math.max(0, Math.round(toFiniteNumber(portfolio.studies_used) || 0));
-      if (used >= 0 && used < selected.length) {
-        setChartSubtitle(`${used} of ${selected.length} studies used`);
-      } else {
-        setChartSubtitle('');
-      }
-    } else {
-      setChartSubtitle('');
-    }
+    renderPortfolioChartMeta(selected.length, portfolio);
 
     if (isLoading) {
       window.AnalyticsEquity.renderEmpty('Loading portfolio equity...');
@@ -1565,10 +2052,14 @@
     AnalyticsState.checkedSetIds = new Set();
     AnalyticsState.setViewMode = 'allStudies';
     AnalyticsState.setMoveMode = false;
+    AnalyticsState.allStudiesMetrics = null;
     AnalyticsState.filterContextEpoch += 1;
     AnalyticsState.filterContextSignature = null;
     clearPortfolioState();
     clearFocusedWindowBoundariesState();
+    clearFocusedStudyEquityState();
+    clearFocusedSetEquityState();
+    clearAllStudiesEquityState();
 
     renderResearchInfo();
     showMessage(AnalyticsState.researchInfo.message || '');

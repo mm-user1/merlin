@@ -1150,19 +1150,28 @@
   }
 
   function computeAnnualizedProfitMetrics(study) {
-    const timestamps = Array.isArray(study?.equity_timestamps) ? study.equity_timestamps : [];
-    if (timestamps.length < 2) {
-      return { annProfitPct: null, oosSpanDays: null };
+    let oosSpanDays = toFiniteNumber(study?.oos_span_days_exact);
+
+    if (oosSpanDays === null) {
+      const firstMs = parseTimestampMs(study?.equity_start_ts);
+      const lastMs = parseTimestampMs(study?.equity_end_ts);
+      if (firstMs !== null && lastMs !== null) {
+        oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
+      }
     }
 
-    const firstMs = parseTimestampMs(timestamps[0]);
-    const lastMs = parseTimestampMs(timestamps[timestamps.length - 1]);
-    if (firstMs === null || lastMs === null) {
-      return { annProfitPct: null, oosSpanDays: null };
+    if (oosSpanDays === null) {
+      const timestamps = Array.isArray(study?.equity_timestamps) ? study.equity_timestamps : [];
+      if (timestamps.length >= 2) {
+        const firstMs = parseTimestampMs(timestamps[0]);
+        const lastMs = parseTimestampMs(timestamps[timestamps.length - 1]);
+        if (firstMs !== null && lastMs !== null) {
+          oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
+        }
+      }
     }
 
-    const oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
-    if (!Number.isFinite(oosSpanDays) || oosSpanDays <= 0) {
+    if (oosSpanDays === null || !Number.isFinite(oosSpanDays) || oosSpanDays <= 0) {
       return { annProfitPct: null, oosSpanDays };
     }
 

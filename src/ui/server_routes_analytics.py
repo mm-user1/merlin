@@ -2,7 +2,7 @@ import json
 import math
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -11,12 +11,16 @@ from flask import jsonify, render_template, request
 
 from core.analytics import aggregate_equity_curves
 from core.storage import (
+    backfill_stitched_oos_metadata,
     create_study_set,
     delete_study_set,
     delete_study_sets,
+    get_or_build_all_studies_analytics_cache,
+    get_or_build_study_set_analytics_cache,
     get_active_db_name,
     get_db_connection,
-    list_study_sets,
+    list_study_sets_with_analytics_cache,
+    load_study_analytics_equity,
     reorder_study_sets,
     update_study_sets_color,
     update_study_set,
@@ -45,6 +49,20 @@ def register_routes(app):
             except ValueError:
                 continue
         return None
+
+    def _parse_timestamp_iso(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _period_days(start_date: Any, end_date: Any) -> Optional[int]:
         start = _parse_date_flexible(start_date)
@@ -357,7 +375,7 @@ def register_routes(app):
 
     @app.get("/api/analytics/sets")
     def analytics_sets_list() -> object:
-        return jsonify({"sets": list_study_sets()})
+        return jsonify(list_study_sets_with_analytics_cache())
 
     @app.post("/api/analytics/sets")
     def analytics_sets_create() -> object:
@@ -411,6 +429,20 @@ def register_routes(app):
         if not delete_study_set(set_id):
             return _json_error("Study set not found.", HTTPStatus.NOT_FOUND)
         return jsonify({"ok": True})
+
+    @app.get("/api/analytics/sets/<int:set_id>/equity")
+    def analytics_set_equity(set_id: int) -> object:
+        try:
+            payload = get_or_build_study_set_analytics_cache(set_id)
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "not found" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+        return jsonify(payload)
+
+    @app.get("/api/analytics/all-studies/equity")
+    def analytics_all_studies_equity() -> object:
+        return jsonify(get_or_build_all_studies_analytics_cache())
 
     @app.put("/api/analytics/sets/bulk-color")
     def analytics_sets_bulk_color() -> object:
@@ -536,6 +568,28 @@ def register_routes(app):
 
         return jsonify({"results": results})
 
+    @app.get("/api/analytics/studies/<string:study_id>/equity")
+    def analytics_study_equity(study_id: str) -> object:
+        payload = load_study_analytics_equity(study_id)
+        if payload is None:
+            return _json_error("Study not found.", HTTPStatus.NOT_FOUND)
+
+        if str(payload.get("optimization_mode") or "").strip().lower() != "wfa":
+            return _json_error(
+                "Analytics study equity is available only for WFA studies.",
+                HTTPStatus.BAD_REQUEST,
+            )
+
+        return jsonify(
+            {
+                "study_id": payload.get("study_id"),
+                "curve": payload.get("curve") or [],
+                "timestamps": payload.get("timestamps") or [],
+                "has_equity_curve": bool(payload.get("has_equity_curve")),
+                "point_count": int(payload.get("point_count") or 0),
+            }
+        )
+
     @app.get("/api/analytics/studies/<string:study_id>/window-boundaries")
     def analytics_study_window_boundaries(study_id: str) -> object:
         normalized_study_id = str(study_id or "").strip()
@@ -612,6 +666,8 @@ def register_routes(app):
     @app.get("/api/analytics/summary")
     def analytics_summary() -> object:
         with get_db_connection() as conn:
+            backfill_stitched_oos_metadata(conn=conn)
+            conn.commit()
             total_studies_row = conn.execute("SELECT COUNT(*) AS count FROM studies").fetchone()
             total_studies = int(total_studies_row["count"] if total_studies_row else 0)
 
@@ -664,8 +720,9 @@ def register_routes(app):
                     stitched_oos_win_rate,
                     median_window_profit,
                     median_window_wr,
-                    stitched_oos_equity_curve,
-                    stitched_oos_timestamps_json
+                    stitched_oos_start_ts,
+                    stitched_oos_end_ts,
+                    stitched_oos_point_count
                 FROM studies
                 WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
                 """
@@ -756,12 +813,17 @@ def register_routes(app):
             else:
                 profitable_windows_pct = 0.0
 
-            equity_curve = _parse_json_array(row_dict.get("stitched_oos_equity_curve"))
-            equity_timestamps = _parse_json_array(row_dict.get("stitched_oos_timestamps_json"))
-            has_equity_curve = len(equity_curve) > 0 and len(equity_curve) == len(equity_timestamps)
-            if not has_equity_curve:
-                equity_curve = []
-                equity_timestamps = []
+            equity_start_ts = str(row_dict.get("stitched_oos_start_ts") or "").strip()
+            equity_end_ts = str(row_dict.get("stitched_oos_end_ts") or "").strip()
+            equity_point_count = _safe_int(row_dict.get("stitched_oos_point_count"))
+            if equity_point_count is None:
+                equity_point_count = 0
+            has_equity_curve = bool(equity_point_count > 0 and equity_start_ts and equity_end_ts)
+            equity_span_days_exact = None
+            start_dt = _parse_timestamp_iso(equity_start_ts)
+            end_dt = _parse_timestamp_iso(equity_end_ts)
+            if start_dt is not None and end_dt is not None:
+                equity_span_days_exact = (end_dt - start_dt).total_seconds() / 86400.0
 
             sampler_config = _parse_json_dict(optuna_config.get("sampler_config"))
             sampler_type = (
@@ -847,8 +909,14 @@ def register_routes(app):
                     "median_window_profit": _safe_float(row_dict.get("median_window_profit")),
                     "median_window_wr": _safe_float(row_dict.get("median_window_wr")),
                     "has_equity_curve": has_equity_curve,
-                    "equity_curve": equity_curve,
-                    "equity_timestamps": equity_timestamps,
+                    "equity_start_ts": equity_start_ts or None,
+                    "equity_end_ts": equity_end_ts or None,
+                    "equity_point_count": equity_point_count,
+                    "oos_span_days_exact": (
+                        round(equity_span_days_exact, 6)
+                        if equity_span_days_exact is not None
+                        else None
+                    ),
                     "optuna_settings": {
                         "objectives": list(config_objectives or row_objectives or []),
                         "primary_objective": (
