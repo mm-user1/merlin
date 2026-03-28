@@ -27,6 +27,7 @@ from core.storage import (
     update_study_sets_color,
     update_study_set,
 )
+from core.metrics import _calculate_r2_consistency
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
 
 
@@ -153,6 +154,8 @@ def test_study_sets_tables_created():
         assert "ann_profit_pct" in analytics_cache_columns
         assert "profit_pct" in analytics_cache_columns
         assert "max_drawdown_pct" in analytics_cache_columns
+        assert "consistency_full" in analytics_cache_columns
+        assert "consistency_recent" in analytics_cache_columns
         assert "computed_at" in analytics_cache_columns
 
 
@@ -425,6 +428,101 @@ def test_study_set_analytics_cache_roundtrip_and_invalidation():
         assert sets_payload["all_metrics"]["selected_count"] == 2
         assert sets_payload["sets"][0]["metrics"]["selected_count"] == 1
         assert sets_payload["sets"][0]["metrics"]["profit_pct"] == pytest.approx(2.0)
+
+
+def test_study_set_analytics_cache_includes_recent_and_full_consistency():
+    with _temporary_active_db("storage_cache_consistency"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [pd.Timestamp(f"2025-01-{day:02d}", tz="UTC") for day in range(1, 10)]
+
+        wf_result = _build_dummy_wfa_result()
+        wf_result.windows[0].window_id = 11
+        wf_result.windows[0].oos_equity_curve = curve
+        wf_result.windows[0].oos_timestamps = timestamps
+        wf_result.stitched_oos.equity_curve = curve
+        wf_result.stitched_oos.timestamps = timestamps
+        wf_result.stitched_oos.final_net_profit_pct = 15.0
+        wf_result.stitched_oos.max_drawdown_pct = 4.1667
+
+        study_id = save_wfa_study_to_db(
+            wf_result=wf_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Consistency Set", [study_id])
+        cache_payload = get_or_build_study_set_analytics_cache(created["id"])
+        summary_payload = list_study_sets_with_analytics_cache()["sets"][0]["metrics"]
+
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        assert cache_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert cache_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+        assert summary_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert summary_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_study_set_analytics_cache_legacy_rows_compute_missing_consistency():
+    with _temporary_active_db("storage_cache_legacy_consistency"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [pd.Timestamp(f"2025-02-{day:02d}", tz="UTC") for day in range(1, 10)]
+
+        wf_result = _build_dummy_wfa_result()
+        wf_result.windows[0].window_id = 12
+        wf_result.windows[0].oos_equity_curve = curve
+        wf_result.windows[0].oos_timestamps = timestamps
+        wf_result.stitched_oos.equity_curve = curve
+        wf_result.stitched_oos.timestamps = timestamps
+        wf_result.stitched_oos.final_net_profit_pct = 15.0
+        wf_result.stitched_oos.max_drawdown_pct = 4.1667
+
+        study_id = save_wfa_study_to_db(
+            wf_result=wf_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Legacy Consistency Set", [study_id])
+        initial_cache = get_or_build_study_set_analytics_cache(created["id"])
+
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_group_cache
+                SET
+                    consistency_full = NULL,
+                    consistency_recent = NULL
+                WHERE group_key = ?
+                """,
+                (f"set:{created['id']}",),
+            )
+            conn.commit()
+
+        refreshed_cache = get_or_build_study_set_analytics_cache(created["id"])
+        summary_payload = list_study_sets_with_analytics_cache()["sets"][0]["metrics"]
+
+        assert refreshed_cache["computed_at"] == initial_cache["computed_at"]
+        assert refreshed_cache["consistency_full"] == pytest.approx(
+            initial_cache["consistency_full"],
+            abs=1e-6,
+        )
+        assert refreshed_cache["consistency_recent"] == pytest.approx(
+            initial_cache["consistency_recent"],
+            abs=1e-6,
+        )
+        assert summary_payload["consistency_full"] == pytest.approx(
+            initial_cache["consistency_full"],
+            abs=1e-6,
+        )
+        assert summary_payload["consistency_recent"] == pytest.approx(
+            initial_cache["consistency_recent"],
+            abs=1e-6,
+        )
 
 
 def test_all_studies_analytics_cache_invalidates_after_new_wfa_study_saved():

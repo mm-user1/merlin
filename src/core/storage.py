@@ -11,7 +11,7 @@ import statistics
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -34,6 +34,8 @@ OBJECTIVE_DIRECTIONS: Dict[str, str] = {
 ANALYTICS_GROUP_KEY_ALL = "all"
 ANALYTICS_GROUP_TYPE_ALL = "all"
 ANALYTICS_GROUP_TYPE_SET = "set"
+ANALYTICS_CONSISTENCY_RECENT_FRACTION = 0.25
+ANALYTICS_CONSISTENCY_MIN_POINTS = 3
 
 DB_INIT_LOCK = threading.Lock()
 DB_ACCESS_LOCK = threading.RLock()
@@ -825,6 +827,8 @@ def _ensure_analytics_group_cache_tables_with_conn(conn: sqlite3.Connection) -> 
             profit_pct REAL,
             max_drawdown_pct REAL,
             ann_profit_pct REAL,
+            consistency_full REAL,
+            consistency_recent REAL,
             overlap_days INTEGER NOT NULL DEFAULT 0,
             overlap_days_exact REAL NOT NULL DEFAULT 0,
             studies_used INTEGER NOT NULL DEFAULT 0,
@@ -840,6 +844,14 @@ def _ensure_analytics_group_cache_tables_with_conn(conn: sqlite3.Connection) -> 
             ON analytics_group_cache(group_type);
         """
     )
+    existing_columns = {
+        str(row["name"] or "")
+        for row in conn.execute("PRAGMA table_info(analytics_group_cache)").fetchall()
+    }
+    if "consistency_full" not in existing_columns:
+        conn.execute("ALTER TABLE analytics_group_cache ADD COLUMN consistency_full REAL")
+    if "consistency_recent" not in existing_columns:
+        conn.execute("ALTER TABLE analytics_group_cache ADD COLUMN consistency_recent REAL")
 
 
 def _parse_json_array_text(raw_value: Any) -> List[Any]:
@@ -880,6 +892,93 @@ def _extract_stitched_oos_metadata(
     if not start_ts or not end_ts:
         return None, None, 0
     return start_ts, end_ts, len(timestamps)
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _parse_cache_timestamp(raw_value: Any) -> Optional[datetime]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalize_curve_for_consistency(
+    curve: Any,
+    timestamps: Any,
+) -> tuple[List[float], List[datetime]]:
+    if not isinstance(curve, list) or not isinstance(timestamps, list):
+        return [], []
+    if len(curve) != len(timestamps):
+        return [], []
+
+    normalized_curve: List[float] = []
+    normalized_timestamps: List[datetime] = []
+    for raw_value, raw_timestamp in zip(curve, timestamps):
+        parsed_value = _coerce_finite_float(raw_value)
+        parsed_timestamp = _parse_cache_timestamp(raw_timestamp)
+        if parsed_value is None or parsed_timestamp is None:
+            return [], []
+        normalized_curve.append(parsed_value)
+        normalized_timestamps.append(parsed_timestamp)
+
+    return normalized_curve, normalized_timestamps
+
+
+def _round_consistency_value(value: Optional[float]) -> Optional[float]:
+    parsed = _coerce_finite_float(value)
+    if parsed is None:
+        return None
+    return round(parsed, 6)
+
+
+def _compute_cached_curve_consistency_scores(
+    curve: Any,
+    timestamps: Any,
+) -> tuple[Optional[float], Optional[float]]:
+    from .metrics import _calculate_r2_consistency
+
+    normalized_curve, normalized_timestamps = _normalize_curve_for_consistency(curve, timestamps)
+    if len(normalized_curve) < ANALYTICS_CONSISTENCY_MIN_POINTS:
+        return None, None
+
+    full_score = _round_consistency_value(_calculate_r2_consistency(normalized_curve))
+
+    start_ts = normalized_timestamps[0]
+    end_ts = normalized_timestamps[-1]
+    span = end_ts - start_ts
+    if span <= timedelta(0):
+        return full_score, None
+
+    recent_start = start_ts + (span * (1.0 - ANALYTICS_CONSISTENCY_RECENT_FRACTION))
+    recent_curve = [
+        value
+        for value, timestamp in zip(normalized_curve, normalized_timestamps)
+        if timestamp >= recent_start
+    ]
+    if len(recent_curve) < ANALYTICS_CONSISTENCY_MIN_POINTS:
+        return full_score, None
+
+    recent_score = _round_consistency_value(_calculate_r2_consistency(recent_curve))
+    return full_score, recent_score
 
 
 def backfill_stitched_oos_metadata(
@@ -1033,6 +1132,12 @@ def _compute_analytics_group_result_with_conn(
 
     result["selected_count"] = len(normalized_ids)
     result["missing_study_ids"] = missing_study_ids
+    consistency_full, consistency_recent = _compute_cached_curve_consistency_scores(
+        result.get("curve"),
+        result.get("timestamps"),
+    )
+    result["consistency_full"] = consistency_full
+    result["consistency_recent"] = consistency_recent
     return result
 
 
@@ -1048,6 +1153,17 @@ def _normalize_analytics_group_cache_payload(row: sqlite3.Row | Dict[str, Any]) 
     payload["studies_excluded"] = int(payload.get("studies_excluded") or 0)
     payload["missing_study_ids"] = []
     payload["has_curve"] = bool(payload["curve"] and len(payload["curve"]) == len(payload["timestamps"]))
+    payload["consistency_full"] = _round_consistency_value(payload.get("consistency_full"))
+    payload["consistency_recent"] = _round_consistency_value(payload.get("consistency_recent"))
+    if payload["consistency_full"] is None or payload["consistency_recent"] is None:
+        computed_full, computed_recent = _compute_cached_curve_consistency_scores(
+            payload["curve"],
+            payload["timestamps"],
+        )
+        if payload["consistency_full"] is None:
+            payload["consistency_full"] = computed_full
+        if payload["consistency_recent"] is None:
+            payload["consistency_recent"] = computed_recent
     payload.pop("curve_json", None)
     payload.pop("timestamps_json", None)
     payload.pop("return_profile_json", None)
@@ -1067,6 +1183,8 @@ def _analytics_group_cache_summary_payload(payload: Dict[str, Any]) -> Dict[str,
         "ann_profit_pct": payload.get("ann_profit_pct"),
         "profit_pct": payload.get("profit_pct"),
         "max_drawdown_pct": payload.get("max_drawdown_pct"),
+        "consistency_full": payload.get("consistency_full"),
+        "consistency_recent": payload.get("consistency_recent"),
         "overlap_days": payload.get("overlap_days"),
         "overlap_days_exact": payload.get("overlap_days_exact"),
         "studies_used": payload.get("studies_used"),
@@ -1089,6 +1207,17 @@ def _upsert_analytics_group_cache_with_conn(
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     normalized_ids = [str(study_id or "").strip() for study_id in study_ids if str(study_id or "").strip()]
+    consistency_full = _round_consistency_value(payload.get("consistency_full"))
+    consistency_recent = _round_consistency_value(payload.get("consistency_recent"))
+    if consistency_full is None or consistency_recent is None:
+        computed_full, computed_recent = _compute_cached_curve_consistency_scores(
+            payload.get("curve"),
+            payload.get("timestamps"),
+        )
+        if consistency_full is None:
+            consistency_full = computed_full
+        if consistency_recent is None:
+            consistency_recent = computed_recent
     stored_payload = {
         "group_key": group_key,
         "group_type": group_type,
@@ -1109,6 +1238,8 @@ def _upsert_analytics_group_cache_with_conn(
         "profit_pct": payload.get("profit_pct"),
         "max_drawdown_pct": payload.get("max_drawdown_pct"),
         "ann_profit_pct": payload.get("ann_profit_pct"),
+        "consistency_full": consistency_full,
+        "consistency_recent": consistency_recent,
         "overlap_days": int(payload.get("overlap_days") or 0),
         "overlap_days_exact": float(payload.get("overlap_days_exact") or 0.0),
         "studies_used": int(payload.get("studies_used") or 0),
@@ -1130,13 +1261,15 @@ def _upsert_analytics_group_cache_with_conn(
             profit_pct,
             max_drawdown_pct,
             ann_profit_pct,
+            consistency_full,
+            consistency_recent,
             overlap_days,
             overlap_days_exact,
             studies_used,
             studies_excluded,
             warning,
             computed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(group_key) DO UPDATE SET
             group_type = excluded.group_type,
             set_id = excluded.set_id,
@@ -1148,6 +1281,8 @@ def _upsert_analytics_group_cache_with_conn(
             profit_pct = excluded.profit_pct,
             max_drawdown_pct = excluded.max_drawdown_pct,
             ann_profit_pct = excluded.ann_profit_pct,
+            consistency_full = excluded.consistency_full,
+            consistency_recent = excluded.consistency_recent,
             overlap_days = excluded.overlap_days,
             overlap_days_exact = excluded.overlap_days_exact,
             studies_used = excluded.studies_used,
@@ -1167,6 +1302,8 @@ def _upsert_analytics_group_cache_with_conn(
             stored_payload["profit_pct"],
             stored_payload["max_drawdown_pct"],
             stored_payload["ann_profit_pct"],
+            stored_payload["consistency_full"],
+            stored_payload["consistency_recent"],
             stored_payload["overlap_days"],
             stored_payload["overlap_days_exact"],
             stored_payload["studies_used"],

@@ -109,6 +109,8 @@
       ann_profit_pct: toFiniteNumber(rawMetrics.ann_profit_pct),
       profit_pct: toFiniteNumber(rawMetrics.profit_pct),
       max_drawdown_pct: toFiniteNumber(rawMetrics.max_drawdown_pct),
+      consistency_full: toFiniteNumber(rawMetrics.consistency_full),
+      consistency_recent: toFiniteNumber(rawMetrics.consistency_recent),
       overlap_days: toFiniteNumber(rawMetrics.overlap_days),
       overlap_days_exact: toFiniteNumber(rawMetrics.overlap_days_exact),
       studies_used: toFiniteNumber(rawMetrics.studies_used),
@@ -293,6 +295,8 @@
       annProfitPct: toFiniteNumber(curve?.ann_profit_pct),
       profitPct: toFiniteNumber(curve?.profit_pct),
       maxDdPct: toFiniteNumber(curve?.max_drawdown_pct),
+      consistencyFull: toFiniteNumber(curve?.consistency_full),
+      consistencyRecent: toFiniteNumber(curve?.consistency_recent),
       profitableText: nonCurve.profitableText,
       wfePct: nonCurve.wfePct,
       oosWinsPct: nonCurve.oosWinsPct,
@@ -329,6 +333,42 @@
     const parsed = toFiniteNumber(value);
     if (parsed === null) return '';
     return Math.abs(parsed) > 40 ? 'val-negative' : '';
+  }
+
+  function formatConsistencyValue(value, digits = 2) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return 'N/A';
+    return parsed.toFixed(digits);
+  }
+
+  function getRecentConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < -0.2) return 'val-negative';
+    if (parsed > 0) return 'val-positive';
+    return '';
+  }
+
+  function getFullConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < 0) return 'val-negative';
+    if (parsed > 0.8) return 'val-positive';
+    return '';
+  }
+
+  function renderConsistencyPair(recentValue, fullValue, digits = 2) {
+    const recent = toFiniteNumber(recentValue);
+    const full = toFiniteNumber(fullValue);
+    if (recent === null && full === null) return 'N/A';
+
+    const recentClass = getRecentConsistencyClass(recent);
+    const fullClass = getFullConsistencyClass(full);
+    return [
+      `<span class="${recentClass}">${escapeHtml(formatConsistencyValue(recent, digits))}</span>`,
+      '<span>/</span>',
+      `<span class="${fullClass}">${escapeHtml(formatConsistencyValue(full, digits))}</span>`,
+    ].join('');
   }
 
   function updateStudyMap() {
@@ -1097,6 +1137,7 @@
         <td>${escapeHtml(allMetrics.profitableText)}</td>
         <td>${escapeHtml(formatUnsignedPercent(allMetrics.wfePct, 1))}</td>
         <td>${escapeHtml(formatUnsignedPercent(allMetrics.oosWinsPct, 1))}</td>
+        <td title="Recent / Full signed R² for the aggregated portfolio curve">${renderConsistencyPair(allMetrics.consistencyRecent, allMetrics.consistencyFull, 2)}</td>
       </tr>
     `);
 
@@ -1121,6 +1162,7 @@
           <td>${escapeHtml(metrics.profitableText)}</td>
           <td>${escapeHtml(formatUnsignedPercent(metrics.wfePct, 1))}</td>
           <td>${escapeHtml(formatUnsignedPercent(metrics.oosWinsPct, 1))}</td>
+          <td title="Recent / Full signed R² for the aggregated portfolio curve">${renderConsistencyPair(metrics.consistencyRecent, metrics.consistencyFull, 2)}</td>
         </tr>
       `);
     });
@@ -1137,6 +1179,7 @@
             <th>Profitable</th>
             <th>WFE%</th>
             <th>OOS Wins</th>
+            <th title="Recent / Full signed R² for the aggregated portfolio curve">Consist</th>
           </tr>
         </thead>
         <tbody>${rows.join('')}</tbody>

@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ui.server import app
 from core.backtest_engine import TradeRecord
+from core.metrics import _calculate_r2_consistency
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
 from core.storage import (
     create_new_db,
@@ -2057,6 +2058,43 @@ def test_analytics_set_and_all_studies_equity_endpoints_return_cached_payloads(c
         refreshed_payload = refreshed.get_json()
         assert refreshed_payload["selected_count"] == 1
         assert refreshed_payload["profit_pct"] == pytest.approx(10.0)
+
+
+def test_analytics_sets_payload_includes_consistency_pair(client):
+    with _temporary_active_db(f"analytics_consistency_{uuid.uuid4().hex[:8]}"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [f"2025-03-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        _insert_analytics_study(
+            study_id="wfa_consistency_set",
+            study_name="WFA_CONSISTENCY_SET",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=15.0,
+            stitched_oos_max_drawdown_pct=4.1667,
+            stitched_oos_equity_curve=curve,
+            stitched_oos_timestamps_json=timestamps,
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Consistency Set", "study_ids": ["wfa_consistency_set"]},
+        ).get_json()
+
+        sets_payload = client.get("/api/analytics/sets")
+        assert sets_payload.status_code == 200
+        payload = sets_payload.get_json()
+        assert payload["all_metrics"]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert payload["all_metrics"]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+        assert payload["sets"][0]["metrics"]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert payload["sets"][0]["metrics"]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+        equity_response = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert equity_response.status_code == 200
+        equity_payload = equity_response.get_json()
+        assert equity_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert equity_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
 
 
 def test_analytics_summary_includes_focus_settings_payload(client):
