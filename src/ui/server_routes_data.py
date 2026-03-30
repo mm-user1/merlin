@@ -182,6 +182,40 @@ def register_routes(app):
 
         return normalized
 
+    def _prepend_wfa_flat_equity_prefix(
+        equity_curve: List[float],
+        timestamps: List[str],
+        *,
+        scheduled_start: Any,
+        live_start: Any,
+    ) -> Tuple[List[float], List[str]]:
+        scheduled_start_ts = parse_timestamp_utc(scheduled_start)
+        live_start_ts = parse_timestamp_utc(live_start)
+        if scheduled_start_ts is None or live_start_ts is None or live_start_ts <= scheduled_start_ts:
+            return list(equity_curve or []), list(timestamps or [])
+
+        prefixed_curve: List[float] = [100.0]
+        prefixed_timestamps: List[str] = [scheduled_start_ts.isoformat()]
+
+        first_live_ts = parse_timestamp_utc(timestamps[0]) if timestamps else None
+        if first_live_ts is None or first_live_ts > live_start_ts:
+            prefixed_curve.append(100.0)
+            prefixed_timestamps.append(live_start_ts.isoformat())
+
+        prefixed_curve.extend(list(equity_curve or []))
+        prefixed_timestamps.extend(list(timestamps or []))
+
+        deduped_curve: List[float] = []
+        deduped_timestamps: List[str] = []
+        for curve_value, timestamp in zip(prefixed_curve, prefixed_timestamps):
+            if deduped_timestamps and timestamp == deduped_timestamps[-1]:
+                deduped_curve[-1] = curve_value
+            else:
+                deduped_curve.append(curve_value)
+                deduped_timestamps.append(timestamp)
+
+        return deduped_curve, deduped_timestamps
+
     def _resolve_csv_path_for_response(
         raw_path: Any,
         *,
@@ -963,6 +997,13 @@ def register_routes(app):
             "oos_actual_days": window.get("oos_actual_days"),
             "cooldown_days_applied": window.get("cooldown_days_applied"),
             "oos_elapsed_days": window.get("oos_elapsed_days"),
+            "trade_start_date": window.get("trade_start_date"),
+            "trade_end_date": window.get("trade_end_date"),
+            "entry_delay_days": window.get("entry_delay_days"),
+            "ft_retry_attempts_used": window.get("ft_retry_attempts_used"),
+            "remaining_oos_days_at_entry": window.get("remaining_oos_days_at_entry"),
+            "window_status": window.get("window_status"),
+            "no_trade_reason": window.get("no_trade_reason"),
         }
 
         return jsonify({"window": _json_safe(window_payload), "modules": _json_safe(modules)})
@@ -1012,6 +1053,35 @@ def register_routes(app):
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
+        scheduled_start = start
+        scheduled_end = end
+        actual_start = start
+        actual_end = end
+        is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos:
+            actual_start = (
+                window.get("trade_start_ts")
+                or window.get("trade_start_date")
+                or actual_start
+            )
+            actual_end = (
+                window.get("trade_end_ts")
+                or window.get("trade_end_date")
+                or actual_end
+            )
+            if str(window.get("window_status") or "").lower() == "no_trade":
+                start_ts = parse_timestamp_utc(scheduled_start)
+                end_ts = parse_timestamp_utc(scheduled_end)
+                timestamps = []
+                equity_curve = []
+                if start_ts is not None:
+                    timestamps.append(start_ts.isoformat())
+                    equity_curve.append(100.0)
+                if end_ts is not None and start_ts is not None and end_ts > start_ts:
+                    timestamps.append(end_ts.isoformat())
+                    equity_curve.append(100.0)
+                return jsonify({"equity_curve": equity_curve, "timestamps": timestamps})
+
         csv_path = study.get("csv_file_path")
         csv_path, error_response = _resolve_csv_path_for_response(
             csv_path,
@@ -1025,8 +1095,8 @@ def register_routes(app):
 
         merged_params = {**fixed_params, **params}
         merged_params["dateFilter"] = True
-        merged_params["start"] = start
-        merged_params["end"] = end
+        merged_params["start"] = actual_start
+        merged_params["end"] = actual_end
 
         equity_curve, timestamps, error = _run_equity_export(
             strategy_id=study.get("strategy_id"),
@@ -1036,6 +1106,14 @@ def register_routes(app):
         )
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
+
+        if is_window_oos:
+            equity_curve, timestamps = _prepend_wfa_flat_equity_prefix(
+                equity_curve or [],
+                timestamps or [],
+                scheduled_start=scheduled_start,
+                live_start=actual_start,
+            )
 
         return jsonify({"equity_curve": equity_curve or [], "timestamps": timestamps or []})
 
@@ -1084,6 +1162,27 @@ def register_routes(app):
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
+        is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos and str(window.get("window_status") or "").lower() == "no_trade":
+            trades = []
+            module_label = module_type or "window"
+            filename = (
+                f"{study.get('study_name', 'study')}_wfa_window_{window_number}_"
+                f"{module_label}_{period}_trades.csv"
+            )
+            return _send_trades_csv(
+                trades=trades,
+                csv_path=study.get("csv_file_path") or "",
+                study=study,
+                filename=filename,
+            )
+
+        actual_start = start
+        actual_end = end
+        if is_window_oos:
+            actual_start = window.get("trade_start_ts") or window.get("trade_start_date") or start
+            actual_end = window.get("trade_end_ts") or window.get("trade_end_date") or end
+
         csv_path = study.get("csv_file_path")
         csv_path, error_response = _resolve_csv_path_for_response(
             csv_path,
@@ -1097,8 +1196,8 @@ def register_routes(app):
 
         merged_params = {**fixed_params, **params}
         merged_params["dateFilter"] = True
-        merged_params["start"] = start
-        merged_params["end"] = end
+        merged_params["start"] = actual_start
+        merged_params["end"] = actual_end
 
         trades, error = _run_trade_export(
             strategy_id=study.get("strategy_id"),
@@ -1116,8 +1215,8 @@ def register_routes(app):
         ):
             trades = _normalize_wfa_oos_trades(
                 trades or [],
-                start=start,
-                end=end,
+                start=actual_start,
+                end=actual_end,
                 expected_total=window.get("oos_total_trades"),
             )
 

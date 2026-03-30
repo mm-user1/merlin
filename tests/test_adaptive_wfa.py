@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.backtest_engine import StrategyResult, TradeRecord
+from core.post_process import PostProcessConfig
 from core.walkforward_engine import ISPipelineResult, WFConfig, WalkForwardEngine, WindowResult
 
 
@@ -379,6 +380,84 @@ def test_adaptive_cooldown_extends_next_window_after_cusum_trigger(monkeypatch):
     assert first_window.oos_actual_days == pytest.approx(2.0)
     assert first_window.oos_elapsed_days == pytest.approx(7.0)
     assert (second_window.oos_start - first_window.oos_end).total_seconds() / 86400.0 == pytest.approx(6.0)
+
+
+def test_adaptive_ft_retry_delays_entry_before_live_oos(monkeypatch):
+    index = pd.date_range("2025-01-01 00:00:00", "2025-04-30 00:00:00", freq="1D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+        index=index,
+    )
+
+    config = WFConfig(
+        strategy_id="s01_trailing_ma",
+        adaptive_mode=True,
+        is_period_days=20,
+        max_oos_period_days=10,
+        min_oos_trades=1,
+        check_interval_trades=1,
+        post_process=PostProcessConfig(
+            enabled=True,
+            ft_period_days=5,
+            ft_threshold_pct=-5.0,
+            ft_reject_action="cooldown_reoptimize",
+            ft_reject_cooldown_days=3,
+            ft_reject_max_attempts=2,
+            ft_reject_min_remaining_oos_days=3,
+        ),
+    )
+    engine = WalkForwardEngine(config, {"fixed_params": {"dateFilter": False}}, {})
+
+    call_counter = {"count": 0}
+
+    def fake_pipeline(self, df, is_start, is_end, window_id):  # noqa: ARG001
+        call_counter["count"] += 1
+        return ISPipelineResult(
+            best_result=SimpleNamespace(score=0.0),
+            best_params={},
+            param_id=f"w{window_id}_{call_counter['count']}",
+            best_trial_number=window_id,
+            best_params_source="forward_test",
+            is_pareto_optimal=None,
+            constraints_satisfied=None,
+            available_modules=["optuna_is", "forward_test"],
+            module_status={
+                "optuna_is": {"enabled": True, "ran": True, "reason": None},
+                "forward_test": {"enabled": True, "ran": True, "reason": None},
+            },
+            selection_chain={},
+            optimization_start=is_start,
+            optimization_end=is_end - pd.Timedelta(days=5),
+            ft_start=is_end - pd.Timedelta(days=5),
+            ft_end=is_end,
+            optuna_is_trials=[],
+            dsr_trials=None,
+            forward_test_trials=[],
+            stress_test_trials=None,
+            ft_gate_failed=call_counter["count"] == 1,
+            ft_pass_count=0 if call_counter["count"] == 1 else 1,
+        )
+
+    def fake_backtest(self, df, start, end, params):  # noqa: ARG001
+        return StrategyResult(
+            trades=[],
+            equity_curve=[100.0, 100.0],
+            balance_curve=[100.0, 100.0],
+            timestamps=[start, end],
+        )
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_window_is_pipeline", fake_pipeline)
+    monkeypatch.setattr(WalkForwardEngine, "_run_period_backtest", fake_backtest)
+
+    result, _study_id = engine.run_wf_optimization(df)
+
+    first_window = result.windows[0]
+    assert first_window.window_status == "traded"
+    assert first_window.entry_delay_days == pytest.approx(3.0)
+    assert first_window.ft_retry_attempts_used == 1
+    assert first_window.trade_start == pd.Timestamp("2025-01-24", tz="UTC")
+    assert first_window.oos_actual_days == pytest.approx(7.0)
+    assert first_window.oos_elapsed_days == pytest.approx(10.0)
 
 
 def test_adaptive_does_not_append_zero_day_last_window(monkeypatch):

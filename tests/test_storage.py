@@ -28,6 +28,7 @@ from core.storage import (
     update_study_set,
 )
 from core.metrics import _calculate_r2_consistency
+from core.post_process import PostProcessConfig
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
 
 
@@ -183,6 +184,15 @@ def test_wfa_window_new_columns():
     assert "cooldown_days_applied" in columns
     assert "oos_elapsed_days" in columns
     assert "oos_winning_trades" in columns
+    assert "trade_start_date" in columns
+    assert "trade_end_date" in columns
+    assert "trade_start_ts" in columns
+    assert "trade_end_ts" in columns
+    assert "entry_delay_days" in columns
+    assert "ft_retry_attempts_used" in columns
+    assert "remaining_oos_days_at_entry" in columns
+    assert "window_status" in columns
+    assert "no_trade_reason" in columns
 
 
 def test_studies_stitched_columns():
@@ -212,9 +222,22 @@ def test_studies_stitched_columns():
     assert "inactivity_multiplier" in columns
     assert "cooldown_enabled" in columns
     assert "cooldown_days" in columns
+    assert "ft_threshold_pct" in columns
+    assert "ft_reject_action" in columns
+    assert "ft_reject_cooldown_days" in columns
+    assert "ft_reject_max_attempts" in columns
+    assert "ft_reject_min_remaining_oos_days" in columns
     assert "stitched_oos_start_ts" in columns
     assert "stitched_oos_end_ts" in columns
     assert "stitched_oos_point_count" in columns
+
+
+def test_trials_ft_gate_columns_exist():
+    with get_db_connection() as conn:
+        cursor = conn.execute("PRAGMA table_info(trials)")
+        columns = {row["name"] for row in cursor.fetchall()}
+
+    assert "ft_passes_threshold" in columns
 
 
 def test_save_wfa_study_with_trials():
@@ -660,10 +683,27 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     wf_result.config.inactivity_multiplier = 6.0
     wf_result.config.cooldown_enabled = True
     wf_result.config.cooldown_days = 15
+    wf_result.config.post_process = PostProcessConfig(
+        enabled=True,
+        ft_period_days=14,
+        top_k=10,
+        sort_metric="profit_degradation",
+        ft_threshold_pct=-5.0,
+        ft_reject_action="cooldown_reoptimize",
+        ft_reject_cooldown_days=5,
+        ft_reject_max_attempts=2,
+        ft_reject_min_remaining_oos_days=10,
+    )
     wf_result.windows[0].trigger_type = "cusum"
     wf_result.windows[0].oos_actual_days = 4.0
     wf_result.windows[0].cooldown_days_applied = 15.0
     wf_result.windows[0].oos_elapsed_days = 19.0
+    wf_result.windows[0].trade_start = pd.Timestamp("2025-01-13", tz="UTC")
+    wf_result.windows[0].trade_end = pd.Timestamp("2025-01-15", tz="UTC")
+    wf_result.windows[0].entry_delay_days = 2.0
+    wf_result.windows[0].ft_retry_attempts_used = 1
+    wf_result.windows[0].remaining_oos_days_at_entry = 3.0
+    wf_result.windows[0].window_status = "traded"
 
     config = {
         "sampler_type": "nsga2",
@@ -725,6 +765,15 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     assert study.get("inactivity_multiplier") == 6.0
     assert study.get("cooldown_enabled") == 1
     assert study.get("cooldown_days") == 15
+    assert study.get("ft_enabled") == 1
+    assert study.get("ft_period_days") == 14
+    assert study.get("ft_top_k") == 10
+    assert study.get("ft_sort_metric") == "profit_degradation"
+    assert study.get("ft_threshold_pct") == -5.0
+    assert study.get("ft_reject_action") == "cooldown_reoptimize"
+    assert study.get("ft_reject_cooldown_days") == 5
+    assert study.get("ft_reject_max_attempts") == 2
+    assert study.get("ft_reject_min_remaining_oos_days") == 10
 
     config_json = study.get("config_json") or {}
     assert config_json.get("optuna_config", {}).get("pruner") == "median"
@@ -737,6 +786,12 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     assert window.get("oos_actual_days") == 4.0
     assert window.get("cooldown_days_applied") == 15.0
     assert window.get("oos_elapsed_days") == 19.0
+    assert window.get("trade_start_ts") == "2025-01-13T00:00:00+00:00"
+    assert window.get("trade_end_ts") == "2025-01-15T00:00:00+00:00"
+    assert window.get("entry_delay_days") == 2.0
+    assert window.get("ft_retry_attempts_used") == 1
+    assert window.get("remaining_oos_days_at_entry") == 3.0
+    assert window.get("window_status") == "traded"
 
 
 def test_save_wfa_study_persists_runtime_seconds():

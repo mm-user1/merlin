@@ -1432,6 +1432,21 @@ function applyQueueConfigFallback(item) {
   if (Object.prototype.hasOwnProperty.call(postProcess, 'sortMetric')) {
     setInputValue('ftSortMetric', postProcess.sortMetric);
   }
+  if (Object.prototype.hasOwnProperty.call(postProcess, 'ftThresholdPct')) {
+    setInputValue('ftThresholdPct', postProcess.ftThresholdPct);
+  }
+  if (Object.prototype.hasOwnProperty.call(postProcess, 'ftRejectAction')) {
+    setInputValue('ftRejectAction', postProcess.ftRejectAction);
+  }
+  if (Object.prototype.hasOwnProperty.call(postProcess, 'ftRejectCooldownDays')) {
+    setInputValue('ftRejectCooldownDays', postProcess.ftRejectCooldownDays);
+  }
+  if (Object.prototype.hasOwnProperty.call(postProcess, 'ftRejectMaxAttempts')) {
+    setInputValue('ftRejectMaxAttempts', postProcess.ftRejectMaxAttempts);
+  }
+  if (Object.prototype.hasOwnProperty.call(postProcess, 'ftRejectMinRemainingOosDays')) {
+    setInputValue('ftRejectMinRemainingOosDays', postProcess.ftRejectMinRemainingOosDays);
+  }
   setCheckboxValue('enableDSR', Boolean(postProcess.dsrEnabled));
   if (Object.prototype.hasOwnProperty.call(postProcess, 'dsrTopK')) {
     setInputValue('dsrTopK', postProcess.dsrTopK);
@@ -1481,6 +1496,7 @@ function refreshQueueFormUiAfterApply() {
   triggerControlEvent('enableAdaptiveWF');
   triggerControlEvent('enableOosTest');
   triggerControlEvent('enablePostProcess');
+  triggerControlEvent('ftRejectAction');
   triggerControlEvent('enableDSR');
   triggerControlEvent('enableStressTest');
   triggerControlEvent('optuna_sanitize_enabled');

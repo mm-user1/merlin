@@ -179,6 +179,11 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             ft_period_days INTEGER,
             ft_top_k INTEGER,
             ft_sort_metric TEXT,
+            ft_threshold_pct REAL,
+            ft_reject_action TEXT,
+            ft_reject_cooldown_days INTEGER,
+            ft_reject_max_attempts INTEGER,
+            ft_reject_min_remaining_oos_days INTEGER,
             ft_start_date TEXT,
             ft_end_date TEXT,
             is_period_days INTEGER,
@@ -297,6 +302,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             ft_consistency_score REAL,
             profit_degradation REAL,
             ft_rank INTEGER,
+            ft_passes_threshold INTEGER,
             ft_source TEXT,
 
             dsr_probability REAL,
@@ -413,6 +419,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             oos_actual_days REAL,
             cooldown_days_applied REAL,
             oos_elapsed_days REAL,
+            trade_start_date TEXT,
+            trade_end_date TEXT,
+            trade_start_ts TEXT,
+            trade_end_ts TEXT,
+            entry_delay_days REAL,
+            ft_retry_attempts_used INTEGER,
+            remaining_oos_days_at_entry REAL,
+            window_status TEXT,
+            no_trade_reason TEXT,
 
             wfe REAL,
 
@@ -486,9 +501,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "inactivity_multiplier", "REAL")
     ensure("studies", "cooldown_enabled", "INTEGER DEFAULT 0")
     ensure("studies", "cooldown_days", "INTEGER")
+    ensure("studies", "ft_threshold_pct", "REAL")
+    ensure("studies", "ft_reject_action", "TEXT")
+    ensure("studies", "ft_reject_cooldown_days", "INTEGER")
+    ensure("studies", "ft_reject_max_attempts", "INTEGER")
+    ensure("studies", "ft_reject_min_remaining_oos_days", "INTEGER")
 
     ensure("trials", "max_consecutive_losses", "INTEGER")
     ensure("trials", "ft_max_consecutive_losses", "INTEGER")
+    ensure("trials", "ft_passes_threshold", "INTEGER")
     ensure("trials", "dsr_probability", "REAL")
     ensure("trials", "dsr_rank", "INTEGER")
     ensure("trials", "dsr_skewness", "REAL")
@@ -642,6 +663,18 @@ def _ensure_wfa_schema_updated(conn: sqlite3.Connection) -> None:
     add_col("ALTER TABLE wfa_windows ADD COLUMN oos_actual_days REAL;", "oos_actual_days")
     add_col("ALTER TABLE wfa_windows ADD COLUMN cooldown_days_applied REAL;", "cooldown_days_applied")
     add_col("ALTER TABLE wfa_windows ADD COLUMN oos_elapsed_days REAL;", "oos_elapsed_days")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN trade_start_date TEXT;", "trade_start_date")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN trade_end_date TEXT;", "trade_end_date")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN trade_start_ts TEXT;", "trade_start_ts")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN trade_end_ts TEXT;", "trade_end_ts")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN entry_delay_days REAL;", "entry_delay_days")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN ft_retry_attempts_used INTEGER;", "ft_retry_attempts_used")
+    add_col(
+        "ALTER TABLE wfa_windows ADD COLUMN remaining_oos_days_at_entry REAL;",
+        "remaining_oos_days_at_entry",
+    )
+    add_col("ALTER TABLE wfa_windows ADD COLUMN window_status TEXT;", "window_status")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN no_trade_reason TEXT;", "no_trade_reason")
 
     conn.commit()
 
@@ -2163,6 +2196,13 @@ def save_optuna_study_to_db(
     ft_period_days = getattr(config, "ft_period_days", None)
     ft_top_k = getattr(config, "ft_top_k", None)
     ft_sort_metric = getattr(config, "ft_sort_metric", None)
+    ft_threshold_pct = getattr(config, "ft_threshold_pct", None)
+    ft_reject_action = getattr(config, "ft_reject_action", None)
+    ft_reject_cooldown_days = getattr(config, "ft_reject_cooldown_days", None)
+    ft_reject_max_attempts = getattr(config, "ft_reject_max_attempts", None)
+    ft_reject_min_remaining_oos_days = getattr(
+        config, "ft_reject_min_remaining_oos_days", None
+    )
     ft_start_date = getattr(config, "ft_start_date", None)
     ft_end_date = getattr(config, "ft_end_date", None)
     is_period_days = getattr(config, "is_period_days", None)
@@ -2186,12 +2226,14 @@ def save_optuna_study_to_db(
                     csv_file_path, csv_file_name,
                     dataset_start_date, dataset_end_date, warmup_bars,
                     ft_enabled, ft_period_days, ft_top_k, ft_sort_metric,
+                    ft_threshold_pct, ft_reject_action, ft_reject_cooldown_days,
+                    ft_reject_max_attempts, ft_reject_min_remaining_oos_days,
                     ft_start_date, ft_end_date, is_period_days,
                     optimization_time_seconds,
                     completed_at,
                     filter_min_profit, min_profit_threshold,
                     sanitize_enabled, sanitize_trades_threshold
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     study_id,
@@ -2230,6 +2272,11 @@ def save_optuna_study_to_db(
                     ft_period_days,
                     ft_top_k,
                     ft_sort_metric,
+                    ft_threshold_pct,
+                    ft_reject_action,
+                    ft_reject_cooldown_days,
+                    ft_reject_max_attempts,
+                    ft_reject_min_remaining_oos_days,
                     _format_date(ft_start_date),
                     _format_date(ft_end_date),
                     is_period_days,
@@ -2301,6 +2348,7 @@ def save_optuna_study_to_db(
                         None,
                         None,
                         None,
+                        None,
                     )
                 )
 
@@ -2317,8 +2365,9 @@ def save_optuna_study_to_db(
                         consistency_score, composite_score,
                         ft_net_profit_pct, ft_max_drawdown_pct, ft_total_trades, ft_win_rate,
                         ft_sharpe_ratio, ft_sortino_ratio, ft_romad, ft_profit_factor,
-                        ft_ulcer_index, ft_sqn, ft_consistency_score, profit_degradation, ft_rank
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ft_ulcer_index, ft_sqn, ft_consistency_score, profit_degradation, ft_rank,
+                        ft_passes_threshold
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     trial_rows,
                 )
@@ -2551,6 +2600,18 @@ def save_wfa_study_to_db(
             inactivity_multiplier = getattr(wf_cfg, "inactivity_multiplier", None)
             cooldown_enabled = 1 if bool(getattr(wf_cfg, "cooldown_enabled", False)) else 0
             cooldown_days = getattr(wf_cfg, "cooldown_days", None)
+            post_process_cfg = getattr(wf_cfg, "post_process", None)
+            ft_enabled = 1 if bool(getattr(post_process_cfg, "enabled", False)) else 0
+            ft_period_days = getattr(post_process_cfg, "ft_period_days", None)
+            ft_top_k = getattr(post_process_cfg, "top_k", None)
+            ft_sort_metric = getattr(post_process_cfg, "sort_metric", None)
+            ft_threshold_pct = getattr(post_process_cfg, "ft_threshold_pct", None)
+            ft_reject_action = getattr(post_process_cfg, "ft_reject_action", None)
+            ft_reject_cooldown_days = getattr(post_process_cfg, "ft_reject_cooldown_days", None)
+            ft_reject_max_attempts = getattr(post_process_cfg, "ft_reject_max_attempts", None)
+            ft_reject_min_remaining_oos_days = getattr(
+                post_process_cfg, "ft_reject_min_remaining_oos_days", None
+            )
             sampler_type = (
                 optuna_config.get("sampler_type")
                 or optuna_config.get("sampler")
@@ -2586,6 +2647,9 @@ def save_wfa_study_to_db(
                 "csv_file_path", "csv_file_name",
                 "dataset_start_date", "dataset_end_date", "warmup_bars",
                 "is_period_days",
+                "ft_enabled", "ft_period_days", "ft_top_k", "ft_sort_metric",
+                "ft_threshold_pct", "ft_reject_action", "ft_reject_cooldown_days",
+                "ft_reject_max_attempts", "ft_reject_min_remaining_oos_days",
                 "adaptive_mode", "max_oos_period_days", "min_oos_trades",
                 "check_interval_trades", "cusum_threshold",
                 "dd_threshold_multiplier", "inactivity_multiplier",
@@ -2637,6 +2701,15 @@ def save_wfa_study_to_db(
                 _format_date(wf_result.trading_end_date),
                 wf_result.warmup_bars,
                 is_period_days,
+                ft_enabled,
+                ft_period_days,
+                ft_top_k,
+                ft_sort_metric,
+                ft_threshold_pct,
+                ft_reject_action,
+                ft_reject_cooldown_days,
+                ft_reject_max_attempts,
+                ft_reject_min_remaining_oos_days,
                 adaptive_mode,
                 max_oos_period_days,
                 min_oos_trades,
@@ -2752,6 +2825,15 @@ def save_wfa_study_to_db(
                         getattr(window, "oos_actual_days", None),
                         getattr(window, "cooldown_days_applied", None),
                         getattr(window, "oos_elapsed_days", None),
+                        _format_date(getattr(window, "trade_start", None)),
+                        _format_date(getattr(window, "trade_end", None)),
+                        _format_timestamp(getattr(window, "trade_start", None)),
+                        _format_timestamp(getattr(window, "trade_end", None)),
+                        getattr(window, "entry_delay_days", None),
+                        getattr(window, "ft_retry_attempts_used", None),
+                        getattr(window, "remaining_oos_days_at_entry", None),
+                        getattr(window, "window_status", None),
+                        getattr(window, "no_trade_reason", None),
                         getattr(window, "wfe", None),
                     )
                 )
@@ -2783,6 +2865,9 @@ def save_wfa_study_to_db(
                     "oos_profit_factor", "oos_sqn", "oos_ulcer_index", "oos_consistency_score",
                     "trigger_type", "cusum_final", "cusum_threshold", "dd_threshold", "oos_actual_days",
                     "cooldown_days_applied", "oos_elapsed_days",
+                    "trade_start_date", "trade_end_date", "trade_start_ts", "trade_end_ts",
+                    "entry_delay_days", "ft_retry_attempts_used", "remaining_oos_days_at_entry",
+                    "window_status", "no_trade_reason",
                     "wfe",
                 )
                 placeholders = ", ".join(["?"] * len(window_columns))
@@ -3052,6 +3137,8 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
                 trial["constraint_values"] = json.loads(trial["constraint_values_json"] or "[]")
                 trial["is_pareto_optimal"] = bool(trial.get("is_pareto_optimal"))
                 trial["constraints_satisfied"] = bool(trial.get("constraints_satisfied"))
+                if trial.get("ft_passes_threshold") is not None:
+                    trial["ft_passes_threshold"] = bool(trial.get("ft_passes_threshold"))
                 if trial.get("param_worst_ratios"):
                     try:
                         trial["param_worst_ratios"] = json.loads(trial["param_worst_ratios"])
@@ -3195,6 +3282,8 @@ def get_study_trial(study_id: str, trial_number: int) -> Optional[Dict]:
             return None
         trial = dict(row)
         trial["params"] = json.loads(trial["params_json"])
+        if trial.get("ft_passes_threshold") is not None:
+            trial["ft_passes_threshold"] = bool(trial.get("ft_passes_threshold"))
         return trial
 
 
@@ -3236,6 +3325,11 @@ def save_forward_test_results(
     ft_period_days: Optional[int],
     ft_top_k: Optional[int],
     ft_sort_metric: Optional[str],
+    ft_threshold_pct: Optional[float],
+    ft_reject_action: Optional[str],
+    ft_reject_cooldown_days: Optional[int],
+    ft_reject_max_attempts: Optional[int],
+    ft_reject_min_remaining_oos_days: Optional[int],
     ft_start_date: Optional[str],
     ft_end_date: Optional[str],
     is_period_days: Optional[int],
@@ -3255,6 +3349,11 @@ def save_forward_test_results(
                     ft_period_days = ?,
                     ft_top_k = ?,
                     ft_sort_metric = ?,
+                    ft_threshold_pct = ?,
+                    ft_reject_action = ?,
+                    ft_reject_cooldown_days = ?,
+                    ft_reject_max_attempts = ?,
+                    ft_reject_min_remaining_oos_days = ?,
                     ft_start_date = ?,
                     ft_end_date = ?,
                     is_period_days = ?
@@ -3265,6 +3364,11 @@ def save_forward_test_results(
                     ft_period_days,
                     ft_top_k,
                     ft_sort_metric,
+                    ft_threshold_pct,
+                    ft_reject_action,
+                    ft_reject_cooldown_days,
+                    ft_reject_max_attempts,
+                    ft_reject_min_remaining_oos_days,
                     _format_date(ft_start_date),
                     _format_date(ft_end_date),
                     is_period_days,
@@ -3294,6 +3398,9 @@ def save_forward_test_results(
                             payload.get("ft_consistency_score"),
                             payload.get("profit_degradation"),
                             payload.get("ft_rank"),
+                            1 if payload.get("ft_passes_threshold") is True else 0
+                            if payload.get("ft_passes_threshold") is False
+                            else None,
                             ft_source,
                             study_id,
                             payload.get("trial_number"),
@@ -3318,6 +3425,7 @@ def save_forward_test_results(
                         ft_consistency_score = ?,
                         profit_degradation = ?,
                         ft_rank = ?,
+                        ft_passes_threshold = ?,
                         ft_source = ?
                     WHERE study_id = ? AND trial_number = ?
                     """,

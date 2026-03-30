@@ -21,6 +21,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+FT_REJECT_ACTION_NO_TRADE = "no_trade"
+FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE = "cooldown_reoptimize"
+
 
 # ============================================================
 # Configuration Dataclasses
@@ -35,6 +38,11 @@ class PostProcessConfig:
     ft_period_days: int = 30
     top_k: int = 20
     sort_metric: str = "profit_degradation"  # or "ft_romad"
+    ft_threshold_pct: float = -5.0
+    ft_reject_action: str = FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE
+    ft_reject_cooldown_days: int = 5
+    ft_reject_max_attempts: int = 2
+    ft_reject_min_remaining_oos_days: int = 10
     warmup_bars: int = 1000
 
 
@@ -97,6 +105,7 @@ class FTResult:
 
     ft_rank: Optional[int] = None
     rank_change: Optional[int] = None
+    ft_passes_threshold: Optional[bool] = None
 
 
 @dataclass
@@ -420,6 +429,74 @@ def calculate_period_dates(
         "ft_days": ft_days,
         "oos_days": oos_days,
     }
+
+
+def normalize_ft_reject_action(action: Optional[str]) -> str:
+    """Normalize FT reject policy identifiers from UI/config payloads."""
+    normalized = str(action or "").strip().lower()
+    if not normalized:
+        return FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE
+
+    aliases = {
+        "no trade": FT_REJECT_ACTION_NO_TRADE,
+        "no_trade": FT_REJECT_ACTION_NO_TRADE,
+        "cooldown + re-optimize": FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE,
+        "cooldown + reoptimize": FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE,
+        "cooldown_reoptimize": FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE,
+        "cooldown_re-optimize": FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE,
+    }
+    return aliases.get(normalized, FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE)
+
+
+def ft_result_meets_threshold(result: Any, threshold_pct: float) -> bool:
+    """Return True when raw FT net profit meets or exceeds the configured threshold."""
+    if isinstance(result, dict):
+        value = result.get("ft_net_profit_pct")
+    else:
+        value = getattr(result, "ft_net_profit_pct", None)
+
+    try:
+        ft_profit_pct = float(value)
+    except (TypeError, ValueError):
+        ft_profit_pct = 0.0
+    return ft_profit_pct >= float(threshold_pct)
+
+
+def annotate_ft_threshold(
+    results: Sequence[Any],
+    threshold_pct: float,
+) -> List[Any]:
+    """Annotate FT results with pass/fail flags using the configured raw FT threshold."""
+    annotated = list(results or [])
+    for result in annotated:
+        passed = ft_result_meets_threshold(result, threshold_pct)
+        if isinstance(result, dict):
+            result["ft_passes_threshold"] = passed
+        else:
+            setattr(result, "ft_passes_threshold", passed)
+    return annotated
+
+
+def filter_ft_passed_results(results: Sequence[Any]) -> List[Any]:
+    """Filter FT results to candidates that passed the FT threshold.
+
+    Legacy results without explicit pass/fail metadata are treated as passing to keep
+    existing persisted studies inspectable.
+    """
+    filtered: List[Any] = []
+    for result in list(results or []):
+        passed = True
+        if isinstance(result, dict):
+            raw_value = result.get("ft_passes_threshold")
+            if raw_value is not None:
+                passed = bool(raw_value)
+        else:
+            raw_value = getattr(result, "ft_passes_threshold", None)
+            if raw_value is not None:
+                passed = bool(raw_value)
+        if passed:
+            filtered.append(result)
+    return filtered
 
 
 def calculate_profit_degradation(
@@ -898,6 +975,8 @@ def run_forward_test(
     for idx, result in enumerate(results, 1):
         result.ft_rank = idx
         result.rank_change = result.source_rank - idx
+
+    annotate_ft_threshold(results, float(config.ft_threshold_pct))
 
     return results
 

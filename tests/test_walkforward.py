@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core import storage
 from core.walkforward_engine import (
+    ISPipelineResult,
     OOSStitchedResult,
     WFConfig,
     WFResult,
@@ -18,8 +19,8 @@ from core.walkforward_engine import (
     WindowResult,
 )
 from core.optuna_engine import OptimizationResult
-from core.post_process import DSRConfig, DSRResult
-from core.backtest_engine import StrategyResult
+from core.post_process import DSRConfig, DSRResult, PostProcessConfig
+from core.backtest_engine import StrategyResult, TradeRecord
 from core.backtest_engine import load_data
 from strategies import get_strategy_config
 
@@ -475,6 +476,94 @@ def test_best_params_source_tracked(monkeypatch):
     assert result.windows[0].best_params_source == "dsr"
     assert result.windows[0].is_pareto_optimal is True
     assert result.windows[0].constraints_satisfied is False
+
+
+def test_fixed_wfa_ft_retry_delays_entry_and_trades_remaining_window(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=70, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+        index=index,
+    )
+
+    config = WFConfig(
+        strategy_id="s01_trailing_ma",
+        is_period_days=20,
+        oos_period_days=10,
+        post_process=PostProcessConfig(
+            enabled=True,
+            ft_period_days=5,
+            ft_threshold_pct=-5.0,
+            ft_reject_action="cooldown_reoptimize",
+            ft_reject_cooldown_days=5,
+            ft_reject_max_attempts=2,
+            ft_reject_min_remaining_oos_days=3,
+        ),
+    )
+    engine = WalkForwardEngine(config, {"fixed_params": {"dateFilter": False}}, {})
+
+    call_counter = {"count": 0}
+
+    def fake_pipeline(self, df, is_start, is_end, window_id):  # noqa: ARG001
+        call_counter["count"] += 1
+        return ISPipelineResult(
+            best_result=OptimizationResult(
+                params={"maType": "EMA", "maLength": 20, "closeCountLong": 7},
+                net_profit_pct=5.0,
+                max_drawdown_pct=1.0,
+                total_trades=3,
+                optuna_trial_number=window_id + call_counter["count"],
+            ),
+            best_params={"maType": "EMA", "maLength": 20, "closeCountLong": 7},
+            param_id=f"retry_{call_counter['count']}",
+            best_trial_number=window_id + call_counter["count"],
+            best_params_source="forward_test",
+            is_pareto_optimal=None,
+            constraints_satisfied=True,
+            available_modules=["optuna_is", "forward_test"],
+            module_status={
+                "optuna_is": {"enabled": True, "ran": True, "reason": None},
+                "forward_test": {"enabled": True, "ran": True, "reason": None},
+            },
+            selection_chain={"optuna_is": 1},
+            optimization_start=is_start,
+            optimization_end=is_end - pd.Timedelta(days=5),
+            ft_start=is_end - pd.Timedelta(days=5),
+            ft_end=is_end,
+            optuna_is_trials=[],
+            dsr_trials=None,
+            forward_test_trials=[],
+            stress_test_trials=None,
+            ft_gate_failed=call_counter["count"] == 1,
+            ft_pass_count=0 if call_counter["count"] == 1 else 1,
+        )
+
+    def fake_backtest(self, df, start, end, params):  # noqa: ARG001
+        trade = TradeRecord(
+            entry_time=start,
+            exit_time=end,
+            net_pnl=5.0,
+            profit_pct=5.0,
+        )
+        return StrategyResult(
+            trades=[trade],
+            equity_curve=[100.0, 105.0],
+            balance_curve=[100.0, 105.0],
+            timestamps=[start, end],
+        )
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_window_is_pipeline", fake_pipeline)
+    monkeypatch.setattr(WalkForwardEngine, "_run_period_backtest", fake_backtest)
+
+    result, _study_id = engine.run_wf_optimization(df)
+
+    first_window = result.windows[0]
+    assert first_window.window_status == "traded"
+    assert first_window.entry_delay_days == pytest.approx(5.0)
+    assert first_window.ft_retry_attempts_used == 1
+    assert first_window.trade_start == pd.Timestamp("2025-01-26", tz="UTC")
+    assert first_window.is_end == pd.Timestamp("2025-01-25", tz="UTC")
+    assert call_counter["count"] >= 2
+
 def test_walkforward_integration_with_sample_data(monkeypatch):
     data_path = Path(__file__).parent.parent / "data" / "raw" / "OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv"
     if not data_path.exists():

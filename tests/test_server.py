@@ -993,6 +993,93 @@ def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
     assert captured["base_template"]["wfa"]["cooldown_days"] == 21
 
 
+def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = _ensure_local_test_tmp_dir() / "wfa_ft_reject_route.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n"
+        "2026-01-02 00:00:00,1,1,1,1,1\n"
+        "2026-01-03 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 1.1, 1.2],
+            "high": [1.0, 1.1, 1.2],
+            "low": [1.0, 1.1, 1.2],
+            "close": [1.0, 1.1, 1.2],
+            "volume": [1.0, 1.0, 1.0],
+        },
+        index=pd.to_datetime(
+            ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"],
+            utc=True,
+        ),
+    )
+
+    captured = {}
+
+    class DummyWalkForwardEngine:
+        def __init__(self, config, base_template, optuna_settings, csv_file_path=None):
+            captured["config"] = config
+            captured["base_template"] = base_template
+            captured["optuna_settings"] = optuna_settings
+            captured["csv_file_path"] = csv_file_path
+
+        def run_wf_optimization(self, _dataframe):
+            return (
+                SimpleNamespace(
+                    total_windows=1,
+                    stitched_oos=SimpleNamespace(
+                        final_net_profit_pct=0.0,
+                        max_drawdown_pct=0.0,
+                        total_trades=0,
+                        wfe=0.0,
+                        oos_win_rate=0.0,
+                    ),
+                ),
+                "study_route_ft_policy",
+            )
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["primary_objective"] = "net_profit_pct"
+    payload["postProcess"] = {
+        "enabled": True,
+        "ftPeriodDays": 14,
+        "topK": 10,
+        "sortMetric": "profit_degradation",
+        "ftThresholdPct": 5.0,
+        "ftRejectAction": "cooldown_reoptimize",
+        "ftRejectCooldownDays": 7,
+        "ftRejectMaxAttempts": 3,
+        "ftRejectMinRemainingOosDays": 11,
+    }
+
+    response = client.post(
+        "/api/walkforward",
+        data={
+            "strategy": "s01_trailing_ma",
+            "csvPath": str(csv_path),
+            "config": json.dumps(payload),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["config"].post_process is not None
+    assert captured["config"].post_process.ft_threshold_pct == 5.0
+    assert captured["config"].post_process.ft_reject_action == "cooldown_reoptimize"
+    assert captured["config"].post_process.ft_reject_cooldown_days == 7
+    assert captured["config"].post_process.ft_reject_max_attempts == 3
+    assert captured["config"].post_process.ft_reject_min_remaining_oos_days == 11
+
+
 def _build_params_from_config(strategy_id: str):
     config = get_strategy_config(strategy_id)
     parameters = config.get("parameters", {}) if isinstance(config, dict) else {}

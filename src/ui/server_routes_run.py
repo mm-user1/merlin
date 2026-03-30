@@ -34,6 +34,8 @@ from core.post_process import (
     StressTestConfig,
     calculate_period_dates,
     calculate_is_period_days,
+    filter_ft_passed_results,
+    normalize_ft_reject_action,
     run_dsr_analysis,
     run_forward_test,
     run_stress_test,
@@ -193,6 +195,29 @@ def register_routes(app):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         return None
+
+    def _parse_ft_threshold_pct(payload: Dict[str, Any]) -> float:
+        try:
+            value = float(payload.get("ftThresholdPct", -5.0))
+        except (TypeError, ValueError):
+            value = -5.0
+        if not math.isfinite(value):
+            value = -5.0
+        return max(-1_000_000.0, min(1_000_000.0, value))
+
+    def _parse_ft_reject_days(payload: Dict[str, Any], key: str, default: int) -> int:
+        try:
+            value = int(payload.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(3650, value))
+
+    def _parse_ft_reject_attempts(payload: Dict[str, Any]) -> int:
+        try:
+            value = int(payload.get("ftRejectMaxAttempts", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return max(0, min(100, value))
 
 
 
@@ -504,6 +529,17 @@ def register_routes(app):
                 ft_period_days=int(post_process_payload.get("ftPeriodDays", 15)),
                 top_k=int(post_process_payload.get("topK", 10)),
                 sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=_parse_ft_threshold_pct(post_process_payload),
+                ft_reject_action=normalize_ft_reject_action(
+                    post_process_payload.get("ftRejectAction")
+                ),
+                ft_reject_cooldown_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectCooldownDays", 5
+                ),
+                ft_reject_max_attempts=_parse_ft_reject_attempts(post_process_payload),
+                ft_reject_min_remaining_oos_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectMinRemainingOosDays", 10
+                ),
                 warmup_bars=warmup_bars,
             )
 
@@ -1188,6 +1224,17 @@ def register_routes(app):
                 ft_period_days=int(ft_days or 0),
                 top_k=int(post_process_payload.get("topK", 10)),
                 sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=_parse_ft_threshold_pct(post_process_payload),
+                ft_reject_action=normalize_ft_reject_action(
+                    post_process_payload.get("ftRejectAction")
+                ),
+                ft_reject_cooldown_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectCooldownDays", 5
+                ),
+                ft_reject_max_attempts=_parse_ft_reject_attempts(post_process_payload),
+                ft_reject_min_remaining_oos_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectMinRemainingOosDays", 10
+                ),
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
@@ -1208,6 +1255,11 @@ def register_routes(app):
                 ft_period_days=int(ft_days or 0),
                 ft_top_k=int(post_process_payload.get("topK", 10)),
                 ft_sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=pp_config.ft_threshold_pct,
+                ft_reject_action=pp_config.ft_reject_action,
+                ft_reject_cooldown_days=pp_config.ft_reject_cooldown_days,
+                ft_reject_max_attempts=pp_config.ft_reject_max_attempts,
+                ft_reject_min_remaining_oos_days=pp_config.ft_reject_min_remaining_oos_days,
                 ft_start_date=ft_start.strftime("%Y-%m-%d") if ft_start else None,
                 ft_end_date=ft_end.strftime("%Y-%m-%d") if ft_end else None,
                 is_period_days=int(is_days or 0),
@@ -1247,7 +1299,7 @@ def register_routes(app):
             st_candidates = results
             st_source = "optuna"
             if ft_enabled and ft_results:
-                st_candidates = ft_results
+                st_candidates = filter_ft_passed_results(ft_results)
                 st_source = "ft"
             elif dsr_results:
                 st_candidates = dsr_results
@@ -1293,6 +1345,7 @@ def register_routes(app):
                 dsr_results=dsr_results,
                 ft_results=ft_results,
                 st_results=st_results,
+                ft_ran=bool(ft_enabled),
                 st_ran=bool(st_enabled),
             )
 

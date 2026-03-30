@@ -55,3 +55,16 @@ def test_select_oos_source_preserves_optuna_order():
     )
     assert source == "optuna"
     assert [c["trial_number"] for c in candidates] == [7, 3, 9]
+
+
+def test_select_oos_source_hard_vetoes_rejected_ft_candidates():
+    source, candidates = select_oos_source_candidates(
+        optuna_results=[{"optuna_trial_number": 1}],
+        dsr_results=[{"trial_number": 2, "dsr_rank": 1}],
+        ft_results=[{"trial_number": 3, "ft_rank": 1, "ft_passes_threshold": False}],
+        st_results=[],
+        ft_ran=True,
+    )
+
+    assert source == "forward_test"
+    assert candidates == []

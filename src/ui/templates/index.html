@@ -747,6 +747,38 @@
                     <option value="ft_romad">FT RoMaD</option>
                   </select>
                 </div>
+
+                <div class="form-group">
+                  <label for="ftThresholdPct">FT Threshold (%):</label>
+                  <input type="number" id="ftThresholdPct" value="-5.0" min="-100000" max="100000" step="0.1" style="width: 100px;" />
+                </div>
+
+                <div id="ftRejectSettings" style="display: none;">
+                  <div class="form-group">
+                    <label for="ftRejectAction">On FT Reject:</label>
+                    <select id="ftRejectAction" style="width: 200px;">
+                      <option value="cooldown_reoptimize" selected>Cooldown + Re-optimize</option>
+                      <option value="no_trade">No Trade</option>
+                    </select>
+                  </div>
+
+                  <div id="ftRejectCooldownSettings" style="display: none;">
+                    <div class="form-group">
+                      <label for="ftRejectCooldownDays">Cooldown Step (days):</label>
+                      <input type="number" id="ftRejectCooldownDays" value="5" min="1" max="3650" style="width: 100px;" />
+                    </div>
+
+                    <div class="form-group">
+                      <label for="ftRejectMaxAttempts">Max Retry Attempts:</label>
+                      <input type="number" id="ftRejectMaxAttempts" value="2" min="0" max="100" style="width: 100px;" />
+                    </div>
+
+                    <div class="form-group">
+                      <label for="ftRejectMinRemainingOosDays">Min Remaining OOS (days):</label>
+                      <input type="number" id="ftRejectMinRemainingOosDays" value="10" min="1" max="3650" style="width: 100px;" />
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div class="form-group vertical" style="align-items: flex-start; margin-top: 10px;">
