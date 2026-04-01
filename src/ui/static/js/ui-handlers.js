@@ -30,8 +30,31 @@ const SCORE_DEFAULT_BOUNDS = {
   pf: { min: 0, max: 5 },
   ulcer: { min: 0, max: 20 },
   sqn: { min: -2, max: 7 },
-  consistency: { min: 0, max: 100 }
+  consistency: { min: -1, max: 1 }
 };
+
+function normalizeScoreBounds(rawBounds = {}) {
+  const normalized = {};
+
+  SCORE_METRICS.forEach((metric) => {
+    const defaults = SCORE_DEFAULT_BOUNDS[metric];
+    const source = rawBounds && typeof rawBounds === 'object' ? rawBounds[metric] : null;
+    let min = Number(source?.min);
+    let max = Number(source?.max);
+
+    if (!Number.isFinite(min)) min = defaults.min;
+    if (!Number.isFinite(max)) max = defaults.max;
+
+    if (metric === 'consistency' && min === 0 && max === 100) {
+      min = defaults.min;
+      max = defaults.max;
+    }
+
+    normalized[metric] = { min, max };
+  });
+
+  return normalized;
+}
 
 const OPT_STATE_KEY = 'merlinOptimizationState';
 const OPT_CONTROL_KEY = 'merlinOptimizationControl';
@@ -148,6 +171,9 @@ function setSelectedCsvPaths(paths) {
   }
   window.uiState.csvPath = window.selectedCsvPath;
   renderSelectedFiles([]);
+  if (typeof syncQueueAutoCreateSetUi === 'function') {
+    syncQueueAutoCreateSetUi();
+  }
 }
 
 const csvBrowserState = {
@@ -456,6 +482,9 @@ function toggleWFSettings() {
       adaptiveToggle.checked = false;
     }
     toggleAdaptiveWFSettings();
+    if (typeof syncQueueAutoCreateSetUi === 'function') {
+      syncQueueAutoCreateSetUi();
+    }
     return;
   }
   wfSettings.style.display = wfToggle.checked ? 'block' : 'none';
@@ -466,6 +495,9 @@ function toggleWFSettings() {
     }
   }
   toggleAdaptiveWFSettings();
+  if (typeof syncQueueAutoCreateSetUi === 'function') {
+    syncQueueAutoCreateSetUi();
+  }
 }
 
 window.toggleWFSettings = toggleWFSettings;
@@ -475,6 +507,8 @@ function toggleAdaptiveWFSettings() {
   const adaptiveToggle = document.getElementById('enableAdaptiveWF');
   const adaptiveSettings = document.getElementById('adaptiveWFSettings');
   const oosInput = document.getElementById('wfOosPeriodDays');
+  const cooldownToggle = document.getElementById('wfCooldownEnabled');
+  const cooldownDaysInput = document.getElementById('wfCooldownDays');
   if (!adaptiveToggle || !adaptiveSettings || !oosInput) {
     return;
   }
@@ -488,6 +522,15 @@ function toggleAdaptiveWFSettings() {
   );
   adaptiveSettings.style.display = enabled ? 'block' : 'none';
   oosInput.disabled = enabled;
+  if (cooldownToggle) {
+    cooldownToggle.disabled = !enabled;
+    if (!enabled) {
+      cooldownToggle.checked = false;
+    }
+  }
+  if (cooldownDaysInput) {
+    cooldownDaysInput.disabled = !enabled || !(cooldownToggle && cooldownToggle.checked);
+  }
 }
 
 window.toggleAdaptiveWFSettings = toggleAdaptiveWFSettings;
@@ -600,10 +643,10 @@ function applyScoreSettings(settings = {}) {
   const thresholdInput = document.getElementById('scoreThreshold');
 
   const defaultScoreConfig = window.defaults?.scoreConfig || {};
-  const baseBounds = {
+  const baseBounds = normalizeScoreBounds({
     ...SCORE_DEFAULT_BOUNDS,
     ...(defaultScoreConfig.metric_bounds || {})
-  };
+  });
   const effectiveWeights = {
     ...SCORE_DEFAULT_WEIGHTS,
     ...(defaultScoreConfig.weights || {}),
@@ -619,6 +662,10 @@ function applyScoreSettings(settings = {}) {
     ...(defaultScoreConfig.invert_metrics || {}),
     ...(settings.scoreInvertMetrics || {})
   };
+  const effectiveBounds = normalizeScoreBounds({
+    ...baseBounds,
+    ...(settings.scoreMetricBounds || {})
+  });
 
   const filterEnabled = Object.prototype.hasOwnProperty.call(settings, 'scoreFilterEnabled')
     ? Boolean(settings.scoreFilterEnabled)
@@ -657,7 +704,7 @@ function applyScoreSettings(settings = {}) {
   }
 
   SCORE_METRICS.forEach((metric) => {
-    const bounds = settings.scoreMetricBounds?.[metric] || {};
+    const bounds = effectiveBounds[metric] || {};
     const base = baseBounds[metric] || { min: 0, max: 100 };
     const minValue = Number.isFinite(Number(bounds.min)) ? Number(bounds.min) : base.min;
     const maxValue = Number.isFinite(Number(bounds.max)) ? Number(bounds.max) : base.max;
@@ -831,6 +878,28 @@ function getWorkerProcessesValue() {
   return Math.round(Math.min(32, Math.max(1, workerProcesses)));
 }
 
+function readSelectedOptimizerOptionValues(paramName) {
+  return Array.from(
+    document.querySelectorAll(
+      `input.select-option-checkbox[data-param-name="${paramName}"]:not([data-option-value="__ALL__"])`
+    )
+  )
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.optionValue);
+}
+
+function parseBoolOptionValue(rawValue) {
+  if (rawValue === true || rawValue === false) return rawValue;
+  const normalized = String(rawValue ?? '').trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return null;
+}
+
 function validateOptimizerForm(config) {
   const params = config?.parameters || {};
   const errors = [];
@@ -846,22 +915,18 @@ function validateOptimizerForm(config) {
 
     enabledCount += 1;
 
-    if (paramType === 'select' || paramType === 'options') {
-      const selectedOptions = Array.from(
-        document.querySelectorAll(
-          `input.select-option-checkbox[data-param-name="${name}"]:not([data-option-value="__ALL__"])`
-        )
-      )
-        .filter((cb) => cb.checked)
-        .map((cb) => cb.dataset.optionValue);
-
+    if (
+      paramType === 'select'
+      || paramType === 'options'
+      || paramType === 'bool'
+      || paramType === 'boolean'
+    ) {
+      const selectedOptions = readSelectedOptimizerOptionValues(name);
       if (!selectedOptions.length) {
         errors.push(`${label}: select at least one option to optimize.`);
       }
       return;
     }
-
-    if (paramType === 'bool') return;
 
     const fromVal = Number(fromInput?.value);
     const toVal = Number(toInput?.value);
@@ -907,19 +972,29 @@ function collectOptimizerParams() {
 
     const paramType = paramDef.type || 'float';
 
-    if (paramType === 'select' || paramType === 'options') {
-      const selectedOptions = [];
-      const optionCheckboxes = document.querySelectorAll(
-        `input.select-option-checkbox[data-param-name="${paramName}"]:not([data-option-value="__ALL__"])`
-      );
+    if (
+      paramType === 'select'
+      || paramType === 'options'
+      || paramType === 'bool'
+      || paramType === 'boolean'
+    ) {
+      const selectedOptions = readSelectedOptimizerOptionValues(paramName);
+      if (!selectedOptions.length) return;
 
-      optionCheckboxes.forEach((cb) => {
-        if (cb.checked) {
-          selectedOptions.push(cb.dataset.optionValue);
+      if (paramType === 'bool' || paramType === 'boolean') {
+        const boolValues = [];
+        selectedOptions.forEach((value) => {
+          const parsed = parseBoolOptionValue(value);
+          if (parsed === null || boolValues.includes(parsed)) return;
+          boolValues.push(parsed);
+        });
+        if (boolValues.length > 0) {
+          ranges[paramName] = {
+            type: 'select',
+            values: boolValues
+          };
         }
-      });
-
-      if (selectedOptions.length > 0) {
+      } else {
         ranges[paramName] = {
           type: 'select',
           values: selectedOptions
@@ -995,23 +1070,34 @@ function buildOptimizationConfig(state) {
     enabledParams[name] = isChecked;
 
     if (isChecked) {
-      if (paramType === 'select' || paramType === 'options') {
-        const selectedOptions = Array.from(
-          document.querySelectorAll(
-            `input.select-option-checkbox[data-param-name="${name}"]:not([data-option-value="__ALL__"])`
-          )
-        )
-          .filter((cb) => cb.checked)
-          .map((cb) => cb.dataset.optionValue);
-
+      if (
+        paramType === 'select'
+        || paramType === 'options'
+        || paramType === 'bool'
+        || paramType === 'boolean'
+      ) {
+        const selectedOptions = readSelectedOptimizerOptionValues(name);
         if (selectedOptions.length > 0) {
-          paramRanges[name] = {
-            type: 'select',
-            values: selectedOptions
-          };
+          if (paramType === 'bool' || paramType === 'boolean') {
+            const boolValues = [];
+            selectedOptions.forEach((value) => {
+              const parsed = parseBoolOptionValue(value);
+              if (parsed === null || boolValues.includes(parsed)) return;
+              boolValues.push(parsed);
+            });
+            if (boolValues.length > 0) {
+              paramRanges[name] = {
+                type: 'select',
+                values: boolValues
+              };
+            }
+          } else {
+            paramRanges[name] = {
+              type: 'select',
+              values: selectedOptions
+            };
+          }
         }
-      } else if (paramType === 'bool') {
-        // Boolean params require no range metadata; search space derives from type
       } else if (fromInput && toInput && stepInput) {
         const fromValue = Number(fromInput.value);
         const toValue = Number(toInput.value);
@@ -1055,6 +1141,7 @@ function buildOptimizationConfig(state) {
     min_profit_threshold: minProfitThreshold,
     score_config: collectScoreConfig(),
     detailed_log: Boolean(document.getElementById('detailedLog')?.checked),
+    trials_log: Boolean(document.getElementById('trialsLog')?.checked),
     optimization_mode: 'optuna'
   };
 }
@@ -1069,7 +1156,10 @@ function buildOptunaConfig(state) {
   const optunaSampler = document.getElementById('optunaSampler');
   const optunaPruner = document.getElementById('optunaPruner');
   const optunaWarmupTrials = document.getElementById('optunaWarmupTrials');
-  const optunaSaveStudy = document.getElementById('optunaSaveStudy');
+  const optunaCoverageMode = document.getElementById('optunaCoverageMode');
+  const dispatcherBatchResultProcessing = document.getElementById('dispatcherBatchResultProcessing');
+  const softDuplicateCycleLimitEnabled = document.getElementById('softDuplicateCycleLimitEnabled');
+  const dispatcherDuplicateCycleLimit = document.getElementById('dispatcherDuplicateCycleLimit');
   const nsgaPopulation = document.getElementById('nsgaPopulationSize');
   const nsgaCrossover = document.getElementById('nsgaCrossoverProb');
   const nsgaMutation = document.getElementById('nsgaMutationProb');
@@ -1080,6 +1170,10 @@ function buildOptunaConfig(state) {
   const timeLimitMinutes = Number(optunaTimeLimit?.value);
   const convergenceValue = Number(optunaConvergence?.value);
   const warmupValue = Number(optunaWarmupTrials?.value);
+  const duplicateCycleLimitRaw = dispatcherDuplicateCycleLimit?.value;
+  const duplicateCycleLimitValue = duplicateCycleLimitRaw === '' || duplicateCycleLimitRaw === undefined
+    ? Number.NaN
+    : Number(duplicateCycleLimitRaw);
   const populationValue = Number(nsgaPopulation?.value);
   const crossoverValue = Number(nsgaCrossover?.value);
   const mutationRaw = nsgaMutation?.value;
@@ -1092,6 +1186,9 @@ function buildOptunaConfig(state) {
     ? Math.max(10, Math.min(500, Math.round(convergenceValue)))
     : 50;
   const normalizedWarmup = Number.isFinite(warmupValue) ? Math.max(0, Math.min(50000, Math.round(warmupValue))) : 20;
+  const normalizedDuplicateCycleLimit = Number.isFinite(duplicateCycleLimitValue)
+    ? Math.max(1, Math.min(1000, Math.round(duplicateCycleLimitValue)))
+    : 18;
   const normalizedPopulation = Number.isFinite(populationValue) ? Math.max(2, Math.min(1000, Math.round(populationValue))) : 50;
   const normalizedCrossover = Number.isFinite(crossoverValue) ? Math.max(0, Math.min(1, crossoverValue)) : 0.9;
   const normalizedMutation = Number.isFinite(mutationValue) ? Math.max(0, Math.min(1, mutationValue)) : null;
@@ -1123,7 +1220,14 @@ function buildOptunaConfig(state) {
     sampler: optunaSampler ? optunaSampler.value : 'tpe',
     optuna_pruner: optunaPruner ? optunaPruner.value : 'median',
     n_startup_trials: normalizedWarmup,
-    optuna_save_study: Boolean(optunaSaveStudy && optunaSaveStudy.checked),
+    coverage_mode: Boolean(optunaCoverageMode && optunaCoverageMode.checked),
+    dispatcher_batch_result_processing: Boolean(
+      dispatcherBatchResultProcessing ? dispatcherBatchResultProcessing.checked : true
+    ),
+    dispatcher_soft_duplicate_cycle_limit_enabled: Boolean(
+      softDuplicateCycleLimitEnabled ? softDuplicateCycleLimitEnabled.checked : true
+    ),
+    dispatcher_duplicate_cycle_limit: normalizedDuplicateCycleLimit,
     objectives: selectedObjectives,
     primary_objective: objectiveConfig.primary_objective,
     constraints,
@@ -1205,6 +1309,8 @@ async function runWalkForward({ sources, state }) {
   const wfOosPeriodDays = document.getElementById('wfOosPeriodDays').value;
   const wfStoreTopNTrials = document.getElementById('wfStoreTopNTrials')?.value || '50';
   const wfAdaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
+  const wfCooldownEnabled = wfAdaptiveMode && Boolean(document.getElementById('wfCooldownEnabled')?.checked);
+  const wfCooldownDays = document.getElementById('wfCooldownDays')?.value || '15';
   const wfMaxOosPeriodDays = document.getElementById('wfMaxOosPeriodDays')?.value || '90';
   const wfMinOosTrades = document.getElementById('wfMinOosTrades')?.value || '5';
   const wfCheckIntervalTrades = document.getElementById('wfCheckIntervalTrades')?.value || '3';
@@ -1244,6 +1350,8 @@ async function runWalkForward({ sources, state }) {
       oosPeriodDays: Number(wfOosPeriodDays),
       storeTopNTrials: Number(wfStoreTopNTrials),
       adaptiveMode: wfAdaptiveMode,
+      cooldownEnabled: wfCooldownEnabled,
+      cooldownDays: Number(wfCooldownDays),
       maxOosPeriodDays: Number(wfMaxOosPeriodDays),
       minOosTrades: Number(wfMinOosTrades),
       checkIntervalTrades: Number(wfCheckIntervalTrades),
@@ -1299,6 +1407,8 @@ async function runWalkForward({ sources, state }) {
     formData.append('wf_oos_period_days', wfOosPeriodDays);
     formData.append('wf_store_top_n_trials', wfStoreTopNTrials);
     formData.append('wf_adaptive_mode', wfAdaptiveMode ? 'true' : 'false');
+    formData.append('wf_cooldown_enabled', wfCooldownEnabled ? 'true' : 'false');
+    formData.append('wf_cooldown_days', wfCooldownDays);
     formData.append('wf_max_oos_period_days', wfMaxOosPeriodDays);
     formData.append('wf_min_oos_trades', wfMinOosTrades);
     formData.append('wf_check_interval_trades', wfCheckIntervalTrades);
@@ -1862,6 +1972,10 @@ function bindOptimizerInputs() {
     checkbox.addEventListener('change', handleOptimizerCheckboxChange);
     handleOptimizerCheckboxChange.call(checkbox);
   });
+
+  if (window.OptunaUI && typeof window.OptunaUI.updateCoverageInfo === 'function') {
+    window.OptunaUI.updateCoverageInfo();
+  }
 }
 
 function handleOptimizerCheckboxChange() {
@@ -1936,10 +2050,10 @@ function bindScoreControls() {
   if (resetButton) {
     resetButton.addEventListener('click', () => {
       const defaultsConfig = window.defaults?.scoreConfig || {};
-      const mergedBounds = {
+      const mergedBounds = normalizeScoreBounds({
         ...SCORE_DEFAULT_BOUNDS,
         ...(defaultsConfig.metric_bounds || {})
-      };
+      });
       applyScoreSettings({
         scoreFilterEnabled: Boolean(defaultsConfig.filter_enabled),
         scoreThreshold: defaultsConfig.min_score_threshold ?? SCORE_DEFAULT_THRESHOLD,
@@ -1968,6 +2082,12 @@ function bindOptunaUiControls() {
     sampler.addEventListener('change', window.OptunaUI.toggleNsgaSettings);
   }
   window.OptunaUI.initSanitizeControls();
+  if (typeof window.OptunaUI.initCoverageInfo === 'function') {
+    window.OptunaUI.initCoverageInfo();
+  }
+  if (typeof window.OptunaUI.initDispatcherControls === 'function') {
+    window.OptunaUI.initDispatcherControls();
+  }
   window.OptunaUI.updateObjectiveSelection();
   window.OptunaUI.toggleNsgaSettings();
 }

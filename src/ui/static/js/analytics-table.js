@@ -19,6 +19,7 @@
     profitable_windows_pct: { label: 'OOS Wins', bestDirection: 'desc' },
     median_window_profit: { label: 'OOS P(med)', bestDirection: 'desc' },
     median_window_wr: { label: 'OOS WR(med)', bestDirection: 'desc' },
+    consistency: { label: 'Consist', bestDirection: 'desc' },
   };
 
   const tableState = {
@@ -40,9 +41,12 @@
       isOos: null,
     },
     autoSelect: false,
+    groupDatesEnabled: true,
+    collapsedGroups: new Set(),
     onSelectionChange: null,
     onSortChange: null,
     onFocusToggle: null,
+    onViewChange: null,
     rangeAnchorStudyId: null,
     rangeAnchorChecked: null,
     focusedStudyId: null,
@@ -254,7 +258,7 @@
 
     const leftId = String(leftStudy?.study_id || '');
     const rightId = String(rightStudy?.study_id || '');
-    return leftId.localeCompare(rightId, undefined, { numeric: true, sensitivity: 'base' });
+    return rightId.localeCompare(leftId, undefined, { numeric: true, sensitivity: 'base' });
   }
 
   function compareNumbersWithNulls(leftValue, rightValue, direction) {
@@ -265,6 +269,40 @@
     if (right === null) return -1;
     if (left === right) return 0;
     return direction === 'asc' ? left - right : right - left;
+  }
+
+  function formatConsistencyValue(value, digits = 2) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return 'N/A';
+    return parsed.toFixed(digits);
+  }
+
+  function getRecentConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < -0.2) return 'val-negative';
+    if (parsed > 0) return 'val-positive';
+    return '';
+  }
+
+  function getFullConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < 0) return 'val-negative';
+    if (parsed > 0.8) return 'val-positive';
+    return '';
+  }
+
+  function renderConsistencyPair(recentValue, fullValue, digits = 2) {
+    const recent = toFiniteNumber(recentValue);
+    const full = toFiniteNumber(fullValue);
+    if (recent === null && full === null) return 'N/A';
+
+    return [
+      `<span class="${getRecentConsistencyClass(recent)}">${escapeHtml(formatConsistencyValue(recent, digits))}</span>`,
+      '<span>/</span>',
+      `<span class="${getFullConsistencyClass(full)}">${escapeHtml(formatConsistencyValue(full, digits))}</span>`,
+    ].join('');
   }
 
   function compareStudyNameRows(leftStudy, rightStudy) {
@@ -310,6 +348,23 @@
     if (sortColumn === 'study_name') {
       const cmp = compareStudyNameRows(leftStudy, rightStudy);
       if (cmp !== 0) return sortDirection === 'asc' ? cmp : -cmp;
+      return compareDefaultRows(leftStudy, rightStudy);
+    }
+
+    if (sortColumn === 'consistency') {
+      let cmp = compareNumbersWithNulls(
+        leftStudy?.consistency_recent,
+        rightStudy?.consistency_recent,
+        sortDirection
+      );
+      if (cmp === 0) {
+        cmp = compareNumbersWithNulls(
+          leftStudy?.consistency_full,
+          rightStudy?.consistency_full,
+          sortDirection
+        );
+      }
+      if (cmp !== 0) return cmp;
       return compareDefaultRows(leftStudy, rightStudy);
     }
 
@@ -400,8 +455,28 @@
     return Array.from(table.querySelectorAll('tbody tr.analytics-study-row'));
   }
 
+  function findStudyRow(studyId) {
+    const normalized = String(studyId || '').trim();
+    if (!normalized) return null;
+    return getStudyRows().find((row) => decodeStudyId(row.dataset.studyId || '') === normalized) || null;
+  }
+
+  function findStudyRecord(studyId) {
+    const normalized = String(studyId || '').trim();
+    if (!normalized) return null;
+    return tableState.studies.find((study) => String(study?.study_id || '') === normalized) || null;
+  }
+
   function encodeStudyId(studyId) {
     return encodeURIComponent(String(studyId || ''));
+  }
+
+  function buildGroupId(start, end) {
+    return encodeURIComponent(`${String(start || '').trim()}||${String(end || '').trim()}`);
+  }
+
+  function getStudyGroupId(study) {
+    return buildGroupId(study?.dataset_start_date, study?.dataset_end_date);
   }
 
   function isElementVisible(element) {
@@ -409,8 +484,20 @@
     return element.style.display !== 'none';
   }
 
+  function isStudyRowEligible(row) {
+    return row instanceof HTMLTableRowElement && row.dataset.eligible === '1';
+  }
+
+  function isStudyRowVisible(row) {
+    return isStudyRowEligible(row) && row.dataset.visible === '1' && isElementVisible(row);
+  }
+
+  function getEligibleRowCheckboxes() {
+    return getRowCheckboxes().filter((checkbox) => isStudyRowEligible(checkbox.closest('tr.analytics-study-row')));
+  }
+
   function getVisibleRowCheckboxes() {
-    return getRowCheckboxes().filter((checkbox) => isElementVisible(checkbox.closest('tr.analytics-study-row')));
+    return getRowCheckboxes().filter((checkbox) => isStudyRowVisible(checkbox.closest('tr.analytics-study-row')));
   }
 
   function getGroupCheckboxes() {
@@ -434,6 +521,10 @@
       .filter((checkbox) => checkbox.checked)
       .map((checkbox) => decodeStudyId(checkbox.dataset.studyId || ''))
       .filter(Boolean);
+  }
+
+  function getEligibleRowCheckboxesForGroup(groupId) {
+    return getEligibleRowCheckboxes().filter((checkbox) => checkbox.dataset.group === groupId);
   }
 
   function rememberRangeAnchor(studyId, checked) {
@@ -530,16 +621,11 @@
   }
 
   function updateGroupVisibility() {
-    const { table } = getTableElements();
-    if (!table) return;
-
     getGroupCheckboxes().forEach((groupCheckbox) => {
       const group = groupCheckbox.dataset.group || '';
       const groupRow = groupCheckbox.closest('tr.analytics-group-row');
-      const children = getStudyRows().filter((row) => row.dataset.group === group);
-      const visibleChildren = children.filter((row) => isElementVisible(row));
       if (groupRow) {
-        groupRow.style.display = visibleChildren.length ? '' : 'none';
+        groupRow.style.display = getEligibleRowCheckboxesForGroup(group).length ? '' : 'none';
       }
     });
   }
@@ -559,14 +645,11 @@
   }
 
   function syncHierarchyCheckboxes() {
-    const { table, headerCheck } = getTableElements();
-    if (!table) return;
+    const { headerCheck } = getTableElements();
 
     getGroupCheckboxes().forEach((groupCheckbox) => {
       const groupKey = groupCheckbox.dataset.group || '';
-      const children = Array.from(
-        table.querySelectorAll(`tbody .analytics-row-check[data-group="${groupKey}"]`)
-      ).filter((checkbox) => isElementVisible(checkbox.closest('tr.analytics-study-row')));
+      const children = getEligibleRowCheckboxesForGroup(groupKey);
 
       if (!children.length) {
         groupCheckbox.checked = false;
@@ -609,6 +692,11 @@
   function notifySortChanged() {
     if (typeof tableState.onSortChange !== 'function') return;
     tableState.onSortChange(cloneSortState());
+  }
+
+  function notifyViewChanged() {
+    if (typeof tableState.onViewChange !== 'function') return;
+    tableState.onViewChange(tableState.focusedStudyId);
   }
 
   function updateSortHeaders() {
@@ -661,25 +749,35 @@
     };
   }
 
-  function buildGroupedStudies() {
+  function isStudyEligible(study) {
+    const studyId = String(study?.study_id || '');
+    const visibleBySet = !(tableState.visibleStudyIds instanceof Set) || tableState.visibleStudyIds.has(studyId);
+    return visibleBySet && matchesFilters(study);
+  }
+
+  function buildGroupedStudies(preparedStudies) {
     const groupsMap = new Map();
-    tableState.studies.forEach((originalStudy) => {
-      const study = withDerivedFields(originalStudy);
+    preparedStudies.forEach((study) => {
       const start = String(study.dataset_start_date || '').trim();
       const end = String(study.dataset_end_date || '').trim();
-      const groupKey = `${start}||${end}`;
-      if (!groupsMap.has(groupKey)) {
-        groupsMap.set(groupKey, {
-          key: groupKey,
+      const groupId = getStudyGroupId(study);
+      if (!groupsMap.has(groupId)) {
+        groupsMap.set(groupId, {
+          groupId,
           start,
           end,
+          key: `${start}||${end}`,
           studies: [],
         });
       }
-      groupsMap.get(groupKey).studies.push(study);
+      groupsMap.get(groupId).studies.push(study);
     });
 
     const groups = Array.from(groupsMap.values());
+    const availableGroupIds = new Set(groups.map((group) => group.groupId));
+    tableState.collapsedGroups = new Set(
+      Array.from(tableState.collapsedGroups).filter((groupId) => availableGroupIds.has(groupId))
+    );
 
     groups.forEach((group) => {
       group.defaultSortedStudies = group.studies.slice().sort(compareDefaultRows);
@@ -697,15 +795,134 @@
 
     const sortColumn = tableState.sortState.sortColumn;
     const sortDirection = tableState.sortState.sortDirection;
-    groups.forEach((group, index) => {
-      const rows = sortColumn
+    groups.forEach((group) => {
+      const orderedStudies = sortColumn
         ? group.studies.slice().sort((left, right) => compareBySortColumn(left, right, sortColumn, sortDirection))
         : group.defaultSortedStudies.slice();
-      group.displayStudies = rows;
-      group.token = `g${index + 1}`;
+
+      group.isCollapsed = tableState.collapsedGroups.has(group.groupId);
+      group.orderedStudies = orderedStudies;
+      group.eligibleStudies = orderedStudies.filter((study) => isStudyEligible(study));
+      group.eligibleStudyIds = new Set(group.eligibleStudies.map((study) => String(study.study_id || '')));
     });
 
     return groups;
+  }
+
+  function buildFlatStudies(preparedStudies) {
+    const sortColumn = tableState.sortState.sortColumn;
+    const sortDirection = tableState.sortState.sortDirection;
+    const orderedStudies = sortColumn
+      ? preparedStudies.slice().sort((left, right) => compareBySortColumn(left, right, sortColumn, sortDirection))
+      : preparedStudies.slice().sort(compareDefaultRows);
+
+    return orderedStudies.map((study) => ({
+      study,
+      groupId: getStudyGroupId(study),
+      eligible: isStudyEligible(study),
+    }));
+  }
+
+  function buildStudyRowHtml(study, groupId, eligible, visible, nextChecked) {
+    const studyId = String(study.study_id || '');
+    const encodedStudyId = encodeStudyId(studyId);
+    const checked = tableState.autoSelect ? eligible : tableState.checkedSet.has(studyId);
+    const styleHidden = visible ? '' : ' style="display:none;"';
+
+    if (checked) nextChecked.add(studyId);
+    if (visible) {
+      tableState.visibleSet.add(studyId);
+    }
+    tableState.orderedStudyIds.push(studyId);
+
+    const profitText = escapeHtml(formatSignedPercentValue(study.profit_pct, 1));
+    const maxDdText = escapeHtml(formatNegativePercentValue(study.max_dd_pct, 1));
+    const annProfitCell = formatAnnualizedProfitCell(study);
+    const annProfitText = escapeHtml(annProfitCell.text);
+    const annProfitTitleAttr = annProfitCell.tooltip
+      ? ` title="${escapeHtml(annProfitCell.tooltip)}"`
+      : '';
+    const wfeRaw = toFiniteNumber(study.wfe_pct);
+    const wfeText = escapeHtml(wfeRaw === null ? 'N/A' : `${wfeRaw.toFixed(1)}%`);
+    const oosProfitText = escapeHtml(formatSignedPercentValue(study.median_window_profit, 1));
+    const oosWrRaw = toFiniteNumber(study.median_window_wr);
+    const oosWrText = escapeHtml(oosWrRaw === null ? 'N/A' : `${oosWrRaw.toFixed(1)}%`);
+    const consistencyText = renderConsistencyPair(study.consistency_recent, study.consistency_full, 2);
+
+    const profitClass = (toFiniteNumber(study.profit_pct) || 0) >= 0 ? 'val-positive' : 'val-negative';
+    const maxDdValue = toFiniteNumber(study.max_dd_pct);
+    const maxDdClass = maxDdValue !== null && Math.abs(maxDdValue) > 40 ? 'val-negative' : '';
+    const oosProfitClass = (toFiniteNumber(study.median_window_profit) || 0) >= 0 ? 'val-positive' : 'val-negative';
+
+    const strategyText = escapeHtml(study.strategy || 'Unknown');
+    const studyNameText = escapeHtml(study._study_name_display || fallbackStudyName(study));
+    const studyNameTitle = escapeHtml(study.study_name || '');
+    const wfaModeText = escapeHtml(study.wfa_mode || 'Unknown');
+    const isOosText = escapeHtml(study.is_oos || 'N/A');
+    const totalTradesText = escapeHtml(formatInteger(study.total_trades, '0'));
+    const oosWinsText = escapeHtml(formatOosWins(study));
+
+    return `
+      <tr
+        class="clickable analytics-study-row"
+        data-group="${groupId}"
+        data-study-id="${encodedStudyId}"
+        data-eligible="${eligible ? '1' : '0'}"
+        data-visible="${visible ? '1' : '0'}"${styleHidden}
+      >
+        <td class="col-check">
+          <input
+            type="checkbox"
+            class="analytics-row-check"
+            data-group="${groupId}"
+            data-study-id="${encodedStudyId}"
+            ${checked ? 'checked' : ''}
+          />
+        </td>
+        <td class="analytics-row-number"></td>
+        <td>${strategyText}</td>
+        <td title="${studyNameTitle}">${studyNameText}</td>
+        <td>${wfaModeText}</td>
+        <td>${isOosText}</td>
+        <td class="${annProfitCell.className || ''}"${annProfitTitleAttr}>${annProfitText}</td>
+        <td class="${profitClass}">${profitText}</td>
+        <td class="${maxDdClass}">${maxDdText}</td>
+        <td>${totalTradesText}</td>
+        <td>${wfeText}</td>
+        <td>${oosWinsText}</td>
+        <td class="${oosProfitClass}">${oosProfitText}</td>
+        <td>${oosWrText}</td>
+        <td title="Recent / Full signed R² for the stitched OOS curve">${consistencyText}</td>
+      </tr>
+    `;
+  }
+
+  function buildGroupRowHtml(group) {
+    const days = periodDays(group.start, group.end);
+    const daysText = days === null ? '?' : String(days);
+    const groupStart = escapeHtml(group.start || 'Unknown');
+    const groupEnd = escapeHtml(group.end || 'Unknown');
+    const toggleIcon = group.isCollapsed ? '&#9656;' : '&#9662;';
+    const groupHiddenStyle = group.eligibleStudies.length ? '' : ' style="display:none;"';
+    const collapsedClass = group.isCollapsed ? ' collapsed' : '';
+
+    return `
+      <tr
+        class="group-row analytics-group-row${collapsedClass}"
+        data-group="${group.groupId}"
+        aria-expanded="${group.isCollapsed ? 'false' : 'true'}"${groupHiddenStyle}
+      >
+        <td class="col-check"><input type="checkbox" class="analytics-group-check" data-group="${group.groupId}" /></td>
+        <td colspan="14">
+          <div class="group-label">
+            <span class="group-toggle-icon" aria-hidden="true">${toggleIcon}</span>
+            <span class="group-dates">${groupStart} &mdash; ${groupEnd}</span>
+            <span class="group-duration">(${daysText} days)</span>
+            <span class="group-count">${group.eligibleStudies.length} studies</span>
+          </div>
+        </td>
+      </tr>
+    `;
   }
 
   function renderTableBody() {
@@ -713,14 +930,14 @@
     if (!tbody) return;
 
     const beforeChecked = new Set(tableState.checkedSet);
-    const groups = buildGroupedStudies();
+    const preparedStudies = tableState.studies.map(withDerivedFields);
     tableState.orderedStudyIds = [];
     tableState.visibleSet = new Set();
 
-    if (!groups.length) {
+    if (!preparedStudies.length) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="14" class="analytics-empty-cell">No WFA studies found in this database.</td>
+          <td colspan="15" class="analytics-empty-cell">No WFA studies found in this database.</td>
         </tr>
       `;
       updateSortHeaders();
@@ -730,95 +947,21 @@
     const html = [];
     const nextChecked = new Set();
 
-    groups.forEach((group) => {
-      const groupToken = group.token || '';
-      const days = periodDays(group.start, group.end);
-      const daysText = days === null ? '?' : String(days);
-      const groupStart = escapeHtml(group.start || 'Unknown');
-      const groupEnd = escapeHtml(group.end || 'Unknown');
-
-      const rowSnippets = [];
-      let visibleChildren = 0;
-
-      group.displayStudies.forEach((study) => {
-        const studyId = String(study.study_id || '');
-        const encodedStudyId = encodeURIComponent(studyId);
-        const visibleBySet = !(tableState.visibleStudyIds instanceof Set)
-          || tableState.visibleStudyIds.has(studyId);
-        const visible = visibleBySet && matchesFilters(study);
-        const checked = tableState.autoSelect ? visible : tableState.checkedSet.has(studyId);
-        const styleHidden = visible ? '' : ' style="display:none;"';
-
-        if (checked) nextChecked.add(studyId);
-        if (visible) {
-          visibleChildren += 1;
-          tableState.visibleSet.add(studyId);
-        }
-        tableState.orderedStudyIds.push(studyId);
-
-        const profitText = escapeHtml(formatSignedPercentValue(study.profit_pct, 1));
-        const maxDdText = escapeHtml(formatNegativePercentValue(study.max_dd_pct, 1));
-        const annProfitCell = formatAnnualizedProfitCell(study);
-        const annProfitText = escapeHtml(annProfitCell.text);
-        const annProfitTitleAttr = annProfitCell.tooltip
-          ? ` title="${escapeHtml(annProfitCell.tooltip)}"`
-          : '';
-        const wfeRaw = toFiniteNumber(study.wfe_pct);
-        const wfeText = escapeHtml(wfeRaw === null ? 'N/A' : `${wfeRaw.toFixed(1)}%`);
-        const oosProfitText = escapeHtml(formatSignedPercentValue(study.median_window_profit, 1));
-        const oosWrRaw = toFiniteNumber(study.median_window_wr);
-        const oosWrText = escapeHtml(oosWrRaw === null ? 'N/A' : `${oosWrRaw.toFixed(1)}%`);
-
-        const profitClass = (toFiniteNumber(study.profit_pct) || 0) >= 0 ? 'val-positive' : 'val-negative';
-        const maxDdValue = toFiniteNumber(study.max_dd_pct);
-        const maxDdClass = maxDdValue !== null && Math.abs(maxDdValue) > 40 ? 'val-negative' : '';
-        const oosProfitClass = (toFiniteNumber(study.median_window_profit) || 0) >= 0 ? 'val-positive' : 'val-negative';
-
-        const strategyText = escapeHtml(study.strategy || 'Unknown');
-        const studyNameText = escapeHtml(study._study_name_display || fallbackStudyName(study));
-        const studyNameTitle = escapeHtml(study.study_name || '');
-        const wfaModeText = escapeHtml(study.wfa_mode || 'Unknown');
-        const isOosText = escapeHtml(study.is_oos || 'N/A');
-        const totalTradesText = escapeHtml(formatInteger(study.total_trades, '0'));
-        const oosWinsText = escapeHtml(formatOosWins(study));
-
-        rowSnippets.push(`
-          <tr class="clickable analytics-study-row" data-group="${groupToken}" data-study-id="${encodedStudyId}"${styleHidden}>
-            <td class="col-check">
-              <input type="checkbox" class="analytics-row-check" data-group="${groupToken}" data-study-id="${encodedStudyId}" ${checked ? 'checked' : ''} />
-            </td>
-            <td class="analytics-row-number"></td>
-            <td>${strategyText}</td>
-            <td title="${studyNameTitle}">${studyNameText}</td>
-            <td>${wfaModeText}</td>
-            <td>${isOosText}</td>
-            <td class="${annProfitCell.className || ''}"${annProfitTitleAttr}>${annProfitText}</td>
-            <td class="${profitClass}">${profitText}</td>
-            <td class="${maxDdClass}">${maxDdText}</td>
-            <td>${totalTradesText}</td>
-            <td>${wfeText}</td>
-            <td>${oosWinsText}</td>
-            <td class="${oosProfitClass}">${oosProfitText}</td>
-            <td>${oosWrText}</td>
-          </tr>
-        `);
+    if (tableState.groupDatesEnabled) {
+      const groups = buildGroupedStudies(preparedStudies);
+      groups.forEach((group) => {
+        html.push(buildGroupRowHtml(group));
+        group.orderedStudies.forEach((study) => {
+          const eligible = group.eligibleStudyIds.has(String(study.study_id || ''));
+          const visible = eligible && !group.isCollapsed;
+          html.push(buildStudyRowHtml(study, group.groupId, eligible, visible, nextChecked));
+        });
       });
-
-      const groupHiddenStyle = visibleChildren > 0 ? '' : ' style="display:none;"';
-      html.push(`
-        <tr class="group-row analytics-group-row" data-group="${groupToken}"${groupHiddenStyle}>
-          <td class="col-check"><input type="checkbox" class="analytics-group-check" data-group="${groupToken}" /></td>
-          <td colspan="13">
-            <div class="group-label">
-              <span class="group-dates">${groupStart} &mdash; ${groupEnd}</span>
-              <span class="group-duration">(${daysText} days)</span>
-              <span class="group-count">${group.displayStudies.length} studies</span>
-            </div>
-          </td>
-        </tr>
-      `);
-      html.push(...rowSnippets);
-    });
+    } else {
+      buildFlatStudies(preparedStudies).forEach((entry) => {
+        html.push(buildStudyRowHtml(entry.study, entry.groupId, entry.eligible, entry.eligible, nextChecked));
+      });
+    }
 
     tbody.innerHTML = html.join('');
 
@@ -893,8 +1036,7 @@
         });
       } else if (target.classList.contains('analytics-group-check')) {
         const group = target.dataset.group || '';
-        getVisibleRowCheckboxes()
-          .filter((checkbox) => checkbox.dataset.group === group)
+        getEligibleRowCheckboxesForGroup(group)
           .forEach((checkbox) => {
             checkbox.checked = target.checked;
           });
@@ -919,6 +1061,33 @@
         cycleSortForColumn(sortKey);
         renderTableBody();
         notifySortChanged();
+        return;
+      }
+
+      const groupRow = target.closest('tr.analytics-group-row');
+      if (groupRow) {
+        if (target.closest('input.analytics-group-check')) {
+          return;
+        }
+
+        if (!tableState.groupDatesEnabled) return;
+
+        const groupId = String(groupRow.dataset.group || '').trim();
+        if (!groupId || !getEligibleRowCheckboxesForGroup(groupId).length) return;
+
+        const nextCollapsed = !tableState.collapsedGroups.has(groupId);
+        if (nextCollapsed) {
+          tableState.collapsedGroups.add(groupId);
+          const focusedStudy = findStudyRecord(tableState.focusedStudyId);
+          if (focusedStudy && getStudyGroupId(focusedStudy) === groupId) {
+            tableState.focusedStudyId = null;
+          }
+        } else {
+          tableState.collapsedGroups.delete(groupId);
+        }
+
+        renderTableBody();
+        notifyViewChanged();
         return;
       }
 
@@ -978,9 +1147,11 @@
     tableState.onSelectionChange = onSelectionChange;
     tableState.onSortChange = typeof opts.onSortChange === 'function' ? opts.onSortChange : null;
     tableState.onFocusToggle = typeof opts.onFocusToggle === 'function' ? opts.onFocusToggle : null;
+    tableState.onViewChange = typeof opts.onViewChange === 'function' ? opts.onViewChange : null;
     tableState.filters = normalizeFilters(opts.filters);
     tableState.visibleStudyIds = normalizeVisibleStudyIds(opts.visibleStudyIds);
     tableState.autoSelect = Boolean(opts.autoSelect);
+    tableState.groupDatesEnabled = opts.groupDatesEnabled !== false;
     tableState.sortState = normalizeSortState(opts.sortState);
     tableState.focusedStudyId = String(opts.focusedStudyId || '') || null;
 
@@ -1015,20 +1186,46 @@
     return Array.from(tableState.visibleSet);
   }
 
+  function scrollStudyIntoView(studyId) {
+    const row = findStudyRow(studyId);
+    if (!row || !isElementVisible(row)) return;
+    const container = row.closest('.analytics-table-scroll');
+    if (!(container instanceof HTMLElement)) return;
+
+    const rowRect = row.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    if (rowRect.top < containerRect.top) {
+      container.scrollTop -= containerRect.top - rowRect.top;
+      return;
+    }
+    if (rowRect.bottom > containerRect.bottom) {
+      container.scrollTop += rowRect.bottom - containerRect.bottom;
+    }
+  }
+
   function computeAnnualizedProfitMetrics(study) {
-    const timestamps = Array.isArray(study?.equity_timestamps) ? study.equity_timestamps : [];
-    if (timestamps.length < 2) {
-      return { annProfitPct: null, oosSpanDays: null };
+    let oosSpanDays = toFiniteNumber(study?.oos_span_days_exact);
+
+    if (oosSpanDays === null) {
+      const firstMs = parseTimestampMs(study?.equity_start_ts);
+      const lastMs = parseTimestampMs(study?.equity_end_ts);
+      if (firstMs !== null && lastMs !== null) {
+        oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
+      }
     }
 
-    const firstMs = parseTimestampMs(timestamps[0]);
-    const lastMs = parseTimestampMs(timestamps[timestamps.length - 1]);
-    if (firstMs === null || lastMs === null) {
-      return { annProfitPct: null, oosSpanDays: null };
+    if (oosSpanDays === null) {
+      const timestamps = Array.isArray(study?.equity_timestamps) ? study.equity_timestamps : [];
+      if (timestamps.length >= 2) {
+        const firstMs = parseTimestampMs(timestamps[0]);
+        const lastMs = parseTimestampMs(timestamps[timestamps.length - 1]);
+        if (firstMs !== null && lastMs !== null) {
+          oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
+        }
+      }
     }
 
-    const oosSpanDays = (lastMs - firstMs) / MS_PER_DAY;
-    if (!Number.isFinite(oosSpanDays) || oosSpanDays <= 0) {
+    if (oosSpanDays === null || !Number.isFinite(oosSpanDays) || oosSpanDays <= 0) {
       return { annProfitPct: null, oosSpanDays };
     }
 
@@ -1088,6 +1285,7 @@
     getSortState,
     setFocusedStudyId,
     getVisibleStudyIds,
+    scrollStudyIntoView,
     encodeStudyId,
     computeAnnualizedProfitMetrics,
   };

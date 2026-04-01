@@ -44,7 +44,9 @@ project-root/
 |   |-- test_analytics.py          # Analytics equity aggregation tests
 |   |-- test_multiprocess_score.py    # Multi-process scoring tests
 |   |-- test_optuna_sanitization.py   # Optuna sanitization tests
-|   `-- test_score_normalization.py   # Score normalization tests
+|   |-- test_score_normalization.py   # Score normalization tests
+|   |-- test_coverage_startup.py      # Initial Search Coverage mode tests
+|   `-- test_strategy_loop_regression.py # Strategy loop performance regression
 `-- src/                      # Application source code
     |-- run_backtest.py       # CLI backtest runner
     |-- core/                 # Core engines and utilities
@@ -98,7 +100,7 @@ project-root/
     |       |   |-- api.js                # API client functions
     |       |   |-- strategy-config.js    # Dynamic form generation
     |       |   |-- ui-handlers.js        # Shared UI event handlers
-    |       |   |-- optuna-ui.js          # Optuna Start-page UI helpers
+    |       |   |-- optuna-ui.js          # Optuna Start-page UI helpers + coverage analysis
     |       |   |-- optuna-results-ui.js  # Optuna Results-page render helpers
     |       |   |-- post-process-ui.js    # Post process UI helpers
     |       |   |-- oos-test-ui.js        # OOS test UI helpers
@@ -137,7 +139,7 @@ project-root/
    - Structures live where they're populated:
      - `TradeRecord`, `StrategyResult` -> `backtest_engine.py`
      - `BasicMetrics`, `AdvancedMetrics` -> `metrics.py`
-     - `OptimizationResult`, `OptunaConfig` -> `optuna_engine.py`
+     - `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` -> `optuna_engine.py`
      - `WFConfig`, `WFResult`, `WindowResult` -> `walkforward_engine.py`
      - Strategy params dataclass -> each strategy's `strategy.py`
 
@@ -149,6 +151,11 @@ project-root/
    - Samplers: Random, TPE (incl. multi-objective TPE), NSGA-II, NSGA-III
    - Budget modes: n_trials, timeout, patience
    - Pruning is supported for **single-objective** only (Optuna `should_prune()` does not support multi-objective)
+   - **Initial Search Coverage**: optional systematic parameter space exploration (coverage mode) with block size hints and auto-fill warmup
+   - **Bool group rules**: strategy `config.json` can declare invalid boolean combinations (e.g., `at_least_one_true`) to reduce wasted trials
+   - **Trial deduplication**: duplicate parameter sets are detected and skipped; search space exhaustion triggers early stopping
+   - **In-memory backend**: `InMemoryJournalBackend` replaces file-based journal storage for faster multiprocess optimization
+   - **Trial log switch**: `trials_log` flag controls Optuna trial-level INFO logging (togglable from UI)
 
 5. **Database Persistence**
    - All optimization results automatically saved to SQLite database
@@ -164,9 +171,9 @@ project-root/
 | Module | Purpose |
 |--------|---------|
 | `backtest_engine.py` | Bar-by-bar trade simulation, position management, data preparation |
-| `optuna_engine.py` | Optuna optimization engine: single/multi-objective, constraints, samplers (TPE/Random/NSGA), pruning (single-objective only), and database persistence |
+| `optuna_engine.py` | Optuna optimization engine: single/multi-objective, constraints, samplers (TPE/Random/NSGA), pruning (single-objective only), Initial Search Coverage, trial deduplication, InMemoryJournalBackend, and database persistence |
 | `walkforward_engine.py` | Rolling walk-forward analysis with calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers (CUSUM, drawdown, inactivity), database persistence |
-| `metrics.py` | Calculate BasicMetrics and AdvancedMetrics (Sharpe, RoMaD, Profit Factor, SQN, Ulcer Index, Consistency) |
+| `metrics.py` | Calculate BasicMetrics and AdvancedMetrics (Sharpe, RoMaD, Profit Factor, SQN, Ulcer Index, Consistency R²) |
 | `analytics.py` | Portfolio equity aggregation: equal-weight curve merging, forward-fill alignment, annualized profit, max drawdown for aggregated curves |
 | `storage.py` | SQLite database operations: save/load studies, manage trials/windows, handle CSV file references, multi-database management, study sets CRUD, queue state persistence |
 | `export.py` | Export trade history to CSV (TradingView format) |
@@ -202,7 +209,7 @@ Strategies auto-discovered by `strategies/__init__.py` if both files exist.
 - `server_routes_analytics.py` - Analytics page + WFA summary API endpoint
 
 **Frontend (JavaScript):**
-- `templates/index.html` - Start page: strategy configuration, optimization launch, run queue
+- `templates/index.html` - Start page: strategy configuration, coverage mode, trials log toggle, optimization launch, run queue
 - `templates/results.html` - Results page: studies browser, trials/windows display, trade downloads
 - `templates/analytics.html` - Analytics page: WFA research, multi-study comparison, filtering
 - `static/js/main.js` - Start page logic and form handling

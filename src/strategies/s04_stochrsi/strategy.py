@@ -85,6 +85,14 @@ class S04StochRSI(BaseStrategy):
 
         lowest_low_series = low.rolling(p.extLookback, min_periods=1).min()
         highest_high_series = high.rolling(p.extLookback, min_periods=1).max()
+        timestamps_index = list(df.index)
+        close_values = close.to_numpy(copy=False)
+        high_values = high.to_numpy(copy=False)
+        low_values = low.to_numpy(copy=False)
+        k_values = k.to_numpy(copy=False)
+        d_values = d.to_numpy(copy=False)
+        lowest_low_values = lowest_low_series.to_numpy(copy=False)
+        highest_high_values = highest_high_series.to_numpy(copy=False)
 
         balance = p.initialCapital
         position = 0
@@ -108,17 +116,18 @@ class S04StochRSI(BaseStrategy):
         equity_curve: List[float] = []
         balance_curve: List[float] = []
         timestamps: List[pd.Timestamp] = []
+        last_bar_index = len(timestamps_index) - 1
 
-        for i in range(len(df)):
-            timestamp = df.index[i]
-            close_val = close.iat[i]
-            high_val = high.iat[i]
-            low_val = low.iat[i]
+        for i in range(len(timestamps_index)):
+            timestamp = timestamps_index[i]
+            close_val = close_values[i]
+            high_val = high_values[i]
+            low_val = low_values[i]
 
-            k_curr = k.iat[i]
-            d_curr = d.iat[i]
-            k_prev = k.iat[i - 1] if i > 0 else np.nan
-            d_prev = d.iat[i - 1] if i > 0 else np.nan
+            k_curr = k_values[i]
+            d_curr = d_values[i]
+            k_prev = k_values[i - 1] if i > 0 else np.nan
+            d_prev = d_values[i - 1] if i > 0 else np.nan
 
             bull_cross_in_os = False
             bear_cross_in_ob = False
@@ -151,7 +160,7 @@ class S04StochRSI(BaseStrategy):
             if reset_ob:
                 ob_cross_short_flag = False
 
-            lowest_low = lowest_low_series.iat[i]
+            lowest_low = lowest_low_values[i]
             if np.isnan(swing_low) or lowest_low != swing_low:
                 swing_low = lowest_low
                 swing_low_count = 0
@@ -167,7 +176,7 @@ class S04StochRSI(BaseStrategy):
                     swing_low_count = 0
                     trend_long_flag = False
 
-            highest_high = highest_high_series.iat[i]
+            highest_high = highest_high_values[i]
             if np.isnan(swing_high) or highest_high != swing_high:
                 swing_high = highest_high
                 swing_high_count = 0
@@ -301,7 +310,7 @@ class S04StochRSI(BaseStrategy):
                             entry_price = np.nan
                             stop_price = np.nan
 
-            if i == len(df) - 1 and position != 0:
+            if i == last_bar_index and position != 0:
                 trade, gross_pnl, exit_commission, _ = build_forced_close_trade(
                     position=position,
                     entry_time=entry_time,

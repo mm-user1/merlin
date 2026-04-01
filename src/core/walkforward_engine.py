@@ -14,13 +14,17 @@ import time
 import pandas as pd
 
 from . import metrics
-from .backtest_engine import prepare_dataset_with_warmup
+from .backtest_engine import StrategyResult, prepare_dataset_with_warmup
 from .optuna_engine import OptunaConfig, OptimizationConfig, SamplerConfig, run_optuna_optimization
 from .storage import save_wfa_study_to_db
 from .post_process import (
     DSRConfig,
+    FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE,
+    FT_REJECT_ACTION_NO_TRADE,
     PostProcessConfig,
     StressTestConfig,
+    filter_ft_passed_results,
+    normalize_ft_reject_action,
     run_dsr_analysis,
     run_forward_test,
     run_stress_test,
@@ -53,6 +57,8 @@ class WFConfig:
     cusum_threshold: float = 5.0
     dd_threshold_multiplier: float = 1.5
     inactivity_multiplier: float = 5.0
+    cooldown_enabled: bool = False
+    cooldown_days: int = 15
 
 
 @dataclass
@@ -158,6 +164,15 @@ class WindowResult:
     cusum_threshold: Optional[float] = None
     dd_threshold: Optional[float] = None
     oos_actual_days: Optional[float] = None
+    cooldown_days_applied: Optional[float] = None
+    oos_elapsed_days: Optional[float] = None
+    trade_start: Optional[pd.Timestamp] = None
+    trade_end: Optional[pd.Timestamp] = None
+    entry_delay_days: Optional[float] = None
+    ft_retry_attempts_used: int = 0
+    remaining_oos_days_at_entry: Optional[float] = None
+    window_status: str = "traded"
+    no_trade_reason: Optional[str] = None
 
 
 @dataclass
@@ -207,6 +222,23 @@ class ISPipelineResult:
     dsr_trials: Optional[List[Dict[str, Any]]]
     forward_test_trials: Optional[List[Dict[str, Any]]]
     stress_test_trials: Optional[List[Dict[str, Any]]]
+    ft_gate_failed: bool = False
+    ft_pass_count: int = 0
+
+
+@dataclass
+class WindowExecutionPlan:
+    """Resolved pre-OOS execution state for one WFA window."""
+
+    pipeline: ISPipelineResult
+    final_is_start: pd.Timestamp
+    final_is_end: pd.Timestamp
+    trade_start: Optional[pd.Timestamp]
+    entry_delay_days: float
+    ft_retry_attempts_used: int
+    remaining_oos_days_at_entry: Optional[float]
+    window_status: str
+    no_trade_reason: Optional[str] = None
 
 
 @dataclass
@@ -461,274 +493,64 @@ class WalkForwardEngine:
                 f"{window.is_start.date()} to {window.is_end.date()}"
             )
 
-            available_modules = ["optuna_is"]
-            module_status: Dict[str, Any] = {
-                "optuna_is": {"enabled": True, "ran": True, "reason": None}
-            }
-            selection_chain: Dict[str, Any] = {}
-
-            ft_config = self.config.post_process
-            optimization_start = window.is_start
-            optimization_end = window.is_end
-            training_end = None
-            ft_start = None
-            ft_end = None
-
-            if ft_config and ft_config.enabled:
-                available_modules.append("forward_test")
-                module_status["forward_test"] = {
-                    "enabled": True,
-                    "ran": False,
-                    "reason": None,
-                }
-                is_days = (window.is_end - window.is_start).days
-                ft_days = int(ft_config.ft_period_days)
-                if ft_days > 0 and ft_days < is_days and self.csv_file_path:
-                    training_end = window.is_end - pd.Timedelta(days=ft_days)
-                    if training_end > window.is_start:
-                        optimization_end = training_end
-                        ft_start = training_end
-                        ft_end = window.is_end
-                    else:
-                        module_status["forward_test"]["reason"] = "insufficient_is_period"
-                else:
-                    module_status["forward_test"]["reason"] = "insufficient_is_period_or_missing_csv"
-                    logger.warning(
-                        "Skipping FT for window %s: insufficient IS period or missing CSV path.",
-                        window.window_id,
-                    )
-
-            optimization_results, optimization_all_results = self._run_optuna_on_window(
-                df, optimization_start, optimization_end
+            execution_plan = self._resolve_window_execution_plan(
+                df=df,
+                window_id=window.window_id,
+                is_start=window.is_start,
+                is_end=window.is_end,
+                oos_start=window.oos_start,
+                oos_budget_end=window.oos_end,
             )
-            if not optimization_results:
-                raise ValueError(f"No optimization results for window {window.window_id}.")
+            is_pipeline = execution_plan.pipeline
+            print(f"Best param ID: {is_pipeline.param_id}")
 
-            best_result = optimization_results[0]
-            best_params_source = "optuna_is"
-
-            optuna_map: Dict[int, Any] = {}
-            for result in (optimization_all_results or optimization_results):
-                trial_num = getattr(result, "optuna_trial_number", None)
-                if trial_num is not None:
-                    optuna_map[int(trial_num)] = result
-
-            optuna_is_trials = self._convert_optuna_results_for_storage(
-                optimization_results, int(self.config.store_top_n_trials)
+            is_result = self._run_period_backtest(
+                df=df,
+                start=execution_plan.final_is_start,
+                end=execution_plan.final_is_end,
+                params=is_pipeline.best_params,
             )
-            if optuna_is_trials:
-                optuna_is_trials[0]["is_selected"] = True
-                selection_chain["optuna_is"] = optuna_is_trials[0].get("trial_number")
-
-            is_pareto_optimal = getattr(best_result, "is_pareto_optimal", None)
-            constraints_satisfied = getattr(best_result, "constraints_satisfied", None)
-
-            dsr_results = []
-            dsr_trials = None
-            dsr_config = self.config.dsr_config
-            if dsr_config and dsr_config.enabled and optimization_results:
-                available_modules.append("dsr")
-                module_status["dsr"] = {"enabled": True, "ran": False, "reason": None}
-                fixed_params = {
-                    "dateFilter": True,
-                    "start": optimization_start.isoformat(),
-                    "end": optimization_end.isoformat(),
-                }
-                try:
-                    dsr_results, _summary = run_dsr_analysis(
-                        optuna_results=optimization_results,
-                        all_results=optimization_all_results or optimization_results,
-                        config=dsr_config,
-                        n_trials_total=len(optimization_all_results or optimization_results),
-                        csv_path=self.csv_file_path,
-                        strategy_id=self.config.strategy_id,
-                        fixed_params=fixed_params,
-                        warmup_bars=self.config.warmup_bars,
-                        score_config=deepcopy(self.base_config_template.get("score_config", {})),
-                        filter_min_profit=bool(self.base_config_template.get("filter_min_profit")),
-                        min_profit_threshold=float(
-                            self.base_config_template.get("min_profit_threshold") or 0.0
-                        ),
-                        df=df,
-                    )
-                    module_status["dsr"]["ran"] = True
-                except Exception as exc:
-                    module_status["dsr"]["reason"] = str(exc)
-                    logger.warning("DSR analysis failed for window %s: %s", window.window_id, exc)
-
-                dsr_trials = self._convert_dsr_results_for_storage(
-                    dsr_results, int(self.config.store_top_n_trials)
-                )
-
-                if dsr_trials:
-                    dsr_trials[0]["is_selected"] = True
-                    selection_chain["dsr"] = dsr_trials[0].get("trial_number")
-                if dsr_results:
-                    best_result = dsr_results[0].original_result
-                    best_params_source = "dsr"
-                    is_pareto_optimal = getattr(best_result, "is_pareto_optimal", None)
-                    constraints_satisfied = getattr(best_result, "constraints_satisfied", None)
-
-            ft_results = []
-            ft_trials = None
-            if ft_config and ft_config.enabled and training_end and best_result:
-                worker_count = int(self.base_config_template.get("worker_processes", 1))
-                ft_candidates = optimization_results
-                if dsr_results:
-                    ft_candidates = [item.original_result for item in dsr_results]
-                ft_results = run_forward_test(
-                    csv_path=self.csv_file_path,
-                    strategy_id=self.config.strategy_id,
-                    optuna_results=ft_candidates,
-                    config=ft_config,
-                    is_period_days=max(0, (training_end - window.is_start).days),
-                    ft_period_days=int(ft_config.ft_period_days),
-                    ft_start_date=training_end.strftime("%Y-%m-%d"),
-                    ft_end_date=window.is_end.strftime("%Y-%m-%d"),
-                    n_workers=worker_count,
-                )
-                module_status["forward_test"]["ran"] = True
-                if ft_results:
-                    best_result = ft_results[0]
-                    best_params_source = "forward_test"
-                    selection_chain["forward_test"] = ft_results[0].trial_number
-                ft_trials = self._convert_ft_results_for_storage(
-                    ft_results, int(self.config.store_top_n_trials), optuna_map
-                )
-                if ft_trials:
-                    ft_trials[0]["is_selected"] = True
-
-            st_results = []
-            st_trials = None
-            st_config = self.config.stress_test_config
-            if st_config and st_config.enabled and best_result:
-                available_modules.append("stress_test")
-                module_status["stress_test"] = {"enabled": True, "ran": False, "reason": None}
-                worker_count = int(self.base_config_template.get("worker_processes", 1))
-                stress_start = optimization_start or window.is_start
-                stress_end = optimization_end or window.is_end
-                fixed_params = {
-                    "dateFilter": True,
-                    "start": stress_start.isoformat(),
-                    "end": stress_end.isoformat(),
-                }
-                st_candidates: List[Any] = optimization_results
-                if ft_results:
-                    st_candidates = ft_results
-                elif dsr_results:
-                    st_candidates = dsr_results
-
-                try:
-                    from strategies import get_strategy_config
-
-                    strategy_config_json = get_strategy_config(self.config.strategy_id)
-                except Exception as exc:
-                    strategy_config_json = {}
-                    logger.warning("Failed to load strategy config for stress test: %s", exc)
-
-                try:
-                    st_results, _summary = run_stress_test(
-                        csv_path=self.csv_file_path,
-                        strategy_id=self.config.strategy_id,
-                        source_results=st_candidates,
-                        config=st_config,
-                        is_start_date=stress_start.isoformat() if stress_start else None,
-                        is_end_date=stress_end.isoformat() if stress_end else None,
-                        fixed_params=fixed_params,
-                        config_json=strategy_config_json,
-                        n_workers=worker_count,
-                    )
-                    module_status["stress_test"]["ran"] = True
-                except Exception as exc:
-                    module_status["stress_test"]["reason"] = str(exc)
-                    logger.warning("Stress test failed for window %s: %s", window.window_id, exc)
-
-                candidate_map: Dict[int, Any] = {}
-                trial_to_params: Dict[int, Dict[str, Any]] = {}
-                for candidate in st_candidates:
-                    trial_num = getattr(candidate, "trial_number", None)
-                    if trial_num is None:
-                        trial_num = getattr(candidate, "optuna_trial_number", None)
-                    if trial_num is None:
-                        continue
-                    trial_num = int(trial_num)
-                    candidate_map[trial_num] = candidate
-                    trial_to_params[trial_num] = getattr(candidate, "params", {}) or {}
-
-                if st_results:
-                    selected = candidate_map.get(st_results[0].trial_number)
-                    if selected is not None:
-                        best_result = selected
-                        best_params_source = "stress_test"
-                        selection_chain["stress_test"] = st_results[0].trial_number
-
-                st_trials = self._convert_st_results_for_storage(
-                    st_results, int(self.config.store_top_n_trials), trial_to_params, optuna_map
-                )
-                if st_trials:
-                    st_trials[0]["is_selected"] = True
-
-            if best_params_source in {"forward_test", "stress_test"}:
-                best_trial_number = getattr(best_result, "trial_number", None)
-                optuna_result = optuna_map.get(best_trial_number)
-                if optuna_result:
-                    is_pareto_optimal = getattr(optuna_result, "is_pareto_optimal", None)
-                    constraints_satisfied = getattr(optuna_result, "constraints_satisfied", None)
-
-            best_params = self._result_to_params(best_result)
-            param_id = self._create_param_id(best_params)
-            best_trial_number = getattr(best_result, "optuna_trial_number", None)
-            if best_trial_number is None and hasattr(best_result, "trial_number"):
-                best_trial_number = getattr(best_result, "trial_number")
-
-            print(f"Best param ID: {param_id}")
-
-            is_df_prepared, is_trade_start_idx = prepare_dataset_with_warmup(
-                df, window.is_start, window.is_end, self.config.warmup_bars
-            )
-
-            is_params = best_params.copy()
-            is_params["dateFilter"] = True
-            is_params["start"] = window.is_start
-            is_params["end"] = window.is_end
-
-            is_result = self.strategy_class.run(
-                is_df_prepared, is_params, is_trade_start_idx
-            )
-
             is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
             is_adv = metrics.calculate_advanced(is_result, initial_balance=100.0)
 
-            print(
-                "OOS validation: dates "
-                f"{window.oos_start.date()} to {window.oos_end.date()}"
-            )
+            if execution_plan.window_status == "no_trade":
+                print(
+                    "OOS validation skipped: "
+                    f"{execution_plan.no_trade_reason or 'no_trade'}"
+                )
+                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end)
+                trade_end = None
+            else:
+                trade_start = execution_plan.trade_start or window.oos_start
+                print(
+                    "OOS validation: dates "
+                    f"{trade_start.date()} to {window.oos_end.date()}"
+                )
+                live_oos_result = self._run_period_backtest(
+                    df=df,
+                    start=trade_start,
+                    end=window.oos_end,
+                    params=is_pipeline.best_params,
+                )
+                prefixed_oos_result = self._prepend_flat_prefix(
+                    live_oos_result,
+                    scheduled_start=window.oos_start,
+                    live_start=trade_start,
+                )
+                trade_end = window.oos_end
 
-            oos_df_prepared, oos_trade_start_idx = prepare_dataset_with_warmup(
-                df, window.oos_start, window.oos_end, self.config.warmup_bars
-            )
-
-            oos_params = best_params.copy()
-            oos_params["dateFilter"] = True
-            oos_params["start"] = window.oos_start
-            oos_params["end"] = window.oos_end
-
-            oos_result = self.strategy_class.run(
-                oos_df_prepared, oos_params, oos_trade_start_idx
-            )
-
-            oos_basic = metrics.calculate_basic(oos_result, initial_balance=100.0)
-            oos_adv = metrics.calculate_advanced(oos_result, initial_balance=100.0)
+            oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
+            oos_adv = metrics.calculate_advanced(prefixed_oos_result, initial_balance=100.0)
 
             if oos_basic.total_trades == 0:
                 print(
                     "Warning: Window "
                     f"{window.window_id} produced no OOS trades. "
-                    "This may indicate overfitting or unsuitable parameters."
+                    "This may indicate overfitting, FT rejection, or unsuitable parameters."
                 )
 
-            dense_curve = list(oos_result.balance_curve or [])
-            dense_timestamps = list(oos_result.timestamps or [])
+            dense_curve = list(prefixed_oos_result.balance_curve or [])
+            dense_timestamps = list(prefixed_oos_result.timestamps or [])
             dense_stitch_windows.append(
                 StitchWindow(
                     window_id=window.window_id,
@@ -740,7 +562,14 @@ class WalkForwardEngine:
             )
 
             compact_equity, compact_timestamps = self._build_compact_oos_curve(
-                oos_result, window
+                prefixed_oos_result,
+                WindowSplit(
+                    window_id=window.window_id,
+                    is_start=execution_plan.final_is_start,
+                    is_end=execution_plan.final_is_end,
+                    oos_start=window.oos_start,
+                    oos_end=window.oos_end,
+                ),
             )
             compact_stitch_windows.append(
                 StitchWindow(
@@ -755,16 +584,16 @@ class WalkForwardEngine:
             window_results.append(
                 WindowResult(
                     window_id=window.window_id,
-                    is_start=window.is_start,
-                    is_end=window.is_end,
+                    is_start=execution_plan.final_is_start,
+                    is_end=execution_plan.final_is_end,
                     oos_start=window.oos_start,
                     oos_end=window.oos_end,
-                    best_params=best_params,
-                    param_id=param_id,
+                    best_params=is_pipeline.best_params,
+                    param_id=is_pipeline.param_id,
                     is_net_profit_pct=is_basic.net_profit_pct,
                     is_max_drawdown_pct=is_basic.max_drawdown_pct,
                     is_total_trades=is_basic.total_trades,
-                    is_best_trial_number=best_trial_number,
+                    is_best_trial_number=is_pipeline.best_trial_number,
                     is_equity_curve=None,
                     is_timestamps=None,
                     oos_net_profit_pct=oos_basic.net_profit_pct,
@@ -773,20 +602,20 @@ class WalkForwardEngine:
                     oos_equity_curve=[],
                     oos_timestamps=[],
                     oos_winning_trades=oos_basic.winning_trades,
-                    is_pareto_optimal=is_pareto_optimal,
-                    constraints_satisfied=constraints_satisfied,
-                    best_params_source=best_params_source,
-                    available_modules=available_modules,
-                    optuna_is_trials=optuna_is_trials,
-                    dsr_trials=dsr_trials,
-                    forward_test_trials=ft_trials,
-                    stress_test_trials=st_trials,
-                    module_status=module_status,
-                    selection_chain=selection_chain,
-                    optimization_start=optimization_start,
-                    optimization_end=optimization_end,
-                    ft_start=ft_start,
-                    ft_end=ft_end,
+                    is_pareto_optimal=is_pipeline.is_pareto_optimal,
+                    constraints_satisfied=is_pipeline.constraints_satisfied,
+                    best_params_source=is_pipeline.best_params_source,
+                    available_modules=is_pipeline.available_modules,
+                    optuna_is_trials=is_pipeline.optuna_is_trials,
+                    dsr_trials=is_pipeline.dsr_trials,
+                    forward_test_trials=is_pipeline.forward_test_trials,
+                    stress_test_trials=is_pipeline.stress_test_trials,
+                    module_status=is_pipeline.module_status,
+                    selection_chain=is_pipeline.selection_chain,
+                    optimization_start=is_pipeline.optimization_start,
+                    optimization_end=is_pipeline.optimization_end,
+                    ft_start=is_pipeline.ft_start,
+                    ft_end=is_pipeline.ft_end,
                     is_win_rate=is_basic.win_rate,
                     is_max_consecutive_losses=is_basic.max_consecutive_losses,
                     is_romad=is_adv.romad,
@@ -795,7 +624,7 @@ class WalkForwardEngine:
                     is_sqn=is_adv.sqn,
                     is_ulcer_index=is_adv.ulcer_index,
                     is_consistency_score=is_adv.consistency_score,
-                    is_composite_score=getattr(best_result, "score", None),
+                    is_composite_score=getattr(is_pipeline.best_result, "score", None),
                     oos_win_rate=oos_basic.win_rate,
                     oos_max_consecutive_losses=oos_basic.max_consecutive_losses,
                     oos_romad=oos_adv.romad,
@@ -804,6 +633,13 @@ class WalkForwardEngine:
                     oos_sqn=oos_adv.sqn,
                     oos_ulcer_index=oos_adv.ulcer_index,
                     oos_consistency_score=oos_adv.consistency_score,
+                    trade_start=execution_plan.trade_start,
+                    trade_end=trade_end,
+                    entry_delay_days=execution_plan.entry_delay_days,
+                    ft_retry_attempts_used=execution_plan.ft_retry_attempts_used,
+                    remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
+                    window_status=execution_plan.window_status,
+                    no_trade_reason=execution_plan.no_trade_reason,
                 )
             )
 
@@ -995,6 +831,8 @@ class WalkForwardEngine:
 
         ft_results = []
         ft_trials = None
+        ft_gate_failed = False
+        ft_pass_count = 0
         if ft_config and ft_config.enabled and training_end and best_result:
             worker_count = int(self.base_config_template.get("worker_processes", 1))
             ft_candidates = optimization_results
@@ -1012,15 +850,28 @@ class WalkForwardEngine:
                 n_workers=worker_count,
             )
             module_status["forward_test"]["ran"] = True
-            if ft_results:
-                best_result = ft_results[0]
+            ft_passed_results = filter_ft_passed_results(ft_results)
+            ft_pass_count = len(ft_passed_results)
+            if ft_passed_results:
+                best_result = ft_passed_results[0]
                 best_params_source = "forward_test"
-                selection_chain["forward_test"] = ft_results[0].trial_number
+                selection_chain["forward_test"] = ft_passed_results[0].trial_number
+            elif ft_results:
+                ft_gate_failed = True
+                module_status["forward_test"]["reason"] = "threshold_reject_all"
+            else:
+                ft_gate_failed = True
+                module_status["forward_test"]["reason"] = "no_ft_results"
             ft_trials = self._convert_ft_results_for_storage(
                 ft_results, int(self.config.store_top_n_trials), optuna_map
             )
             if ft_trials:
-                ft_trials[0]["is_selected"] = True
+                selected_ft_trial = selection_chain.get("forward_test")
+                if selected_ft_trial is not None:
+                    for item in ft_trials:
+                        if item.get("trial_number") == selected_ft_trial:
+                            item["is_selected"] = True
+                            break
 
         st_results = []
         st_trials = None
@@ -1028,69 +879,77 @@ class WalkForwardEngine:
         if st_config and st_config.enabled and best_result:
             available_modules.append("stress_test")
             module_status["stress_test"] = {"enabled": True, "ran": False, "reason": None}
-            worker_count = int(self.base_config_template.get("worker_processes", 1))
-            stress_start = optimization_start or is_start
-            stress_end = optimization_end or is_end
-            fixed_params = {
-                "dateFilter": True,
-                "start": stress_start.isoformat(),
-                "end": stress_end.isoformat(),
-            }
-            st_candidates: List[Any] = optimization_results
-            if ft_results:
-                st_candidates = ft_results
-            elif dsr_results:
-                st_candidates = dsr_results
+            if ft_gate_failed:
+                module_status["stress_test"]["reason"] = "skipped_upstream_ft_reject"
+            else:
+                worker_count = int(self.base_config_template.get("worker_processes", 1))
+                stress_start = optimization_start or is_start
+                stress_end = optimization_end or is_end
+                fixed_params = {
+                    "dateFilter": True,
+                    "start": stress_start.isoformat(),
+                    "end": stress_end.isoformat(),
+                }
+                st_candidates: List[Any] = optimization_results
+                if ft_results:
+                    st_candidates = filter_ft_passed_results(ft_results)
+                elif dsr_results:
+                    st_candidates = dsr_results
 
-            try:
-                from strategies import get_strategy_config
+                try:
+                    from strategies import get_strategy_config
 
-                strategy_config_json = get_strategy_config(self.config.strategy_id)
-            except Exception as exc:
-                strategy_config_json = {}
-                logger.warning("Failed to load strategy config for stress test: %s", exc)
+                    strategy_config_json = get_strategy_config(self.config.strategy_id)
+                except Exception as exc:
+                    strategy_config_json = {}
+                    logger.warning("Failed to load strategy config for stress test: %s", exc)
 
-            try:
-                st_results, _summary = run_stress_test(
-                    csv_path=self.csv_file_path,
-                    strategy_id=self.config.strategy_id,
-                    source_results=st_candidates,
-                    config=st_config,
-                    is_start_date=stress_start.isoformat() if stress_start else None,
-                    is_end_date=stress_end.isoformat() if stress_end else None,
-                    fixed_params=fixed_params,
-                    config_json=strategy_config_json,
-                    n_workers=worker_count,
+                try:
+                    st_results, _summary = run_stress_test(
+                        csv_path=self.csv_file_path,
+                        strategy_id=self.config.strategy_id,
+                        source_results=st_candidates,
+                        config=st_config,
+                        is_start_date=stress_start.isoformat() if stress_start else None,
+                        is_end_date=stress_end.isoformat() if stress_end else None,
+                        fixed_params=fixed_params,
+                        config_json=strategy_config_json,
+                        n_workers=worker_count,
+                    )
+                    module_status["stress_test"]["ran"] = True
+                except Exception as exc:
+                    module_status["stress_test"]["reason"] = str(exc)
+                    logger.warning("Stress test failed for window %s: %s", window_id, exc)
+
+                candidate_map: Dict[int, Any] = {}
+                trial_to_params: Dict[int, Dict[str, Any]] = {}
+                for candidate in st_candidates:
+                    trial_num = getattr(candidate, "trial_number", None)
+                    if trial_num is None:
+                        trial_num = getattr(candidate, "optuna_trial_number", None)
+                    if trial_num is None:
+                        continue
+                    trial_num = int(trial_num)
+                    candidate_map[trial_num] = candidate
+                    trial_to_params[trial_num] = getattr(candidate, "params", {}) or {}
+
+                if st_results:
+                    selected = candidate_map.get(st_results[0].trial_number)
+                    if selected is not None:
+                        best_result = selected
+                        best_params_source = "stress_test"
+                        selection_chain["stress_test"] = st_results[0].trial_number
+
+                st_trials = self._convert_st_results_for_storage(
+                    st_results, int(self.config.store_top_n_trials), trial_to_params, optuna_map
                 )
-                module_status["stress_test"]["ran"] = True
-            except Exception as exc:
-                module_status["stress_test"]["reason"] = str(exc)
-                logger.warning("Stress test failed for window %s: %s", window_id, exc)
-
-            candidate_map: Dict[int, Any] = {}
-            trial_to_params: Dict[int, Dict[str, Any]] = {}
-            for candidate in st_candidates:
-                trial_num = getattr(candidate, "trial_number", None)
-                if trial_num is None:
-                    trial_num = getattr(candidate, "optuna_trial_number", None)
-                if trial_num is None:
-                    continue
-                trial_num = int(trial_num)
-                candidate_map[trial_num] = candidate
-                trial_to_params[trial_num] = getattr(candidate, "params", {}) or {}
-
-            if st_results:
-                selected = candidate_map.get(st_results[0].trial_number)
-                if selected is not None:
-                    best_result = selected
-                    best_params_source = "stress_test"
-                    selection_chain["stress_test"] = st_results[0].trial_number
-
-            st_trials = self._convert_st_results_for_storage(
-                st_results, int(self.config.store_top_n_trials), trial_to_params, optuna_map
-            )
-            if st_trials:
-                st_trials[0]["is_selected"] = True
+                if st_trials:
+                    selected_st_trial = selection_chain.get("stress_test")
+                    if selected_st_trial is not None:
+                        for item in st_trials:
+                            if item.get("trial_number") == selected_st_trial:
+                                item["is_selected"] = True
+                                break
 
         if best_params_source in {"forward_test", "stress_test"}:
             best_trial_number = getattr(best_result, "trial_number", None)
@@ -1124,11 +983,301 @@ class WalkForwardEngine:
             dsr_trials=dsr_trials,
             forward_test_trials=ft_trials,
             stress_test_trials=st_trials,
+            ft_gate_failed=ft_gate_failed,
+            ft_pass_count=ft_pass_count,
         )
 
     @staticmethod
     def _duration_days(start: pd.Timestamp, end: pd.Timestamp) -> float:
         return max(0.0, (end - start).total_seconds() / 86400.0)
+
+    @staticmethod
+    def _align_timestamp_to_index(
+        time_index: pd.DatetimeIndex,
+        target: pd.Timestamp,
+        *,
+        side: str = "left",
+    ) -> Optional[pd.Timestamp]:
+        idx = int(time_index.searchsorted(target, side=side))
+        if idx < 0 or idx >= len(time_index):
+            return None
+        return time_index[idx]
+
+    def _resolve_shifted_window_bounds(
+        self,
+        time_index: pd.DatetimeIndex,
+        *,
+        is_start: pd.Timestamp,
+        is_end: pd.Timestamp,
+        delay_days: float,
+    ) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        shift = pd.Timedelta(days=float(delay_days))
+        shifted_is_start = self._align_timestamp_to_index(time_index, is_start + shift, side="left")
+        shifted_is_end = self._align_timestamp_to_index(time_index, is_end + shift, side="left")
+        if shifted_is_start is None or shifted_is_end is None or shifted_is_end <= shifted_is_start:
+            return None, None, None
+        trade_start = self._align_timestamp_to_index(time_index, shifted_is_end, side="right")
+        return shifted_is_start, shifted_is_end, trade_start
+
+    @staticmethod
+    def _build_flat_result(start: pd.Timestamp, end: pd.Timestamp) -> StrategyResult:
+        if end < start:
+            end = start
+        timestamps = [start]
+        if end > start:
+            timestamps.append(end)
+        curve = [100.0 for _ in timestamps]
+        return StrategyResult(
+            trades=[],
+            equity_curve=curve,
+            balance_curve=list(curve),
+            timestamps=timestamps,
+        )
+
+    @staticmethod
+    def _prepend_flat_prefix(
+        result: StrategyResult,
+        *,
+        scheduled_start: pd.Timestamp,
+        live_start: Optional[pd.Timestamp],
+    ) -> StrategyResult:
+        if live_start is None or live_start <= scheduled_start:
+            return result
+
+        equity_curve = list(getattr(result, "equity_curve", None) or [])
+        balance_curve = list(getattr(result, "balance_curve", None) or [])
+        timestamps = list(getattr(result, "timestamps", None) or [])
+
+        prefixed_timestamps: List[pd.Timestamp] = [scheduled_start]
+        prefixed_equity: List[float] = [100.0]
+        prefixed_balance: List[float] = [100.0]
+
+        if not timestamps or timestamps[0] > live_start:
+            prefixed_timestamps.append(live_start)
+            prefixed_equity.append(100.0)
+            prefixed_balance.append(100.0)
+
+        prefixed_timestamps.extend(timestamps)
+        prefixed_equity.extend(equity_curve)
+        prefixed_balance.extend(balance_curve)
+
+        deduped_timestamps: List[pd.Timestamp] = []
+        deduped_equity: List[float] = []
+        deduped_balance: List[float] = []
+        for ts, eq, bal in zip(prefixed_timestamps, prefixed_equity, prefixed_balance):
+            if deduped_timestamps and ts == deduped_timestamps[-1]:
+                deduped_equity[-1] = eq
+                deduped_balance[-1] = bal
+            else:
+                deduped_timestamps.append(ts)
+                deduped_equity.append(eq)
+                deduped_balance.append(bal)
+
+        return StrategyResult(
+            trades=list(getattr(result, "trades", None) or []),
+            equity_curve=deduped_equity,
+            balance_curve=deduped_balance,
+            timestamps=deduped_timestamps,
+        )
+
+    def _annotate_execution_plan(
+        self,
+        plan: WindowExecutionPlan,
+    ) -> WindowExecutionPlan:
+        module_status = plan.pipeline.module_status or {}
+        forward_status = module_status.get("forward_test")
+        if isinstance(forward_status, dict):
+            forward_status["ft_pass_count"] = plan.pipeline.ft_pass_count
+            forward_status["retry_attempts_used"] = int(plan.ft_retry_attempts_used)
+            forward_status["entry_delay_days"] = float(plan.entry_delay_days)
+            if plan.no_trade_reason:
+                forward_status["no_trade_reason"] = plan.no_trade_reason
+        plan.pipeline.module_status = module_status
+        return plan
+
+    def _resolve_window_execution_plan(
+        self,
+        *,
+        df: pd.DataFrame,
+        window_id: int,
+        is_start: pd.Timestamp,
+        is_end: pd.Timestamp,
+        oos_start: pd.Timestamp,
+        oos_budget_end: pd.Timestamp,
+    ) -> WindowExecutionPlan:
+        ft_config = self.config.post_process
+        time_index = df.index
+        reject_action = normalize_ft_reject_action(
+            getattr(ft_config, "ft_reject_action", FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE)
+        )
+        max_retries = max(0, int(getattr(ft_config, "ft_reject_max_attempts", 0) or 0))
+        cooldown_days = max(1, int(getattr(ft_config, "ft_reject_cooldown_days", 1) or 1))
+        min_remaining = max(
+            1,
+            int(getattr(ft_config, "ft_reject_min_remaining_oos_days", 1) or 1),
+        )
+
+        delay_days = 0.0
+        retry_attempts_used = 0
+        last_pipeline: Optional[ISPipelineResult] = None
+        last_is_start = is_start
+        last_is_end = is_end
+
+        while True:
+            shifted_is_start, shifted_is_end, trade_start = self._resolve_shifted_window_bounds(
+                time_index,
+                is_start=is_start,
+                is_end=is_end,
+                delay_days=delay_days,
+            )
+            if shifted_is_start is None or shifted_is_end is None:
+                if last_pipeline is None:
+                    last_pipeline = self._run_window_is_pipeline(
+                        df=df,
+                        is_start=is_start,
+                        is_end=is_end,
+                        window_id=window_id,
+                    )
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=last_pipeline,
+                        final_is_start=last_is_start,
+                        final_is_end=last_is_end,
+                        trade_start=None,
+                        entry_delay_days=float(delay_days),
+                        ft_retry_attempts_used=int(retry_attempts_used),
+                        remaining_oos_days_at_entry=None,
+                        window_status="no_trade",
+                        no_trade_reason="ft_retry_window_out_of_range",
+                    )
+                )
+
+            last_is_start = shifted_is_start
+            last_is_end = shifted_is_end
+            pipeline = self._run_window_is_pipeline(
+                df=df,
+                is_start=shifted_is_start,
+                is_end=shifted_is_end,
+                window_id=window_id,
+            )
+            last_pipeline = pipeline
+
+            remaining_oos_days = None
+            if trade_start is not None and trade_start <= oos_budget_end:
+                remaining_oos_days = self._duration_days(trade_start, oos_budget_end)
+
+            if not pipeline.ft_gate_failed:
+                if trade_start is None or trade_start > oos_budget_end:
+                    return self._annotate_execution_plan(
+                        WindowExecutionPlan(
+                            pipeline=pipeline,
+                            final_is_start=shifted_is_start,
+                            final_is_end=shifted_is_end,
+                            trade_start=None,
+                            entry_delay_days=float(delay_days),
+                            ft_retry_attempts_used=int(retry_attempts_used),
+                            remaining_oos_days_at_entry=remaining_oos_days,
+                            window_status="no_trade",
+                            no_trade_reason="ft_retry_window_out_of_range",
+                        )
+                    )
+                if remaining_oos_days is not None and remaining_oos_days < float(min_remaining):
+                    return self._annotate_execution_plan(
+                        WindowExecutionPlan(
+                            pipeline=pipeline,
+                            final_is_start=shifted_is_start,
+                            final_is_end=shifted_is_end,
+                            trade_start=None,
+                            entry_delay_days=float(delay_days),
+                            ft_retry_attempts_used=int(retry_attempts_used),
+                            remaining_oos_days_at_entry=remaining_oos_days,
+                            window_status="no_trade",
+                            no_trade_reason="ft_retry_min_remaining_oos_days",
+                        )
+                    )
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=pipeline,
+                        final_is_start=shifted_is_start,
+                        final_is_end=shifted_is_end,
+                        trade_start=trade_start,
+                        entry_delay_days=self._duration_days(oos_start, trade_start),
+                        ft_retry_attempts_used=int(retry_attempts_used),
+                        remaining_oos_days_at_entry=remaining_oos_days,
+                        window_status="traded",
+                    )
+                )
+
+            if reject_action == FT_REJECT_ACTION_NO_TRADE:
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=pipeline,
+                        final_is_start=shifted_is_start,
+                        final_is_end=shifted_is_end,
+                        trade_start=None,
+                        entry_delay_days=float(delay_days),
+                        ft_retry_attempts_used=int(retry_attempts_used),
+                        remaining_oos_days_at_entry=remaining_oos_days,
+                        window_status="no_trade",
+                        no_trade_reason="ft_reject_action_no_trade",
+                    )
+                )
+
+            if retry_attempts_used >= max_retries:
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=pipeline,
+                        final_is_start=shifted_is_start,
+                        final_is_end=shifted_is_end,
+                        trade_start=None,
+                        entry_delay_days=float(delay_days),
+                        ft_retry_attempts_used=int(retry_attempts_used),
+                        remaining_oos_days_at_entry=remaining_oos_days,
+                        window_status="no_trade",
+                        no_trade_reason="ft_retry_attempts_exhausted",
+                    )
+                )
+
+            next_delay_days = delay_days + float(cooldown_days)
+            _, _, next_trade_start = self._resolve_shifted_window_bounds(
+                time_index,
+                is_start=is_start,
+                is_end=is_end,
+                delay_days=next_delay_days,
+            )
+            if next_trade_start is None or next_trade_start > oos_budget_end:
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=pipeline,
+                        final_is_start=shifted_is_start,
+                        final_is_end=shifted_is_end,
+                        trade_start=None,
+                        entry_delay_days=float(delay_days),
+                        ft_retry_attempts_used=int(retry_attempts_used),
+                        remaining_oos_days_at_entry=remaining_oos_days,
+                        window_status="no_trade",
+                        no_trade_reason="ft_retry_window_out_of_range",
+                    )
+                )
+
+            next_remaining_oos_days = self._duration_days(next_trade_start, oos_budget_end)
+            if next_remaining_oos_days < float(min_remaining):
+                return self._annotate_execution_plan(
+                    WindowExecutionPlan(
+                        pipeline=pipeline,
+                        final_is_start=shifted_is_start,
+                        final_is_end=shifted_is_end,
+                        trade_start=None,
+                        entry_delay_days=float(next_delay_days),
+                        ft_retry_attempts_used=int(retry_attempts_used + 1),
+                        remaining_oos_days_at_entry=next_remaining_oos_days,
+                        window_status="no_trade",
+                        no_trade_reason="ft_retry_min_remaining_oos_days",
+                    )
+                )
+
+            delay_days = next_delay_days
+            retry_attempts_used += 1
 
     def _compute_is_baseline(self, is_result: Any, is_period_days: int) -> Dict[str, Any]:
         closed_trades = [
@@ -1471,6 +1620,33 @@ class WalkForwardEngine:
             trigger_time,
         )
 
+    def _resolve_adaptive_roll_end(
+        self,
+        trigger_result: TriggerResult,
+        oos_actual_end: pd.Timestamp,
+        trading_end: pd.Timestamp,
+    ) -> Tuple[pd.Timestamp, Optional[float]]:
+        cooldown_enabled = bool(getattr(self.config, "cooldown_enabled", False))
+        cooldown_days = int(getattr(self.config, "cooldown_days", 0) or 0)
+        cooldown_trigger = (
+            trigger_result.triggered
+            and trigger_result.trigger_type in {"cusum", "drawdown"}
+            and cooldown_enabled
+            and cooldown_days > 0
+        )
+        if not cooldown_trigger:
+            return oos_actual_end, None
+
+        cooldown_end = min(
+            oos_actual_end + pd.Timedelta(days=cooldown_days),
+            trading_end,
+        )
+        cooldown_days_applied = self._duration_days(oos_actual_end, cooldown_end)
+        if cooldown_days_applied <= 0.0:
+            return oos_actual_end, None
+
+        return cooldown_end, cooldown_days_applied
+
     def _run_adaptive_wfa(self, df: pd.DataFrame) -> tuple[WFResult, Optional[str]]:
         print("Starting Walk-Forward Analysis (adaptive mode)...")
         start_time = time.time()
@@ -1481,6 +1657,8 @@ class WalkForwardEngine:
             raise ValueError("min_oos_trades must be positive for adaptive WFA.")
         if self.config.check_interval_trades <= 0:
             raise ValueError("check_interval_trades must be positive for adaptive WFA.")
+        if self.config.cooldown_enabled and self.config.cooldown_days <= 0:
+            raise ValueError("cooldown_days must be positive when cooldown is enabled.")
 
         trading_start, trading_end = self._resolve_trading_bounds(df)
         trading_start_normalized = trading_start.normalize()
@@ -1541,18 +1719,21 @@ class WalkForwardEngine:
             print(f"\n--- Adaptive Window {window_id} ---")
             print(f"IS optimization: dates {is_start.date()} to {is_end.date()}")
 
-            is_pipeline = self._run_window_is_pipeline(
+            execution_plan = self._resolve_window_execution_plan(
                 df=df,
+                window_id=window_id,
                 is_start=is_start,
                 is_end=is_end,
-                window_id=window_id,
+                oos_start=oos_start,
+                oos_budget_end=oos_max_end,
             )
+            is_pipeline = execution_plan.pipeline
             print(f"Best param ID: {is_pipeline.param_id}")
 
             is_result = self._run_period_backtest(
                 df=df,
-                start=is_start,
-                end=is_end,
+                start=execution_plan.final_is_start,
+                end=execution_plan.final_is_end,
                 params=is_pipeline.best_params,
             )
             is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
@@ -1570,41 +1751,87 @@ class WalkForwardEngine:
                     window_id,
                 )
 
-            print(f"OOS validation (adaptive max): dates {oos_start.date()} to {oos_max_end.date()}")
-            oos_result = self._run_period_backtest(
-                df=df,
-                start=oos_start,
-                end=oos_max_end,
-                params=is_pipeline.best_params,
-            )
+            if execution_plan.window_status == "no_trade":
+                print(
+                    "OOS validation skipped: "
+                    f"{execution_plan.no_trade_reason or 'no_trade'}"
+                )
+                prefixed_oos_result = self._build_flat_result(oos_start, oos_max_end)
+                oos_actual_end = oos_max_end
+                adaptive_roll_end = oos_max_end
+                cooldown_days_applied = None
+                oos_elapsed_days = self._duration_days(oos_start, adaptive_roll_end)
+                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
+                oos_adv = metrics.calculate_advanced(prefixed_oos_result, initial_balance=100.0)
+                trigger_type = "ft_reject_no_trade"
+                cusum_final = None
+                trigger_cusum_threshold = None
+                dd_threshold = None
+                oos_actual_days = 0.0
+                trade_end = None
+            else:
+                live_trade_start = execution_plan.trade_start or oos_start
+                print(
+                    "OOS validation (adaptive max): dates "
+                    f"{live_trade_start.date()} to {oos_max_end.date()}"
+                )
+                live_oos_result = self._run_period_backtest(
+                    df=df,
+                    start=live_trade_start,
+                    end=oos_max_end,
+                    params=is_pipeline.best_params,
+                )
 
-            trigger_result = self._scan_triggers(
-                trades=list(getattr(oos_result, "trades", None) or []),
-                balance_curve=list(getattr(oos_result, "balance_curve", None) or []),
-                timestamps=list(getattr(oos_result, "timestamps", None) or []),
-                baseline=baseline,
-                oos_start=oos_start,
-                oos_max_end=oos_max_end,
-            )
-            truncated_oos_result, oos_actual_end = self._truncate_oos_result(
-                oos_result=oos_result,
-                trigger_result=trigger_result,
-                oos_max_end=oos_max_end,
-            )
-            oos_basic = metrics.calculate_basic(truncated_oos_result, initial_balance=100.0)
-            oos_adv = metrics.calculate_advanced(truncated_oos_result, initial_balance=100.0)
+                trigger_result = self._scan_triggers(
+                    trades=list(getattr(live_oos_result, "trades", None) or []),
+                    balance_curve=list(getattr(live_oos_result, "balance_curve", None) or []),
+                    timestamps=list(getattr(live_oos_result, "timestamps", None) or []),
+                    baseline=baseline,
+                    oos_start=live_trade_start,
+                    oos_max_end=oos_max_end,
+                )
+                truncated_live_result, oos_actual_end = self._truncate_oos_result(
+                    oos_result=live_oos_result,
+                    trigger_result=trigger_result,
+                    oos_max_end=oos_max_end,
+                )
+                prefixed_oos_result = self._prepend_flat_prefix(
+                    truncated_live_result,
+                    scheduled_start=oos_start,
+                    live_start=live_trade_start,
+                )
+                adaptive_roll_end, cooldown_days_applied = self._resolve_adaptive_roll_end(
+                    trigger_result=trigger_result,
+                    oos_actual_end=oos_actual_end,
+                    trading_end=trading_end,
+                )
+                oos_elapsed_days = self._duration_days(oos_start, adaptive_roll_end)
+                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
+                oos_adv = metrics.calculate_advanced(prefixed_oos_result, initial_balance=100.0)
+                trigger_type = trigger_result.trigger_type
+                cusum_final = trigger_result.cusum_final
+                trigger_cusum_threshold = trigger_result.cusum_threshold
+                dd_threshold = trigger_result.dd_threshold
+                oos_actual_days = trigger_result.oos_actual_days
+                trade_end = oos_actual_end
+
+                if cooldown_days_applied is not None:
+                    print(
+                        "  Cooldown activated: "
+                        f"{cooldown_days_applied:.1f}d after {trigger_result.trigger_type} trigger"
+                    )
 
             if oos_basic.total_trades == 0:
                 print(
                     "Warning: Window "
-                    f"{window_id} produced no OOS trades before trigger."
+                    f"{window_id} produced no OOS trades in the executed OOS segment."
                 )
 
             dense_stitch_windows.append(
                 StitchWindow(
                     window_id=window_id,
-                    oos_equity_curve=list(truncated_oos_result.balance_curve or []),
-                    oos_timestamps=list(truncated_oos_result.timestamps or []),
+                    oos_equity_curve=list(prefixed_oos_result.balance_curve or []),
+                    oos_timestamps=list(prefixed_oos_result.timestamps or []),
                     oos_total_trades=oos_basic.total_trades,
                     oos_start=oos_start,
                 )
@@ -1612,13 +1839,13 @@ class WalkForwardEngine:
 
             window_split = WindowSplit(
                 window_id=window_id,
-                is_start=is_start,
-                is_end=is_end,
+                is_start=execution_plan.final_is_start,
+                is_end=execution_plan.final_is_end,
                 oos_start=oos_start,
                 oos_end=oos_actual_end,
             )
             compact_equity, compact_timestamps = self._build_compact_oos_curve(
-                truncated_oos_result, window_split
+                prefixed_oos_result, window_split
             )
             compact_stitch_windows.append(
                 StitchWindow(
@@ -1633,8 +1860,8 @@ class WalkForwardEngine:
             window_results.append(
                 WindowResult(
                     window_id=window_id,
-                    is_start=is_start,
-                    is_end=is_end,
+                    is_start=execution_plan.final_is_start,
+                    is_end=execution_plan.final_is_end,
                     oos_start=oos_start,
                     oos_end=oos_actual_end,
                     best_params=is_pipeline.best_params,
@@ -1682,15 +1909,24 @@ class WalkForwardEngine:
                     oos_sqn=oos_adv.sqn,
                     oos_ulcer_index=oos_adv.ulcer_index,
                     oos_consistency_score=oos_adv.consistency_score,
-                    trigger_type=trigger_result.trigger_type,
-                    cusum_final=trigger_result.cusum_final,
-                    cusum_threshold=trigger_result.cusum_threshold,
-                    dd_threshold=trigger_result.dd_threshold,
-                    oos_actual_days=trigger_result.oos_actual_days,
+                    trigger_type=trigger_type,
+                    cusum_final=cusum_final,
+                    cusum_threshold=trigger_cusum_threshold,
+                    dd_threshold=dd_threshold,
+                    oos_actual_days=oos_actual_days,
+                    cooldown_days_applied=cooldown_days_applied,
+                    oos_elapsed_days=oos_elapsed_days,
+                    trade_start=execution_plan.trade_start,
+                    trade_end=trade_end,
+                    entry_delay_days=execution_plan.entry_delay_days,
+                    ft_retry_attempts_used=execution_plan.ft_retry_attempts_used,
+                    remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
+                    window_status=execution_plan.window_status,
+                    no_trade_reason=execution_plan.no_trade_reason,
                 )
             )
 
-            shift = oos_actual_end - oos_start
+            shift = adaptive_roll_end - oos_start
             if shift <= pd.Timedelta(0):
                 shift = pd.Timedelta(days=1)
 
@@ -1883,7 +2119,9 @@ class WalkForwardEngine:
                 total_oos_profit = sum(w.oos_net_profit_pct for w in windows)
                 total_oos_days = 0.0
                 for window in windows:
-                    oos_days = getattr(window, "oos_actual_days", None)
+                    oos_days = getattr(window, "oos_elapsed_days", None)
+                    if oos_days is None:
+                        oos_days = getattr(window, "oos_actual_days", None)
                     if oos_days is None:
                         oos_days = self._duration_days(window.oos_start, window.oos_end)
                     if oos_days > 0:
@@ -2045,6 +2283,7 @@ class WalkForwardEngine:
                         "is_max_drawdown_pct": getattr(result, "is_max_drawdown_pct", None),
                         "is_total_trades": getattr(result, "is_total_trades", None),
                         "is_win_rate": getattr(result, "is_win_rate", None),
+                        "ft_passes_threshold": getattr(result, "ft_passes_threshold", None),
                         "profit_degradation": getattr(result, "profit_degradation", None),
                         "max_dd_change": getattr(result, "max_dd_change", None),
                         "romad_change": getattr(result, "romad_change", None),
@@ -2157,12 +2396,24 @@ class WalkForwardEngine:
             fixed_params=fixed_params,
             worker_processes=int(self.base_config_template["worker_processes"]),
             warmup_bars=self.config.warmup_bars,
+            csv_original_name=self.base_config_template.get("csv_original_name"),
             risk_per_trade_pct=float(self.base_config_template["risk_per_trade_pct"]),
             contract_size=float(self.base_config_template["contract_size"]),
             commission_rate=float(self.base_config_template["commission_rate"]),
             filter_min_profit=bool(self.base_config_template["filter_min_profit"]),
             min_profit_threshold=float(self.base_config_template["min_profit_threshold"]),
             score_config=deepcopy(self.base_config_template.get("score_config", {})),
+            detailed_log=bool(self.base_config_template.get("detailed_log", False)),
+            trials_log=bool(self.base_config_template.get("trials_log", False)),
+            dispatcher_batch_result_processing=bool(
+                self.base_config_template.get("dispatcher_batch_result_processing", True)
+            ),
+            dispatcher_soft_duplicate_cycle_limit_enabled=bool(
+                self.base_config_template.get("dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            dispatcher_duplicate_cycle_limit=int(
+                self.base_config_template.get("dispatcher_duplicate_cycle_limit", 18)
+            ),
             optimization_mode="wfa",
             objectives=list(self.base_config_template.get("objectives") or []),
             primary_objective=self.base_config_template.get("primary_objective"),
@@ -2173,6 +2424,7 @@ class WalkForwardEngine:
             mutation_prob=self.base_config_template.get("mutation_prob"),
             swapping_prob=self.base_config_template.get("swapping_prob", 0.5),
             n_startup_trials=self.base_config_template.get("n_startup_trials", 20),
+            coverage_mode=bool(self.base_config_template.get("coverage_mode", False)),
         )
 
         objectives = list(self.optuna_settings.get("objectives") or [])
@@ -2204,7 +2456,8 @@ class WalkForwardEngine:
             enable_pruning=enable_pruning,
             pruner=self.optuna_settings["pruner"],
             warmup_trials=int(self.optuna_settings.get("warmup_trials") or 20),
-            save_study=self.optuna_settings["save_study"],
+            coverage_mode=bool(self.optuna_settings.get("coverage_mode", False)),
+            save_study=False,
             study_name=None,
         )
 

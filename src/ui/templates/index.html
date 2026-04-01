@@ -126,9 +126,15 @@
                 </div>
 
                 <div class="form-group">
-                  <div class="checkbox-group">
-                    <input type="checkbox" id="detailedLog" />
-                    <label for="detailedLog">Detailed log</label>
+                  <div class="checkbox-group" style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                    <span style="display: flex; align-items: center; gap: 6px;">
+                      <input type="checkbox" id="detailedLog" />
+                      <label for="detailedLog">Detailed log</label>
+                    </span>
+                    <span style="display: flex; align-items: center; gap: 6px;">
+                      <input type="checkbox" id="trialsLog" />
+                      <label for="trialsLog">Trials Log</label>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -228,7 +234,7 @@
                         <input type="checkbox" id="metric-consistency" checked />
                         <label for="metric-consistency" style="min-width: 140px;">Consistency Score</label>
                         <input type="number" id="weight-consistency" step="0.05" min="0" max="1" value="0.10" style="width: 70px;" />
-                        <span style="font-size: 11px; color: #777;">Profitable months %</span>
+                        <span style="font-size: 11px; color: #777;">Signed R² of equity curve</span>
                       </div>
                     </div>
 
@@ -273,9 +279,9 @@
                         </div>
                         <div class="score-metric-row">
                           <label for="bound-min-consistency" style="min-width: 140px;">Consistency Score</label>
-                          <input type="number" id="bound-min-consistency" step="1" style="width: 80px;" />
+                          <input type="number" id="bound-min-consistency" step="0.01" style="width: 80px;" />
                           <span style="font-size: 11px; color: #777;">to</span>
-                          <input type="number" id="bound-max-consistency" step="1" style="width: 80px;" />
+                          <input type="number" id="bound-max-consistency" step="0.01" style="width: 80px;" />
                         </div>
                       </div>
                     </div>
@@ -410,7 +416,7 @@
                         </label>
                         <label class="objective-item">
                           <input type="checkbox" class="objective-checkbox" data-objective="consistency_score" />
-                          Consistency %
+                          Consistency
                           <span class="objective-direction">&uarr; max</span>
                         </label>
                         <label class="objective-item">
@@ -509,9 +515,43 @@
                           </select>
                         </div>
 
+                        <div class="form-group" style="align-items: flex-start;">
+                          <label for="optunaWarmupTrials">Initial trials:</label>
+                          <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                            <input type="number" id="optunaWarmupTrials" min="0" max="50000" value="20" style="width: 80px;" />
+                            <span class="checkbox-group" style="margin: 0; display: flex; align-items: center; gap: 6px;">
+                              <input type="checkbox" id="optunaCoverageMode" />
+                              <label for="optunaCoverageMode">Coverage mode</label>
+                            </span>
+                            <small
+                              id="coverageInfo"
+                              class="form-hint"
+                              style="color: #888; font-size: 11px; display: none;"
+                            ></small>
+                          </div>
+                        </div>
+
                         <div class="form-group">
-                          <label for="optunaWarmupTrials">Initial random trials:</label>
-                          <input type="number" id="optunaWarmupTrials" min="0" max="50000" value="20" style="width: 80px;" />
+                          <div class="checkbox-group">
+                            <input type="checkbox" id="dispatcherBatchResultProcessing" checked />
+                            <label for="dispatcherBatchResultProcessing">Dispatcher batch result processing</label>
+                          </div>
+                        </div>
+
+                        <div class="form-group" style="align-items: center; gap: 8px;">
+                          <div class="checkbox-group" style="margin: 0; display: flex; align-items: center; gap: 6px;">
+                            <input type="checkbox" id="softDuplicateCycleLimitEnabled" checked />
+                            <label for="softDuplicateCycleLimitEnabled">Soft duplicate-cycle limit</label>
+                          </div>
+                          <input
+                            type="number"
+                            id="dispatcherDuplicateCycleLimit"
+                            min="1"
+                            max="1000"
+                            step="1"
+                            value="18"
+                            style="width: 80px;"
+                          />
                         </div>
 
                         <div id="nsgaSettings" class="nsga-settings" style="display: none;">
@@ -531,13 +571,6 @@
                           <div class="form-group">
                             <label for="nsgaSwappingProb">Swapping Probability:</label>
                             <input type="number" id="nsgaSwappingProb" min="0" max="1" step="0.05" value="0.5" style="width: 80px;" />
-                          </div>
-                        </div>
-
-                        <div class="form-group">
-                          <div class="checkbox-group">
-                            <input type="checkbox" id="optunaSaveStudy" />
-                            <label for="optunaSaveStudy">Save study database (optuna_study.db)</label>
                           </div>
                         </div>
                       </div>
@@ -638,10 +671,10 @@
                       <div class="constraint-row">
                         <label class="constraint-label">
                           <input type="checkbox" class="constraint-checkbox" data-constraint-metric="consistency_score" />
-                          Consistency %
+                          Consistency
                         </label>
                         <span class="constraint-operator">&ge;</span>
-                        <input type="number" class="constraint-input" data-constraint-threshold="consistency_score" value="0.0" step="0.1" />
+                        <input type="number" class="constraint-input" data-constraint-threshold="consistency_score" value="0.0" step="0.01" />
                       </div>
                       <div class="constraint-row">
                         <label class="constraint-label">
@@ -713,6 +746,38 @@
                     <option value="profit_degradation" selected>Profit Degradation</option>
                     <option value="ft_romad">FT RoMaD</option>
                   </select>
+                </div>
+
+                <div class="form-group">
+                  <label for="ftThresholdPct">FT Threshold (%):</label>
+                  <input type="number" id="ftThresholdPct" value="-5.0" min="-100000" max="100000" step="0.1" style="width: 100px;" />
+                </div>
+
+                <div id="ftRejectSettings" style="display: none;">
+                  <div class="form-group">
+                    <label for="ftRejectAction">On FT Reject:</label>
+                    <select id="ftRejectAction" style="width: 200px;">
+                      <option value="cooldown_reoptimize" selected>Cooldown + Re-optimize</option>
+                      <option value="no_trade">No Trade</option>
+                    </select>
+                  </div>
+
+                  <div id="ftRejectCooldownSettings" style="display: none;">
+                    <div class="form-group">
+                      <label for="ftRejectCooldownDays">Cooldown Step (days):</label>
+                      <input type="number" id="ftRejectCooldownDays" value="5" min="1" max="3650" style="width: 100px;" />
+                    </div>
+
+                    <div class="form-group">
+                      <label for="ftRejectMaxAttempts">Max Retry Attempts:</label>
+                      <input type="number" id="ftRejectMaxAttempts" value="2" min="0" max="100" style="width: 100px;" />
+                    </div>
+
+                    <div class="form-group">
+                      <label for="ftRejectMinRemainingOosDays">Min Remaining OOS (days):</label>
+                      <input type="number" id="ftRejectMinRemainingOosDays" value="10" min="1" max="3650" style="width: 100px;" />
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -820,6 +885,22 @@
 
                   <div id="adaptiveWFSettings" style="display: none; margin-top: 12px;">
                     <div class="form-group" style="margin-bottom: 10px;">
+                      <label style="min-width: 170px; display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="wfCooldownEnabled" onchange="toggleAdaptiveWFSettings()" />
+                        <span>Cooldown (days):</span>
+                      </label>
+                      <input
+                        type="number"
+                        id="wfCooldownDays"
+                        value="15"
+                        min="1"
+                        max="365"
+                        step="1"
+                        style="width: 100px;"
+                        disabled
+                      />
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
                       <label style="min-width: 170px;">Max OOS (days):</label>
                       <input type="number" id="wfMaxOosPeriodDays" value="90" min="30" max="365" style="width: 100px;" />
                     </div>
@@ -844,16 +925,6 @@
                       <input type="number" id="wfInactivityMultiplier" value="5.0" min="2.0" max="20.0" step="0.1" style="width: 100px;" />
                     </div>
                   </div>
-                </div>
-
-                <div style="background-color: #e8f4f8; padding: 15px; border-radius: 5px;">
-                  <strong>Behavior (Phase 2):</strong>
-                  <ul style="margin-top: 10px; font-size: 13px; color: #555; padding-left: 18px;">
-                    <li>Rolling windows (shift forward by OOS period)</li>
-                    <li>Calendar-based sizing (days)</li>
-                    <li>Single best parameter set per window</li>
-                    <li>Stitched OOS equity curve + annualized WFE</li>
-                  </ul>
                 </div>
               </div>
             </div>
@@ -903,10 +974,20 @@
 
               <div id="queueItemsList" class="queue-items-list" style="display: none;"></div>
 
-              <div class="queue-actions" style="margin-top: 12px; display: flex; gap: 8px;">
+              <div class="queue-actions" style="margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap;">
                 <button type="button" id="addToQueueBtn" class="secondary">+ Add to Queue</button>
                 <button type="button" id="loadQueueBtn" class="secondary">Load Queue</button>
                 <button type="button" id="clearQueueBtn" class="secondary" style="display: none;">Clear</button>
+                <button type="button" id="batchQueueBtn" class="secondary" style="display: none;">Batch</button>
+                <button type="button" id="moveQueueBtn" class="secondary" style="display: none;">Move</button>
+              </div>
+
+              <div id="queueSecondaryRow" class="queue-secondary-row" hidden>
+                <label id="queueAutoCreateSetLabel" class="queue-auto-set-option" hidden>
+                  <input type="checkbox" id="queueAutoCreateSet" />
+                  <span>Auto-create Set</span>
+                </label>
+                <span id="queueMoveHint" class="queue-move-hint" hidden>Move mode: Enter save, Esc cancel</span>
               </div>
             </div>
 

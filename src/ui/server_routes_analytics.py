@@ -2,7 +2,7 @@ import json
 import math
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -11,12 +11,18 @@ from flask import jsonify, render_template, request
 
 from core.analytics import aggregate_equity_curves
 from core.storage import (
+    backfill_stitched_oos_metadata,
     create_study_set,
     delete_study_set,
+    delete_study_sets,
+    get_or_build_all_studies_analytics_cache,
+    get_or_build_study_set_analytics_cache,
     get_active_db_name,
     get_db_connection,
-    list_study_sets,
+    list_study_sets_with_analytics_cache,
+    load_study_analytics_equity,
     reorder_study_sets,
+    update_study_sets_color,
     update_study_set,
 )
 
@@ -25,7 +31,11 @@ def register_routes(app):
     analytics_equity_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, Dict[str, Any]]] = {}
     analytics_equity_cache_ttl_seconds = 10.0
     analytics_equity_cache_max_entries = 256
-    analytics_equity_max_study_ids = 500
+    # Batch analytics requests always include the synthetic "all studies" group.
+    # The equity loader already reads rows in chunks, so this guard exists to
+    # reject pathological payload sizes without blocking the intended working
+    # Analytics range.
+    analytics_equity_max_study_ids = 5000
     analytics_equity_chunk_size = 200
 
     def _parse_date_flexible(date_str: Any) -> Optional[datetime]:
@@ -39,6 +49,20 @@ def register_routes(app):
             except ValueError:
                 continue
         return None
+
+    def _parse_timestamp_iso(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _period_days(start_date: Any, end_date: Any) -> Optional[int]:
         start = _parse_date_flexible(start_date)
@@ -113,6 +137,29 @@ def register_routes(app):
         if isinstance(parsed, list):
             return parsed
         return []
+
+    def _extract_post_process_settings(config_payload: Dict[str, Any]) -> Dict[str, Any]:
+        post_process_payload = _parse_json_dict(config_payload.get("postProcess"))
+        stress_payload = _parse_json_dict(post_process_payload.get("stressTest"))
+        return {
+            "ft_enabled": bool(post_process_payload.get("enabled")),
+            "ft_period_days": _safe_int(post_process_payload.get("ftPeriodDays")),
+            "ft_top_k": _safe_int(post_process_payload.get("topK")),
+            "ft_sort_metric": str(post_process_payload.get("sortMetric") or "").strip() or None,
+            "ft_threshold_pct": _safe_float(post_process_payload.get("ftThresholdPct")),
+            "ft_reject_action": str(post_process_payload.get("ftRejectAction") or "").strip() or None,
+            "ft_reject_cooldown_days": _safe_int(post_process_payload.get("ftRejectCooldownDays")),
+            "ft_reject_max_attempts": _safe_int(post_process_payload.get("ftRejectMaxAttempts")),
+            "ft_reject_min_remaining_oos_days": _safe_int(
+                post_process_payload.get("ftRejectMinRemainingOosDays")
+            ),
+            "dsr_enabled": bool(post_process_payload.get("dsrEnabled")),
+            "dsr_top_k": _safe_int(post_process_payload.get("dsrTopK")),
+            "st_enabled": bool(stress_payload.get("enabled")),
+            "st_top_k": _safe_int(stress_payload.get("topK")),
+            "st_failure_threshold": _safe_float(stress_payload.get("failureThreshold")),
+            "st_sort_metric": str(stress_payload.get("sortMetric") or "").strip() or None,
+        }
 
     def _timeframe_to_minutes(value: Any) -> float:
         token = str(value or "").strip().lower()
@@ -241,6 +288,24 @@ def register_routes(app):
             values.append(value)
         return values
 
+    def _parse_set_ids_payload(payload: Any) -> List[int]:
+        if not isinstance(payload, list):
+            raise ValueError("set_ids must be an array.")
+        values: List[int] = []
+        seen = set()
+        for raw in payload:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("set_ids must contain integer set IDs.") from exc
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        if not values:
+            raise ValueError("set_ids must contain at least one set ID.")
+        return values
+
     def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:
         start = 0
         total = len(values)
@@ -333,7 +398,7 @@ def register_routes(app):
 
     @app.get("/api/analytics/sets")
     def analytics_sets_list() -> object:
-        return jsonify({"sets": list_study_sets()})
+        return jsonify(list_study_sets_with_analytics_cache())
 
     @app.post("/api/analytics/sets")
     def analytics_sets_create() -> object:
@@ -345,7 +410,7 @@ def register_routes(app):
         study_ids_raw = payload.get("study_ids")
         try:
             study_ids = _parse_study_ids_payload(study_ids_raw)
-            created = create_study_set(name, study_ids)
+            created = create_study_set(name, study_ids, color_token=payload.get("color_token"))
         except ValueError as exc:
             return _json_error(str(exc), HTTPStatus.BAD_REQUEST)
 
@@ -367,6 +432,8 @@ def register_routes(app):
                 return _json_error(str(exc), HTTPStatus.BAD_REQUEST)
         if "sort_order" in payload:
             kwargs["sort_order"] = payload.get("sort_order")
+        if "color_token" in payload:
+            kwargs["color_token"] = payload.get("color_token")
 
         if not kwargs:
             return _json_error("No fields provided to update.", HTTPStatus.BAD_REQUEST)
@@ -385,6 +452,52 @@ def register_routes(app):
         if not delete_study_set(set_id):
             return _json_error("Study set not found.", HTTPStatus.NOT_FOUND)
         return jsonify({"ok": True})
+
+    @app.get("/api/analytics/sets/<int:set_id>/equity")
+    def analytics_set_equity(set_id: int) -> object:
+        try:
+            payload = get_or_build_study_set_analytics_cache(set_id)
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "not found" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+        return jsonify(payload)
+
+    @app.get("/api/analytics/all-studies/equity")
+    def analytics_all_studies_equity() -> object:
+        return jsonify(get_or_build_all_studies_analytics_cache())
+
+    @app.put("/api/analytics/sets/bulk-color")
+    def analytics_sets_bulk_color() -> object:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _json_error("Expected JSON payload.", HTTPStatus.BAD_REQUEST)
+
+        try:
+            set_ids = _parse_set_ids_payload(payload.get("set_ids"))
+            update_study_sets_color(set_ids, payload.get("color_token"))
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "unknown study set ids" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+
+        return jsonify({"ok": True})
+
+    @app.post("/api/analytics/sets/bulk-delete")
+    def analytics_sets_bulk_delete() -> object:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _json_error("Expected JSON payload.", HTTPStatus.BAD_REQUEST)
+
+        try:
+            set_ids = _parse_set_ids_payload(payload.get("set_ids"))
+            deleted = delete_study_sets(set_ids)
+        except ValueError as exc:
+            message = str(exc)
+            status = HTTPStatus.NOT_FOUND if "unknown study set ids" in message.lower() else HTTPStatus.BAD_REQUEST
+            return _json_error(message, status)
+
+        return jsonify({"ok": True, "deleted": deleted})
 
     @app.put("/api/analytics/sets/reorder")
     def analytics_sets_reorder() -> object:
@@ -468,6 +581,7 @@ def register_routes(app):
                 group_result["missing_study_ids"] = []
             else:
                 group_result = _compute_equity_for_study_ids(study_ids)
+            group_result.pop("return_profile", None)
             results.append(
                 {
                     "group_id": group_id,
@@ -476,6 +590,28 @@ def register_routes(app):
             )
 
         return jsonify({"results": results})
+
+    @app.get("/api/analytics/studies/<string:study_id>/equity")
+    def analytics_study_equity(study_id: str) -> object:
+        payload = load_study_analytics_equity(study_id)
+        if payload is None:
+            return _json_error("Study not found.", HTTPStatus.NOT_FOUND)
+
+        if str(payload.get("optimization_mode") or "").strip().lower() != "wfa":
+            return _json_error(
+                "Analytics study equity is available only for WFA studies.",
+                HTTPStatus.BAD_REQUEST,
+            )
+
+        return jsonify(
+            {
+                "study_id": payload.get("study_id"),
+                "curve": payload.get("curve") or [],
+                "timestamps": payload.get("timestamps") or [],
+                "has_equity_curve": bool(payload.get("has_equity_curve")),
+                "point_count": int(payload.get("point_count") or 0),
+            }
+        )
 
     @app.get("/api/analytics/studies/<string:study_id>/window-boundaries")
     def analytics_study_window_boundaries(study_id: str) -> object:
@@ -553,6 +689,8 @@ def register_routes(app):
     @app.get("/api/analytics/summary")
     def analytics_summary() -> object:
         with get_db_connection() as conn:
+            backfill_stitched_oos_metadata(conn=conn)
+            conn.commit()
             total_studies_row = conn.execute("SELECT COUNT(*) AS count FROM studies").fetchone()
             total_studies = int(total_studies_row["count"] if total_studies_row else 0)
 
@@ -563,6 +701,7 @@ def register_routes(app):
                     study_name,
                     strategy_id,
                     strategy_version,
+                    optimization_mode,
                     created_at,
                     completed_at,
                     CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch,
@@ -571,6 +710,8 @@ def register_routes(app):
                     csv_file_name,
                     adaptive_mode,
                     is_period_days,
+                    cooldown_enabled,
+                    cooldown_days,
                     max_oos_period_days,
                     min_oos_trades,
                     check_interval_trades,
@@ -598,13 +739,16 @@ def register_routes(app):
                     stitched_oos_total_trades,
                     stitched_oos_winning_trades,
                     best_value,
+                    stitched_oos_consistency_full,
+                    stitched_oos_consistency_recent,
                     profitable_windows,
                     total_windows,
                     stitched_oos_win_rate,
                     median_window_profit,
                     median_window_wr,
-                    stitched_oos_equity_curve,
-                    stitched_oos_timestamps_json
+                    stitched_oos_start_ts,
+                    stitched_oos_end_ts,
+                    stitched_oos_point_count
                 FROM studies
                 WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
                 """
@@ -695,19 +839,55 @@ def register_routes(app):
             else:
                 profitable_windows_pct = 0.0
 
-            equity_curve = _parse_json_array(row_dict.get("stitched_oos_equity_curve"))
-            equity_timestamps = _parse_json_array(row_dict.get("stitched_oos_timestamps_json"))
-            has_equity_curve = len(equity_curve) > 0 and len(equity_curve) == len(equity_timestamps)
-            if not has_equity_curve:
-                equity_curve = []
-                equity_timestamps = []
+            equity_start_ts = str(row_dict.get("stitched_oos_start_ts") or "").strip()
+            equity_end_ts = str(row_dict.get("stitched_oos_end_ts") or "").strip()
+            equity_point_count = _safe_int(row_dict.get("stitched_oos_point_count"))
+            if equity_point_count is None:
+                equity_point_count = 0
+            has_equity_curve = bool(equity_point_count > 0 and equity_start_ts and equity_end_ts)
+            equity_span_days_exact = None
+            start_dt = _parse_timestamp_iso(equity_start_ts)
+            end_dt = _parse_timestamp_iso(equity_end_ts)
+            if start_dt is not None and end_dt is not None:
+                equity_span_days_exact = (end_dt - start_dt).total_seconds() / 86400.0
 
+            sampler_config = _parse_json_dict(optuna_config.get("sampler_config"))
             sampler_type = (
-                _parse_json_dict(optuna_config.get("sampler_config")).get("sampler_type")
+                sampler_config.get("sampler_type")
                 or optuna_config.get("sampler_type")
                 or optuna_config.get("sampler")
                 or row_dict.get("sampler_type")
             )
+            warmup_trials = _safe_int(optuna_config.get("warmup_trials"))
+            if warmup_trials is None:
+                warmup_trials = _safe_int(config_payload.get("n_startup_trials"))
+            if warmup_trials is None:
+                warmup_trials = _safe_int(sampler_config.get("n_startup_trials"))
+
+            coverage_mode = _safe_bool(optuna_config.get("coverage_mode"))
+            if coverage_mode is None:
+                coverage_mode = _safe_bool(config_payload.get("coverage_mode"))
+            dispatcher_batch_result_processing = _safe_bool(
+                optuna_config.get("dispatcher_batch_result_processing")
+            )
+            if dispatcher_batch_result_processing is None:
+                dispatcher_batch_result_processing = _safe_bool(
+                    config_payload.get("dispatcher_batch_result_processing")
+                )
+            dispatcher_soft_duplicate_cycle_limit_enabled = _safe_bool(
+                optuna_config.get("dispatcher_soft_duplicate_cycle_limit_enabled")
+            )
+            if dispatcher_soft_duplicate_cycle_limit_enabled is None:
+                dispatcher_soft_duplicate_cycle_limit_enabled = _safe_bool(
+                    config_payload.get("dispatcher_soft_duplicate_cycle_limit_enabled")
+                )
+            dispatcher_duplicate_cycle_limit = _safe_int(
+                optuna_config.get("dispatcher_duplicate_cycle_limit")
+            )
+            if dispatcher_duplicate_cycle_limit is None:
+                dispatcher_duplicate_cycle_limit = _safe_int(
+                    config_payload.get("dispatcher_duplicate_cycle_limit")
+                )
             workers_value = _safe_int(config_payload.get("worker_processes"))
             if workers_value is None:
                 workers_value = _safe_int(config_payload.get("workerProcesses"))
@@ -731,6 +911,7 @@ def register_routes(app):
                 {
                     "study_id": row_dict.get("study_id"),
                     "study_name": row_dict.get("study_name"),
+                    "optimization_mode": row_dict.get("optimization_mode"),
                     "strategy": strategy_label,
                     "strategy_id": row_dict.get("strategy_id"),
                     "strategy_version": row_dict.get("strategy_version"),
@@ -749,14 +930,22 @@ def register_routes(app):
                     "total_trades": total_trades,
                     "winning_trades": winning_trades,
                     "wfe_pct": _safe_float(row_dict.get("best_value")),
+                    "consistency_full": _safe_float(row_dict.get("stitched_oos_consistency_full")),
+                    "consistency_recent": _safe_float(row_dict.get("stitched_oos_consistency_recent")),
                     "total_windows": total_windows,
                     "profitable_windows": profitable_windows,
                     "profitable_windows_pct": profitable_windows_pct,
                     "median_window_profit": _safe_float(row_dict.get("median_window_profit")),
                     "median_window_wr": _safe_float(row_dict.get("median_window_wr")),
                     "has_equity_curve": has_equity_curve,
-                    "equity_curve": equity_curve,
-                    "equity_timestamps": equity_timestamps,
+                    "equity_start_ts": equity_start_ts or None,
+                    "equity_end_ts": equity_end_ts or None,
+                    "equity_point_count": equity_point_count,
+                    "oos_span_days_exact": (
+                        round(equity_span_days_exact, 6)
+                        if equity_span_days_exact is not None
+                        else None
+                    ),
                     "optuna_settings": {
                         "objectives": list(config_objectives or row_objectives or []),
                         "primary_objective": (
@@ -786,6 +975,11 @@ def register_routes(app):
                         "sampler_type": sampler_type,
                         "enable_pruning": _safe_bool(optuna_config.get("enable_pruning")),
                         "pruner": optuna_config.get("pruner"),
+                        "warmup_trials": warmup_trials,
+                        "coverage_mode": coverage_mode,
+                        "dispatcher_batch_result_processing": dispatcher_batch_result_processing,
+                        "dispatcher_soft_duplicate_cycle_limit_enabled": dispatcher_soft_duplicate_cycle_limit_enabled,
+                        "dispatcher_duplicate_cycle_limit": dispatcher_duplicate_cycle_limit,
                         "workers": workers_value,
                         "sanitize_enabled": (
                             _safe_bool(optuna_config.get("sanitize_enabled"))
@@ -818,6 +1012,16 @@ def register_routes(app):
                         ),
                         "oos_period_days": oos_period_days,
                         "adaptive_mode": adaptive_mode_bool,
+                        "cooldown_enabled": (
+                            _safe_bool(row_dict.get("cooldown_enabled"))
+                            if _safe_bool(row_dict.get("cooldown_enabled")) is not None
+                            else _safe_bool(wfa_config.get("cooldown_enabled"))
+                        ),
+                        "cooldown_days": (
+                            _safe_int(row_dict.get("cooldown_days"))
+                            if _safe_int(row_dict.get("cooldown_days")) is not None
+                            else _safe_int(wfa_config.get("cooldown_days"))
+                        ),
                         "max_oos_period_days": (
                             _safe_int(row_dict.get("max_oos_period_days"))
                             if _safe_int(row_dict.get("max_oos_period_days")) is not None
@@ -850,6 +1054,7 @@ def register_routes(app):
                         ),
                         "run_time_seconds": run_time_seconds,
                     },
+                    "post_process_settings": _extract_post_process_settings(config_payload),
                 }
             )
 

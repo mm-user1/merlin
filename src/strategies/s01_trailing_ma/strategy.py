@@ -123,7 +123,16 @@ class S01TrailingMA(BaseStrategy):
         if p.trailShortLength > 0:
             trail_ma_short = trail_ma_short * (1 + p.trailShortOffset / 100.0)
 
-        times = df.index
+        times = list(df.index)
+        close_values = close.to_numpy(copy=False)
+        high_values = high.to_numpy(copy=False)
+        low_values = low.to_numpy(copy=False)
+        ma_values = ma_series.to_numpy(copy=False)
+        atr_values = atr_series.to_numpy(copy=False)
+        lowest_long_values = lowest_long.to_numpy(copy=False)
+        highest_short_values = highest_short.to_numpy(copy=False)
+        trail_ma_long_values = trail_ma_long.to_numpy(copy=False)
+        trail_ma_short_values = trail_ma_short.to_numpy(copy=False)
         if p.use_date_filter:
             time_in_range = np.zeros(len(times), dtype=bool)
             time_in_range[trade_start_idx:] = True
@@ -155,17 +164,19 @@ class S01TrailingMA(BaseStrategy):
         realized_curve: List[float] = []
         mtm_curve: List[float] = []
 
-        for i in range(len(df)):
+        last_bar_index = len(times) - 1
+
+        for i in range(len(times)):
             time = times[i]
-            c = close.iat[i]
-            h = high.iat[i]
-            l = low.iat[i]
-            ma_value = ma_series.iat[i]
-            atr_value = atr_series.iat[i]
-            lowest_value = lowest_long.iat[i]
-            highest_value = highest_short.iat[i]
-            trail_long_value = trail_ma_long.iat[i]
-            trail_short_value = trail_ma_short.iat[i]
+            c = close_values[i]
+            h = high_values[i]
+            l = low_values[i]
+            ma_value = ma_values[i]
+            atr_value = atr_values[i]
+            lowest_value = lowest_long_values[i]
+            highest_value = highest_short_values[i]
+            trail_long_value = trail_ma_long_values[i]
+            trail_short_value = trail_ma_short_values[i]
 
             if not np.isnan(ma_value):
                 if c > ma_value:
@@ -356,7 +367,7 @@ class S01TrailingMA(BaseStrategy):
                             entry_commission = entry_price * position_size * p.commissionRate
                             realized_equity -= entry_commission
 
-            if i == len(df) - 1 and position != 0:
+            if i == last_bar_index and position != 0:
                 entry_time = entry_time_long if position > 0 else entry_time_short
                 trade, gross_pnl, exit_commission, _ = build_forced_close_trade(
                     position=position,

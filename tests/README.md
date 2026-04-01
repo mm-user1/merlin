@@ -42,6 +42,8 @@ pytest tests/ --cov=src --cov-report=html
 | `test_multiprocess_score.py` | Multi-process scoring tests |
 | `test_optuna_sanitization.py` | Optuna sanitization tests |
 | `test_score_normalization.py` | Score normalization tests |
+| `test_coverage_startup.py` | Initial Search Coverage mode tests |
+| `test_strategy_loop_regression.py` | Strategy loop performance regression tests |
 
 ## Test Categories
 

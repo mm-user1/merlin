@@ -105,12 +105,17 @@ function setSettingRowVisible(rowId, visible) {
 }
 
 function setAdaptiveWfaRowsVisible(visible) {
+  setSettingRowVisible('wfa-cooldown-row', visible);
   setSettingRowVisible('wfa-max-oos-row', visible);
   setSettingRowVisible('wfa-min-trades-row', visible);
   setSettingRowVisible('wfa-check-interval-row', visible);
   setSettingRowVisible('wfa-cusum-row', visible);
   setSettingRowVisible('wfa-dd-mult-row', visible);
   setSettingRowVisible('wfa-inactivity-row', visible);
+}
+
+function setAdaptiveCooldownRowVisible(visible) {
+  setSettingRowVisible('wfa-cooldown-row', visible);
 }
 
 function renderOptunaTable(results) {
@@ -1171,6 +1176,104 @@ function displaySummaryCards(stitchedOOS) {
   container.style.display = 'grid';
 }
 
+function formatPercentWithOptionalSign(value, digits = 1) {
+  const number = getFiniteNumber(value);
+  if (number === null) return '-';
+  const sign = number > 0 ? '+' : (number < 0 ? '-' : '');
+  return `${sign}${Math.abs(number).toFixed(digits)}%`;
+}
+
+function formatPostProcessActionLabel(action) {
+  const normalized = String(action || '').trim().toLowerCase();
+  if (normalized === 'cooldown_reoptimize') return 'CD + Re-opt';
+  if (normalized === 'no_trade') return 'No Trade';
+  return formatTitleFromKey(normalized) || '-';
+}
+
+function formatCompactPostProcessSortMetricLabel(metric) {
+  const normalized = String(metric || '').trim().toLowerCase();
+  const compactLabels = {
+    profit_degradation: 'Profit Deg',
+    profit_retention: 'Profit Ret',
+    romad_retention: 'RoMaD Ret'
+  };
+  return compactLabels[normalized] || formatSortMetricLabel(normalized) || '-';
+}
+
+function renderSidebarSettingsList(containerId, rows) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  (rows || []).forEach((row) => {
+    const item = document.createElement('div');
+    item.className = 'setting-item';
+
+    const key = document.createElement('span');
+    key.className = 'key';
+    key.textContent = String(row.key || '');
+
+    const val = document.createElement('span');
+    val.className = 'val';
+    val.textContent = String(row.val ?? '-');
+
+    item.appendChild(key);
+    item.appendChild(val);
+    container.appendChild(item);
+  });
+}
+
+function buildPostProcessSettingsRows(postProcessConfig, isWfaMode) {
+  const config = postProcessConfig && typeof postProcessConfig === 'object'
+    ? postProcessConfig
+    : {};
+  const rows = [];
+  const stressConfig = config.stressTest && typeof config.stressTest === 'object'
+    ? config.stressTest
+    : {};
+
+  if (config.enabled) {
+    const ftParts = [
+      `${config.ftPeriodDays ?? '-'}d`,
+      `Top ${config.topK ?? '-'}`,
+      `Sort: ${formatCompactPostProcessSortMetricLabel(config.sortMetric)}`,
+      `Threshold: ${formatPercentWithOptionalSign(config.ftThresholdPct, 1)}`,
+    ];
+    if (isWfaMode) {
+      const rejectAction = String(config.ftRejectAction || '').trim().toLowerCase();
+      ftParts.push(`Policy: ${formatPostProcessActionLabel(rejectAction)}`);
+      if (rejectAction === 'cooldown_reoptimize') {
+        ftParts.push(`CD ${config.ftRejectCooldownDays ?? '-'}d`);
+        ftParts.push(`Retry ${config.ftRejectMaxAttempts ?? '-'}`);
+        ftParts.push(`Min OOS ${config.ftRejectMinRemainingOosDays ?? '-'}d`);
+      }
+    }
+    rows.push({
+      key: 'Forward Test',
+      val: ftParts.join(', '),
+    });
+  }
+
+  if (config.dsrEnabled) {
+    rows.push({
+      key: 'DSR',
+      val: `Top ${config.dsrTopK ?? '-'}`,
+    });
+  }
+
+  if (stressConfig.enabled) {
+    const failureThresholdRaw = getFiniteNumber(stressConfig.failureThreshold);
+    const failureThresholdPct = failureThresholdRaw === null
+      ? '-'
+      : `${((failureThresholdRaw > 1 ? failureThresholdRaw : failureThresholdRaw * 100)).toFixed(1)}%`;
+    rows.push({
+      key: 'Stress Test',
+      val: `Top ${stressConfig.topK ?? '-'}, Failure: ${failureThresholdPct}, Sort: ${formatCompactPostProcessSortMetricLabel(stressConfig.sortMetric)}`,
+    });
+  }
+
+  return rows;
+}
+
 function updateSidebarSettings() {
   setText('optuna-objectives', formatObjectivesList(ResultsState.optuna.objectives || []));
   setText('optuna-primary', ResultsState.optuna.primaryObjective ? formatObjectiveLabel(ResultsState.optuna.primaryObjective) : '-');
@@ -1188,6 +1291,16 @@ function updateSidebarSettings() {
   setText('optuna-budget', budgetLabel);
   setText('optuna-sampler', (ResultsState.optuna.sampler || '').toUpperCase() || '-');
   setText('optuna-pruner', ResultsState.optuna.pruner ? ResultsState.optuna.pruner : '-');
+  const warmupTrials = ResultsState.optuna.warmupTrials;
+  const coverageMode = Boolean(ResultsState.optuna.coverageMode);
+  if (warmupTrials !== null && warmupTrials !== undefined) {
+    const initialValue = Number.isFinite(Number(warmupTrials))
+      ? String(Math.max(0, Math.round(Number(warmupTrials))))
+      : String(warmupTrials);
+    setText('optuna-initial', coverageMode ? `${initialValue} (coverage)` : initialValue);
+  } else {
+    setText('optuna-initial', '-');
+  }
   const sanitizeEnabled = ResultsState.optuna.sanitizeEnabled;
   const sanitizeThresholdRaw = ResultsState.optuna.sanitizeTradesThreshold;
   const sanitizeThreshold = Number.isFinite(Number(sanitizeThresholdRaw))
@@ -1224,6 +1337,10 @@ function updateSidebarSettings() {
   const timeLabel = ResultsState.mode === 'wfa' ? '-' : (formatDuration(optimizationTime) || '-');
   setText('optuna-time', timeLabel);
 
+  const postProcessRows = buildPostProcessSettingsRows(ResultsState.postProcess, ResultsState.mode === 'wfa');
+  renderSidebarSettingsList('post-process-settings-list', postProcessRows);
+  setElementVisible('post-process-settings-section', postProcessRows.length > 0);
+
   if (ResultsState.mode === 'wfa') {
     setElementVisible('wfa-progress-section', true);
     setElementVisible('wfa-settings-section', true);
@@ -1233,8 +1350,20 @@ function updateSidebarSettings() {
     const adaptiveModeLabel = adaptiveModeRaw === null || adaptiveModeRaw === undefined
       ? '-'
       : (Boolean(adaptiveModeRaw) ? 'On' : 'Off');
+    const cooldownEnabledRaw = ResultsState.wfa.cooldownEnabled ?? ResultsState.wfa.cooldown_enabled;
+    const cooldownEnabled = cooldownEnabledRaw === null || cooldownEnabledRaw === undefined
+      ? null
+      : Boolean(cooldownEnabledRaw);
+    const cooldownDays = ResultsState.wfa.cooldownDays ?? ResultsState.wfa.cooldown_days;
     setText('wfa-adaptive-mode', adaptiveModeLabel);
     setAdaptiveWfaRowsVisible(Boolean(adaptiveModeRaw));
+    setAdaptiveCooldownRowVisible(Boolean(adaptiveModeRaw) && Boolean(cooldownEnabled));
+    setText(
+      'wfa-cooldown-days',
+      cooldownEnabled
+        ? `${Math.max(1, Math.round(Number(cooldownDays || 15)))}d`
+        : '-'
+    );
     setText('wfa-max-oos-days', ResultsState.wfa.maxOosPeriodDays ?? ResultsState.wfa.max_oos_period_days ?? '-');
     setText('wfa-min-trades', ResultsState.wfa.minOosTrades ?? ResultsState.wfa.min_oos_trades ?? '-');
     setText('wfa-check-interval', ResultsState.wfa.checkIntervalTrades ?? ResultsState.wfa.check_interval_trades ?? '-');
@@ -1264,6 +1393,7 @@ function updateSidebarSettings() {
     setElementVisible('wfa-progress-section', false);
     setElementVisible('wfa-settings-section', false);
     setAdaptiveWfaRowsVisible(true);
+    setAdaptiveCooldownRowVisible(true);
   }
 
   setText('strategy-name', ResultsState.strategy.name || ResultsState.strategyId || '-');

@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import pandas as pd
 
 from .backtest_engine import prepare_dataset_with_warmup
-from .post_process import calculate_comparison_metrics
+from .post_process import calculate_comparison_metrics, filter_ft_passed_results
 from . import metrics
 
 
@@ -48,6 +48,7 @@ def select_oos_source_candidates(
     dsr_results: Sequence[Any],
     ft_results: Sequence[Any],
     st_results: Sequence[Any],
+    ft_ran: bool = False,
     st_ran: bool = False,
 ) -> Tuple[str, List[Dict[str, int]]]:
     """
@@ -60,8 +61,9 @@ def select_oos_source_candidates(
     if st_ran:
         filtered_st = [item for item in (st_results or []) if _is_stress_ok(item)]
         return "stress_test", _build_source_candidates(filtered_st, "st_rank")
-    if ft_results:
-        return "forward_test", _build_source_candidates(ft_results, "ft_rank")
+    if ft_ran or ft_results:
+        filtered_ft = filter_ft_passed_results(ft_results or [])
+        return "forward_test", _build_source_candidates(filtered_ft, "ft_rank")
     if dsr_results:
         return "dsr", _build_source_candidates(dsr_results, "dsr_rank")
     return "optuna", _build_source_candidates(optuna_results or [], None)

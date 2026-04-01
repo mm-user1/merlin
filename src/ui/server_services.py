@@ -799,7 +799,7 @@ DEFAULT_OPTIMIZER_SCORE_CONFIG: Dict[str, Any] = {
         "pf": {"min": 0.0, "max": 5.0},
         "ulcer": {"min": 0.0, "max": 20.0},
         "sqn": {"min": -2.0, "max": 7.0},
-        "consistency": {"min": 0.0, "max": 100.0},
+        "consistency": {"min": -1.0, "max": 1.0},
     },
 }
 
@@ -1451,6 +1451,7 @@ def _build_optimization_config(
     def _sanitize_score_config(raw_config: Any) -> Dict[str, Any]:
         source = raw_config if isinstance(raw_config, dict) else {}
         normalized = json.loads(json.dumps(DEFAULT_OPTIMIZER_SCORE_CONFIG))
+        legacy_consistency_bounds = {"min": 0.0, "max": 100.0}
 
         filter_value = source.get("filter_enabled")
         normalized["filter_enabled"] = _parse_bool(
@@ -1530,6 +1531,13 @@ def _build_optimization_config(
                     bounds[metric_key] = normalized["metric_bounds"].get(
                         metric_key, {"min": 0.0, "max": 100.0}
                     )
+            consistency_bounds = bounds.get("consistency")
+            if (
+                consistency_bounds
+                and math.isclose(consistency_bounds.get("min", 0.0), legacy_consistency_bounds["min"])
+                and math.isclose(consistency_bounds.get("max", 0.0), legacy_consistency_bounds["max"])
+            ):
+                bounds["consistency"] = dict(normalized["metric_bounds"]["consistency"])
             normalized["metric_bounds"] = bounds
 
         return normalized
@@ -1638,6 +1646,20 @@ def _build_optimization_config(
     score_config_payload = payload.get("score_config")
     score_config = _sanitize_score_config(score_config_payload)
     detailed_log = _parse_bool(payload.get("detailed_log", False), False)
+    trials_log = _parse_bool(payload.get("trials_log", False), False)
+    dispatcher_batch_result_processing = _parse_bool(
+        payload.get("dispatcher_batch_result_processing", True),
+        True,
+    )
+    dispatcher_soft_duplicate_cycle_limit_enabled = _parse_bool(
+        payload.get("dispatcher_soft_duplicate_cycle_limit_enabled", True),
+        True,
+    )
+    try:
+        dispatcher_duplicate_cycle_limit = int(payload.get("dispatcher_duplicate_cycle_limit", 18))
+    except (TypeError, ValueError):
+        dispatcher_duplicate_cycle_limit = 18
+    dispatcher_duplicate_cycle_limit = max(1, min(1000, dispatcher_duplicate_cycle_limit))
 
     optimization_mode_raw = payload.get("optimization_mode", "optuna")
     optimization_mode = str(optimization_mode_raw).strip().lower() or "optuna"
@@ -1670,10 +1692,13 @@ def _build_optimization_config(
         n_startup_trials = int(payload.get("n_startup_trials", 20))
     except (TypeError, ValueError):
         n_startup_trials = 20
+    coverage_mode = _parse_bool(payload.get("coverage_mode", False), False)
 
     optuna_enable_pruning = _parse_bool(payload.get("optuna_enable_pruning", True), True)
     optuna_pruner = str(payload.get("optuna_pruner", "median")).strip().lower()
     optuna_save_study = _parse_bool(payload.get("optuna_save_study", False), False)
+    if optuna_save_study:
+        _get_logger().warning("Ignoring deprecated optuna_save_study request; raw Optuna persistence is disabled.")
 
     sanitize_enabled = _parse_bool(payload.get("sanitize_enabled", True), True)
     sanitize_trades_threshold_raw = payload.get("sanitize_trades_threshold", 0)
@@ -1737,13 +1762,16 @@ def _build_optimization_config(
         "mutation_prob": mutation_prob,
         "swapping_prob": swapping_prob,
         "n_startup_trials": n_startup_trials,
+        "coverage_mode": coverage_mode,
+        "dispatcher_batch_result_processing": dispatcher_batch_result_processing,
+        "dispatcher_soft_duplicate_cycle_limit_enabled": dispatcher_soft_duplicate_cycle_limit_enabled,
+        "dispatcher_duplicate_cycle_limit": dispatcher_duplicate_cycle_limit,
         "optuna_budget_mode": optuna_budget_mode,
         "optuna_n_trials": optuna_n_trials,
         "optuna_time_limit": optuna_time_limit,
         "optuna_convergence": optuna_convergence,
         "optuna_enable_pruning": optuna_enable_pruning,
         "optuna_pruner": optuna_pruner,
-        "optuna_save_study": optuna_save_study,
         "sanitize_enabled": sanitize_enabled,
         "sanitize_trades_threshold": sanitize_trades_threshold,
     }
@@ -1764,6 +1792,10 @@ def _build_optimization_config(
         min_profit_threshold=min_profit_threshold,
         score_config=score_config,
         detailed_log=detailed_log,
+        trials_log=trials_log,
+        dispatcher_batch_result_processing=dispatcher_batch_result_processing,
+        dispatcher_soft_duplicate_cycle_limit_enabled=dispatcher_soft_duplicate_cycle_limit_enabled,
+        dispatcher_duplicate_cycle_limit=dispatcher_duplicate_cycle_limit,
         optimization_mode=optimization_mode,
         objectives=objectives,
         primary_objective=primary_objective,
@@ -1776,6 +1808,7 @@ def _build_optimization_config(
         mutation_prob=mutation_prob if mutation_prob is not None else None,
         swapping_prob=swapping_prob if swapping_prob is not None else 0.5,
         n_startup_trials=n_startup_trials,
+        coverage_mode=coverage_mode,
     )
 
     if optimization_mode == "optuna":

@@ -7,10 +7,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.post_process import (
+    annotate_ft_threshold,
     calculate_comparison_metrics,
     calculate_ft_dates,
     calculate_period_dates,
     calculate_profit_degradation,
+    filter_ft_passed_results,
+    ft_result_meets_threshold,
+    normalize_ft_reject_action,
 )
 
 
@@ -96,3 +100,24 @@ def test_calculate_comparison_metrics():
     assert comparison["romad_change"] == -2.0
     assert comparison["sharpe_change"] == -0.5
     assert comparison["pf_change"] == pytest.approx(-0.6)
+
+
+def test_ft_threshold_helpers_support_signed_thresholds():
+    results = [
+        {"trial_number": 1, "ft_net_profit_pct": -4.9},
+        {"trial_number": 2, "ft_net_profit_pct": -5.1},
+        {"trial_number": 3, "ft_net_profit_pct": 6.0},
+    ]
+
+    assert ft_result_meets_threshold(results[0], -5.0) is True
+    assert ft_result_meets_threshold(results[1], -5.0) is False
+    assert ft_result_meets_threshold(results[2], 5.0) is True
+
+    annotated = annotate_ft_threshold(results, -5.0)
+    assert [item["ft_passes_threshold"] for item in annotated] == [True, False, True]
+    assert [item["trial_number"] for item in filter_ft_passed_results(annotated)] == [1, 3]
+
+
+def test_normalize_ft_reject_action_accepts_ui_labels():
+    assert normalize_ft_reject_action("Cooldown + Re-optimize") == "cooldown_reoptimize"
+    assert normalize_ft_reject_action("no_trade") == "no_trade"

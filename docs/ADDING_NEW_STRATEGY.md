@@ -94,6 +94,83 @@ Create parameter schema matching PineScript inputs:
 - Match PineScript input names exactly
 - Group related parameters for UI organization
 
+### Bool Parameters in Optimization
+
+Bool parameters are optimized as categorical values (`True` / `False`) in Start page.
+
+Use one of these patterns:
+
+1. **All bool combinations are valid**  
+Do nothing special. Define bool params normally in `parameters`.
+
+2. **Some bool combinations are invalid**  
+Declare rules in `config.json` under `optimization_rules.bool_groups`.
+
+Example (`at_least_one_true`):
+
+```json
+{
+  "optimization_rules": {
+    "bool_groups": [
+      {
+        "params": ["useCloseCount", "useTBands"],
+        "mode": "at_least_one_true"
+      }
+    ]
+  }
+}
+```
+
+What this does:
+- Invalid combo (`false`, `false`) is excluded from optimizer search space.
+- Valid combos remain available.
+- Coverage mode minimum/recommended trials are computed from the filtered search space.
+
+Important notes:
+- Rules apply to **optimized** bool params in the group.
+- If a bool in the group is fixed (not optimized), its fixed value is used when validating combinations.
+- If your strategy should allow all states (including all-off), do not add a bool group rule.
+
+### Parameter Dependencies (`depends_on`)
+
+Numeric (or other) parameters can declare a dependency on a bool parameter using `"depends_on"`. When the parent bool is `false`, the dependent parameter is **skipped entirely** during optimization — it is not suggested to Optuna and not stored in trial results. This reduces the effective search space and avoids wasting trials on meaningless values.
+
+Example from S03:
+
+```json
+{
+  "useCloseCount": {
+    "type": "bool",
+    "label": "Use Close Count",
+    "default": true,
+    "group": "Entry Filters",
+    "optimize": { "enabled": true }
+  },
+  "closeCountLong": {
+    "type": "int",
+    "label": "Close Count Long",
+    "default": 7,
+    "min": 1,
+    "max": 50,
+    "step": 1,
+    "group": "Entry Filters",
+    "depends_on": "useCloseCount",
+    "optimize": { "enabled": true, "min": 2, "max": 7, "step": 1 }
+  }
+}
+```
+
+What this does:
+- When `useCloseCount = true`: `closeCountLong` is suggested normally by Optuna.
+- When `useCloseCount = false`: `closeCountLong` is skipped (not suggested, not stored in trial params).
+- Reduces search space dimensionality for trials where the feature is disabled.
+- Works with both optimized and fixed parent bools.
+
+Rules:
+- `depends_on` must reference a **bool** parameter that exists in `parameters`.
+- Can be a single string (`"depends_on": "useTBands"`) or a list (`"depends_on": ["useBool1", "useBool2"]`). When a list is given, **all** parents must be `true` for the dependent to be active.
+- Combines naturally with `bool_groups`: the group rule controls which bool combos are valid, while `depends_on` controls which numeric params are active for each combo.
+
 ## Step 4: Create Params Dataclass
 
 ```python
@@ -238,6 +315,7 @@ in Optuna optimization results but are not exposed in single-backtest output
 by design.
 
 **Key patterns from existing strategies:**
+- Pre-extract NumPy arrays from DataFrame columns before the loop (e.g., `close_arr = df["Close"].to_numpy()`) for faster element access
 - Use `trade_start_idx` to skip warmup bars
 - Create `TradeRecord` for each closed trade
 - Track `equity_curve`, `balance_curve`, `timestamps`
@@ -314,6 +392,8 @@ See `src/strategies/s04_stochrsi/` for a complete working example:
 | Strategy not discovered | Ensure both config.json and strategy.py exist |
 | snake_case parameters | Use camelCase everywhere: `rsiLen` not `rsi_len` |
 | Missing trades | Check `trade_start_idx` usage, verify entry conditions |
+| Wasted trials from invalid bool states | Add `optimization_rules.bool_groups` (e.g., `at_least_one_true`) |
+| Numeric params explored when feature is off | Add `"depends_on": "boolParamName"` to skip dependent params when parent bool is false |
 
 ## Architecture Guarantees
 

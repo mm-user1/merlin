@@ -128,6 +128,10 @@
               <span class="val" id="optuna-pruner">-</span>
             </div>
             <div class="setting-item">
+              <span class="key">Initial</span>
+              <span class="val" id="optuna-initial">-</span>
+            </div>
+            <div class="setting-item">
               <span class="key">Sanitize Trades</span>
               <span class="val" id="optuna-sanitize">-</span>
             </div>
@@ -144,6 +148,16 @@
               <span class="val" id="optuna-time">-</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div class="collapsible open" id="post-process-settings-section" style="display: none;">
+        <div class="collapsible-header">
+          <span class="collapsible-icon">&#9660;</span>
+          <span class="collapsible-title">Post Process Settings</span>
+        </div>
+        <div class="collapsible-content">
+          <div class="settings-list" id="post-process-settings-list"></div>
         </div>
       </div>
 
@@ -165,6 +179,10 @@
             <div class="setting-item">
               <span class="key">Adaptive</span>
               <span class="val" id="wfa-adaptive-mode">-</span>
+            </div>
+            <div class="setting-item" id="wfa-cooldown-row">
+              <span class="key">Cooldown (days)</span>
+              <span class="val" id="wfa-cooldown-days">-</span>
             </div>
             <div class="setting-item" id="wfa-max-oos-row">
               <span class="key">Max OOS (days)</span>
@@ -228,6 +246,7 @@
         <div class="header-actions">
           <button class="btn btn-secondary" id="manualTestBtn">Manual Test</button>
           <button class="btn btn-secondary" id="downloadTradesBtn">Download Trades</button>
+          <button class="btn btn-secondary" id="exportLancelotBtn">Export for Lancelot</button>
         </div>
       </div>
 

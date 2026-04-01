@@ -1,23 +1,46 @@
 import json
 import sys
 import time
+import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from core.storage import (
+    create_new_db,
     create_study_set,
+    delete_study_sets,
+    get_active_db_name,
+    get_or_build_all_studies_analytics_cache,
+    get_or_build_study_set_analytics_cache,
     get_db_connection,
     list_study_sets,
+    list_study_sets_with_analytics_cache,
     load_study_from_db,
     load_wfa_window_trials,
     reorder_study_sets,
     save_wfa_study_to_db,
+    set_active_db,
+    update_study_sets_color,
     update_study_set,
 )
+from core.metrics import _calculate_r2_consistency
+from core.post_process import DSRConfig, PostProcessConfig, StressTestConfig
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
+
+
+@contextmanager
+def _temporary_active_db(label: str):
+    previous_db = get_active_db_name()
+    create_new_db(label)
+    try:
+        yield
+    finally:
+        set_active_db(previous_db)
 
 
 def _build_dummy_wfa_result():
@@ -113,8 +136,29 @@ def test_study_sets_tables_created():
         members_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='study_set_members'"
         ).fetchone()
+        analytics_cache_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_group_cache'"
+        ).fetchone()
+        set_columns = {row["name"] for row in conn.execute("PRAGMA table_info(study_sets)").fetchall()}
+        analytics_cache_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(analytics_group_cache)").fetchall()
+        }
         assert sets_table is not None
         assert members_table is not None
+        assert analytics_cache_table is not None
+        assert "color_token" in set_columns
+        assert "group_key" in analytics_cache_columns
+        assert "group_type" in analytics_cache_columns
+        assert "set_id" in analytics_cache_columns
+        assert "members_hash" in analytics_cache_columns
+        assert "curve_json" in analytics_cache_columns
+        assert "timestamps_json" in analytics_cache_columns
+        assert "ann_profit_pct" in analytics_cache_columns
+        assert "profit_pct" in analytics_cache_columns
+        assert "max_drawdown_pct" in analytics_cache_columns
+        assert "consistency_full" in analytics_cache_columns
+        assert "consistency_recent" in analytics_cache_columns
+        assert "computed_at" in analytics_cache_columns
 
 
 def test_wfa_window_new_columns():
@@ -138,7 +182,18 @@ def test_wfa_window_new_columns():
     assert "cusum_threshold" in columns
     assert "dd_threshold" in columns
     assert "oos_actual_days" in columns
+    assert "cooldown_days_applied" in columns
+    assert "oos_elapsed_days" in columns
     assert "oos_winning_trades" in columns
+    assert "trade_start_date" in columns
+    assert "trade_end_date" in columns
+    assert "trade_start_ts" in columns
+    assert "trade_end_ts" in columns
+    assert "entry_delay_days" in columns
+    assert "ft_retry_attempts_used" in columns
+    assert "remaining_oos_days_at_entry" in columns
+    assert "window_status" in columns
+    assert "no_trade_reason" in columns
 
 
 def test_studies_stitched_columns():
@@ -153,6 +208,8 @@ def test_studies_stitched_columns():
     assert "stitched_oos_total_trades" in columns
     assert "stitched_oos_winning_trades" in columns
     assert "stitched_oos_win_rate" in columns
+    assert "stitched_oos_consistency_full" in columns
+    assert "stitched_oos_consistency_recent" in columns
     assert "profitable_windows" in columns
     assert "total_windows" in columns
     assert "median_window_profit" in columns
@@ -166,6 +223,24 @@ def test_studies_stitched_columns():
     assert "cusum_threshold" in columns
     assert "dd_threshold_multiplier" in columns
     assert "inactivity_multiplier" in columns
+    assert "cooldown_enabled" in columns
+    assert "cooldown_days" in columns
+    assert "ft_threshold_pct" in columns
+    assert "ft_reject_action" in columns
+    assert "ft_reject_cooldown_days" in columns
+    assert "ft_reject_max_attempts" in columns
+    assert "ft_reject_min_remaining_oos_days" in columns
+    assert "stitched_oos_start_ts" in columns
+    assert "stitched_oos_end_ts" in columns
+    assert "stitched_oos_point_count" in columns
+
+
+def test_trials_ft_gate_columns_exist():
+    with get_db_connection() as conn:
+        cursor = conn.execute("PRAGMA table_info(trials)")
+        columns = {row["name"] for row in cursor.fetchall()}
+
+    assert "ft_passes_threshold" in columns
 
 
 def test_save_wfa_study_with_trials():
@@ -197,6 +272,9 @@ def test_save_wfa_study_with_trials():
     assert study.get("median_window_wr") == 50.0
     assert study.get("worst_window_profit") == 2.0
     assert study.get("worst_window_dd") == 0.7
+    assert study.get("stitched_oos_start_ts") == "2025-01-11T00:00:00+00:00"
+    assert study.get("stitched_oos_end_ts") == "2025-01-15T00:00:00+00:00"
+    assert study.get("stitched_oos_point_count") == 2
 
 
 def test_study_sets_storage_roundtrip():
@@ -221,10 +299,17 @@ def test_study_sets_storage_roundtrip():
 
     created = create_study_set("Storage Roundtrip Set", [study_id_a, study_id_b])
     assert created["name"] == "Storage Roundtrip Set"
+    assert created["color_token"] is None
     assert created["study_ids"] == [study_id_a, study_id_b]
 
-    updated = update_study_set(created["id"], name="Storage Roundtrip Set v2", study_ids=[study_id_b])
+    updated = update_study_set(
+        created["id"],
+        name="Storage Roundtrip Set v2",
+        study_ids=[study_id_b],
+        color_token="blue",
+    )
     assert updated["name"] == "Storage Roundtrip Set v2"
+    assert updated["color_token"] == "blue"
     assert updated["study_ids"] == [study_id_b]
 
     second = create_study_set("Storage Roundtrip Set v3", [study_id_a])
@@ -232,6 +317,356 @@ def test_study_sets_storage_roundtrip():
 
     sets = list_study_sets()
     assert [entry["id"] for entry in sets[:2]] == [second["id"], created["id"]]
+    assert sets[0]["color_token"] is None
+    assert sets[1]["color_token"] == "blue"
+
+
+def test_save_wfa_study_persists_stitched_consistency_scores():
+    wf_result = _build_dummy_wfa_result()
+    curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+    timestamps = [pd.Timestamp(f"2025-03-{day:02d}", tz="UTC") for day in range(1, 10)]
+    wf_result.stitched_oos.equity_curve = curve
+    wf_result.stitched_oos.timestamps = timestamps
+    wf_result.stitched_oos.window_ids = list(range(1, 10))
+
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    loaded = load_study_from_db(study_id)
+    assert loaded is not None
+    expected_full = _calculate_r2_consistency(curve)
+    expected_recent = _calculate_r2_consistency(curve[-3:])
+
+    study = loaded["study"]
+    stitched = loaded["stitched_oos"]
+    assert study.get("stitched_oos_consistency_full") == pytest.approx(expected_full, abs=1e-6)
+    assert study.get("stitched_oos_consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+    assert stitched.get("consistency_full") == pytest.approx(expected_full, abs=1e-6)
+    assert stitched.get("consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_load_study_backfills_missing_stitched_consistency_for_legacy_rows():
+    with _temporary_active_db("storage_stitched_consistency_backfill"):
+        curve = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 109.0, 107.0, 105.0]
+        timestamps = [f"2025-04-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id,
+                    study_name,
+                    strategy_id,
+                    optimization_mode,
+                    stitched_oos_equity_curve,
+                    stitched_oos_timestamps_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy_wfa_consistency",
+                    "LEGACY_WFA_CONSISTENCY",
+                    "s01_trailing_ma",
+                    "wfa",
+                    json.dumps(curve),
+                    json.dumps(timestamps),
+                ),
+            )
+            conn.commit()
+
+        loaded = load_study_from_db("legacy_wfa_consistency")
+        assert loaded is not None
+        assert loaded["study"].get("stitched_oos_consistency_full") == pytest.approx(expected_full, abs=1e-6)
+        assert loaded["study"].get("stitched_oos_consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+
+        with get_db_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    stitched_oos_start_ts,
+                    stitched_oos_end_ts,
+                    stitched_oos_point_count,
+                    stitched_oos_consistency_full,
+                    stitched_oos_consistency_recent
+                FROM studies
+                WHERE study_id = ?
+                """,
+                ("legacy_wfa_consistency",),
+            ).fetchone()
+
+        assert row is not None
+        assert row["stitched_oos_start_ts"] == timestamps[0]
+        assert row["stitched_oos_end_ts"] == timestamps[-1]
+        assert row["stitched_oos_point_count"] == len(timestamps)
+        assert row["stitched_oos_consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert row["stitched_oos_consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_study_sets_reject_invalid_color_token():
+    wf_result = _build_dummy_wfa_result()
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    created = create_study_set("Invalid Color Set", [study_id])
+    with pytest.raises(ValueError):
+        update_study_set(created["id"], color_token="magenta")
+
+
+def test_study_sets_color_token_can_be_cleared():
+    wf_result = _build_dummy_wfa_result()
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    created = create_study_set("Clear Color Set", [study_id], color_token="teal")
+    assert created["color_token"] == "teal"
+
+    cleared = update_study_set(created["id"], color_token=None)
+    assert cleared["color_token"] is None
+
+
+def test_study_sets_rename_auto_suffixes_duplicate_names():
+    study_id = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    first = create_study_set("Rename Duplicate", [study_id])
+    second = create_study_set("Rename Duplicate", [study_id])
+    target = create_study_set("Rename Target", [study_id])
+
+    updated = update_study_set(target["id"], name="Rename Duplicate")
+    assert updated["name"] == "Rename Duplicate (2)"
+
+    same_name = update_study_set(second["id"], name="Rename Duplicate")
+    assert same_name["name"] == "Rename Duplicate (1)"
+
+    by_id = {entry["id"]: entry for entry in list_study_sets()}
+    assert by_id[first["id"]]["name"] == "Rename Duplicate"
+    assert by_id[second["id"]]["name"] == "Rename Duplicate (1)"
+    assert by_id[target["id"]]["name"] == "Rename Duplicate (2)"
+
+
+def test_study_sets_bulk_color_update_and_delete():
+    first_study = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+    second_study = save_wfa_study_to_db(
+        wf_result=_build_dummy_wfa_result(),
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    first = create_study_set("Bulk Color First", [first_study], color_token="blue")
+    second = create_study_set("Bulk Color Second", [second_study], color_token="teal")
+
+    updated = update_study_sets_color([first["id"], second["id"]], "rose")
+    assert [item["id"] for item in updated] == [first["id"], second["id"]]
+    assert [item["color_token"] for item in updated] == ["rose", "rose"]
+
+    deleted_count = delete_study_sets([first["id"], second["id"]])
+    assert deleted_count == 2
+    remaining_ids = {entry["id"] for entry in list_study_sets()}
+    assert first["id"] not in remaining_ids
+    assert second["id"] not in remaining_ids
+
+
+def test_study_set_analytics_cache_roundtrip_and_invalidation():
+    with _temporary_active_db("storage_cache_roundtrip"):
+        first_result = _build_dummy_wfa_result()
+        first_study_id = save_wfa_study_to_db(
+            wf_result=first_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        second_result = _build_dummy_wfa_result()
+        second_result.windows[0].window_id = 2
+        second_result.windows[0].param_id = "EMA 75_test"
+        second_result.windows[0].best_params = {"maType": "EMA", "maLength": 75, "closeCountLong": 7}
+        second_result.windows[0].oos_net_profit_pct = 5.0
+        second_result.windows[0].oos_equity_curve = [100.0, 105.0]
+        second_result.stitched_oos.final_net_profit_pct = 5.0
+        second_result.stitched_oos.equity_curve = [100.0, 105.0]
+        second_study_id = save_wfa_study_to_db(
+            wf_result=second_result,
+            config={},
+            csv_file_path="",
+            start_time=1.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Cache Set", [first_study_id, second_study_id])
+
+        initial_cache = get_or_build_study_set_analytics_cache(created["id"])
+        repeated_cache = get_or_build_study_set_analytics_cache(created["id"])
+        assert initial_cache["selected_count"] == 2
+        assert initial_cache["has_curve"] is True
+        assert initial_cache["computed_at"] == repeated_cache["computed_at"]
+        assert len(initial_cache["curve"]) == len(initial_cache["timestamps"]) == 2
+
+        updated = update_study_set(created["id"], study_ids=[first_study_id])
+        refreshed_cache = get_or_build_study_set_analytics_cache(updated["id"])
+        assert refreshed_cache["selected_count"] == 1
+        assert refreshed_cache["profit_pct"] == pytest.approx(2.0)
+        assert refreshed_cache["computed_at"] != initial_cache["computed_at"]
+
+        sets_payload = list_study_sets_with_analytics_cache()
+        assert sets_payload["all_metrics"]["selected_count"] == 2
+        assert sets_payload["sets"][0]["metrics"]["selected_count"] == 1
+        assert sets_payload["sets"][0]["metrics"]["profit_pct"] == pytest.approx(2.0)
+
+
+def test_study_set_analytics_cache_includes_recent_and_full_consistency():
+    with _temporary_active_db("storage_cache_consistency"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [pd.Timestamp(f"2025-01-{day:02d}", tz="UTC") for day in range(1, 10)]
+
+        wf_result = _build_dummy_wfa_result()
+        wf_result.windows[0].window_id = 11
+        wf_result.windows[0].oos_equity_curve = curve
+        wf_result.windows[0].oos_timestamps = timestamps
+        wf_result.stitched_oos.equity_curve = curve
+        wf_result.stitched_oos.timestamps = timestamps
+        wf_result.stitched_oos.final_net_profit_pct = 15.0
+        wf_result.stitched_oos.max_drawdown_pct = 4.1667
+
+        study_id = save_wfa_study_to_db(
+            wf_result=wf_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Consistency Set", [study_id])
+        cache_payload = get_or_build_study_set_analytics_cache(created["id"])
+        summary_payload = list_study_sets_with_analytics_cache()["sets"][0]["metrics"]
+
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        assert cache_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert cache_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+        assert summary_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert summary_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_study_set_analytics_cache_legacy_rows_compute_missing_consistency():
+    with _temporary_active_db("storage_cache_legacy_consistency"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [pd.Timestamp(f"2025-02-{day:02d}", tz="UTC") for day in range(1, 10)]
+
+        wf_result = _build_dummy_wfa_result()
+        wf_result.windows[0].window_id = 12
+        wf_result.windows[0].oos_equity_curve = curve
+        wf_result.windows[0].oos_timestamps = timestamps
+        wf_result.stitched_oos.equity_curve = curve
+        wf_result.stitched_oos.timestamps = timestamps
+        wf_result.stitched_oos.final_net_profit_pct = 15.0
+        wf_result.stitched_oos.max_drawdown_pct = 4.1667
+
+        study_id = save_wfa_study_to_db(
+            wf_result=wf_result,
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        created = create_study_set("Legacy Consistency Set", [study_id])
+        initial_cache = get_or_build_study_set_analytics_cache(created["id"])
+
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                UPDATE analytics_group_cache
+                SET
+                    consistency_full = NULL,
+                    consistency_recent = NULL
+                WHERE group_key = ?
+                """,
+                (f"set:{created['id']}",),
+            )
+            conn.commit()
+
+        refreshed_cache = get_or_build_study_set_analytics_cache(created["id"])
+        summary_payload = list_study_sets_with_analytics_cache()["sets"][0]["metrics"]
+
+        assert refreshed_cache["computed_at"] == initial_cache["computed_at"]
+        assert refreshed_cache["consistency_full"] == pytest.approx(
+            initial_cache["consistency_full"],
+            abs=1e-6,
+        )
+        assert refreshed_cache["consistency_recent"] == pytest.approx(
+            initial_cache["consistency_recent"],
+            abs=1e-6,
+        )
+        assert summary_payload["consistency_full"] == pytest.approx(
+            initial_cache["consistency_full"],
+            abs=1e-6,
+        )
+        assert summary_payload["consistency_recent"] == pytest.approx(
+            initial_cache["consistency_recent"],
+            abs=1e-6,
+        )
+
+
+def test_all_studies_analytics_cache_invalidates_after_new_wfa_study_saved():
+    with _temporary_active_db("storage_all_cache_invalidation"):
+        save_wfa_study_to_db(
+            wf_result=_build_dummy_wfa_result(),
+            config={},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+        first_cache = get_or_build_all_studies_analytics_cache()
+        assert first_cache["selected_count"] == 1
+        assert first_cache["has_curve"] is True
+
+        second_result = _build_dummy_wfa_result()
+        second_result.windows[0].window_id = 2
+        second_result.windows[0].param_id = "EMA 90_test"
+        second_result.windows[0].best_params = {"maType": "EMA", "maLength": 90, "closeCountLong": 7}
+        save_wfa_study_to_db(
+            wf_result=second_result,
+            config={},
+            csv_file_path="",
+            start_time=2.0,
+            score_config=None,
+        )
+
+        second_cache = get_or_build_all_studies_analytics_cache()
+        assert second_cache["selected_count"] == 2
+        assert second_cache["computed_at"] != first_cache["computed_at"]
 
 
 def test_save_wfa_study_layer1_aggregates_multi_window():
@@ -337,6 +772,36 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     wf_result.config.cusum_threshold = 6.5
     wf_result.config.dd_threshold_multiplier = 1.8
     wf_result.config.inactivity_multiplier = 6.0
+    wf_result.config.cooldown_enabled = True
+    wf_result.config.cooldown_days = 15
+    wf_result.config.post_process = PostProcessConfig(
+        enabled=True,
+        ft_period_days=14,
+        top_k=10,
+        sort_metric="profit_degradation",
+        ft_threshold_pct=-5.0,
+        ft_reject_action="cooldown_reoptimize",
+        ft_reject_cooldown_days=5,
+        ft_reject_max_attempts=2,
+        ft_reject_min_remaining_oos_days=10,
+    )
+    wf_result.config.dsr_config = DSRConfig(enabled=True, top_k=18)
+    wf_result.config.stress_test_config = StressTestConfig(
+        enabled=True,
+        top_k=7,
+        failure_threshold=0.65,
+        sort_metric="profit_retention",
+    )
+    wf_result.windows[0].trigger_type = "cusum"
+    wf_result.windows[0].oos_actual_days = 4.0
+    wf_result.windows[0].cooldown_days_applied = 15.0
+    wf_result.windows[0].oos_elapsed_days = 19.0
+    wf_result.windows[0].trade_start = pd.Timestamp("2025-01-13", tz="UTC")
+    wf_result.windows[0].trade_end = pd.Timestamp("2025-01-15", tz="UTC")
+    wf_result.windows[0].entry_delay_days = 2.0
+    wf_result.windows[0].ft_retry_attempts_used = 1
+    wf_result.windows[0].remaining_oos_days_at_entry = 3.0
+    wf_result.windows[0].window_status = "traded"
 
     config = {
         "sampler_type": "nsga2",
@@ -361,6 +826,8 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
             "is_period_days": 10,
             "oos_period_days": 5,
             "adaptive_mode": True,
+            "cooldown_enabled": True,
+            "cooldown_days": 15,
         },
     }
 
@@ -394,10 +861,41 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     assert study.get("cusum_threshold") == 6.5
     assert study.get("dd_threshold_multiplier") == 1.8
     assert study.get("inactivity_multiplier") == 6.0
+    assert study.get("cooldown_enabled") == 1
+    assert study.get("cooldown_days") == 15
+    assert study.get("ft_enabled") == 1
+    assert study.get("ft_period_days") == 14
+    assert study.get("ft_top_k") == 10
+    assert study.get("ft_sort_metric") == "profit_degradation"
+    assert study.get("ft_threshold_pct") == -5.0
+    assert study.get("ft_reject_action") == "cooldown_reoptimize"
+    assert study.get("ft_reject_cooldown_days") == 5
+    assert study.get("ft_reject_max_attempts") == 2
+    assert study.get("ft_reject_min_remaining_oos_days") == 10
+    assert study.get("dsr_enabled") == 1
+    assert study.get("dsr_top_k") == 18
+    assert study.get("st_enabled") == 1
+    assert study.get("st_top_k") == 7
+    assert study.get("st_failure_threshold") == 0.65
+    assert study.get("st_sort_metric") == "profit_retention"
 
     config_json = study.get("config_json") or {}
     assert config_json.get("optuna_config", {}).get("pruner") == "median"
     assert config_json.get("wfa", {}).get("oos_period_days") == 5
+    assert config_json.get("wfa", {}).get("cooldown_enabled") is True
+    assert config_json.get("wfa", {}).get("cooldown_days") == 15
+
+    window = loaded["windows"][0]
+    assert window.get("trigger_type") == "cusum"
+    assert window.get("oos_actual_days") == 4.0
+    assert window.get("cooldown_days_applied") == 15.0
+    assert window.get("oos_elapsed_days") == 19.0
+    assert window.get("trade_start_ts") == "2025-01-13T00:00:00+00:00"
+    assert window.get("trade_end_ts") == "2025-01-15T00:00:00+00:00"
+    assert window.get("entry_delay_days") == 2.0
+    assert window.get("ft_retry_attempts_used") == 1
+    assert window.get("remaining_oos_days_at_entry") == 3.0
+    assert window.get("window_status") == "traded"
 
 
 def test_save_wfa_study_persists_runtime_seconds():

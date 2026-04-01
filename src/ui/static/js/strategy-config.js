@@ -223,6 +223,13 @@ function createOptimizerRow(paramName, paramDef) {
   if (paramType === 'select' || paramType === 'options') {
     const optionsContainer = createSelectOptions(paramName, paramDef);
     controlsDiv.appendChild(optionsContainer);
+  } else if (paramType === 'bool' || paramType === 'boolean') {
+    const optionsContainer = createSelectOptions(paramName, {
+      ...paramDef,
+      options: [true, false],
+      selectAllByDefault: true
+    });
+    controlsDiv.appendChild(optionsContainer);
   } else {
     const isInt = paramType === 'int' || paramType === 'integer';
     const defaultStep = isInt ? 1 : 0.1;
@@ -279,7 +286,7 @@ function createSelectOptions(paramName, paramDef) {
   container.className = 'select-options-container';
   container.dataset.paramName = paramName;
   const allByDefaultParams = new Set(['maType', 'trailMaType', 'maType3']);
-  const selectAllByDefault = allByDefaultParams.has(paramName);
+  const selectAllByDefault = allByDefaultParams.has(paramName) || paramDef.selectAllByDefault === true;
 
   const options = paramDef.options || [];
 
@@ -325,7 +332,11 @@ function createSelectOptions(paramName, paramDef) {
     }
 
     const optionLabel = document.createElement('span');
-    optionLabel.textContent = optionValue;
+    if (typeof optionValue === 'boolean') {
+      optionLabel.textContent = optionValue ? 'True' : 'False';
+    } else {
+      optionLabel.textContent = optionValue;
+    }
 
     optionWrapper.appendChild(optionCheckbox);
     optionWrapper.appendChild(optionLabel);

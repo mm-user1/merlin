@@ -17,6 +17,7 @@ from core.backtest_engine import (
     parse_timestamp_utc,
     prepare_dataset_with_warmup,
 )
+from core.bundle_export import build_lancelot_partial_bundle
 from core.export import export_trades_csv
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
@@ -180,6 +181,40 @@ def register_routes(app):
             normalized = normalized[:limit]
 
         return normalized
+
+    def _prepend_wfa_flat_equity_prefix(
+        equity_curve: List[float],
+        timestamps: List[str],
+        *,
+        scheduled_start: Any,
+        live_start: Any,
+    ) -> Tuple[List[float], List[str]]:
+        scheduled_start_ts = parse_timestamp_utc(scheduled_start)
+        live_start_ts = parse_timestamp_utc(live_start)
+        if scheduled_start_ts is None or live_start_ts is None or live_start_ts <= scheduled_start_ts:
+            return list(equity_curve or []), list(timestamps or [])
+
+        prefixed_curve: List[float] = [100.0]
+        prefixed_timestamps: List[str] = [scheduled_start_ts.isoformat()]
+
+        first_live_ts = parse_timestamp_utc(timestamps[0]) if timestamps else None
+        if first_live_ts is None or first_live_ts > live_start_ts:
+            prefixed_curve.append(100.0)
+            prefixed_timestamps.append(live_start_ts.isoformat())
+
+        prefixed_curve.extend(list(equity_curve or []))
+        prefixed_timestamps.extend(list(timestamps or []))
+
+        deduped_curve: List[float] = []
+        deduped_timestamps: List[str] = []
+        for curve_value, timestamp in zip(prefixed_curve, prefixed_timestamps):
+            if deduped_timestamps and timestamp == deduped_timestamps[-1]:
+                deduped_curve[-1] = curve_value
+            else:
+                deduped_curve.append(curve_value)
+                deduped_timestamps.append(timestamp)
+
+        return deduped_curve, deduped_timestamps
 
     def _resolve_csv_path_for_response(
         raw_path: Any,
@@ -831,6 +866,88 @@ def register_routes(app):
 
 
 
+    @app.post("/api/studies/<string:study_id>/export/lancelot")
+    def export_lancelot_bundle_endpoint(study_id: str) -> object:
+        if not request.is_json:
+            return jsonify({"error": "Expected JSON payload."}), HTTPStatus.BAD_REQUEST
+
+        payload = request.get_json(silent=True) or {}
+        study_data = load_study_from_db(study_id)
+        if not study_data:
+            return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
+
+        study = study_data["study"]
+        csv_path = study.get("csv_file_path")
+        csv_path, error_response = _resolve_csv_path_for_response(
+            csv_path,
+            missing_error="CSV file is missing for this study.",
+            not_found_error="CSV file is missing for this study.",
+        )
+        if error_response:
+            return error_response
+
+        params: Dict[str, Any] = {}
+        source_trial_number = 0
+        mode = str(study.get("optimization_mode") or "").lower()
+
+        if mode == "wfa":
+            raw_window_number = payload.get("windowNumber")
+            if raw_window_number in (None, ""):
+                return jsonify({"error": "windowNumber is required for WFA bundle export."}), HTTPStatus.BAD_REQUEST
+            try:
+                window_number = int(raw_window_number)
+            except (TypeError, ValueError):
+                return jsonify({"error": "windowNumber must be an integer."}), HTTPStatus.BAD_REQUEST
+
+            window = _find_wfa_window(study_data, window_number)
+            if not window:
+                return jsonify({"error": "WFA window not found."}), HTTPStatus.NOT_FOUND
+
+            params = dict(window.get("best_params") or {})
+            source_trial_number = int(window.get("is_best_trial_number") or 0)
+
+            if source_trial_number <= 0:
+                window_id = window.get("window_id") or f"{study_id}_w{window_number}"
+                modules = load_wfa_window_trials(window_id)
+                preferred_module = str(window.get("best_params_source") or "optuna_is")
+                module_trials = modules.get(preferred_module) or []
+                selected_trial = next((trial for trial in module_trials if trial.get("is_selected")), None)
+                if selected_trial is None and module_trials:
+                    selected_trial = module_trials[0]
+                if selected_trial:
+                    source_trial_number = int(selected_trial.get("trial_number") or 0)
+        elif mode == "optuna":
+            raw_trial_number = payload.get("trialNumber")
+            if raw_trial_number in (None, ""):
+                return jsonify({"error": "trialNumber is required for bundle export."}), HTTPStatus.BAD_REQUEST
+            try:
+                source_trial_number = int(raw_trial_number)
+            except (TypeError, ValueError):
+                return jsonify({"error": "trialNumber must be an integer."}), HTTPStatus.BAD_REQUEST
+
+            trial = get_study_trial(study_id, source_trial_number)
+            if not trial:
+                return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
+            params = dict(trial.get("params") or {})
+        else:
+            return jsonify({"error": "Bundle export is only supported for Optuna and WFA studies."}), HTTPStatus.BAD_REQUEST
+
+        try:
+            bundle = build_lancelot_partial_bundle(
+                study=study,
+                params=params,
+                trial_number=source_trial_number,
+                csv_path=csv_path,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        except OSError:
+            return jsonify({"error": "Failed to read CSV file for bundle export."}), HTTPStatus.BAD_REQUEST
+
+        return jsonify(_json_safe(bundle))
+
+
+
     @app.get("/api/studies/<string:study_id>/wfa/windows/<int:window_number>")
     def get_wfa_window_details(study_id: str, window_number: int) -> object:
         study_data = load_study_from_db(study_id)
@@ -878,6 +995,15 @@ def register_routes(app):
             "cusum_threshold": window.get("cusum_threshold"),
             "dd_threshold": window.get("dd_threshold"),
             "oos_actual_days": window.get("oos_actual_days"),
+            "cooldown_days_applied": window.get("cooldown_days_applied"),
+            "oos_elapsed_days": window.get("oos_elapsed_days"),
+            "trade_start_date": window.get("trade_start_date"),
+            "trade_end_date": window.get("trade_end_date"),
+            "entry_delay_days": window.get("entry_delay_days"),
+            "ft_retry_attempts_used": window.get("ft_retry_attempts_used"),
+            "remaining_oos_days_at_entry": window.get("remaining_oos_days_at_entry"),
+            "window_status": window.get("window_status"),
+            "no_trade_reason": window.get("no_trade_reason"),
         }
 
         return jsonify({"window": _json_safe(window_payload), "modules": _json_safe(modules)})
@@ -927,6 +1053,35 @@ def register_routes(app):
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
+        scheduled_start = start
+        scheduled_end = end
+        actual_start = start
+        actual_end = end
+        is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos:
+            actual_start = (
+                window.get("trade_start_ts")
+                or window.get("trade_start_date")
+                or actual_start
+            )
+            actual_end = (
+                window.get("trade_end_ts")
+                or window.get("trade_end_date")
+                or actual_end
+            )
+            if str(window.get("window_status") or "").lower() == "no_trade":
+                start_ts = parse_timestamp_utc(scheduled_start)
+                end_ts = parse_timestamp_utc(scheduled_end)
+                timestamps = []
+                equity_curve = []
+                if start_ts is not None:
+                    timestamps.append(start_ts.isoformat())
+                    equity_curve.append(100.0)
+                if end_ts is not None and start_ts is not None and end_ts > start_ts:
+                    timestamps.append(end_ts.isoformat())
+                    equity_curve.append(100.0)
+                return jsonify({"equity_curve": equity_curve, "timestamps": timestamps})
+
         csv_path = study.get("csv_file_path")
         csv_path, error_response = _resolve_csv_path_for_response(
             csv_path,
@@ -940,8 +1095,8 @@ def register_routes(app):
 
         merged_params = {**fixed_params, **params}
         merged_params["dateFilter"] = True
-        merged_params["start"] = start
-        merged_params["end"] = end
+        merged_params["start"] = actual_start
+        merged_params["end"] = actual_end
 
         equity_curve, timestamps, error = _run_equity_export(
             strategy_id=study.get("strategy_id"),
@@ -951,6 +1106,14 @@ def register_routes(app):
         )
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
+
+        if is_window_oos:
+            equity_curve, timestamps = _prepend_wfa_flat_equity_prefix(
+                equity_curve or [],
+                timestamps or [],
+                scheduled_start=scheduled_start,
+                live_start=actual_start,
+            )
 
         return jsonify({"equity_curve": equity_curve or [], "timestamps": timestamps or []})
 
@@ -999,6 +1162,27 @@ def register_routes(app):
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
+        is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos and str(window.get("window_status") or "").lower() == "no_trade":
+            trades = []
+            module_label = module_type or "window"
+            filename = (
+                f"{study.get('study_name', 'study')}_wfa_window_{window_number}_"
+                f"{module_label}_{period}_trades.csv"
+            )
+            return _send_trades_csv(
+                trades=trades,
+                csv_path=study.get("csv_file_path") or "",
+                study=study,
+                filename=filename,
+            )
+
+        actual_start = start
+        actual_end = end
+        if is_window_oos:
+            actual_start = window.get("trade_start_ts") or window.get("trade_start_date") or start
+            actual_end = window.get("trade_end_ts") or window.get("trade_end_date") or end
+
         csv_path = study.get("csv_file_path")
         csv_path, error_response = _resolve_csv_path_for_response(
             csv_path,
@@ -1012,8 +1196,8 @@ def register_routes(app):
 
         merged_params = {**fixed_params, **params}
         merged_params["dateFilter"] = True
-        merged_params["start"] = start
-        merged_params["end"] = end
+        merged_params["start"] = actual_start
+        merged_params["end"] = actual_end
 
         trades, error = _run_trade_export(
             strategy_id=study.get("strategy_id"),
@@ -1031,8 +1215,8 @@ def register_routes(app):
         ):
             trades = _normalize_wfa_oos_trades(
                 trades or [],
-                start=start,
-                end=end,
+                start=actual_start,
+                end=actual_end,
                 expected_total=window.get("oos_total_trades"),
             )
 

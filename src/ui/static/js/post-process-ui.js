@@ -5,7 +5,15 @@
       period: document.getElementById('ftPeriodDays'),
       topK: document.getElementById('ftTopK'),
       sortMetric: document.getElementById('ftSortMetric'),
+      thresholdPct: document.getElementById('ftThresholdPct'),
+      rejectAction: document.getElementById('ftRejectAction'),
+      rejectCooldownDays: document.getElementById('ftRejectCooldownDays'),
+      rejectMaxAttempts: document.getElementById('ftRejectMaxAttempts'),
+      rejectMinRemainingOosDays: document.getElementById('ftRejectMinRemainingOosDays'),
       ftSettings: document.getElementById('ftSettings'),
+      ftRejectSettings: document.getElementById('ftRejectSettings'),
+      ftRejectCooldownSettings: document.getElementById('ftRejectCooldownSettings'),
+      wfEnable: document.getElementById('enableWF'),
       dsrEnable: document.getElementById('enableDSR'),
       dsrTopK: document.getElementById('dsrTopK'),
       dsrSettings: document.getElementById('dsrSettings'),
@@ -26,13 +34,29 @@
     return rounded;
   }
 
+  function normalizeFloat(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    if (min !== undefined && parsed < min) return min;
+    if (max !== undefined && parsed > max) return max;
+    return parsed;
+  }
+
   function syncPostProcessUI() {
     const {
       enable,
       period,
       topK,
       sortMetric,
+      thresholdPct,
+      rejectAction,
+      rejectCooldownDays,
+      rejectMaxAttempts,
+      rejectMinRemainingOosDays,
       ftSettings,
+      ftRejectSettings,
+      ftRejectCooldownSettings,
+      wfEnable,
       dsrEnable,
       dsrTopK,
       dsrSettings,
@@ -47,7 +71,19 @@
       if (period) period.disabled = disabled;
       if (topK) topK.disabled = disabled;
       if (sortMetric) sortMetric.disabled = disabled;
+      if (thresholdPct) thresholdPct.disabled = disabled;
       if (ftSettings) ftSettings.style.display = disabled ? 'none' : 'block';
+
+      const wfaEnabled = Boolean(wfEnable && wfEnable.checked);
+      const rejectPolicyVisible = !disabled && wfaEnabled;
+      if (rejectAction) rejectAction.disabled = !rejectPolicyVisible;
+      if (ftRejectSettings) ftRejectSettings.style.display = rejectPolicyVisible ? 'block' : 'none';
+
+      const cooldownVisible = rejectPolicyVisible && (rejectAction?.value || 'cooldown_reoptimize') === 'cooldown_reoptimize';
+      if (rejectCooldownDays) rejectCooldownDays.disabled = !cooldownVisible;
+      if (rejectMaxAttempts) rejectMaxAttempts.disabled = !cooldownVisible;
+      if (rejectMinRemainingOosDays) rejectMinRemainingOosDays.disabled = !cooldownVisible;
+      if (ftRejectCooldownSettings) ftRejectCooldownSettings.style.display = cooldownVisible ? 'block' : 'none';
     }
     if (dsrEnable) {
       const dsrDisabled = !dsrEnable.checked;
@@ -69,6 +105,11 @@
       period,
       topK,
       sortMetric,
+      thresholdPct,
+      rejectAction,
+      rejectCooldownDays,
+      rejectMaxAttempts,
+      rejectMinRemainingOosDays,
       dsrEnable,
       dsrTopK,
       stEnable,
@@ -86,6 +127,11 @@
       ftPeriodDays: normalizeInt(period?.value, 30, 1, 3650),
       topK: normalizeInt(topK?.value, 10, 1, 10000),
       sortMetric: sortMetric?.value || 'profit_degradation',
+      ftThresholdPct: normalizeFloat(thresholdPct?.value, -5.0, -100000, 100000),
+      ftRejectAction: rejectAction?.value || 'cooldown_reoptimize',
+      ftRejectCooldownDays: normalizeInt(rejectCooldownDays?.value, 5, 1, 3650),
+      ftRejectMaxAttempts: normalizeInt(rejectMaxAttempts?.value, 2, 0, 100),
+      ftRejectMinRemainingOosDays: normalizeInt(rejectMinRemainingOosDays?.value, 10, 1, 3650),
       dsrEnabled,
       dsrTopK: normalizeInt(dsrTopK?.value, 20, 1, 10000),
       stressTest: {
@@ -98,9 +144,15 @@
   }
 
   function bind() {
-    const { enable, dsrEnable, stEnable } = getPostProcessElements();
+    const { enable, rejectAction, wfEnable, dsrEnable, stEnable } = getPostProcessElements();
     if (enable) {
       enable.addEventListener('change', syncPostProcessUI);
+    }
+    if (rejectAction) {
+      rejectAction.addEventListener('change', syncPostProcessUI);
+    }
+    if (wfEnable) {
+      wfEnable.addEventListener('change', syncPostProcessUI);
     }
     if (dsrEnable) {
       dsrEnable.addEventListener('change', syncPostProcessUI);

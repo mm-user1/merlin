@@ -473,6 +473,7 @@ function resetForDbSwitch() {
   ResultsState.strategyId = '';
   ResultsState.dataset = {};
   ResultsState.optuna = {};
+  ResultsState.postProcess = {};
   ResultsState.wfa = {};
   ResultsState.summary = {};
   ResultsState.results = [];
@@ -766,16 +767,28 @@ async function applyStudyPayload(data) {
   ResultsState.dataPath = study.csv_file_path || ResultsState.dataPath;
 
   const config = study.config_json || {};
+  const postProcessConfig = config.postProcess && typeof config.postProcess === 'object'
+    ? config.postProcess
+    : {};
+  const stressConfig = postProcessConfig.stressTest && typeof postProcessConfig.stressTest === 'object'
+    ? postProcessConfig.stressTest
+    : {};
   const configWfa = config.wfa || {};
   const adaptiveModeRaw = study.adaptive_mode ?? configWfa.adaptive_mode ?? config.adaptive_mode;
+  const cooldownEnabledRaw = study.cooldown_enabled ?? configWfa.cooldown_enabled ?? config.cooldown_enabled;
+  ResultsState.postProcess = postProcessConfig;
   ResultsState.wfa = {
-    postProcess: config.postProcess || {},
+    postProcess: postProcessConfig,
     isPeriodDays: study.is_period_days ?? configWfa.is_period_days ?? config.is_period_days ?? null,
     oosPeriodDays: configWfa.oos_period_days ?? config.oos_period_days ?? null,
     storeTopNTrials: configWfa.store_top_n_trials ?? null,
     adaptiveMode: adaptiveModeRaw === undefined || adaptiveModeRaw === null
       ? null
       : Boolean(adaptiveModeRaw),
+    cooldownEnabled: cooldownEnabledRaw === undefined || cooldownEnabledRaw === null
+      ? null
+      : Boolean(cooldownEnabledRaw),
+    cooldownDays: study.cooldown_days ?? configWfa.cooldown_days ?? config.cooldown_days ?? null,
     maxOosPeriodDays: study.max_oos_period_days ?? configWfa.max_oos_period_days ?? config.max_oos_period_days ?? null,
     minOosTrades: study.min_oos_trades ?? configWfa.min_oos_trades ?? config.min_oos_trades ?? null,
     checkIntervalTrades: study.check_interval_trades ?? configWfa.check_interval_trades ?? config.check_interval_trades ?? null,
@@ -796,19 +809,19 @@ async function applyStudyPayload(data) {
   }
   ResultsState.selectedRowId = null;
 
-  ResultsState.forwardTest.enabled = Boolean(study.ft_enabled);
+  ResultsState.forwardTest.enabled = Boolean(study.ft_enabled) || Boolean(postProcessConfig.enabled);
   ResultsState.forwardTest.startDate = study.ft_start_date || '';
   ResultsState.forwardTest.endDate = study.ft_end_date || '';
-  ResultsState.forwardTest.periodDays = study.ft_period_days ?? null;
-  ResultsState.forwardTest.sortMetric = study.ft_sort_metric || 'profit_degradation';
+  ResultsState.forwardTest.periodDays = study.ft_period_days ?? postProcessConfig.ftPeriodDays ?? null;
+  ResultsState.forwardTest.sortMetric = study.ft_sort_metric || postProcessConfig.sortMetric || 'profit_degradation';
   ResultsState.forwardTest.trials = (data.trials || []).filter((trial) => trial.ft_rank !== null && trial.ft_rank !== undefined);
   ResultsState.forwardTest.trials.sort((a, b) => (a.ft_rank || 0) - (b.ft_rank || 0));
 
   const dsrTrials = (data.trials || []).filter((trial) => trial.dsr_rank !== null && trial.dsr_rank !== undefined);
   dsrTrials.sort((a, b) => (a.dsr_rank || 0) - (b.dsr_rank || 0));
   ResultsState.dsr = {
-    enabled: Boolean(study.dsr_enabled),
-    topK: study.dsr_top_k ?? null,
+    enabled: Boolean(study.dsr_enabled) || Boolean(postProcessConfig.dsrEnabled),
+    topK: study.dsr_top_k ?? postProcessConfig.dsrTopK ?? null,
     trials: dsrTrials,
     nTrials: study.dsr_n_trials ?? null,
     meanSharpe: study.dsr_mean_sharpe ?? null,
@@ -821,11 +834,11 @@ async function applyStudyPayload(data) {
   const stTrials = (data.trials || []).filter((trial) => trial.st_rank !== null && trial.st_rank !== undefined);
   stTrials.sort((a, b) => (a.st_rank || 0) - (b.st_rank || 0));
   ResultsState.stressTest = {
-    enabled: Boolean(study.st_enabled),
-    topK: study.st_top_k ?? null,
+    enabled: Boolean(study.st_enabled) || Boolean(stressConfig.enabled),
+    topK: study.st_top_k ?? stressConfig.topK ?? null,
     trials: stTrials,
-    sortMetric: study.st_sort_metric || 'profit_retention',
-    failureThreshold: study.st_failure_threshold ?? 0.7,
+    sortMetric: study.st_sort_metric || stressConfig.sortMetric || 'profit_retention',
+    failureThreshold: study.st_failure_threshold ?? stressConfig.failureThreshold ?? 0.7,
     avgProfitRetention: study.st_avg_profit_retention ?? null,
     avgRomadRetention: study.st_avg_romad_retention ?? null,
     avgCombinedFailureRate: study.st_avg_combined_failure_rate ?? null,
@@ -903,6 +916,8 @@ async function applyStudyPayload(data) {
         winning_trades: storedStitched.winning_trades ?? study.stitched_oos_winning_trades ?? winningTrades,
         wfe: storedStitched.wfe ?? study.best_value ?? 0,
         oos_win_rate: storedStitched.oos_win_rate ?? study.stitched_oos_win_rate ?? winRate,
+        consistency_full: storedStitched.consistency_full ?? study.stitched_oos_consistency_full ?? null,
+        consistency_recent: storedStitched.consistency_recent ?? study.stitched_oos_consistency_recent ?? null,
         profitable_windows: storedStitched.profitable_windows ?? study.profitable_windows ?? profitableWindows,
         total_windows: storedStitched.total_windows ?? study.total_windows ?? totalWindows,
         median_window_profit: storedStitched.median_window_profit ?? study.median_window_profit ?? medianWindowProfit,
@@ -923,6 +938,8 @@ async function applyStudyPayload(data) {
         winning_trades: study.stitched_oos_winning_trades ?? winningTrades,
         wfe: study.best_value ?? 0,
         oos_win_rate: study.stitched_oos_win_rate ?? winRate,
+        consistency_full: study.stitched_oos_consistency_full ?? null,
+        consistency_recent: study.stitched_oos_consistency_recent ?? null,
         profitable_windows: study.profitable_windows ?? profitableWindows,
         total_windows: study.total_windows ?? totalWindows,
         median_window_profit: study.median_window_profit ?? medianWindowProfit,
@@ -996,6 +1013,15 @@ async function applyStudyPayload(data) {
       || study.sampler_type
       || null,
     pruner: optunaConfig.pruner ?? null,
+    warmupTrials: optunaConfig.warmup_trials
+      ?? config.n_startup_trials
+      ?? (optunaConfig.sampler_config ? optunaConfig.sampler_config.n_startup_trials : null)
+      ?? null,
+    coverageMode: Boolean(
+      optunaConfig.coverage_mode
+      ?? config.coverage_mode
+      ?? false
+    ),
     workers: config.worker_processes ?? null,
     sanitizeEnabled,
     sanitizeTradesThreshold: sanitizeThreshold,
@@ -1499,6 +1525,67 @@ async function runManualTestFromModal() {
   }
 }
 
+function getLancelotExportSelection() {
+  if (!ResultsState.studyId) {
+    throw new Error('Select a study first.');
+  }
+  if (ResultsState.mode === 'wfa') {
+    const wfaSelection = ResultsState.wfaSelection || {};
+    const windowNumber = Number.isFinite(Number(wfaSelection.windowNumber))
+      ? parseInt(wfaSelection.windowNumber, 10)
+      : (
+        Number.isFinite(Number(ResultsState.selectedRowId))
+          ? parseInt(ResultsState.selectedRowId, 10)
+          : null
+      );
+    if (!windowNumber) {
+      throw new Error('Select a WFA window in the table.');
+    }
+    return { windowNumber };
+  }
+  if (!ResultsState.selectedRowId) {
+    throw new Error('Select a trial in the table.');
+  }
+  return { trialNumber: ResultsState.selectedRowId };
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) {
+      throw new Error('Clipboard copy is unavailable.');
+    }
+  } finally {
+    textarea.remove();
+  }
+}
+
+function downloadJsonText(text, filename) {
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 function bindEventHandlers() {
   const cancelBtn = document.querySelector('.control-btn.cancel');
   if (cancelBtn) {
@@ -1616,6 +1703,43 @@ function bindEventHandlers() {
         window.URL.revokeObjectURL(url);
       } catch (error) {
         alert(error.message || 'Trade export failed.');
+      }
+    });
+  }
+
+  const exportBtn = document.getElementById('exportLancelotBtn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', async () => {
+      try {
+        const selection = getLancelotExportSelection();
+        const response = await fetch(
+          `/api/studies/${encodeURIComponent(ResultsState.studyId)}/export/lancelot`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(selection),
+          }
+        );
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || 'Bundle export failed.');
+        }
+
+        const payload = await response.json();
+        const formatted = JSON.stringify(payload, null, 2);
+        try {
+          await copyTextToClipboard(formatted);
+          alert('Partial Bundle copied to clipboard.');
+        } catch (_clipboardError) {
+          const selectionLabel = selection.windowNumber
+            ? `wfa_window_${selection.windowNumber}`
+            : `trial_${selection.trialNumber}`;
+          const strategyLabel = String(payload?.strategyId || 'strategy').trim() || 'strategy';
+          downloadJsonText(formatted, `${strategyLabel}_${selectionLabel}_lancelot_bundle.json`);
+          alert('Clipboard copy is unavailable. Partial Bundle JSON was downloaded instead.');
+        }
+      } catch (error) {
+        alert(error.message || 'Bundle export failed.');
       }
     });
   }

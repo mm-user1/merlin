@@ -34,6 +34,8 @@ from core.post_process import (
     StressTestConfig,
     calculate_period_dates,
     calculate_is_period_days,
+    filter_ft_passed_results,
+    normalize_ft_reject_action,
     run_dsr_analysis,
     run_forward_test,
     run_stress_test,
@@ -193,6 +195,29 @@ def register_routes(app):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         return None
+
+    def _parse_ft_threshold_pct(payload: Dict[str, Any]) -> float:
+        try:
+            value = float(payload.get("ftThresholdPct", -5.0))
+        except (TypeError, ValueError):
+            value = -5.0
+        if not math.isfinite(value):
+            value = -5.0
+        return max(-1_000_000.0, min(1_000_000.0, value))
+
+    def _parse_ft_reject_days(payload: Dict[str, Any], key: str, default: int) -> int:
+        try:
+            value = int(payload.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(1, min(3650, value))
+
+    def _parse_ft_reject_attempts(payload: Dict[str, Any]) -> int:
+        try:
+            value = int(payload.get("ftRejectMaxAttempts", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return max(0, min(100, value))
 
 
 
@@ -370,6 +395,17 @@ def register_routes(app):
             "strategy_id": optimization_config.strategy_id,
             "warmup_bars": optimization_config.warmup_bars,
             "csv_original_name": original_csv_name,
+            "detailed_log": bool(getattr(optimization_config, "detailed_log", False)),
+            "trials_log": bool(getattr(optimization_config, "trials_log", False)),
+            "dispatcher_batch_result_processing": bool(
+                getattr(optimization_config, "dispatcher_batch_result_processing", True)
+            ),
+            "dispatcher_soft_duplicate_cycle_limit_enabled": bool(
+                getattr(optimization_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            "dispatcher_duplicate_cycle_limit": int(
+                getattr(optimization_config, "dispatcher_duplicate_cycle_limit", 18)
+            ),
             "objectives": list(getattr(optimization_config, "objectives", []) or []),
             "primary_objective": getattr(optimization_config, "primary_objective", None),
             "constraints": json.loads(json.dumps(getattr(optimization_config, "constraints", []) or [])),
@@ -379,6 +415,7 @@ def register_routes(app):
             "mutation_prob": getattr(optimization_config, "mutation_prob", None),
             "swapping_prob": getattr(optimization_config, "swapping_prob", None),
             "n_startup_trials": getattr(optimization_config, "n_startup_trials", 20),
+            "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
         }
         if post_process_payload:
             base_template["postProcess"] = post_process_payload
@@ -399,7 +436,17 @@ def register_routes(app):
             "swapping_prob": getattr(optimization_config, "swapping_prob", None),
             "pruner": getattr(optimization_config, "optuna_pruner", "median"),
             "warmup_trials": int(getattr(optimization_config, "n_startup_trials", 20)),
-            "save_study": bool(getattr(optimization_config, "optuna_save_study", False)),
+            "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
+            "trials_log": bool(getattr(optimization_config, "trials_log", False)),
+            "dispatcher_batch_result_processing": bool(
+                getattr(optimization_config, "dispatcher_batch_result_processing", True)
+            ),
+            "dispatcher_soft_duplicate_cycle_limit_enabled": bool(
+                getattr(optimization_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+            ),
+            "dispatcher_duplicate_cycle_limit": int(
+                getattr(optimization_config, "dispatcher_duplicate_cycle_limit", 18)
+            ),
         }
         base_template["optuna_config"] = json.loads(json.dumps(optuna_settings))
 
@@ -417,6 +464,19 @@ def register_routes(app):
             adaptive_mode = adaptive_raw.strip().lower() in {"true", "1", "yes", "on"}
         else:
             adaptive_mode = bool(adaptive_raw)
+
+        cooldown_enabled_raw = data.get("wf_cooldown_enabled", False)
+        if isinstance(cooldown_enabled_raw, str):
+            cooldown_enabled = cooldown_enabled_raw.strip().lower() in {"true", "1", "yes", "on"}
+        else:
+            cooldown_enabled = bool(cooldown_enabled_raw)
+        cooldown_enabled = adaptive_mode and cooldown_enabled
+
+        try:
+            cooldown_days = int(data.get("wf_cooldown_days", 15))
+        except (TypeError, ValueError):
+            cooldown_days = 15
+        cooldown_days = max(1, min(365, cooldown_days))
 
         try:
             max_oos_period_days = int(data.get("wf_max_oos_period_days", 90))
@@ -469,6 +529,17 @@ def register_routes(app):
                 ft_period_days=int(post_process_payload.get("ftPeriodDays", 15)),
                 top_k=int(post_process_payload.get("topK", 10)),
                 sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=_parse_ft_threshold_pct(post_process_payload),
+                ft_reject_action=normalize_ft_reject_action(
+                    post_process_payload.get("ftRejectAction")
+                ),
+                ft_reject_cooldown_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectCooldownDays", 5
+                ),
+                ft_reject_max_attempts=_parse_ft_reject_attempts(post_process_payload),
+                ft_reject_min_remaining_oos_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectMinRemainingOosDays", 10
+                ),
                 warmup_bars=warmup_bars,
             )
 
@@ -520,6 +591,8 @@ def register_routes(app):
             cusum_threshold=cusum_threshold,
             dd_threshold_multiplier=dd_threshold_multiplier,
             inactivity_multiplier=inactivity_multiplier,
+            cooldown_enabled=cooldown_enabled,
+            cooldown_days=cooldown_days,
         )
 
         base_template["adaptive_mode"] = adaptive_mode
@@ -529,6 +602,8 @@ def register_routes(app):
         base_template["cusum_threshold"] = cusum_threshold
         base_template["dd_threshold_multiplier"] = dd_threshold_multiplier
         base_template["inactivity_multiplier"] = inactivity_multiplier
+        base_template["cooldown_enabled"] = cooldown_enabled
+        base_template["cooldown_days"] = cooldown_days
 
         base_template["wfa"] = {
             "is_period_days": is_period_days,
@@ -541,6 +616,8 @@ def register_routes(app):
             "cusum_threshold": cusum_threshold,
             "dd_threshold_multiplier": dd_threshold_multiplier,
             "inactivity_multiplier": inactivity_multiplier,
+            "cooldown_enabled": cooldown_enabled,
+            "cooldown_days": cooldown_days,
         }
         engine = WalkForwardEngine(wf_config, base_template, optuna_settings, csv_file_path=data_path)
 
@@ -567,6 +644,8 @@ def register_routes(app):
                     "cusum_threshold": cusum_threshold,
                     "dd_threshold_multiplier": dd_threshold_multiplier,
                     "inactivity_multiplier": inactivity_multiplier,
+                    "cooldown_enabled": cooldown_enabled,
+                    "cooldown_days": cooldown_days,
                 },
             }
         )
@@ -655,6 +734,20 @@ def register_routes(app):
                 "data_path": data_path,
                 "summary": response_payload.get("summary", {}),
                 "study_id": study_id,
+                "wfa": {
+                    "is_period_days": is_period_days,
+                    "oos_period_days": oos_period_days,
+                    "store_top_n_trials": store_top_n_trials,
+                    "adaptive_mode": adaptive_mode,
+                    "max_oos_period_days": max_oos_period_days,
+                    "min_oos_trades": min_oos_trades,
+                    "check_interval_trades": check_interval_trades,
+                    "cusum_threshold": cusum_threshold,
+                    "dd_threshold_multiplier": dd_threshold_multiplier,
+                    "inactivity_multiplier": inactivity_multiplier,
+                    "cooldown_enabled": cooldown_enabled,
+                    "cooldown_days": cooldown_days,
+                },
             }
         )
         _clear_cancelled_run(run_id)
@@ -1131,6 +1224,17 @@ def register_routes(app):
                 ft_period_days=int(ft_days or 0),
                 top_k=int(post_process_payload.get("topK", 10)),
                 sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=_parse_ft_threshold_pct(post_process_payload),
+                ft_reject_action=normalize_ft_reject_action(
+                    post_process_payload.get("ftRejectAction")
+                ),
+                ft_reject_cooldown_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectCooldownDays", 5
+                ),
+                ft_reject_max_attempts=_parse_ft_reject_attempts(post_process_payload),
+                ft_reject_min_remaining_oos_days=_parse_ft_reject_days(
+                    post_process_payload, "ftRejectMinRemainingOosDays", 10
+                ),
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
@@ -1151,6 +1255,11 @@ def register_routes(app):
                 ft_period_days=int(ft_days or 0),
                 ft_top_k=int(post_process_payload.get("topK", 10)),
                 ft_sort_metric=str(post_process_payload.get("sortMetric", "profit_degradation")),
+                ft_threshold_pct=pp_config.ft_threshold_pct,
+                ft_reject_action=pp_config.ft_reject_action,
+                ft_reject_cooldown_days=pp_config.ft_reject_cooldown_days,
+                ft_reject_max_attempts=pp_config.ft_reject_max_attempts,
+                ft_reject_min_remaining_oos_days=pp_config.ft_reject_min_remaining_oos_days,
                 ft_start_date=ft_start.strftime("%Y-%m-%d") if ft_start else None,
                 ft_end_date=ft_end.strftime("%Y-%m-%d") if ft_end else None,
                 is_period_days=int(is_days or 0),
@@ -1190,7 +1299,7 @@ def register_routes(app):
             st_candidates = results
             st_source = "optuna"
             if ft_enabled and ft_results:
-                st_candidates = ft_results
+                st_candidates = filter_ft_passed_results(ft_results)
                 st_source = "ft"
             elif dsr_results:
                 st_candidates = dsr_results
@@ -1236,6 +1345,7 @@ def register_routes(app):
                 dsr_results=dsr_results,
                 ft_results=ft_results,
                 st_results=st_results,
+                ft_ran=bool(ft_enabled),
                 st_ran=bool(st_enabled),
             )
 

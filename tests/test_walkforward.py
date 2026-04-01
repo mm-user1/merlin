@@ -9,7 +9,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from core import storage
 from core.walkforward_engine import (
+    ISPipelineResult,
     OOSStitchedResult,
     WFConfig,
     WFResult,
@@ -17,8 +19,8 @@ from core.walkforward_engine import (
     WindowResult,
 )
 from core.optuna_engine import OptimizationResult
-from core.post_process import DSRConfig, DSRResult
-from core.backtest_engine import StrategyResult
+from core.post_process import DSRConfig, DSRResult, PostProcessConfig
+from core.backtest_engine import StrategyResult, TradeRecord
 from core.backtest_engine import load_data
 from strategies import get_strategy_config
 
@@ -258,6 +260,155 @@ def test_store_top_n_trials_limit():
     assert stored[0]["trial_number"] == 0
 
 
+def test_run_optuna_on_window_forwards_coverage_mode(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    base_row = {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100}
+    df = pd.DataFrame([base_row for _ in range(len(index))], index=index)
+
+    wf_config = WFConfig(strategy_id="s01_trailing_ma", is_period_days=10, oos_period_days=5)
+    base_template = {
+        "enabled_params": {},
+        "param_ranges": {},
+        "param_types": {},
+        "fixed_params": {"dateFilter": False},
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 1,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+        "csv_original_name": "OKX_LINKUSDT.P, 30 2025.05.01-2025.11.20.csv",
+        "detailed_log": True,
+        "trials_log": True,
+        "dispatcher_batch_result_processing": False,
+        "dispatcher_soft_duplicate_cycle_limit_enabled": False,
+        "dispatcher_duplicate_cycle_limit": 42,
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "sampler_type": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "n_startup_trials": 33,
+        "coverage_mode": True,
+    }
+    optuna_settings = {
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "budget_mode": "trials",
+        "n_trials": 20,
+        "time_limit": 3600,
+        "convergence_patience": 50,
+        "enable_pruning": True,
+        "sampler": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "pruner": "median",
+        "warmup_trials": 33,
+        "coverage_mode": True,
+        "save_study": False,
+    }
+    engine = WalkForwardEngine(wf_config, base_template, optuna_settings)
+
+    captured = {}
+
+    def fake_run_optuna_optimization(base_config, optuna_cfg):
+        captured["base_config"] = base_config
+        captured["optuna_cfg"] = optuna_cfg
+        return [], None
+
+    monkeypatch.setattr("core.walkforward_engine.run_optuna_optimization", fake_run_optuna_optimization)
+
+    engine._run_optuna_on_window(df, index[0], index[10])
+
+    assert captured["base_config"].coverage_mode is True
+    assert captured["base_config"].n_startup_trials == 33
+    assert captured["base_config"].csv_original_name == "OKX_LINKUSDT.P, 30 2025.05.01-2025.11.20.csv"
+    assert captured["base_config"].detailed_log is True
+    assert captured["base_config"].trials_log is True
+    assert captured["base_config"].dispatcher_batch_result_processing is False
+    assert captured["base_config"].dispatcher_soft_duplicate_cycle_limit_enabled is False
+    assert captured["base_config"].dispatcher_duplicate_cycle_limit == 42
+    assert captured["optuna_cfg"].coverage_mode is True
+    assert captured["optuna_cfg"].warmup_trials == 33
+
+
+@pytest.mark.slow
+def test_run_optuna_on_window_multiprocess_uses_in_memory_worker_csv():
+    data_path = Path(__file__).parent.parent / "data" / "raw" / "OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv"
+    if not data_path.exists():
+        pytest.skip("Sample data file not available for WFA multiprocess test.")
+
+    df = load_data(str(data_path)).iloc[:1200].copy()
+    wf_config = WFConfig(
+        strategy_id="s01_trailing_ma",
+        is_period_days=60,
+        oos_period_days=30,
+        warmup_bars=200,
+    )
+    base_template = {
+        "enabled_params": {"maLength": True},
+        "param_ranges": {"maLength": (10, 40, 10)},
+        "param_types": {"maLength": "int"},
+        "fixed_params": {
+            "dateFilter": False,
+            "maType": "EMA",
+            "closeCountLong": 2,
+            "closeCountShort": 2,
+        },
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 2,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "sampler_type": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "n_startup_trials": 20,
+        "coverage_mode": False,
+    }
+    optuna_settings = {
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "budget_mode": "trials",
+        "n_trials": 2,
+        "time_limit": 3600,
+        "convergence_patience": 10,
+        "enable_pruning": False,
+        "sampler": "tpe",
+        "population_size": 50,
+        "crossover_prob": 0.9,
+        "mutation_prob": None,
+        "swapping_prob": 0.5,
+        "pruner": "median",
+        "warmup_trials": 20,
+        "coverage_mode": False,
+    }
+    engine = WalkForwardEngine(wf_config, base_template, optuna_settings)
+
+    before_entries = {path.name for path in storage.JOURNAL_DIR.iterdir()}
+    results, all_results = engine._run_optuna_on_window(df, df.index[200], df.index[-1])
+    after_entries = {path.name for path in storage.JOURNAL_DIR.iterdir()}
+
+    assert after_entries == before_entries
+    assert isinstance(results, list)
+    assert isinstance(all_results, list)
+
+
 def test_best_params_source_tracked(monkeypatch):
     index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
     base_row = {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100}
@@ -325,6 +476,94 @@ def test_best_params_source_tracked(monkeypatch):
     assert result.windows[0].best_params_source == "dsr"
     assert result.windows[0].is_pareto_optimal is True
     assert result.windows[0].constraints_satisfied is False
+
+
+def test_fixed_wfa_ft_retry_delays_entry_and_trades_remaining_window(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=70, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+        index=index,
+    )
+
+    config = WFConfig(
+        strategy_id="s01_trailing_ma",
+        is_period_days=20,
+        oos_period_days=10,
+        post_process=PostProcessConfig(
+            enabled=True,
+            ft_period_days=5,
+            ft_threshold_pct=-5.0,
+            ft_reject_action="cooldown_reoptimize",
+            ft_reject_cooldown_days=5,
+            ft_reject_max_attempts=2,
+            ft_reject_min_remaining_oos_days=3,
+        ),
+    )
+    engine = WalkForwardEngine(config, {"fixed_params": {"dateFilter": False}}, {})
+
+    call_counter = {"count": 0}
+
+    def fake_pipeline(self, df, is_start, is_end, window_id):  # noqa: ARG001
+        call_counter["count"] += 1
+        return ISPipelineResult(
+            best_result=OptimizationResult(
+                params={"maType": "EMA", "maLength": 20, "closeCountLong": 7},
+                net_profit_pct=5.0,
+                max_drawdown_pct=1.0,
+                total_trades=3,
+                optuna_trial_number=window_id + call_counter["count"],
+            ),
+            best_params={"maType": "EMA", "maLength": 20, "closeCountLong": 7},
+            param_id=f"retry_{call_counter['count']}",
+            best_trial_number=window_id + call_counter["count"],
+            best_params_source="forward_test",
+            is_pareto_optimal=None,
+            constraints_satisfied=True,
+            available_modules=["optuna_is", "forward_test"],
+            module_status={
+                "optuna_is": {"enabled": True, "ran": True, "reason": None},
+                "forward_test": {"enabled": True, "ran": True, "reason": None},
+            },
+            selection_chain={"optuna_is": 1},
+            optimization_start=is_start,
+            optimization_end=is_end - pd.Timedelta(days=5),
+            ft_start=is_end - pd.Timedelta(days=5),
+            ft_end=is_end,
+            optuna_is_trials=[],
+            dsr_trials=None,
+            forward_test_trials=[],
+            stress_test_trials=None,
+            ft_gate_failed=call_counter["count"] == 1,
+            ft_pass_count=0 if call_counter["count"] == 1 else 1,
+        )
+
+    def fake_backtest(self, df, start, end, params):  # noqa: ARG001
+        trade = TradeRecord(
+            entry_time=start,
+            exit_time=end,
+            net_pnl=5.0,
+            profit_pct=5.0,
+        )
+        return StrategyResult(
+            trades=[trade],
+            equity_curve=[100.0, 105.0],
+            balance_curve=[100.0, 105.0],
+            timestamps=[start, end],
+        )
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_window_is_pipeline", fake_pipeline)
+    monkeypatch.setattr(WalkForwardEngine, "_run_period_backtest", fake_backtest)
+
+    result, _study_id = engine.run_wf_optimization(df)
+
+    first_window = result.windows[0]
+    assert first_window.window_status == "traded"
+    assert first_window.entry_delay_days == pytest.approx(5.0)
+    assert first_window.ft_retry_attempts_used == 1
+    assert first_window.trade_start == pd.Timestamp("2025-01-26", tz="UTC")
+    assert first_window.is_end == pd.Timestamp("2025-01-25", tz="UTC")
+    assert call_counter["count"] >= 2
+
 def test_walkforward_integration_with_sample_data(monkeypatch):
     data_path = Path(__file__).parent.parent / "data" / "raw" / "OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv"
     if not data_path.exists():

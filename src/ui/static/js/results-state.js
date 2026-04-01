@@ -18,6 +18,7 @@ const ResultsState = {
   fixedParams: {},
   strategyConfig: {},
   optuna: {},
+  postProcess: {},
   wfa: {},
   summary: {},
   results: [],
@@ -110,6 +111,7 @@ function applyState(state) {
   }
   ResultsState.strategyConfig = state.strategyConfig || ResultsState.strategyConfig;
   ResultsState.optuna = state.optuna || ResultsState.optuna;
+  ResultsState.postProcess = state.postProcess || ResultsState.postProcess;
   ResultsState.wfa = state.wfa || ResultsState.wfa;
   ResultsState.summary = state.summary || ResultsState.summary;
   ResultsState.results = state.results || state.windows || ResultsState.results;

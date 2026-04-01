@@ -2,28 +2,51 @@
 from __future__ import annotations
 
 import bisect
+from contextlib import contextmanager
+import io
+import itertools
+import json
 import logging
 import math
-import uuid
 import multiprocessing as mp
-import tempfile
+import queue
 import time
+import traceback
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import optuna
 from optuna.pruners import MedianPruner, PercentilePruner, PatientPruner
 from optuna.samplers import NSGAIIISampler, NSGAIISampler, RandomSampler, TPESampler
+from optuna.storages.journal import BaseJournalBackend
 from optuna.trial import TrialState
 import pandas as pd
 
 from . import metrics
 from .backtest_engine import load_data
-from .storage import JOURNAL_DIR, save_optuna_study_to_db
+from .storage import save_optuna_study_to_db
 
 logger = logging.getLogger(__name__)
 OPTUNA_LOGGER = optuna.logging.get_logger("optuna")
+
+_DUPLICATE_SKIPPED_ATTR = "merlin.duplicate_skipped"
+_DUPLICATE_SKIP_REASON_ATTR = "merlin.duplicate_skip_reason"
+_UNSET = object()
+
+
+class InMemoryJournalBackend(BaseJournalBackend):
+    """Process-shared in-memory journal backend for multiprocess Optuna."""
+
+    def __init__(self, shared_logs: Any) -> None:
+        self._logs = shared_logs
+
+    def read_logs(self, log_number_from: int):
+        return list(self._logs[log_number_from:])
+
+    def append_logs(self, logs: List[Dict[str, Any]]) -> None:
+        if logs:
+            self._logs.extend(logs)
 
 
 # ============================================================================
@@ -58,6 +81,10 @@ class OptimizationConfig:
     min_profit_threshold: float = 0.0
     score_config: Optional[Dict[str, Any]] = None
     detailed_log: bool = False
+    trials_log: bool = False
+    dispatcher_batch_result_processing: bool = True
+    dispatcher_soft_duplicate_cycle_limit_enabled: bool = True
+    dispatcher_duplicate_cycle_limit: int = 18
     optimization_mode: str = "optuna"
     objectives: List[str] = field(default_factory=list)
     primary_objective: Optional[str] = None
@@ -70,6 +97,7 @@ class OptimizationConfig:
     mutation_prob: Optional[float] = None
     swapping_prob: float = 0.5
     n_startup_trials: int = 20
+    coverage_mode: bool = False
 
 
 @dataclass
@@ -167,7 +195,7 @@ DEFAULT_METRIC_BOUNDS: Dict[str, Dict[str, float]] = {
     "pf": {"min": 0.0, "max": 5.0},
     "ulcer": {"min": 0.0, "max": 20.0},
     "sqn": {"min": -2.0, "max": 7.0},
-    "consistency": {"min": 0.0, "max": 100.0},
+    "consistency": {"min": -1.0, "max": 1.0},
 }
 
 DEFAULT_SCORE_CONFIG: Dict[str, Any] = {
@@ -204,7 +232,7 @@ OBJECTIVE_DISPLAY_NAMES: Dict[str, str] = {
     "win_rate": "Win Rate %",
     "sqn": "SQN",
     "ulcer_index": "Ulcer Index",
-    "consistency_score": "Consistency %",
+    "consistency_score": "Consistency",
     "composite_score": "Composite Score",
 }
 
@@ -224,6 +252,34 @@ CONSTRAINT_OPERATORS: Dict[str, str] = {
     "ulcer_index": "lte",
     "consistency_score": "gte",
 }
+
+_LEGACY_CONSISTENCY_BOUNDS = {"min": 0.0, "max": 100.0}
+
+
+def _migrate_legacy_consistency_bounds(metric_bounds: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """
+    Upgrade stale score configs that still treat consistency as 0..100 percent.
+
+    The metric semantics changed to signed R² in [-1, 1]. Old saved queue/study
+    configs may still carry the retired 0..100 bounds, which would distort score
+    normalization if used verbatim.
+    """
+    bounds = {
+        key: {"min": float(value.get("min", 0.0)), "max": float(value.get("max", 100.0))}
+        for key, value in metric_bounds.items()
+    }
+
+    consistency = bounds.get("consistency")
+    if consistency is None:
+        return bounds
+
+    if (
+        math.isclose(consistency.get("min", 0.0), _LEGACY_CONSISTENCY_BOUNDS["min"])
+        and math.isclose(consistency.get("max", 0.0), _LEGACY_CONSISTENCY_BOUNDS["max"])
+    ):
+        bounds["consistency"] = dict(DEFAULT_METRIC_BOUNDS["consistency"])
+
+    return bounds
 
 
 # ============================================================================
@@ -258,10 +314,432 @@ def _format_objective_value(value: Any) -> str:
         return "Inf" if float(value) > 0 else "-Inf"
     if _is_non_finite(value):
         return "NaN"
+
+
+def _build_params_key(params: Dict[str, Any]) -> str:
+    """Create a deterministic key for exact duplicate suppression."""
+    return json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _normalize_dispatch_cycle_duplicate_limit(value: Any) -> int:
+    """Normalize the configurable soft duplicate limit for the centralized dispatcher."""
     try:
-        return str(float(value))
+        parsed = int(value)
     except (TypeError, ValueError):
-        return "NaN"
+        return 18
+    return max(1, min(1000, parsed))
+
+
+def _estimate_search_space_size(search_space: Dict[str, Dict[str, Any]]) -> Optional[int]:
+    """Return the exact number of unique combinations for finite discrete spaces."""
+    total = 1
+    for spec in (search_space or {}).values():
+        p_type = str(spec.get("type", "")).lower()
+        if p_type == "categorical":
+            choices = list(spec.get("choices") or [])
+            if not choices:
+                return 0
+            total *= len(choices)
+            continue
+
+        if p_type == "int":
+            low = int(spec.get("low", 0))
+            high = int(spec.get("high", 0))
+            step = max(1, int(spec.get("step", 1) or 1))
+            total *= max(0, ((high - low) // step) + 1)
+            continue
+
+        if p_type == "float":
+            step = spec.get("step")
+            if step in (None, 0, 0.0) or spec.get("log"):
+                return None
+            try:
+                low = float(spec.get("low", 0.0))
+                high = float(spec.get("high", 0.0))
+                step_val = float(step)
+            except (TypeError, ValueError):
+                return None
+            if step_val <= 0:
+                return None
+            levels = int(math.floor(((high - low) / step_val) + 1e-9) + 1)
+            total *= max(0, levels)
+            continue
+
+        return None
+
+    return total
+
+
+def _resolve_strategy_param_type(
+    base_config: OptimizationConfig,
+    param_name: str,
+    param_spec: Dict[str, Any],
+) -> str:
+    return str(base_config.param_types.get(param_name, param_spec.get("type", "float"))).lower()
+
+
+def _is_duplicate_skipped_trial(trial: Any) -> bool:
+    attrs = getattr(trial, "user_attrs", {}) or {}
+    if not isinstance(attrs, dict):
+        return False
+    return bool(attrs.get(_DUPLICATE_SKIPPED_ATTR, False))
+
+
+def _coerce_bool_value(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
+def _normalize_bool_choices(raw_values: Any) -> List[bool]:
+    if raw_values is None:
+        return []
+    if isinstance(raw_values, (list, tuple)):
+        source_values = raw_values
+    else:
+        source_values = [raw_values]
+
+    normalized: List[bool] = []
+    for raw in source_values:
+        parsed = _coerce_bool_value(raw)
+        if parsed is None or parsed in normalized:
+            continue
+        normalized.append(parsed)
+    return normalized
+
+
+def _normalize_param_dependencies(raw_value: Any) -> Tuple[str, ...]:
+    if raw_value is None:
+        return ()
+    if isinstance(raw_value, str):
+        source_values = [raw_value]
+    elif isinstance(raw_value, (list, tuple)):
+        source_values = list(raw_value)
+    else:
+        raise ValueError("Parameter 'depends_on' must be a string or list of strings.")
+
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in source_values:
+        name = str(item or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return tuple(normalized)
+
+
+def _extract_bool_group_rules(strategy_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(strategy_config, dict):
+        return []
+
+    optimization_rules = strategy_config.get("optimization_rules")
+    if not isinstance(optimization_rules, dict):
+        return []
+
+    raw_groups = optimization_rules.get("bool_groups")
+    if not isinstance(raw_groups, list):
+        return []
+
+    rules: List[Dict[str, Any]] = []
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            continue
+
+        raw_params = (
+            raw_group.get("params")
+            or raw_group.get("parameters")
+            or raw_group.get("members")
+        )
+        if not isinstance(raw_params, list):
+            continue
+
+        deduped_params: List[str] = []
+        seen: Set[str] = set()
+        for raw_name in raw_params:
+            name = str(raw_name or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            deduped_params.append(name)
+        if len(deduped_params) < 2:
+            continue
+
+        rules.append(
+            {
+                "params": deduped_params,
+                "mode": str(raw_group.get("mode", "at_least_one_true")).strip().lower(),
+            }
+        )
+
+    return rules
+
+
+_COVERAGE_FLOAT_TOL = 1e-12
+_COVERAGE_RECOMMENDED_MULTIPLIER = 2
+
+
+def _extract_coverage_axes(
+    search_space: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Tuple[str, List[Any]]], Dict[str, Dict[str, Any]]]:
+    categorical_axes: List[Tuple[str, List[Any]]] = []
+    numeric_specs: Dict[str, Dict[str, Any]] = {}
+
+    for name, spec in (search_space or {}).items():
+        p_type = str(spec.get("type", "")).lower()
+        if p_type == "categorical":
+            choices = list(spec.get("choices") or [])
+            if choices:
+                categorical_axes.append((name, choices))
+            continue
+        if p_type in {"int", "float"}:
+            numeric_specs[name] = spec
+
+    return categorical_axes, numeric_specs
+
+
+def _infer_primary_numeric_param(
+    main_axis_name: Optional[str],
+    numeric_specs: Dict[str, Dict[str, Any]],
+) -> Optional[str]:
+    numeric_names = list(numeric_specs.keys())
+    if not numeric_names:
+        return None
+    unconditional_names = [
+        name for name, spec in numeric_specs.items() if not tuple(spec.get("depends_on") or ())
+    ]
+    candidate_names = unconditional_names or numeric_names
+    if not main_axis_name:
+        return candidate_names[0]
+
+    axis_name = str(main_axis_name)
+    axis_lower = axis_name.lower()
+    candidates: List[str] = []
+
+    # Common pairings like maType -> maLength and maType3 -> maLength3.
+    candidates.extend(
+        [
+            axis_name.replace("Type", "Length"),
+            axis_name.replace("type", "length"),
+            axis_name.replace("_type", "_length"),
+            axis_name.replace("_Type", "_Length"),
+            axis_name.replace("Type", "Period"),
+            axis_name.replace("type", "period"),
+            axis_name.replace("_type", "_period"),
+            axis_name.replace("_Type", "_Period"),
+        ]
+    )
+
+    if axis_lower.endswith("type"):
+        root = axis_name[:-4]
+        candidates.extend([f"{root}Length", f"{root}length", f"{root}Period", f"{root}period"])
+    if axis_lower.endswith("_type"):
+        root = axis_name[:-5]
+        candidates.extend([f"{root}_length", f"{root}_Length", f"{root}_period", f"{root}_Period"])
+
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            if candidate in candidate_names:
+                return candidate
+
+    digits = "".join(ch for ch in axis_name if ch.isdigit())
+    if digits:
+        for name in numeric_names:
+            if name in candidate_names and (
+                name.endswith(digits) and ("length" in name.lower() or "period" in name.lower())
+            ):
+                return name
+
+    for name in candidate_names:
+        if "length" in name.lower() or "period" in name.lower():
+            return name
+
+    return candidate_names[0]
+
+
+def _fraction_to_level_index(fraction: float, levels: int) -> int:
+    if levels <= 1:
+        return 0
+    bounded = max(0.0, min(1.0, float(fraction)))
+    target = bounded * float(levels - 1)
+    lower = int(math.floor(target))
+    upper = int(math.ceil(target))
+    if upper == lower:
+        return lower
+    dist_lower = target - float(lower)
+    dist_upper = float(upper) - target
+    if abs(dist_lower - dist_upper) <= _COVERAGE_FLOAT_TOL:
+        return lower
+    return lower if dist_lower < dist_upper else upper
+
+
+def _quantize_numeric_fraction(norm_value: float, spec: Dict[str, Any]) -> Union[int, float]:
+    bounded = max(0.0, min(1.0, float(norm_value)))
+    p_type = str(spec.get("type", "")).lower()
+
+    low = float(spec.get("low"))
+    high = float(spec.get("high"))
+    if high < low:
+        low, high = high, low
+
+    if p_type == "int":
+        low_i = int(round(low))
+        high_i = int(round(high))
+        step_i = max(1, int(round(float(spec.get("step", 1) or 1))))
+        levels = int(((high_i - low_i) // step_i) + 1)
+        levels = max(1, levels)
+        idx = _fraction_to_level_index(bounded, levels)
+        value = low_i + idx * step_i
+        return int(max(low_i, min(high_i, value)))
+
+    step = spec.get("step")
+    if step not in (None, 0, 0.0):
+        step_f = float(step)
+        if math.isfinite(step_f) and step_f > 0:
+            levels = int(math.floor(((high - low) / step_f) + 1e-9) + 1)
+            levels = max(1, levels)
+            idx = _fraction_to_level_index(bounded, levels)
+            quantized = low + idx * step_f
+            quantized = max(low, min(high, quantized))
+            return float(round(quantized, 12))
+
+    value = low + bounded * (high - low)
+    return float(round(max(low, min(high, value)), 12))
+
+
+def _build_anchor_fractions(full_blocks: int) -> List[float]:
+    block_count = max(0, int(full_blocks or 0))
+    if block_count <= 0:
+        return []
+    if block_count == 1:
+        return [0.5]
+    if block_count == 2:
+        return [1.0 / 3.0, 2.0 / 3.0]
+    denominator = float(block_count - 1)
+    return [idx / denominator for idx in range(block_count)]
+
+
+def _next_partial_anchor_fraction(full_blocks: int, used_fractions: List[float]) -> float:
+    if full_blocks <= 0:
+        return 0.5
+    candidates = _build_anchor_fractions(int(full_blocks) + 1)
+    unused = [
+        candidate
+        for candidate in candidates
+        if all(abs(candidate - used) > _COVERAGE_FLOAT_TOL for used in used_fractions)
+    ]
+    if not unused:
+        return 0.5
+    return min(unused, key=lambda value: (abs(value - 0.5), value))
+
+
+def _build_categorical_combinations(
+    categorical_axes: List[Tuple[str, List[Any]]]
+) -> List[Dict[str, Any]]:
+    if not categorical_axes:
+        return [{}]
+    axis_names = [name for name, _ in categorical_axes]
+    axis_choices = [choices for _, choices in categorical_axes]
+    combinations: List[Dict[str, Any]] = []
+    for values in itertools.product(*axis_choices):
+        combinations.append(dict(zip(axis_names, values)))
+    return combinations
+
+
+def _analyze_coverage_requirements(
+    search_space: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    categorical_axes, numeric_specs = _extract_coverage_axes(search_space)
+
+    coverage_block_size = 1
+    for _, choices in categorical_axes:
+        coverage_block_size *= max(1, len(choices))
+
+    main_axis_name: Optional[str] = None
+    main_axis_options = 1
+    if categorical_axes:
+        main_axis_name, main_axis_choices = max(categorical_axes, key=lambda item: len(item[1]))
+        main_axis_options = max(1, len(main_axis_choices))
+
+    primary_numeric_name = _infer_primary_numeric_param(main_axis_name, numeric_specs)
+    n_min = int(max(1, coverage_block_size))
+    n_rec = int(max(n_min, n_min * _COVERAGE_RECOMMENDED_MULTIPLIER))
+
+    return {
+        "n_min": n_min,
+        "n_rec": n_rec,
+        "coverage_block_size": n_min,
+        "coverage_combinations": n_min,
+        "categorical_axes_count": int(len(categorical_axes)),
+        "numeric_axes_count": int(len(numeric_specs)),
+        "main_axis_name": main_axis_name,
+        "main_axis_options": int(main_axis_options),
+        "primary_numeric_name": primary_numeric_name,
+    }
+
+
+def _generate_coverage_trials(
+    search_space: Dict[str, Dict[str, Any]],
+    n_trials: int,
+) -> List[Dict[str, Any]]:
+    target_count = max(0, int(n_trials or 0))
+    if target_count <= 0:
+        return []
+    coverage_report = _analyze_coverage_requirements(search_space)
+    categorical_axes, numeric_specs = _extract_coverage_axes(search_space)
+    categorical_combinations = _build_categorical_combinations(categorical_axes)
+    combination_count = max(1, len(categorical_combinations))
+
+    full_blocks = target_count // combination_count
+    remainder = target_count % combination_count
+    primary_numeric_name = coverage_report.get("primary_numeric_name")
+    midpoint_values: Dict[str, Union[int, float]] = {
+        name: _quantize_numeric_fraction(0.5, spec) for name, spec in numeric_specs.items()
+    }
+
+    results: List[Dict[str, Any]] = []
+    anchor_fractions = _build_anchor_fractions(full_blocks)
+
+    for fraction in anchor_fractions:
+        primary_override = None
+        if primary_numeric_name and primary_numeric_name in numeric_specs:
+            primary_override = _quantize_numeric_fraction(
+                fraction, numeric_specs[primary_numeric_name]
+            )
+        for combo in categorical_combinations:
+            params: Dict[str, Any] = dict(combo)
+            params.update(midpoint_values)
+            if primary_numeric_name and primary_override is not None:
+                params[primary_numeric_name] = primary_override
+            results.append(params)
+
+    if remainder > 0:
+        partial_fraction = _next_partial_anchor_fraction(full_blocks, anchor_fractions)
+        primary_override = None
+        if primary_numeric_name and primary_numeric_name in numeric_specs:
+            primary_override = _quantize_numeric_fraction(
+                partial_fraction, numeric_specs[primary_numeric_name]
+            )
+        start_offset = (full_blocks * 37 + remainder * 11) % combination_count
+        for idx in range(remainder):
+            combo = categorical_combinations[(start_offset + idx) % combination_count]
+            params = dict(combo)
+            params.update(midpoint_values)
+            if primary_numeric_name and primary_override is not None:
+                params[primary_numeric_name] = primary_override
+            results.append(params)
+
+    return results[:target_count]
 
 
 def evaluate_constraints(
@@ -330,6 +808,8 @@ def create_sampler(
         return TPESampler(
             n_startup_trials=config.n_startup_trials,
             multivariate=True,
+            group=True,
+            constant_liar=True,
             constraints_func=constraints_func,
         )
     if config.sampler_type == "nsga2":
@@ -693,39 +1173,126 @@ def _result_from_trial(trial: optuna.trial.FrozenTrial) -> OptimizationResult:
     return result
 
 
-def _materialize_csv_to_temp(csv_source: Any) -> Tuple[str, bool]:
-    """
-    Ensure CSV source is a file path string usable by worker processes.
-
-    Returns (path_string, needs_cleanup)
-    """
+def _serialize_csv_source_for_worker(csv_source: Any) -> Tuple[str, Union[str, bytes]]:
+    """Convert CSV source into a picklable worker payload."""
     if isinstance(csv_source, (str, Path)):
-        return str(csv_source), False
+        return "path", str(csv_source)
 
     if hasattr(csv_source, "name") and csv_source.name:
         possible_path = Path(csv_source.name)
         if possible_path.exists() and possible_path.is_file():
-            return str(possible_path), False
+            return "path", str(possible_path)
 
     if hasattr(csv_source, "read"):
+        reset_after_read = False
         if hasattr(csv_source, "seek"):
+            try:
+                csv_source.seek(0)
+                reset_after_read = True
+            except Exception:
+                pass
+
+        content = csv_source.read()
+        if reset_after_read and hasattr(csv_source, "seek"):
             try:
                 csv_source.seek(0)
             except Exception:
                 pass
 
-        content = csv_source.read()
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+        if isinstance(content, (bytes, bytearray)):
+            return "bytes", bytes(content)
+        return "text", str(content)
 
-        temp_dir = Path(tempfile.gettempdir()) / "merlin_optuna_csv"
-        temp_dir.mkdir(exist_ok=True)
-        temp_path = temp_dir / f"optimization_{int(time.time())}_{id(csv_source)}.csv"
-        Path(temp_path).write_bytes(content)
-        logger.info("Materialized CSV to temp file: %s", temp_path)
-        return str(temp_path), True
+    return "path", str(csv_source)
 
-    return str(csv_source), False
+
+def _restore_csv_source_from_worker(
+    mode: str,
+    payload: Union[str, bytes],
+) -> Union[str, io.StringIO, io.BytesIO]:
+    """Rebuild a CSV source object inside a worker process."""
+    if mode == "path":
+        return str(payload)
+    if mode == "bytes":
+        raw = payload if isinstance(payload, (bytes, bytearray)) else str(payload).encode("utf-8")
+        return io.BytesIO(bytes(raw))
+    text = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+    return io.StringIO(text)
+
+
+def _terminate_processes(processes: List[mp.Process], join_timeout: float = 5.0) -> None:
+    """Best-effort worker shutdown used by the multiprocess optimizer."""
+    for proc in processes:
+        if proc.is_alive():
+            proc.terminate()
+    for proc in processes:
+        proc.join(timeout=join_timeout)
+
+
+
+def _drain_worker_errors(error_queue: Any) -> List[Dict[str, Any]]:
+    """Collect worker error payloads without blocking."""
+    errors: List[Dict[str, Any]] = []
+    while True:
+        try:
+            errors.append(error_queue.get_nowait())
+        except queue.Empty:
+            break
+    return errors
+
+
+def _drain_result_queue_nowait(result_queue: Any) -> List[Dict[str, Any]]:
+    """Collect all currently queued result payloads without blocking."""
+    results: List[Dict[str, Any]] = []
+    while True:
+        try:
+            results.append(result_queue.get_nowait())
+        except queue.Empty:
+            break
+    return results
+
+
+def _wait_for_result_batch(result_queue: Any, timeout: float) -> List[Dict[str, Any]]:
+    """Wait for one result, then drain any additional ready payloads as one batch."""
+    try:
+        first = result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return []
+    return [first, *_drain_result_queue_nowait(result_queue)]
+
+
+def _drain_dispatch_results_nowait(result_queue: Any, batch_enabled: bool) -> List[Dict[str, Any]]:
+    """Drain ready dispatcher results using batch or single-result behavior."""
+    if batch_enabled:
+        return _drain_result_queue_nowait(result_queue)
+    try:
+        return [result_queue.get_nowait()]
+    except queue.Empty:
+        return []
+
+
+def _wait_for_dispatch_results(result_queue: Any, timeout: float, batch_enabled: bool) -> List[Dict[str, Any]]:
+    """Wait for dispatcher results using batch or single-result behavior."""
+    if batch_enabled:
+        return _wait_for_result_batch(result_queue, timeout)
+    try:
+        return [result_queue.get(timeout=timeout)]
+    except queue.Empty:
+        return []
+
+
+@contextmanager
+def _scoped_optuna_trial_logging(enabled: bool):
+    """Temporarily switch Optuna INFO trial logging on or off."""
+    previous_level = optuna.logging.get_verbosity()
+    target_level = optuna.logging.INFO if enabled else optuna.logging.WARNING
+    if previous_level != target_level:
+        optuna.logging.set_verbosity(target_level)
+    try:
+        yield
+    finally:
+        if previous_level != target_level:
+            optuna.logging.set_verbosity(previous_level)
 
 
 def _resolve_csv_path_for_study(csv_source: Any) -> str:
@@ -738,18 +1305,20 @@ def _resolve_csv_path_for_study(csv_source: Any) -> str:
 
 def _worker_process_entry(
     study_name: str,
-    storage_path: str,
+    shared_logs: Any,
+    csv_source_mode: str,
+    csv_source_payload: Union[str, bytes],
     base_config_dict: Dict[str, Any],
     optuna_config_dict: Dict[str, Any],
     n_trials: Optional[int],
     timeout: Optional[int],
     worker_id: int,
+    error_queue: Any,
 ) -> None:
     """
     Entry point for multi-process Optuna workers.
     """
     from optuna.storages import JournalStorage
-    from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
     from optuna.study import MaxTrialsCallback
 
     worker_logger = logging.getLogger(__name__)
@@ -757,6 +1326,7 @@ def _worker_process_entry(
 
     try:
         base_config = OptimizationConfig(**base_config_dict)
+        base_config.csv_file = _restore_csv_source_from_worker(csv_source_mode, csv_source_payload)
         optuna_config = OptunaConfig(**optuna_config_dict)
 
         optimizer = OptunaOptimizer(base_config, optuna_config)
@@ -764,9 +1334,7 @@ def _worker_process_entry(
         optimizer.pruner = optimizer._create_pruner()
         worker_sampler = optimizer._create_sampler()
 
-        storage = JournalStorage(
-            JournalFileBackend(storage_path, lock_obj=JournalFileOpenLock(storage_path))
-        )
+        storage = JournalStorage(InMemoryJournalBackend(shared_logs))
         study = optuna.load_study(
             study_name=study_name,
             storage=storage,
@@ -785,17 +1353,85 @@ def _worker_process_entry(
         worker_logger.info(
             "Worker %s running optimise (n_trials=%s, timeout=%s)", worker_id, n_trials, timeout
         )
-        study.optimize(
-            worker_objective,
-            n_trials=None,
-            timeout=timeout,
-            callbacks=callbacks or None,
-            show_progress_bar=False,
-            n_jobs=1,
-        )
+        with _scoped_optuna_trial_logging(bool(getattr(base_config, "trials_log", False))):
+            study.optimize(
+                worker_objective,
+                n_trials=None,
+                timeout=timeout,
+                callbacks=callbacks or None,
+                show_progress_bar=False,
+                n_jobs=1,
+            )
         worker_logger.info("Worker %s finished", worker_id)
     except Exception as exc:  # pragma: no cover - defensive
+        try:
+            error_queue.put_nowait(
+                {
+                    "worker_id": worker_id,
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            worker_logger.debug("Failed to publish worker error for worker %s", worker_id, exc_info=True)
         worker_logger.error("Worker %s failed: %s", worker_id, exc, exc_info=True)
+        raise
+
+
+def _evaluator_worker_entry(
+    task_queue: mp.Queue,
+    result_queue: mp.Queue,
+    csv_source_mode: str,
+    csv_source_payload: Union[str, bytes],
+    base_config_dict: Dict[str, Any],
+    optuna_config_dict: Dict[str, Any],
+    worker_id: int,
+    error_queue: Any,
+) -> None:
+    """Worker process used by centralized NSGA ask/tell orchestration."""
+    worker_logger = logging.getLogger(__name__)
+    worker_logger.info("Evaluator worker %s starting (pid=%s)", worker_id, mp.current_process().pid)
+
+    try:
+        base_config = OptimizationConfig(**base_config_dict)
+        base_config.csv_file = _restore_csv_source_from_worker(csv_source_mode, csv_source_payload)
+        optuna_config = OptunaConfig(**optuna_config_dict)
+
+        optimizer = OptunaOptimizer(base_config, optuna_config)
+        optimizer._prepare_data_and_strategy()
+
+        while True:
+            task = task_queue.get()
+            if task is None:
+                worker_logger.info("Evaluator worker %s received stop signal", worker_id)
+                break
+
+            trial_number = int(task["trial_number"])
+            params = dict(task["params"])
+            payload = optimizer._evaluate_trial_payload(params)
+            result_queue.put(
+                {
+                    "trial_number": trial_number,
+                    "params_key": str(task["params_key"]),
+                    "payload": payload,
+                }
+            )
+
+        worker_logger.info("Evaluator worker %s finished", worker_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        try:
+            error_queue.put_nowait(
+                {
+                    "worker_id": worker_id,
+                    "message": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            worker_logger.debug(
+                "Failed to publish evaluator error for worker %s", worker_id, exc_info=True
+            )
+        worker_logger.error("Evaluator worker %s failed: %s", worker_id, exc, exc_info=True)
         raise
 
 
@@ -965,6 +1601,7 @@ def calculate_score(
                 min_val = current.get("min", 0.0)
                 max_val = current.get("max", 100.0)
             metric_bounds[key] = {"min": min_val, "max": max_val}
+    metric_bounds = _migrate_legacy_consistency_bounds(metric_bounds)
 
     metrics_to_normalize: List[str] = []
     for metric in SCORE_METRIC_ATTRS:
@@ -1021,6 +1658,7 @@ class OptunaConfig:
     enable_pruning: bool = True
     pruner: str = "median"  # "median", "percentile", "patient", "none"
     warmup_trials: int = 20
+    coverage_mode: bool = False
     save_study: bool = False
     study_name: Optional[str] = None
 
@@ -1031,6 +1669,9 @@ class OptunaOptimizer:
     def __init__(self, base_config, optuna_config: OptunaConfig) -> None:
         self.base_config = base_config
         self.optuna_config = optuna_config
+        if bool(getattr(self.optuna_config, "save_study", False)):
+            logger.warning("Raw Optuna study persistence is disabled; ignoring save_study=True")
+            self.optuna_config.save_study = False
         objectives = list(optuna_config.objectives or [])
         if not objectives:
             objectives = ["net_profit_pct"]
@@ -1052,6 +1693,11 @@ class OptunaOptimizer:
             self.sampler_config = SamplerConfig(**raw_sampler_config)
         else:
             self.sampler_config = raw_sampler_config or SamplerConfig()
+        if bool(getattr(self.optuna_config, "coverage_mode", False)) and str(
+            getattr(self.sampler_config, "sampler_type", "")
+        ).lower() == "tpe":
+            # Coverage trials replace random startup when coverage mode is enabled.
+            self.sampler_config.n_startup_trials = 0
         self.df: Optional[pd.DataFrame] = None
         self.trade_start_idx: int = 0
         self.strategy_class: Optional[Any] = None
@@ -1063,7 +1709,13 @@ class OptunaOptimizer:
         self.study: Optional[optuna.Study] = None
         self.pruner: Optional[optuna.pruners.BasePruner] = None
         self.param_type_map: Dict[str, str] = {}
+        self._param_defaults: Dict[str, Any] = {}
+        self._param_dependencies: Dict[str, Tuple[str, ...]] = {}
+        self._optimizable_param_names: Set[str] = set()
         self._multiprocess_mode: bool = False
+        self._coverage_report: Optional[Dict[str, Any]] = None
+        self._bool_group_choice_map: Dict[str, Dict[str, Dict[str, bool]]] = {}
+        self._duplicate_skipped_count: int = 0
 
     # ------------------------------------------------------------------
     # Search space handling
@@ -1084,18 +1736,45 @@ class OptunaOptimizer:
 
         space: Dict[str, Dict[str, Any]] = {}
         self.param_type_map = {}
+        self._param_defaults = {}
+        self._param_dependencies = {}
+        self._optimizable_param_names = set()
+        self._bool_group_choice_map = {}
+        resolved_param_types = {
+            param_name: _resolve_strategy_param_type(self.base_config, param_name, param_spec)
+            for param_name, param_spec in parameters.items()
+            if isinstance(param_spec, dict)
+        }
 
         for param_name, param_spec in parameters.items():
             if not isinstance(param_spec, dict):
                 continue
 
-            param_type = str(
-                self.base_config.param_types.get(param_name, param_spec.get("type", "float"))
-            ).lower()
+            self._param_defaults[param_name] = param_spec.get("default")
+            dependencies = _normalize_param_dependencies(param_spec.get("depends_on"))
+            for dependency_name in dependencies:
+                if dependency_name not in parameters:
+                    raise ValueError(
+                        "Parameter dependency references unknown parent "
+                        f"'{dependency_name}' for '{param_name}' in strategy "
+                        f"'{self.base_config.strategy_id}'"
+                    )
+                if resolved_param_types.get(dependency_name) != "bool":
+                    raise ValueError(
+                        "Parameter dependency requires a bool parent "
+                        f"for '{param_name}' in strategy '{self.base_config.strategy_id}': "
+                        f"'{dependency_name}' is typed as "
+                        f"'{resolved_param_types.get(dependency_name, 'unknown')}'"
+                    )
+            if dependencies:
+                self._param_dependencies[param_name] = dependencies
+
+            param_type = resolved_param_types[param_name]
             self.param_type_map[param_name] = param_type
 
             if not self.base_config.enabled_params.get(param_name, False):
                 continue
+            self._optimizable_param_names.add(param_name)
 
             optimize_spec = param_spec.get("optimize", {}) if isinstance(param_spec.get("optimize", {}), dict) else {}
             override_range = self.base_config.param_ranges.get(param_name)
@@ -1149,12 +1828,151 @@ class OptunaOptimizer:
                 }
 
             elif param_type in {"bool", "boolean"}:
+                bool_choices = [True, False]
+
+                range_override = self.base_config.param_ranges.get(param_name)
+                if isinstance(range_override, dict):
+                    override_options = range_override.get("values") or range_override.get("options")
+                    normalized_override = _normalize_bool_choices(override_options)
+                    if normalized_override:
+                        bool_choices = normalized_override
+
+                fixed_override = self.base_config.fixed_params.get(f"{param_name}_options")
+                normalized_fixed = _normalize_bool_choices(fixed_override)
+                if normalized_fixed:
+                    bool_choices = normalized_fixed
+
                 space[param_name] = {
                     "type": "categorical",
-                    "choices": [True, False],
+                    "choices": list(bool_choices),
                 }
 
-        return space
+            if dependencies and param_name in space:
+                space[param_name]["depends_on"] = list(dependencies)
+
+        return self._apply_bool_group_rules(space, strategy_config)
+
+    def _build_bool_group_surrogate_name(self, member_names: List[str]) -> str:
+        sanitized = [name for name in member_names if name]
+        return "__bool_group__" + "__".join(sanitized)
+
+    def _apply_bool_group_rules(
+        self,
+        search_space: Dict[str, Dict[str, Any]],
+        strategy_config: Dict[str, Any],
+    ) -> Dict[str, Dict[str, Any]]:
+        rules = _extract_bool_group_rules(strategy_config)
+        if not rules:
+            return search_space
+
+        updated_space: Dict[str, Dict[str, Any]] = dict(search_space)
+        strategy_params = (
+            strategy_config.get("parameters", {})
+            if isinstance(strategy_config.get("parameters", {}), dict)
+            else {}
+        )
+
+        for rule_index, rule in enumerate(rules):
+            member_names = list(rule.get("params") or [])
+            mode = str(rule.get("mode", "")).strip().lower()
+            if len(member_names) < 2:
+                continue
+            if mode != "at_least_one_true":
+                raise ValueError(
+                    f"Unsupported bool group mode '{mode}' in strategy '{self.base_config.strategy_id}'"
+                )
+
+            optimizable_members: List[str] = []
+            member_choices: Dict[str, List[bool]] = {}
+            for name in member_names:
+                spec = updated_space.get(name)
+                if isinstance(spec, dict) and str(spec.get("type", "")).lower() == "categorical":
+                    normalized_choices = _normalize_bool_choices(spec.get("choices"))
+                    if not normalized_choices:
+                        raise ValueError(
+                            f"Invalid bool choices for '{name}' in strategy '{self.base_config.strategy_id}'"
+                        )
+                    member_choices[name] = normalized_choices
+                    optimizable_members.append(name)
+                    continue
+
+                fixed_value = self.base_config.fixed_params.get(name)
+                if fixed_value is None and isinstance(strategy_params, dict):
+                    param_spec = strategy_params.get(name, {})
+                    if isinstance(param_spec, dict):
+                        fixed_value = param_spec.get("default")
+
+                parsed_fixed = _coerce_bool_value(fixed_value)
+                if parsed_fixed is None:
+                    raise ValueError(
+                        f"Unable to resolve bool value for '{name}' in strategy '{self.base_config.strategy_id}'"
+                    )
+                member_choices[name] = [parsed_fixed]
+
+            if not optimizable_members:
+                continue
+
+            combinations: List[Dict[str, bool]] = []
+            choice_lists = [member_choices[name] for name in member_names]
+            for combo_values in itertools.product(*choice_lists):
+                combo = dict(zip(member_names, combo_values))
+                if mode == "at_least_one_true" and not any(combo.values()):
+                    continue
+                combinations.append(combo)
+
+            if not combinations:
+                raise ValueError(
+                    "Boolean optimization rules produced no valid combinations for "
+                    f"strategy '{self.base_config.strategy_id}'."
+                )
+
+            projected_combinations: List[Dict[str, bool]] = []
+            for combo in combinations:
+                projected = {name: combo[name] for name in optimizable_members}
+                if projected not in projected_combinations:
+                    projected_combinations.append(projected)
+
+            if not projected_combinations:
+                raise ValueError(
+                    "Boolean optimization rules produced no projected combinations for "
+                    f"strategy '{self.base_config.strategy_id}'."
+                )
+
+            if len(optimizable_members) == 1:
+                target_name = optimizable_members[0]
+                allowed_values: List[bool] = []
+                for projected in projected_combinations:
+                    value = projected[target_name]
+                    if value not in allowed_values:
+                        allowed_values.append(value)
+                updated_space[target_name] = {
+                    "type": "categorical",
+                    "choices": allowed_values,
+                }
+                continue
+
+            surrogate_name = self._build_bool_group_surrogate_name(optimizable_members)
+            while surrogate_name in updated_space:
+                surrogate_name = f"{surrogate_name}_{rule_index}"
+
+            choice_map: Dict[str, Dict[str, bool]] = {}
+            surrogate_choices: List[str] = []
+            for idx, projected in enumerate(projected_combinations):
+                token = f"g{rule_index}_{idx}"
+                choice_map[token] = projected
+                surrogate_choices.append(token)
+
+            for name in optimizable_members:
+                updated_space.pop(name, None)
+
+            updated_space[surrogate_name] = {
+                "type": "categorical",
+                "choices": surrogate_choices,
+            }
+            self.param_type_map[surrogate_name] = "categorical"
+            self._bool_group_choice_map[surrogate_name] = choice_map
+
+        return updated_space
 
     # ------------------------------------------------------------------
     # Sampler / pruner factories
@@ -1183,6 +2001,35 @@ class OptunaOptimizer:
         return MedianPruner(
             n_startup_trials=max(0, int(self.optuna_config.warmup_trials))
         )
+
+    def _enqueue_coverage_trials(
+        self,
+        search_space: Dict[str, Dict[str, Any]],
+        context_label: str = "",
+    ) -> int:
+        self._coverage_report = _analyze_coverage_requirements(
+            search_space=search_space,
+        )
+
+        if not bool(getattr(self.optuna_config, "coverage_mode", False)):
+            return 0
+        if self.study is None:
+            return 0
+
+        n_initial = max(0, int(getattr(self.optuna_config, "warmup_trials", 0) or 0))
+        if n_initial <= 0:
+            return 0
+
+        coverage_trials = [
+            self._prune_inactive_trial_values(params)
+            for params in _generate_coverage_trials(search_space, n_initial)
+        ]
+        for params in coverage_trials:
+            self.study.enqueue_trial(params)
+
+        suffix = f" {context_label}".strip()
+        logger.info("Enqueued %d coverage trials%s", len(coverage_trials), f" {suffix}" if suffix else "")
+        return len(coverage_trials)
 
     # ------------------------------------------------------------------
     # Data preparation (shared by single and multi process)
@@ -1228,6 +2075,51 @@ class OptunaOptimizer:
         args = (params_dict, self.df, self.trade_start_idx, self.strategy_class)
         return _run_single_combination(args)
 
+    def _evaluate_trial_payload(self, params_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate one parameter set and return a serializable Optuna payload."""
+        result = self._evaluate_parameters(params_dict)
+
+        score_config = self.base_config.score_config or DEFAULT_SCORE_CONFIG
+        score_needed = score_config.get("filter_enabled") or (
+            "composite_score" in self.mo_config.objectives
+        )
+        if score_needed:
+            minmax_config = score_config.copy()
+            minmax_config["normalization_method"] = "minmax"
+            scored_results = calculate_score([result], minmax_config)
+            if scored_results:
+                result = scored_results[0]
+
+        all_metrics = self._collect_metrics(result)
+        objective_values, sanitized, objective_return, should_fail = self._prepare_objective_values(
+            all_metrics
+        )
+        payload: Dict[str, Any] = {
+            "result": result,
+            "all_metrics": all_metrics,
+            "objective_values": objective_values,
+            "sanitized_metrics": list(sanitized),
+            "objective_return": objective_return,
+            "should_fail": bool(should_fail),
+            "constraint_values": [],
+            "constraints_satisfied": True,
+        }
+        if should_fail:
+            return payload
+
+        constraint_values = evaluate_constraints(all_metrics, self.constraints)
+        constraints_satisfied = True
+        if constraint_values:
+            constraints_satisfied = all(value <= 0.0 for value in constraint_values)
+
+        result.objective_values = objective_values
+        result.constraint_values = constraint_values
+        result.constraints_satisfied = constraints_satisfied
+
+        payload["constraint_values"] = constraint_values
+        payload["constraints_satisfied"] = constraints_satisfied
+        return payload
+
     def _cast_param_value(self, name: str, value: Any) -> Any:
         param_type = self.param_type_map.get(name, "").lower()
         try:
@@ -1236,51 +2128,161 @@ class OptunaOptimizer:
             if param_type == "float":
                 return float(value)
             if param_type == "bool":
-                return bool(value)
+                parsed_bool = _coerce_bool_value(value)
+                return bool(value) if parsed_bool is None else parsed_bool
         except (TypeError, ValueError):  # pragma: no cover - defensive
             return value
         return value
 
+    def _suggest_trial_parameter(
+        self,
+        trial: optuna.Trial,
+        key: str,
+        spec: Dict[str, Any],
+    ) -> Any:
+        p_type = spec["type"]
+        if p_type == "int":
+            return trial.suggest_int(
+                key,
+                int(spec["low"]),
+                int(spec["high"]),
+                step=int(spec.get("step", 1)),
+            )
+        if p_type == "float":
+            if spec.get("log"):
+                return trial.suggest_float(
+                    key,
+                    float(spec["low"]),
+                    float(spec["high"]),
+                    log=True,
+                )
+            step = spec.get("step")
+            if step:
+                return trial.suggest_float(
+                    key,
+                    float(spec["low"]),
+                    float(spec["high"]),
+                    step=float(step),
+                )
+            return trial.suggest_float(
+                key,
+                float(spec["low"]),
+                float(spec["high"]),
+            )
+        if p_type == "categorical":
+            return trial.suggest_categorical(key, list(spec["choices"]))
+        raise ValueError(f"Unsupported search space type '{p_type}' for parameter '{key}'")
+
+    def _decode_bool_group_params(
+        self,
+        params_dict: Dict[str, Any],
+        *,
+        remove_surrogates: bool,
+    ) -> Dict[str, Any]:
+        resolved = dict(params_dict)
+        for surrogate_name, choice_map in self._bool_group_choice_map.items():
+            token = resolved.get(surrogate_name)
+            if token is None:
+                continue
+            decoded = choice_map.get(str(token))
+            if not decoded:
+                raise ValueError(
+                    f"Invalid bool-group token '{token}' for '{surrogate_name}' "
+                    f"in strategy '{self.base_config.strategy_id}'"
+                )
+            if remove_surrogates:
+                resolved.pop(surrogate_name, None)
+            resolved.update(decoded)
+        return resolved
+
+    def _is_dependency_ready(self, dependency_name: str, params_dict: Dict[str, Any]) -> bool:
+        if dependency_name in params_dict:
+            return True
+        if dependency_name in self._optimizable_param_names:
+            return False
+        fixed_value = (self.base_config.fixed_params or {}).get(dependency_name, _UNSET)
+        if fixed_value is not _UNSET:
+            return True
+        return dependency_name in self._param_defaults
+
+    def _resolve_parameter_value(self, name: str, params_dict: Dict[str, Any]) -> Any:
+        if name in params_dict:
+            return params_dict[name]
+        fixed_value = (self.base_config.fixed_params or {}).get(name, _UNSET)
+        if fixed_value is not _UNSET:
+            return self._cast_param_value(name, fixed_value)
+        default_value = self._param_defaults.get(name, _UNSET)
+        if default_value is not _UNSET:
+            return self._cast_param_value(name, default_value)
+        return None
+
+    def _dependencies_ready(self, name: str, params_dict: Dict[str, Any]) -> bool:
+        dependencies = self._param_dependencies.get(name, ())
+        return all(self._is_dependency_ready(dep_name, params_dict) for dep_name in dependencies)
+
+    def _dependency_is_active(self, name: str, params_dict: Dict[str, Any]) -> bool:
+        dependencies = self._param_dependencies.get(name, ())
+        if not dependencies:
+            return True
+        for dep_name in dependencies:
+            dep_value = self._resolve_parameter_value(dep_name, params_dict)
+            parsed = _coerce_bool_value(dep_value)
+            dep_enabled = bool(dep_value) if parsed is None else parsed
+            if not dep_enabled:
+                return False
+        return True
+
+    def _prune_inactive_trial_values(self, params_dict: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._param_dependencies:
+            return dict(params_dict)
+        pruned = dict(params_dict)
+        context = self._decode_bool_group_params(pruned, remove_surrogates=False)
+        for name in list(pruned.keys()):
+            if name in self._param_dependencies and not self._dependency_is_active(name, context):
+                pruned.pop(name, None)
+        return pruned
+
     def _prepare_trial_parameters(self, trial: optuna.Trial, search_space: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         params_dict: Dict[str, Any] = {}
+        pending_specs = list(search_space.items())
 
-        for key, spec in search_space.items():
-            p_type = spec["type"]
-            if p_type == "int":
-                params_dict[key] = trial.suggest_int(
-                    key,
-                    int(spec["low"]),
-                    int(spec["high"]),
-                    step=int(spec.get("step", 1)),
+        while pending_specs:
+            next_pending: List[Tuple[str, Dict[str, Any]]] = []
+            progressed = False
+
+            for key, spec in pending_specs:
+                if not self._dependencies_ready(key, params_dict):
+                    next_pending.append((key, spec))
+                    continue
+                if not self._dependency_is_active(key, params_dict):
+                    progressed = True
+                    continue
+
+                params_dict[key] = self._suggest_trial_parameter(trial, key, spec)
+                if key in self._bool_group_choice_map:
+                    params_dict = self._decode_bool_group_params(
+                        params_dict,
+                        remove_surrogates=True,
+                    )
+                progressed = True
+
+            if not progressed and next_pending:
+                unresolved_names = ", ".join(key for key, _ in next_pending)
+                raise ValueError(
+                    "Unable to resolve parameter dependencies for "
+                    f"strategy '{self.base_config.strategy_id}': {unresolved_names}"
                 )
-            elif p_type == "float":
-                if spec.get("log"):
-                    params_dict[key] = trial.suggest_float(
-                        key,
-                        float(spec["low"]),
-                        float(spec["high"]),
-                        log=True,
-                    )
-                else:
-                    step = spec.get("step")
-                    if step:
-                        params_dict[key] = trial.suggest_float(
-                            key,
-                            float(spec["low"]),
-                            float(spec["high"]),
-                            step=float(step),
-                        )
-                    else:
-                        params_dict[key] = trial.suggest_float(
-                            key,
-                            float(spec["low"]),
-                            float(spec["high"]),
-                    )
-            elif p_type == "categorical":
-                params_dict[key] = trial.suggest_categorical(key, list(spec["choices"]))
+
+            pending_specs = next_pending
+
+        params_dict = self._decode_bool_group_params(params_dict, remove_surrogates=True)
 
         for key, value in (self.base_config.fixed_params or {}).items():
             if value is None or key in params_dict:
+                continue
+            if not self._dependencies_ready(key, params_dict):
+                continue
+            if not self._dependency_is_active(key, params_dict):
                 continue
             params_dict[key] = self._cast_param_value(key, value)
 
@@ -1428,48 +2430,64 @@ class OptunaOptimizer:
             return -value
         return value
 
+    def _mark_coverage_generation_for_nsga(self, trial: optuna.Trial) -> None:
+        """Ensure enqueued coverage trials are visible to NSGA generations."""
+        if not bool(getattr(self.optuna_config, "coverage_mode", False)):
+            return
+
+        sampler_type = str(getattr(self.sampler_config, "sampler_type", "")).lower()
+        if sampler_type == "nsga2":
+            generation_key = NSGAIISampler._GENERATION_KEY
+        elif sampler_type == "nsga3":
+            generation_key = NSGAIIISampler._GENERATION_KEY
+        else:
+            return
+
+        trial_id = getattr(trial, "_trial_id", None)
+        storage = getattr(getattr(trial, "study", None), "_storage", None)
+        if trial_id is None or storage is None:
+            return
+
+        try:
+            frozen_trial = storage.get_trial(trial_id)
+            system_attrs = dict(getattr(frozen_trial, "system_attrs", {}) or {})
+            if "fixed_params" not in system_attrs:
+                return
+            if system_attrs.get(generation_key) is not None:
+                return
+            storage.set_trial_system_attr(trial_id, generation_key, 0)
+        except Exception:  # pragma: no cover - defensive safety
+            logger.debug(
+                "Failed to mark NSGA generation for trial %s in coverage mode",
+                getattr(trial, "number", "?"),
+                exc_info=True,
+            )
+
     def _objective(self, trial: optuna.Trial, search_space: Dict[str, Dict[str, Any]]):
+        self._mark_coverage_generation_for_nsga(trial)
         params_dict = self._prepare_trial_parameters(trial, search_space)
 
-        result = self._evaluate_parameters(params_dict)
-
-        score_config = self.base_config.score_config or DEFAULT_SCORE_CONFIG
-        score_needed = score_config.get("filter_enabled") or (
-            "composite_score" in self.mo_config.objectives
-        )
-        if score_needed:
-            minmax_config = score_config.copy()
-            minmax_config["normalization_method"] = "minmax"
-            scored_results = calculate_score([result], minmax_config)
-            if scored_results:
-                result = scored_results[0]
-
-        all_metrics = self._collect_metrics(result)
-        objective_values, sanitized, objective_return, should_fail = self._prepare_objective_values(all_metrics)
+        payload = self._evaluate_trial_payload(params_dict)
+        result = payload["result"]
+        all_metrics = payload["all_metrics"]
+        objective_values = payload["objective_values"]
+        objective_return = payload["objective_return"]
+        sanitized = payload["sanitized_metrics"]
         if sanitized:
             trial.set_user_attr("merlin.sanitized_metrics", sanitized)
 
-        if should_fail:
+        if payload["should_fail"]:
             self._log_failed_objective(trial, objective_values, all_metrics)
             # Optuna treats NaN returns as FAILED without aborting the study.
             return objective_return
-
-        constraint_values = evaluate_constraints(all_metrics, self.constraints)
-        constraints_satisfied = True
-        if constraint_values:
-            constraints_satisfied = all(value <= 0.0 for value in constraint_values)
-
-        result.objective_values = objective_values
-        result.constraint_values = constraint_values
-        result.constraints_satisfied = constraints_satisfied
 
         _trial_set_result_attrs(
             trial=trial,
             result=result,
             objective_values=objective_values,
             all_metrics=all_metrics,
-            constraint_values=constraint_values,
-            constraints_satisfied=constraints_satisfied,
+            constraint_values=payload["constraint_values"],
+            constraints_satisfied=payload["constraints_satisfied"],
         )
 
         if self.pruner is not None:
@@ -1496,42 +2514,29 @@ class OptunaOptimizer:
         """
         Objective used inside worker processes (no shared state).
         """
+        self._mark_coverage_generation_for_nsga(trial)
         params_dict = self._prepare_trial_parameters(trial, search_space)
-        result = self._evaluate_parameters(params_dict)
-
-        score_config = self.base_config.score_config or DEFAULT_SCORE_CONFIG
-        score_needed = score_config.get("filter_enabled") or (
-            "composite_score" in self.mo_config.objectives
-        )
-        if score_needed:
-            minmax_config = score_config.copy()
-            minmax_config["normalization_method"] = "minmax"
-            scored_results = calculate_score([result], minmax_config)
-            if scored_results:
-                result = scored_results[0]
-
-        all_metrics = self._collect_metrics(result)
-        objective_values, sanitized, objective_return, should_fail = self._prepare_objective_values(all_metrics)
+        payload = self._evaluate_trial_payload(params_dict)
+        result = payload["result"]
+        all_metrics = payload["all_metrics"]
+        objective_values = payload["objective_values"]
+        objective_return = payload["objective_return"]
+        sanitized = payload["sanitized_metrics"]
         if sanitized:
             trial.set_user_attr("merlin.sanitized_metrics", sanitized)
 
-        if should_fail:
+        if payload["should_fail"]:
             self._log_failed_objective(trial, objective_values, all_metrics)
             # Optuna treats NaN returns as FAILED without aborting the study.
             return objective_return
-
-        constraint_values = evaluate_constraints(all_metrics, self.constraints)
-        constraints_satisfied = True
-        if constraint_values:
-            constraints_satisfied = all(value <= 0.0 for value in constraint_values)
 
         _trial_set_result_attrs(
             trial=trial,
             result=result,
             objective_values=objective_values,
             all_metrics=all_metrics,
-            constraint_values=constraint_values,
-            constraints_satisfied=constraints_satisfied,
+            constraint_values=payload["constraint_values"],
+            constraints_satisfied=payload["constraints_satisfied"],
         )
 
         if self.pruner is not None:
@@ -1544,38 +2549,168 @@ class OptunaOptimizer:
     # ------------------------------------------------------------------
     # Main execution entrypoint
     # ------------------------------------------------------------------
+    def _get_sampler_type(self) -> str:
+        return str(getattr(self.sampler_config, "sampler_type", "")).strip().lower()
+
+    def _trials_log_enabled(self) -> bool:
+        return bool(getattr(self.base_config, "trials_log", False))
+
+    def _describe_execution_label(self, workers: int, dispatcher_label: Optional[str] = None) -> str:
+        sampler_label = dispatcher_label or (self._get_sampler_type().upper() or "OPTUNA")
+        mode_label = "single-process" if workers <= 1 else "multi-process"
+        return f"{mode_label} {sampler_label}"
+
+    def _get_dataset_label(self) -> str:
+        csv_name = getattr(self.base_config, "csv_original_name", None)
+        if csv_name:
+            return str(Path(str(csv_name)).name)
+        csv_path = _resolve_csv_path_for_study(getattr(self.base_config, "csv_file", ""))
+        if csv_path:
+            return str(Path(csv_path).name)
+        return "upload"
+
+    def _log_study_start(self, execution_label: str, workers: int) -> None:
+        coverage_label = "off"
+        if bool(getattr(self.optuna_config, "coverage_mode", False)):
+            coverage_label = str(max(0, int(getattr(self.optuna_config, "warmup_trials", 0) or 0)))
+        logger.info(
+            "Starting %s study for %s: objectives=%s, budget_mode=%s, workers=%s, coverage=%s",
+            execution_label,
+            self._get_dataset_label(),
+            ",".join(self.mo_config.objectives),
+            self.optuna_config.budget_mode,
+            workers,
+            coverage_label,
+        )
+
+    def _completed_trial_count(self) -> int:
+        study = getattr(self, "study", None)
+        if study is not None:
+            try:
+                return sum(
+                    1
+                    for trial in study.trials
+                    if trial.state == TrialState.COMPLETE and not _is_duplicate_skipped_trial(trial)
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to count completed trials from study state", exc_info=True)
+        return len(getattr(self, "trial_results", []) or [])
+
+    def _log_study_end(self, execution_label: str) -> None:
+        elapsed = max(0.0, time.time() - (self.start_time or time.time()))
+        logger.info(
+            "Finished %s study for %s: elapsed=%.1fs, complete=%s, pruned=%s, duplicate-skipped=%s",
+            execution_label,
+            self._get_dataset_label(),
+            elapsed,
+            self._completed_trial_count(),
+            int(getattr(self, "pruned_trials", 0) or 0),
+            int(getattr(self, "_duplicate_skipped_count", 0) or 0),
+        )
+
+    def _log_centralized_trial_completion(
+        self,
+        trial_number: int,
+        objective_values: Sequence[float],
+        params_dict: Dict[str, Any],
+    ) -> None:
+        if not self._trials_log_enabled():
+            return
+        objective_map = dict(zip(self.mo_config.get_metric_names(), objective_values))
+        logger.info(
+            "Trial %s finished with values: %s and parameters: %s.",
+            trial_number,
+            objective_map,
+            params_dict,
+        )
+
+    def _process_centralized_result_batch(
+        self,
+        result_messages: List[Dict[str, Any]],
+        pending_trials: Dict[int, Tuple[optuna.Trial, str]],
+        in_flight_keys: Set[str],
+        seen_keys: Set[str],
+        dispatcher_label: str,
+    ) -> int:
+        processed_count = 0
+        for result_message in result_messages:
+            trial_number = int(result_message["trial_number"])
+            pending_entry = pending_trials.pop(trial_number, None)
+            if pending_entry is None:
+                logger.warning(
+                    "Received %s worker result for unknown trial %s",
+                    dispatcher_label,
+                    trial_number,
+                )
+                continue
+
+            trial, params_key = pending_entry
+            in_flight_keys.discard(params_key)
+            seen_keys.add(params_key)
+            processed_count += 1
+
+            payload = dict(result_message["payload"])
+            sanitized = list(payload.get("sanitized_metrics") or [])
+            if sanitized:
+                trial.set_user_attr("merlin.sanitized_metrics", sanitized)
+
+            objective_values = list(payload.get("objective_values") or [])
+            all_metrics = dict(payload.get("all_metrics") or {})
+            objective_return = payload.get("objective_return")
+
+            if payload.get("should_fail"):
+                self._log_failed_objective(trial, objective_values, all_metrics)
+                self.study.tell(trial, state=TrialState.FAIL)
+                continue
+
+            result = payload["result"]
+            _trial_set_result_attrs(
+                trial=trial,
+                result=result,
+                objective_values=objective_values,
+                all_metrics=all_metrics,
+                constraint_values=list(payload.get("constraint_values") or []),
+                constraints_satisfied=bool(payload.get("constraints_satisfied", True)),
+            )
+
+            if self.pruner is not None:
+                trial.report(float(objective_return), step=0)
+                if trial.should_prune():
+                    self.pruned_trials += 1
+                    self.study.tell(trial, state=TrialState.PRUNED)
+                    continue
+
+            self.study.tell(trial, values=objective_return)
+            self._log_centralized_trial_completion(trial.number, objective_values, result.params)
+        return processed_count
+
     def optimize(self) -> List[OptimizationResult]:
         workers = max(1, int(getattr(self.base_config, "worker_processes", 1) or 1))
         if workers <= 1:
             return self._optimize_single_process()
+        sampler_type = self._get_sampler_type()
+        if sampler_type in {"nsga2", "nsga3"}:
+            return self._optimize_multiprocess_nsga(workers)
+        if sampler_type == "tpe":
+            return self._optimize_multiprocess_tpe(workers)
         return self._optimize_multiprocess(workers)
 
     def _optimize_single_process(self) -> List[OptimizationResult]:
-        logger.info(
-            "Starting single-process Optuna optimisation: objectives=%s, budget_mode=%s",
-            ",".join(self.mo_config.objectives),
-            self.optuna_config.budget_mode,
-        )
-
         self._multiprocess_mode = False
         self.start_time = time.time()
         self.trial_results = []
         self.best_value = float("-inf")
         self.trials_without_improvement = 0
         self.pruned_trials = 0
+        self._duplicate_skipped_count = 0
+        execution_label = self._describe_execution_label(workers=1)
+        self._log_study_start(execution_label, workers=1)
 
         search_space = self._build_search_space()
         self._prepare_data_and_strategy()
 
         sampler = self._create_sampler()
-        self.pruner = self._create_pruner()
-
-        storage = None
-        if self.optuna_config.save_study:
-            storage = optuna.storages.RDBStorage(
-                url="sqlite:///optuna_study.db",
-                engine_kwargs={"connect_args": {"timeout": 30}},
-            )
+        self.pruner = None
 
         study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
 
@@ -1583,10 +2718,11 @@ class OptunaOptimizer:
             mo_config=self.mo_config,
             sampler=sampler,
             study_name=study_name,
-            storage=storage,
+            storage=None,
             pruner=self.pruner,
-            load_if_exists=self.optuna_config.save_study,
+            load_if_exists=False,
         )
+        self._enqueue_coverage_trials(search_space, context_label="single-process")
 
         timeout = None
         n_trials = None
@@ -1610,27 +2746,55 @@ class OptunaOptimizer:
             callbacks.append(convergence_callback)
 
         try:
-            self.study.optimize(
-                lambda trial: self._objective(trial, search_space),
-                n_trials=n_trials,
-                timeout=timeout,
-                callbacks=callbacks or None,
-                show_progress_bar=False,
-            )
+            with _scoped_optuna_trial_logging(self._trials_log_enabled()):
+                self.study.optimize(
+                    lambda trial: self._objective(trial, search_space),
+                    n_trials=n_trials,
+                    timeout=timeout,
+                    callbacks=callbacks or None,
+                    show_progress_bar=False,
+                )
         except KeyboardInterrupt:
             logger.info("Optuna optimisation interrupted by user")
         finally:
             self.pruner = None
 
-        return self._finalize_results()
+        finalized = self._finalize_results()
+        self._log_study_end(execution_label)
+        return finalized
 
-    def _optimize_multiprocess(self, n_workers: int) -> List[OptimizationResult]:
-        logger.info(
-            "Starting multi-process Optuna optimisation: objectives=%s, budget_mode=%s, workers=%s",
-            ",".join(self.mo_config.objectives),
-            self.optuna_config.budget_mode,
+    def _optimize_multiprocess_tpe(self, n_workers: int) -> List[OptimizationResult]:
+        return self._optimize_multiprocess_centralized(
             n_workers,
+            dispatcher_label="TPE",
+            worker_name_prefix="TPEEvaluator",
+            coverage_context_label="multiprocess-tpe",
+            mark_nsga_generation=False,
+            allow_pruning=not self.mo_config.is_multi_objective(),
         )
+
+    def _optimize_multiprocess_nsga(self, n_workers: int) -> List[OptimizationResult]:
+        return self._optimize_multiprocess_centralized(
+            n_workers,
+            dispatcher_label="NSGA",
+            worker_name_prefix="NSGAEvaluator",
+            coverage_context_label="multiprocess-nsga",
+            mark_nsga_generation=True,
+            allow_pruning=False,
+        )
+
+    def _optimize_multiprocess_centralized(
+        self,
+        n_workers: int,
+        *,
+        dispatcher_label: str,
+        worker_name_prefix: str,
+        coverage_context_label: str,
+        mark_nsga_generation: bool,
+        allow_pruning: bool,
+    ) -> List[OptimizationResult]:
+        execution_label = self._describe_execution_label(n_workers, dispatcher_label)
+        logger.debug("Using centralized ask/tell dispatcher for %s", dispatcher_label)
 
         self._multiprocess_mode = True
         self.start_time = time.time()
@@ -1638,132 +2802,427 @@ class OptunaOptimizer:
         self.pruned_trials = 0
         self.best_value = float("-inf")
         self.trials_without_improvement = 0
+        self._duplicate_skipped_count = 0
+        self._log_study_start(execution_label, workers=n_workers)
 
-        # Build search space to validate config early
-        self._build_search_space()
+        search_space = self._build_search_space()
+        search_space_size = _estimate_search_space_size(search_space)
 
-        csv_path, csv_cleanup = _materialize_csv_to_temp(self.base_config.csv_file)
+        csv_source_mode, csv_source_payload = _serialize_csv_source_for_worker(self.base_config.csv_file)
         base_config_dict = {
-            f.name: (csv_path if f.name == "csv_file" else getattr(self.base_config, f.name))
+            f.name: (None if f.name == "csv_file" else getattr(self.base_config, f.name))
+            for f in fields(self.base_config)
+        }
+        optuna_config_dict = asdict(self.optuna_config)
+
+        task_queue: mp.Queue = mp.Queue()
+        result_queue: mp.Queue = mp.Queue()
+        error_queue: mp.Queue = mp.Queue()
+
+        sampler = self._create_sampler()
+        self.pruner = self._create_pruner() if allow_pruning else None
+        study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
+        processes: List[mp.Process] = []
+        sampler_type = self._get_sampler_type()
+
+        if self.optuna_config.budget_mode == "time":
+            timeout = max(60, int(self.optuna_config.time_limit))
+            target_trials: Optional[int] = None
+            logger.info("Time budget per study for %s: %ss", self._get_dataset_label(), timeout)
+        elif self.optuna_config.budget_mode == "trials":
+            timeout = None
+            target_trials = max(1, int(self.optuna_config.n_trials))
+            logger.info("Global trial budget for %s: %s", self._get_dataset_label(), target_trials)
+        elif self.optuna_config.budget_mode == "convergence":
+            timeout = None
+            target_trials = 10000
+            logger.warning(
+                "Convergence budget is not fully supported in multi-process mode; "
+                "using trial cap of 10000."
+            )
+        else:
+            timeout = None
+            target_trials = max(1, int(self.optuna_config.n_trials))
+
+        duplicate_retry_limit = 1000
+        batch_result_processing = bool(
+            getattr(self.base_config, "dispatcher_batch_result_processing", True)
+        )
+        soft_cycle_limit_enabled = bool(
+            getattr(self.base_config, "dispatcher_soft_duplicate_cycle_limit_enabled", True)
+        )
+        cycle_duplicate_limit = _normalize_dispatch_cycle_duplicate_limit(
+            getattr(self.base_config, "dispatcher_duplicate_cycle_limit", 18)
+        )
+        pending_trials: Dict[int, Tuple[optuna.Trial, str]] = {}
+        in_flight_keys: Set[str] = set()
+        seen_keys: Set[str] = set()
+        completed_evaluations = 0
+        consecutive_duplicate_skips = 0
+        dispatch_closed = False
+
+        try:
+            self.study = create_optimization_study(
+                mo_config=self.mo_config,
+                sampler=sampler,
+                study_name=study_name,
+                storage=None,
+                pruner=self.pruner,
+                load_if_exists=False,
+            )
+            self._enqueue_coverage_trials(search_space, context_label=coverage_context_label)
+
+            for worker_id in range(n_workers):
+                proc = mp.Process(
+                    target=_evaluator_worker_entry,
+                    args=(
+                        task_queue,
+                        result_queue,
+                        csv_source_mode,
+                        csv_source_payload,
+                        base_config_dict,
+                        optuna_config_dict,
+                        worker_id,
+                        error_queue,
+                    ),
+                    name=f"{worker_name_prefix}-{worker_id}",
+                )
+                proc.start()
+                processes.append(proc)
+                logger.info("Started %s evaluator worker %s (pid=%s)", dispatcher_label, worker_id, proc.pid)
+
+            while True:
+                error_details = _drain_worker_errors(error_queue)
+                if error_details:
+                    first_detail = error_details[0]
+                    for error_detail in error_details:
+                        logger.error(
+                            "Evaluator worker %s failure detail: %s\n%s",
+                            error_detail.get("worker_id"),
+                            error_detail.get("message"),
+                            error_detail.get("traceback"),
+                        )
+                    raise RuntimeError(
+                        f"Multi-process {dispatcher_label} optimisation failed; first error from worker "
+                        f"{first_detail.get('worker_id')}: {first_detail.get('message')}"
+                    )
+
+                for worker_id, proc in enumerate(processes):
+                    if proc.exitcode not in (None, 0):
+                        raise RuntimeError(
+                            f"Multi-process {dispatcher_label} optimisation failed; worker {worker_id} "
+                            f"exited with code {proc.exitcode}"
+                        )
+
+                ready_results = _drain_dispatch_results_nowait(
+                    result_queue,
+                    batch_enabled=batch_result_processing,
+                )
+                if ready_results:
+                    completed_evaluations += self._process_centralized_result_batch(
+                        ready_results,
+                        pending_trials,
+                        in_flight_keys,
+                        seen_keys,
+                        dispatcher_label,
+                    )
+                    continue
+
+                if timeout is not None and (time.time() - (self.start_time or time.time())) >= timeout:
+                    dispatch_closed = True
+
+                if search_space_size is not None and (len(seen_keys) + len(in_flight_keys)) >= search_space_size:
+                    if not dispatch_closed:
+                        logger.info(
+                            "%s search space exhausted after %s unique evaluations; stopping early.",
+                            dispatcher_label,
+                            len(seen_keys),
+                        )
+                    dispatch_closed = True
+
+                cycle_duplicate_skips = 0
+                while not dispatch_closed and len(pending_trials) < n_workers:
+                    if target_trials is not None and (completed_evaluations + len(pending_trials)) >= target_trials:
+                        dispatch_closed = True
+                        break
+
+                    trial = self.study.ask()
+                    if mark_nsga_generation:
+                        self._mark_coverage_generation_for_nsga(trial)
+                    params_dict = self._prepare_trial_parameters(trial, search_space)
+                    params_key = _build_params_key(params_dict)
+
+                    if params_key in seen_keys or params_key in in_flight_keys:
+                        self._duplicate_skipped_count += 1
+                        consecutive_duplicate_skips += 1
+                        cycle_duplicate_skips += 1
+                        trial.set_user_attr(_DUPLICATE_SKIPPED_ATTR, True)
+                        trial.set_user_attr(_DUPLICATE_SKIP_REASON_ATTR, "exact_params")
+                        self.study.tell(trial, state=TrialState.FAIL)
+                        if self._trials_log_enabled():
+                            logger.info(
+                                "Skipping duplicate %s proposal trial=%s sampler=%s",
+                                dispatcher_label,
+                                trial.number,
+                                sampler_type,
+                            )
+                        if consecutive_duplicate_skips >= duplicate_retry_limit:
+                            logger.warning(
+                                "%s generated %s consecutive duplicate proposals; stopping dispatch early.",
+                                dispatcher_label,
+                                consecutive_duplicate_skips,
+                            )
+                            dispatch_closed = True
+                            break
+                        if soft_cycle_limit_enabled and cycle_duplicate_skips >= cycle_duplicate_limit:
+                            logger.debug(
+                                "%s reached per-cycle duplicate limit (%s); yielding dispatch to process results.",
+                                dispatcher_label,
+                                cycle_duplicate_limit,
+                            )
+                            break
+                        continue
+
+                    consecutive_duplicate_skips = 0
+                    pending_trials[trial.number] = (trial, params_key)
+                    in_flight_keys.add(params_key)
+                    task_queue.put(
+                        {
+                            "trial_number": trial.number,
+                            "params": params_dict,
+                            "params_key": params_key,
+                        }
+                    )
+
+                if dispatch_closed and not pending_trials:
+                    break
+
+                if not pending_trials:
+                    continue
+
+                result_batch = _wait_for_dispatch_results(
+                    result_queue,
+                    timeout=0.1,
+                    batch_enabled=batch_result_processing,
+                )
+                if not result_batch:
+                    continue
+
+                completed_evaluations += self._process_centralized_result_batch(
+                    result_batch,
+                    pending_trials,
+                    in_flight_keys,
+                    seen_keys,
+                    dispatcher_label,
+                )
+
+            self.trial_results = []
+            for trial in self.study.trials:
+                if _is_duplicate_skipped_trial(trial):
+                    continue
+                if trial.state == TrialState.COMPLETE:
+                    try:
+                        self.trial_results.append(_result_from_trial(trial))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
+
+            if self._duplicate_skipped_count:
+                logger.info(
+                    "%s dispatcher skipped %s duplicate proposals.",
+                    dispatcher_label,
+                    self._duplicate_skipped_count,
+                )
+
+            finalized = self._finalize_results()
+            self._log_study_end(execution_label)
+            return finalized
+        finally:
+            for _ in processes:
+                try:
+                    task_queue.put_nowait(None)
+                except Exception:
+                    break
+            _terminate_processes(processes)
+            for ipc_queue in (task_queue, result_queue, error_queue):
+                try:
+                    ipc_queue.close()
+                    ipc_queue.join_thread()
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug("Failed to shutdown multiprocessing queue", exc_info=True)
+            self.pruner = None
+
+    def _optimize_multiprocess(self, n_workers: int) -> List[OptimizationResult]:
+        execution_label = self._describe_execution_label(n_workers)
+        logger.debug("Using legacy multiprocess Optuna path for sampler=%s", self._get_sampler_type())
+
+        self._multiprocess_mode = True
+        self.start_time = time.time()
+        self.trial_results = []
+        self.pruned_trials = 0
+        self.best_value = float("-inf")
+        self.trials_without_improvement = 0
+        self._duplicate_skipped_count = 0
+        self._log_study_start(execution_label, workers=n_workers)
+
+        # Build search space early to validate config and prepare deterministic coverage.
+        search_space = self._build_search_space()
+
+        csv_source_mode, csv_source_payload = _serialize_csv_source_for_worker(self.base_config.csv_file)
+        base_config_dict = {
+            f.name: (None if f.name == "csv_file" else getattr(self.base_config, f.name))
             for f in fields(self.base_config)
         }
         optuna_config_dict = asdict(self.optuna_config)
 
         from optuna.storages import JournalStorage
-        from optuna.storages.journal import JournalFileBackend, JournalFileOpenLock
+        manager = mp.Manager()
+        shared_logs = manager.list()
+        error_queue: mp.Queue = mp.Queue()
 
-        journal_dir = JOURNAL_DIR
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = time.time_ns()
-        study_name = self.optuna_config.study_name or f"strategy_opt_{timestamp}"
-        storage_path = str(journal_dir / f"{study_name}_{timestamp}_{uuid.uuid4().hex}.journal.log")
-
-        storage = JournalStorage(
-            JournalFileBackend(storage_path, lock_obj=JournalFileOpenLock(storage_path))
-        )
+        study_name = self.optuna_config.study_name or f"strategy_opt_{time.time_ns()}"
+        storage = JournalStorage(InMemoryJournalBackend(shared_logs))
 
         sampler = self._create_sampler()
         self.pruner = self._create_pruner()
-
-        self.study = create_optimization_study(
-            mo_config=self.mo_config,
-            sampler=sampler,
-            study_name=study_name,
-            storage=storage,
-            pruner=self.pruner,
-            load_if_exists=False,
-        )
-
-        timeout: Optional[int] = None
-        n_trials: Optional[int] = None
-
-        if self.optuna_config.budget_mode == "time":
-            timeout = max(60, int(self.optuna_config.time_limit))
-            logger.info("Time budget per study: %ss", timeout)
-        elif self.optuna_config.budget_mode == "trials":
-            n_trials = max(1, int(self.optuna_config.n_trials))
-            logger.info("Global trial budget: %s", n_trials)
-        elif self.optuna_config.budget_mode == "convergence":
-            logger.warning(
-                "Convergence budget is not fully supported in multi-process mode; "
-                "using trial cap of 10000."
-            )
-            n_trials = 10000
-
         processes: List[mp.Process] = []
-
         try:
-            for worker_id in range(n_workers):
-                proc = mp.Process(
-                    target=_worker_process_entry,
-                    args=(
-                        study_name,
-                        storage_path,
-                        base_config_dict,
-                        optuna_config_dict,
-                        n_trials,
-                        timeout,
-                        worker_id,
-                    ),
-                    name=f"OptunaWorker-{worker_id}",
+            self.study = create_optimization_study(
+                mo_config=self.mo_config,
+                sampler=sampler,
+                study_name=study_name,
+                storage=storage,
+                pruner=self.pruner,
+                load_if_exists=False,
+            )
+            self._enqueue_coverage_trials(search_space, context_label="multiprocess")
+
+            timeout: Optional[int] = None
+            n_trials: Optional[int] = None
+
+            if self.optuna_config.budget_mode == "time":
+                timeout = max(60, int(self.optuna_config.time_limit))
+                logger.info("Time budget per study for %s: %ss", self._get_dataset_label(), timeout)
+            elif self.optuna_config.budget_mode == "trials":
+                n_trials = max(1, int(self.optuna_config.n_trials))
+                logger.info("Global trial budget for %s: %s", self._get_dataset_label(), n_trials)
+            elif self.optuna_config.budget_mode == "convergence":
+                logger.warning(
+                    "Convergence budget is not fully supported in multi-process mode; "
+                    "using trial cap of 10000."
                 )
-                proc.start()
-                processes.append(proc)
-                logger.info("Started worker %s (pid=%s)", worker_id, proc.pid)
+                n_trials = 10000
 
-            logger.info("Waiting for %s workers to finish...", n_workers)
-            for worker_id, proc in enumerate(processes):
-                proc.join()
-                if proc.exitcode == 0:
-                    logger.info("Worker %s completed successfully", worker_id)
-                else:
-                    logger.error("Worker %s exited with code %s", worker_id, proc.exitcode)
+            worker_failures: List[Tuple[int, Optional[int]]] = []
 
-        except KeyboardInterrupt:
-            logger.info("Optimisation interrupted; terminating workers...")
-            for proc in processes:
-                if proc.is_alive():
-                    proc.terminate()
-            for proc in processes:
-                proc.join(timeout=5)
-
-        # Reload study to gather results from storage
-        self.study = optuna.load_study(study_name=study_name, storage=storage)
-
-        self.trial_results = []
-        for trial in self.study.trials:
-            if trial.state == TrialState.COMPLETE:
-                try:
-                    self.trial_results.append(_result_from_trial(trial))
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
-
-        results = self._finalize_results()
-
-        # Cleanup temp CSV and storage if not persisted (after finalization)
-        if csv_cleanup:
             try:
-                Path(csv_path).unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to cleanup temp CSV %s", csv_path)
+                for worker_id in range(n_workers):
+                    proc = mp.Process(
+                        target=_worker_process_entry,
+                        args=(
+                            study_name,
+                            shared_logs,
+                            csv_source_mode,
+                            csv_source_payload,
+                            base_config_dict,
+                            optuna_config_dict,
+                            n_trials,
+                            timeout,
+                            worker_id,
+                            error_queue,
+                        ),
+                        name=f"OptunaWorker-{worker_id}",
+                    )
+                    proc.start()
+                    processes.append(proc)
+                    logger.info("Started worker %s (pid=%s)", worker_id, proc.pid)
 
-        if not self.optuna_config.save_study:
+                logger.info("Waiting for %s workers to finish...", n_workers)
+                remaining_workers = set(range(len(processes)))
+                while remaining_workers:
+                    completed_this_pass = False
+                    for worker_id in list(remaining_workers):
+                        proc = processes[worker_id]
+                        proc.join(timeout=0.1)
+                        if proc.exitcode is None:
+                            continue
+
+                        remaining_workers.remove(worker_id)
+                        completed_this_pass = True
+
+                        if proc.exitcode == 0:
+                            logger.info("Worker %s completed successfully", worker_id)
+                            continue
+
+                        logger.error("Worker %s exited with code %s", worker_id, proc.exitcode)
+                        worker_failures.append((worker_id, proc.exitcode))
+                        _terminate_processes([processes[idx] for idx in remaining_workers])
+                        remaining_workers.clear()
+                        break
+
+                    if not completed_this_pass:
+                        time.sleep(0.05)
+
+            except KeyboardInterrupt:
+                logger.info("Optimisation interrupted; terminating workers...")
+                raise RuntimeError("Multi-process Optuna optimisation interrupted.")
+
+            if worker_failures:
+                failed_workers = ", ".join(
+                    f"{worker_id}:{exitcode}" for worker_id, exitcode in worker_failures
+                )
+                worker_error_details = _drain_worker_errors(error_queue)
+                for error_detail in worker_error_details:
+                    logger.error(
+                        "Worker %s failure detail: %s\n%s",
+                        error_detail.get("worker_id"),
+                        error_detail.get("message"),
+                        error_detail.get("traceback"),
+                    )
+                failure_message = f"Multi-process Optuna optimisation failed; worker exit codes: {failed_workers}"
+                if worker_error_details:
+                    first_detail = worker_error_details[0]
+                    failure_message = (
+                        f"{failure_message}; first error from worker {first_detail.get('worker_id')}: "
+                        f"{first_detail.get('message')}"
+                    )
+                raise RuntimeError(failure_message)
+
+            self.study = optuna.load_study(study_name=study_name, storage=storage)
+
+            self.trial_results = []
+            for trial in self.study.trials:
+                if trial.state == TrialState.COMPLETE:
+                    try:
+                        self.trial_results.append(_result_from_trial(trial))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Failed to rebuild trial %s: %s", trial.number, exc)
+
+            finalized = self._finalize_results()
+            self._log_study_end(execution_label)
+            return finalized
+        finally:
+            _terminate_processes(processes)
             try:
-                Path(storage_path).unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to cleanup journal file %s", storage_path)
-
-        self.pruner = None
-
-        return results
+                error_queue.close()
+                error_queue.join_thread()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to shutdown worker error queue", exc_info=True)
+            try:
+                manager.shutdown()
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("Failed to shutdown multiprocessing Manager", exc_info=True)
+            self.pruner = None
 
     def _finalize_results(self) -> List[OptimizationResult]:
         end_time = time.time()
         optimisation_time = end_time - (self.start_time or end_time)
+        effective_trials = []
+        if self.study:
+            effective_trials = [trial for trial in self.study.trials if not _is_duplicate_skipped_trial(trial)]
 
         logger.info(
             "Optuna optimisation completed: trials=%s, time=%.1fs",
-            len(self.study.trials) if self.study else len(self.trial_results),
+            len(effective_trials) if self.study else len(self.trial_results),
             optimisation_time,
         )
 
@@ -1772,9 +3231,9 @@ class OptunaOptimizer:
         self.trial_results = calculate_score(self.trial_results, score_config)
 
         if self.study:
-            completed_trials = sum(1 for trial in self.study.trials if trial.state == TrialState.COMPLETE)
-            pruned_trials = sum(1 for trial in self.study.trials if trial.state == TrialState.PRUNED)
-            total_trials = len(self.study.trials)
+            completed_trials = sum(1 for trial in effective_trials if trial.state == TrialState.COMPLETE)
+            pruned_trials = sum(1 for trial in effective_trials if trial.state == TrialState.PRUNED)
+            total_trials = len(effective_trials)
         else:
             completed_trials = len(self.trial_results)
             pruned_trials = self.pruned_trials
@@ -1797,6 +3256,21 @@ class OptunaOptimizer:
 
         pareto_front_size = sum(1 for r in self.trial_results if r.is_pareto_optimal) if self.mo_config.is_multi_objective() else None
 
+        initial_trials = max(0, int(getattr(self.optuna_config, "warmup_trials", 0) or 0))
+        coverage_mode = bool(getattr(self.optuna_config, "coverage_mode", False))
+        coverage_min = self._coverage_report.get("n_min") if self._coverage_report else None
+        coverage_rec = self._coverage_report.get("n_rec") if self._coverage_report else None
+        coverage_warning: Optional[str] = None
+        if (
+            coverage_mode
+            and coverage_min is not None
+            and coverage_rec is not None
+            and initial_trials < int(coverage_min)
+        ):
+            coverage_warning = (
+                f"Need more initial trials (min: {int(coverage_min)}, recommended: {int(coverage_rec)})"
+            )
+
         summary = {
             "method": "Optuna",
             "objectives": list(self.mo_config.objectives),
@@ -1811,6 +3285,15 @@ class OptunaOptimizer:
             "pareto_front_size": pareto_front_size,
             "optimization_time_seconds": optimisation_time,
             "multiprocess_mode": self._multiprocess_mode,
+            "initial_search_mode": "coverage" if coverage_mode else "random",
+            "initial_search_trials": initial_trials,
+            "coverage_min_trials": coverage_min,
+            "coverage_recommended_trials": coverage_rec,
+            "coverage_block_size": self._coverage_report.get("coverage_block_size") if self._coverage_report else None,
+            "coverage_main_axis": self._coverage_report.get("main_axis_name") if self._coverage_report else None,
+            "coverage_main_axis_options": self._coverage_report.get("main_axis_options") if self._coverage_report else None,
+            "coverage_primary_numeric": self._coverage_report.get("primary_numeric_name") if self._coverage_report else None,
+            "coverage_warning": coverage_warning,
         }
         setattr(self.base_config, "optuna_summary", summary)
 
@@ -1876,7 +3359,8 @@ def run_optimization(config: OptimizationConfig) -> Tuple[List[OptimizationResul
         enable_pruning=bool(getattr(config, "optuna_enable_pruning", True)),
         pruner=getattr(config, "optuna_pruner", "median"),
         warmup_trials=int(n_startup_trials or 20),
-        save_study=bool(getattr(config, "optuna_save_study", False)),
+        coverage_mode=bool(getattr(config, "coverage_mode", False)),
+        save_study=False,
         study_name=getattr(config, "optuna_study_name", None),
     )
 

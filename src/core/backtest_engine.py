@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import re
 from typing import IO, Any, Dict, List, Optional, Tuple, Union
@@ -52,7 +52,8 @@ class StrategyResult:
     romad: Optional[float] = None  # Return Over Maximum Drawdown
     ulcer_index: Optional[float] = None
     sqn: Optional[float] = None
-    consistency_score: Optional[float] = None  # % of profitable months
+    consistency_score: Optional[float] = None  # Signed R² equity consistency [-1, +1]
+    last_position: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         data = {

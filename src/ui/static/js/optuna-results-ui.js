@@ -10,7 +10,7 @@
     max_consecutive_losses: 'Max CL',
     sqn: 'SQN',
     ulcer_index: 'Ulcer Index',
-    consistency_score: 'Consistency %',
+    consistency_score: 'Consistency',
     composite_score: 'Composite Score'
   };
 
@@ -157,7 +157,7 @@
         <td>${formatNumber(pf, 3)}</td>
         <td>${formatNumber(ulcer, 2)}</td>
         <td>${formatNumber(sqn, 3)}</td>
-        <td>${formatNumber(consistency, 1)}${consistency !== null && consistency !== undefined ? '%' : ''}</td>
+        <td>${formatNumber(consistency, 2)}</td>
       </tr>
     `;
   }

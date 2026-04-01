@@ -31,7 +31,7 @@ class TestMinMaxNormalization:
             profit_factor=3.0,
             ulcer_index=10.0,
             sqn=4.0,
-            consistency_score=80.0,
+            consistency_score=0.8,
         )
 
         config = DEFAULT_SCORE_CONFIG.copy()
@@ -185,7 +185,7 @@ class TestScoreConsistency:
             profit_factor=2.0,
             ulcer_index=8.0,
             sqn=3.0,
-            consistency_score=60.0,
+            consistency_score=0.6,
         )
 
         config = DEFAULT_SCORE_CONFIG.copy()
@@ -208,7 +208,7 @@ class TestScoreConsistency:
                 profit_factor=float(i * 0.3),
                 ulcer_index=float(i * 2),
                 sqn=float(i * 0.5),
-                consistency_score=float(i * 10),
+                consistency_score=float(i / 100),
             )
             for i in range(1, 100)
         ]
@@ -217,6 +217,26 @@ class TestScoreConsistency:
         score_in_group = scored_all[-1].score
 
         assert score_alone == pytest.approx(score_in_group, abs=0.01)
+
+    def test_legacy_consistency_bounds_are_migrated(self):
+        """Old 0..100 consistency bounds should map to the new signed R² range."""
+        result = OptimizationResult(
+            params={},
+            net_profit_pct=10.0,
+            max_drawdown_pct=5.0,
+            total_trades=30,
+            consistency_score=0.5,
+        )
+
+        config = DEFAULT_SCORE_CONFIG.copy()
+        config["normalization_method"] = "minmax"
+        config["enabled_metrics"] = {"consistency": True}
+        config["weights"] = {"consistency": 1.0}
+        config["metric_bounds"] = {"consistency": {"min": 0.0, "max": 100.0}}
+
+        scored = calculate_score([result], config)
+
+        assert scored[0].score == pytest.approx(75.0, abs=0.01)
 
 
 class TestCustomBounds:

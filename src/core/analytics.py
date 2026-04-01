@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 SECONDS_PER_DAY = 86400.0
 SHORT_SPAN_DAYS = 30.0
+RETURN_PROFILE_STEM_LIMIT = 60
 
 WARNING_NO_VALID_DATA = "No valid equity data found for selected studies."
 WARNING_NO_OVERLAP = "Selected studies have no overlapping time period."
@@ -18,6 +19,15 @@ WARNING_NO_OVERLAP = "Selected studies have no overlapping time period."
 class _StudyCurve:
     timestamps: List[datetime]
     values: List[float]
+
+
+def _empty_return_profile() -> Dict[str, Any]:
+    return {
+        "stems": [],
+        "source_count": 0,
+        "display_count": 0,
+        "is_binned": False,
+    }
 
 
 def _empty_result(
@@ -36,6 +46,7 @@ def _empty_result(
         "overlap_days_exact": 0.0,
         "studies_used": studies_used,
         "studies_excluded": studies_excluded,
+        "return_profile": _empty_return_profile(),
         "warning": warning,
     }
 
@@ -164,6 +175,51 @@ def _annualize_profit(profit_pct: float, span_days: float) -> Optional[float]:
     return ann
 
 
+def _build_return_profile(values: Sequence[float], stem_limit: int = RETURN_PROFILE_STEM_LIMIT) -> Dict[str, Any]:
+    finite_values = []
+    for raw_value in values:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            finite_values.append(value)
+
+    if not finite_values:
+        return _empty_return_profile()
+
+    sorted_values = sorted(finite_values, reverse=True)
+    normalized_limit = max(1, int(stem_limit))
+    source_count = len(sorted_values)
+
+    if source_count <= normalized_limit:
+        stems = [round(value, 4) for value in sorted_values]
+        return {
+            "stems": stems,
+            "source_count": source_count,
+            "display_count": len(stems),
+            "is_binned": False,
+        }
+
+    stems: List[float] = []
+    for bucket_index in range(normalized_limit):
+        start = math.floor(bucket_index * source_count / normalized_limit)
+        end = math.floor((bucket_index + 1) * source_count / normalized_limit)
+        if end <= start:
+            end = min(source_count, start + 1)
+        bucket = sorted_values[start:end]
+        if not bucket:
+            continue
+        stems.append(round(sum(bucket) / len(bucket), 4))
+
+    return {
+        "stems": stems,
+        "source_count": source_count,
+        "display_count": len(stems),
+        "is_binned": True,
+    }
+
+
 def aggregate_equity_curves(studies_data: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """Aggregate study stitched equity curves into an equal-weight portfolio curve."""
     valid: List[_StudyCurve] = []
@@ -201,13 +257,16 @@ def aggregate_equity_curves(studies_data: Iterable[Dict[str, Any]]) -> Dict[str,
         )
 
     aligned_curves: List[List[float]] = []
+    overlap_returns: List[float] = []
     for study in valid:
         filled = _forward_fill_values(study.timestamps, study.values, time_grid)
         start_value = filled[0]
         if start_value <= 0 or not math.isfinite(start_value):
             excluded += 1
             continue
-        aligned_curves.append([value / start_value * 100.0 for value in filled])
+        aligned = [value / start_value * 100.0 for value in filled]
+        aligned_curves.append(aligned)
+        overlap_returns.append((aligned[-1] / 100.0 - 1.0) * 100.0)
 
     if not aligned_curves:
         return _empty_result(
@@ -247,5 +306,6 @@ def aggregate_equity_curves(studies_data: Iterable[Dict[str, Any]]) -> Dict[str,
         "overlap_days_exact": round(span_days_exact, 6),
         "studies_used": len(aligned_curves),
         "studies_excluded": excluded,
+        "return_profile": _build_return_profile(overlap_returns),
         "warning": warning,
     }

@@ -1,10 +1,13 @@
 import io
 import sys
 import csv
+import hashlib
 import json
 import uuid
+import logging
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
@@ -13,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ui.server import app
 from core.backtest_engine import TradeRecord
+from core.metrics import _calculate_r2_consistency
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
 from core.storage import (
     create_new_db,
@@ -30,6 +34,25 @@ def client():
     app.config["TESTING"] = True
     with app.test_client() as test_client:
         yield test_client
+
+
+def test_core_logger_console_handler_is_configured_once():
+    from ui import server as server_module
+
+    core_logger = logging.getLogger("core")
+    marked_handlers_before = [
+        handler for handler in core_logger.handlers if getattr(handler, "_merlin_core_console_handler", False)
+    ]
+
+    server_module._configure_core_console_logging()
+
+    marked_handlers_after = [
+        handler for handler in core_logger.handlers if getattr(handler, "_merlin_core_console_handler", False)
+    ]
+
+    assert marked_handlers_before
+    assert len(marked_handlers_after) == len(marked_handlers_before)
+    assert core_logger.level <= logging.INFO
 
 
 @contextmanager
@@ -178,6 +201,140 @@ def _insert_analytics_wfa_window(
                 oos_start_date,
                 is_end_ts,
                 is_end_date,
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_study(
+    *,
+    study_id: str,
+    study_name: str,
+    optimization_mode: str,
+    csv_file_path: str,
+    csv_file_name: str,
+    strategy_id: str = "s03_reversal_v10",
+    strategy_version: str = "v10",
+    warmup_bars: int = 1000,
+    config_json: dict | None = None,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO studies (
+                study_id,
+                study_name,
+                strategy_id,
+                strategy_version,
+                optimization_mode,
+                csv_file_path,
+                csv_file_name,
+                warmup_bars,
+                config_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                study_id,
+                study_name,
+                strategy_id,
+                strategy_version,
+                optimization_mode,
+                csv_file_path,
+                csv_file_name,
+                int(warmup_bars),
+                json.dumps(config_json or {"fixed_params": {}}),
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_trial(*, study_id: str, trial_number: int, params: dict):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO trials (
+                study_id,
+                trial_number,
+                params_json,
+                objective_values_json,
+                constraint_values_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                study_id,
+                int(trial_number),
+                json.dumps(params),
+                json.dumps([]),
+                json.dumps([]),
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_wfa_window(
+    *,
+    study_id: str,
+    window_number: int,
+    best_params: dict,
+    best_params_source: str = "optuna_is",
+    is_best_trial_number: int | None = None,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO wfa_windows (
+                window_id,
+                study_id,
+                window_number,
+                best_params_json,
+                best_params_source,
+                is_best_trial_number
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{study_id}_w{window_number}",
+                study_id,
+                int(window_number),
+                json.dumps(best_params),
+                best_params_source,
+                is_best_trial_number,
+            ),
+        )
+        conn.commit()
+
+
+def _insert_lancelot_export_wfa_trial(
+    *,
+    study_id: str,
+    window_number: int,
+    module_type: str,
+    trial_number: int,
+    params: dict,
+    is_selected: bool,
+):
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO wfa_window_trials (
+                window_id,
+                module_type,
+                trial_number,
+                params_json,
+                objective_values_json,
+                constraint_values_json,
+                is_selected,
+                module_metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{study_id}_w{window_number}",
+                module_type,
+                int(trial_number),
+                json.dumps(params),
+                json.dumps([]),
+                json.dumps([]),
+                1 if is_selected else 0,
+                json.dumps({}),
             ),
         )
         conn.commit()
@@ -369,6 +526,97 @@ def test_optuna_sanitize_defaults():
     assert config.sanitize_trades_threshold == 0
 
 
+def test_optuna_coverage_mode_parsed():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["coverage_mode"] = True
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+    assert config.coverage_mode is True
+
+
+def test_optuna_trials_log_parsed():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["trials_log"] = True
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+    assert config.trials_log is True
+
+
+def test_optuna_dispatcher_controls_parsed():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["dispatcher_batch_result_processing"] = False
+    payload["dispatcher_soft_duplicate_cycle_limit_enabled"] = False
+    payload["dispatcher_duplicate_cycle_limit"] = 42
+
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+
+    assert config.dispatcher_batch_result_processing is False
+    assert config.dispatcher_soft_duplicate_cycle_limit_enabled is False
+    assert config.dispatcher_duplicate_cycle_limit == 42
+
+
+def test_optuna_save_study_payload_is_ignored(caplog):
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["optuna_save_study"] = True
+
+    with caplog.at_level("WARNING"):
+        config = server_module._build_optimization_config(
+            "dummy.csv",
+            payload,
+            worker_processes=1,
+            strategy_id="s01_trailing_ma",
+            warmup_bars=1000,
+        )
+
+    assert not hasattr(config, "optuna_save_study")
+    assert any("optuna_save_study" in record.message for record in caplog.records)
+
+
+def test_optuna_score_config_migrates_legacy_consistency_bounds():
+    from ui import server as server_module
+
+    payload = _build_minimal_optuna_payload()
+    payload["score_config"] = {
+        "enabled_metrics": {"consistency": True},
+        "weights": {"consistency": 1.0},
+        "metric_bounds": {"consistency": {"min": 0.0, "max": 100.0}},
+    }
+
+    config = server_module._build_optimization_config(
+        "dummy.csv",
+        payload,
+        worker_processes=1,
+        strategy_id="s01_trailing_ma",
+        warmup_bars=1000,
+    )
+
+    assert config.score_config["metric_bounds"]["consistency"] == {"min": -1.0, "max": 1.0}
+
+
 def _ensure_local_test_tmp_dir() -> Path:
     path = Path(__file__).parent / ".tmp_server_cancel"
     path.mkdir(parents=True, exist_ok=True)
@@ -473,6 +721,83 @@ def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
     assert clear_data["runtime"]["active"] is False
     assert clear_data["runtime"]["updatedAt"] == 0
     assert not queue_file.exists()
+
+
+def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch):
+    queue_file = _patch_queue_storage_path(monkeypatch, "queue_extended_metadata.json")
+
+    payload = {
+        "items": [
+            {
+                "id": "q_test_meta",
+                "index": 73,
+                "label": "#73 example",
+                "mode": "wfa",
+                "finalState": "completed",
+                "dbTarget": "analytics_01.sqlite",
+                "sources": [
+                    {"type": "path", "path": r"C:\data\alpha_30m.csv"},
+                    {"type": "path", "path": r"C:\data\beta_30m.csv"},
+                ],
+                "sourceCursor": 2,
+                "successCount": 2,
+                "failureCount": 0,
+                "studySet": {
+                    "autoCreate": True,
+                    "completedStudyIds": ["study_a", "study_b"],
+                    "createdSetId": 11,
+                    "createdSetName": "#73 · S03 · 30m · NSGA-2 (357) · 1.5k · WFA-F 60/30",
+                    "status": "created",
+                    "error": "",
+                    "lastUpdatedAt": "2026-03-12T10:15:00Z",
+                },
+                "uiSnapshot": {
+                    "selectedTab": "optimizer",
+                    "dbTarget": {"value": "analytics_01.sqlite"},
+                },
+                "wfa": {
+                    "isPeriodDays": 60,
+                    "oosPeriodDays": 30,
+                    "storeTopNTrials": 50,
+                    "adaptiveMode": True,
+                    "cooldownEnabled": True,
+                    "cooldownDays": 15,
+                    "maxOosPeriodDays": 120,
+                    "minOosTrades": 7,
+                    "checkIntervalTrades": 4,
+                    "cusumThreshold": 5.5,
+                    "ddThresholdMultiplier": 1.7,
+                    "inactivityMultiplier": 6.2,
+                },
+            }
+        ],
+        "nextIndex": 74,
+        "runtime": {"active": False, "updatedAt": 0},
+    }
+
+    response_put = client.put("/api/queue", json=payload)
+    assert response_put.status_code == 200
+    stored = response_put.get_json()
+    assert stored["items"][0]["finalState"] == "completed"
+    assert stored["items"][0]["studySet"]["createdSetId"] == 11
+    assert stored["items"][0]["studySet"]["completedStudyIds"] == ["study_a", "study_b"]
+    assert stored["items"][0]["uiSnapshot"]["dbTarget"]["value"] == "analytics_01.sqlite"
+    assert stored["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert stored["items"][0]["wfa"]["cooldownDays"] == 15
+
+    response_get = client.get("/api/queue")
+    assert response_get.status_code == 200
+    loaded = response_get.get_json()
+    assert loaded["items"][0]["studySet"]["createdSetName"].startswith("#73")
+    assert loaded["items"][0]["dbTarget"] == "analytics_01.sqlite"
+    assert loaded["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert loaded["items"][0]["wfa"]["cooldownDays"] == 15
+
+    on_disk = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert on_disk["items"][0]["studySet"]["status"] == "created"
+    assert on_disk["items"][0]["uiSnapshot"]["selectedTab"] == "optimizer"
+    assert on_disk["items"][0]["wfa"]["cooldownEnabled"] is True
+    assert on_disk["items"][0]["wfa"]["cooldownDays"] == 15
 
 
 def test_queue_api_rejects_non_object_payload(client):
@@ -586,6 +911,173 @@ def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert data["run_id"] == "run_cancel_wfa"
     assert data["study_id"] is None
     assert deleted_studies == ["study_cancel_wfa"]
+
+
+def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = _ensure_local_test_tmp_dir() / "wfa_cooldown_route.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n"
+        "2026-01-02 00:00:00,1,1,1,1,1\n"
+        "2026-01-03 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 1.1, 1.2],
+            "high": [1.0, 1.1, 1.2],
+            "low": [1.0, 1.1, 1.2],
+            "close": [1.0, 1.1, 1.2],
+            "volume": [1.0, 1.0, 1.0],
+        },
+        index=pd.to_datetime(
+            ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"],
+            utc=True,
+        ),
+    )
+
+    captured = {}
+
+    class DummyWalkForwardEngine:
+        def __init__(self, config, base_template, optuna_settings, csv_file_path=None):
+            captured["config"] = config
+            captured["base_template"] = base_template
+            captured["optuna_settings"] = optuna_settings
+            captured["csv_file_path"] = csv_file_path
+
+        def run_wf_optimization(self, _dataframe):
+            return (
+                SimpleNamespace(
+                    total_windows=1,
+                    stitched_oos=SimpleNamespace(
+                        final_net_profit_pct=0.0,
+                        max_drawdown_pct=0.0,
+                        total_trades=0,
+                        wfe=0.0,
+                        oos_win_rate=0.0,
+                    ),
+                ),
+                "study_route_cooldown",
+            )
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["primary_objective"] = "net_profit_pct"
+
+    response = client.post(
+        "/api/walkforward",
+        data={
+            "strategy": "s01_trailing_ma",
+            "csvPath": str(csv_path),
+            "config": json.dumps(payload),
+            "wf_adaptive_mode": "true",
+            "wf_cooldown_enabled": "true",
+            "wf_cooldown_days": "21",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["config"].adaptive_mode is True
+    assert captured["config"].cooldown_enabled is True
+    assert captured["config"].cooldown_days == 21
+    assert captured["base_template"]["cooldown_enabled"] is True
+    assert captured["base_template"]["cooldown_days"] == 21
+    assert captured["base_template"]["wfa"]["cooldown_enabled"] is True
+    assert captured["base_template"]["wfa"]["cooldown_days"] == 21
+
+
+def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = _ensure_local_test_tmp_dir() / "wfa_ft_reject_route.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n"
+        "2026-01-02 00:00:00,1,1,1,1,1\n"
+        "2026-01-03 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 1.1, 1.2],
+            "high": [1.0, 1.1, 1.2],
+            "low": [1.0, 1.1, 1.2],
+            "close": [1.0, 1.1, 1.2],
+            "volume": [1.0, 1.0, 1.0],
+        },
+        index=pd.to_datetime(
+            ["2026-01-01 00:00:00", "2026-01-02 00:00:00", "2026-01-03 00:00:00"],
+            utc=True,
+        ),
+    )
+
+    captured = {}
+
+    class DummyWalkForwardEngine:
+        def __init__(self, config, base_template, optuna_settings, csv_file_path=None):
+            captured["config"] = config
+            captured["base_template"] = base_template
+            captured["optuna_settings"] = optuna_settings
+            captured["csv_file_path"] = csv_file_path
+
+        def run_wf_optimization(self, _dataframe):
+            return (
+                SimpleNamespace(
+                    total_windows=1,
+                    stitched_oos=SimpleNamespace(
+                        final_net_profit_pct=0.0,
+                        max_drawdown_pct=0.0,
+                        total_trades=0,
+                        wfe=0.0,
+                        oos_win_rate=0.0,
+                    ),
+                ),
+                "study_route_ft_policy",
+            )
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["primary_objective"] = "net_profit_pct"
+    payload["postProcess"] = {
+        "enabled": True,
+        "ftPeriodDays": 14,
+        "topK": 10,
+        "sortMetric": "profit_degradation",
+        "ftThresholdPct": 5.0,
+        "ftRejectAction": "cooldown_reoptimize",
+        "ftRejectCooldownDays": 7,
+        "ftRejectMaxAttempts": 3,
+        "ftRejectMinRemainingOosDays": 11,
+    }
+
+    response = client.post(
+        "/api/walkforward",
+        data={
+            "strategy": "s01_trailing_ma",
+            "csvPath": str(csv_path),
+            "config": json.dumps(payload),
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["config"].post_process is not None
+    assert captured["config"].post_process.ft_threshold_pct == 5.0
+    assert captured["config"].post_process.ft_reject_action == "cooldown_reoptimize"
+    assert captured["config"].post_process.ft_reject_cooldown_days == 7
+    assert captured["config"].post_process.ft_reject_max_attempts == 3
+    assert captured["config"].post_process.ft_reject_min_remaining_oos_days == 11
 
 
 def _build_params_from_config(strategy_id: str):
@@ -906,10 +1398,184 @@ def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
             csv_path.unlink()
 
 
+def test_export_lancelot_bundle_from_optuna_trial(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_optuna.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_optuna_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_optuna_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_optuna_1",
+                optimization_mode="optuna",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv",
+            )
+            _insert_lancelot_export_trial(
+                study_id=study_id,
+                trial_number=42,
+                params={"closeCountLong": 3, "useTBands": True},
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"trialNumber": 42},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["bundleSchemaVersion"] == 2
+            assert payload["strategyId"] == "s03_reversal_v10"
+            assert payload["strategyVersion"] == "v10"
+            assert payload["symbol"] == "LINK/USDT:USDT"
+            assert payload["timeframe"] == "15m"
+            assert payload["warmupBars"] == 1000
+            assert payload["exportMode"] == "live"
+            assert payload["params"] == {"closeCountLong": 3, "useTBands": True}
+            assert payload["source"]["studyId"] == study_id
+            assert payload["source"]["trialNumber"] == 42
+            assert payload["source"]["studyName"] == "bundle_optuna_1"
+            assert payload["source"]["exportedAt"].endswith("Z")
+            assert payload["source"]["merlinVersion"]
+            assert payload["source"]["merlinCommit"]
+            assert payload["source"]["dataFingerprint"] == (
+                f"sha256:{hashlib.sha256(csv_path.read_bytes()).hexdigest()}"
+            )
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_wfa_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_wfa_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_wfa_1",
+                optimization_mode="wfa",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_BTCUSDT.P, 1h 2025.05.01-2025.11.20.csv",
+                warmup_bars=1500,
+            )
+            _insert_lancelot_export_wfa_window(
+                study_id=study_id,
+                window_number=1,
+                best_params={"maLength3": 75},
+                is_best_trial_number=7,
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"windowNumber": 1},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "BTC/USDT:USDT"
+            assert payload["timeframe"] == "1h"
+            assert payload["warmupBars"] == 1500
+            assert payload["params"] == {"maLength3": 75}
+            assert payload["source"]["trialNumber"] == 7
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa_selected.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_wfa_sel_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_wfa_selected_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_wfa_selected_1",
+                optimization_mode="wfa",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_ETHUSDT.P, 60 2025.05.01-2025.11.20.csv",
+            )
+            _insert_lancelot_export_wfa_window(
+                study_id=study_id,
+                window_number=1,
+                best_params={"maLength3": 125},
+                best_params_source="forward_test",
+                is_best_trial_number=None,
+            )
+            _insert_lancelot_export_wfa_trial(
+                study_id=study_id,
+                window_number=1,
+                module_type="forward_test",
+                trial_number=19,
+                params={"maLength3": 125},
+                is_selected=True,
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"windowNumber": 1},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "ETH/USDT:USDT"
+            assert payload["timeframe"] == "1h"
+            assert payload["source"]["trialNumber"] == 19
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_export_lancelot_bundle_requires_selection_payload(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_missing.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_missing_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_missing_selection"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_missing_selection",
+                optimization_mode="optuna",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv",
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={},
+            )
+
+            assert response.status_code == 400
+            assert response.get_json()["error"] == "trialNumber is required for bundle export."
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
 def test_analytics_page_renders(client):
     response = client.get("/analytics")
     assert response.status_code == 200
-    assert "Analytics" in response.get_data(as_text=True)
+    body = response.get_data(as_text=True)
+    assert "Analytics" in body
+    assert "Group Dates" in body
 
 
 def test_analytics_window_boundaries_endpoint_success(client):
@@ -1023,6 +1689,12 @@ def test_analytics_equity_endpoint_success(client):
         assert payload["selected_count"] == 2
         assert payload["missing_study_ids"] == []
         assert payload["profit_pct"] == pytest.approx(0.0, abs=1e-6)
+        assert payload["return_profile"] == {
+            "stems": [20.0, -20.0],
+            "source_count": 2,
+            "display_count": 2,
+            "is_binned": False,
+        }
 
 
 def test_analytics_equity_endpoint_rejects_missing_payload(client):
@@ -1052,10 +1724,10 @@ def test_analytics_equity_endpoint_rejects_empty_study_ids(client):
 def test_analytics_equity_endpoint_rejects_study_ids_over_cap(client):
     response = client.post(
         "/api/analytics/equity",
-        json={"study_ids": [f"id_{i}" for i in range(501)]},
+        json={"study_ids": [f"id_{i}" for i in range(5001)]},
     )
     assert response.status_code == 400
-    assert "Maximum allowed is 500" in response.get_json()["error"]
+    assert "Maximum allowed is 5000" in response.get_json()["error"]
 
 
 def test_analytics_equity_endpoint_no_overlap_returns_warning(client):
@@ -1089,6 +1761,12 @@ def test_analytics_equity_endpoint_no_overlap_returns_warning(client):
         payload = response.get_json()
         assert payload["curve"] is None
         assert payload["warning"] == "Selected studies have no overlapping time period."
+        assert payload["return_profile"] == {
+            "stems": [],
+            "source_count": 0,
+            "display_count": 0,
+            "is_binned": False,
+        }
 
 
 def test_analytics_equity_batch_endpoint_success(client):
@@ -1132,6 +1810,9 @@ def test_analytics_equity_batch_endpoint_success(client):
         assert by_id["all"]["studies_used"] == 2
         assert by_id["subset"]["studies_used"] == 1
         assert by_id["empty"]["curve"] is None
+        assert "return_profile" not in by_id["all"]
+        assert "return_profile" not in by_id["subset"]
+        assert "return_profile" not in by_id["empty"]
 
 
 def test_analytics_summary_empty_db_returns_expected_message(client):
@@ -1269,22 +1950,31 @@ def test_analytics_summary_wfa_phase1_contract(client):
         assert [row["study_id"] for row in studies] == ["wfa_a1", "wfa_a2", "wfa_b1"]
 
         first = studies[0]
+        expected_first_full = _calculate_r2_consistency([100.0, 101.5, 110.0])
         assert first["strategy"] == "S01 v2.1"
         assert first["symbol"] == "LINKUSDT.P"
         assert first["tf"] == "15m"
         assert first["wfa_mode"] == "Adaptive"
         assert first["is_oos"] == "60/30"
         assert first["has_equity_curve"] is True
-        assert len(first["equity_curve"]) == 3
-        assert len(first["equity_timestamps"]) == 3
+        assert first["equity_point_count"] == 3
+        assert first["equity_start_ts"] == "2025-01-01T00:00:00+00:00"
+        assert first["equity_end_ts"] == "2025-01-31T00:00:00+00:00"
+        assert first["oos_span_days_exact"] == pytest.approx(30.0)
+        assert first["consistency_full"] == pytest.approx(expected_first_full, abs=1e-6)
+        assert first["consistency_recent"] is None
+        assert "equity_curve" not in first
+        assert "equity_timestamps" not in first
 
         second = studies[1]
         assert second["strategy"] == "S02 v3.0"
         assert second["wfa_mode"] == "Fixed"
         assert second["is_oos"] == "?/30"
         assert second["has_equity_curve"] is False
-        assert second["equity_curve"] == []
-        assert second["equity_timestamps"] == []
+        assert second["equity_point_count"] == 0
+        assert second["equity_start_ts"] is None
+        assert second["equity_end_ts"] is None
+        assert second["oos_span_days_exact"] is None
 
         third = studies[2]
         assert third["strategy"] == "custom_strategy"
@@ -1342,6 +2032,8 @@ def test_analytics_summary_includes_study_name_and_timestamps(client):
         assert first["created_at_epoch"] > 0
         assert first["completed_at_epoch"] > 0
         assert first["wfa_settings"]["run_time_seconds"] == 300
+        assert "equity_curve" not in first
+        assert "equity_timestamps" not in first
 
         second = by_id["wfa_ts_2"]
         assert second["study_name"] == "S03_OKX_ETHUSDT.P, 240 2025.01.01-2025.01.31_WFA"
@@ -1351,6 +2043,173 @@ def test_analytics_summary_includes_study_name_and_timestamps(client):
         assert isinstance(second["completed_at_epoch"], int)
         assert second["completed_at_epoch"] > 0
         assert second["wfa_settings"]["run_time_seconds"] is None
+
+
+def test_analytics_study_equity_endpoint_returns_lazy_curve_payload(client):
+    with _temporary_active_db(f"analytics_study_equity_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_study_curve",
+            study_name="WFA_STUDY_CURVE",
+            optimization_mode="wfa",
+            stitched_oos_equity_curve=[100.0, 110.0, 108.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-05T00:00:00+00:00",
+                "2025-01-08T00:00:00+00:00",
+            ],
+        )
+        _insert_analytics_study(
+            study_id="optuna_curve",
+            study_name="OPTUNA_CURVE",
+            optimization_mode="optuna",
+        )
+
+        response = client.get("/api/analytics/studies/wfa_study_curve/equity")
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["study_id"] == "wfa_study_curve"
+        assert payload["has_equity_curve"] is True
+        assert payload["point_count"] == 3
+        assert payload["curve"] == [100.0, 110.0, 108.0]
+        assert payload["timestamps"] == [
+            "2025-01-01T00:00:00+00:00",
+            "2025-01-05T00:00:00+00:00",
+            "2025-01-08T00:00:00+00:00",
+        ]
+
+        missing = client.get("/api/analytics/studies/missing/equity")
+        assert missing.status_code == 404
+
+        non_wfa = client.get("/api/analytics/studies/optuna_curve/equity")
+        assert non_wfa.status_code == 400
+        assert "WFA" in non_wfa.get_json()["error"]
+
+
+def test_analytics_set_and_all_studies_equity_endpoints_return_cached_payloads(client):
+    with _temporary_active_db(f"analytics_cached_equity_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_cache_a",
+            study_name="WFA_CACHE_A",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=10.0,
+            stitched_oos_max_drawdown_pct=4.0,
+            stitched_oos_equity_curve=[100.0, 110.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-10T00:00:00+00:00",
+            ],
+        )
+        _insert_analytics_study(
+            study_id="wfa_cache_b",
+            study_name="WFA_CACHE_B",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=5.0,
+            stitched_oos_max_drawdown_pct=2.0,
+            stitched_oos_equity_curve=[100.0, 105.0],
+            stitched_oos_timestamps_json=[
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-10T00:00:00+00:00",
+            ],
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Cached Set", "study_ids": ["wfa_cache_a", "wfa_cache_b"]},
+        ).get_json()
+
+        sets_payload = client.get("/api/analytics/sets").get_json()
+        assert sets_payload["all_metrics"]["selected_count"] == 2
+        assert sets_payload["all_metrics"]["has_curve"] is True
+        assert sets_payload["sets"][0]["metrics"]["selected_count"] == 2
+        assert sets_payload["sets"][0]["metrics"]["has_curve"] is True
+
+        set_equity = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert set_equity.status_code == 200
+        set_payload = set_equity.get_json()
+        assert set_payload["selected_count"] == 2
+        assert set_payload["has_curve"] is True
+        assert len(set_payload["curve"]) == len(set_payload["timestamps"]) == 2
+
+        all_equity = client.get("/api/analytics/all-studies/equity")
+        assert all_equity.status_code == 200
+        all_payload = all_equity.get_json()
+        assert all_payload["selected_count"] == 2
+        assert all_payload["has_curve"] is True
+        assert len(all_payload["curve"]) == len(all_payload["timestamps"]) == 2
+
+        update_response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"study_ids": ["wfa_cache_a"]},
+        )
+        assert update_response.status_code == 200
+
+        refreshed = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert refreshed.status_code == 200
+        refreshed_payload = refreshed.get_json()
+        assert refreshed_payload["selected_count"] == 1
+        assert refreshed_payload["profit_pct"] == pytest.approx(10.0)
+
+
+def test_analytics_sets_payload_includes_consistency_pair(client):
+    with _temporary_active_db(f"analytics_consistency_{uuid.uuid4().hex[:8]}"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [f"2025-03-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        _insert_analytics_study(
+            study_id="wfa_consistency_set",
+            study_name="WFA_CONSISTENCY_SET",
+            optimization_mode="wfa",
+            stitched_oos_net_profit_pct=15.0,
+            stitched_oos_max_drawdown_pct=4.1667,
+            stitched_oos_equity_curve=curve,
+            stitched_oos_timestamps_json=timestamps,
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Consistency Set", "study_ids": ["wfa_consistency_set"]},
+        ).get_json()
+
+        sets_payload = client.get("/api/analytics/sets")
+        assert sets_payload.status_code == 200
+        payload = sets_payload.get_json()
+        assert payload["all_metrics"]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert payload["all_metrics"]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+        assert payload["sets"][0]["metrics"]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert payload["sets"][0]["metrics"]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+        equity_response = client.get(f"/api/analytics/sets/{created['id']}/equity")
+        assert equity_response.status_code == 200
+        equity_payload = equity_response.get_json()
+        assert equity_payload["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert equity_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_analytics_summary_includes_per_study_consistency_pair(client):
+    with _temporary_active_db(f"analytics_summary_consistency_{uuid.uuid4().hex[:8]}"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [f"2025-03-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        _insert_analytics_study(
+            study_id="wfa_summary_consistency",
+            study_name="WFA_SUMMARY_CONSISTENCY",
+            optimization_mode="wfa",
+            stitched_oos_equity_curve=curve,
+            stitched_oos_timestamps_json=timestamps,
+        )
+
+        response = client.get("/api/analytics/summary")
+        assert response.status_code == 200
+        payload = response.get_json()
+
+        studies = payload["studies"]
+        assert len(studies) == 1
+        assert studies[0]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert studies[0]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
 
 
 def test_analytics_summary_includes_focus_settings_payload(client):
@@ -1380,6 +2239,11 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                     "sampler": "tpe",
                     "enable_pruning": False,
                     "pruner": "median",
+                    "warmup_trials": 132,
+                    "coverage_mode": True,
+                    "dispatcher_batch_result_processing": False,
+                    "dispatcher_soft_duplicate_cycle_limit_enabled": True,
+                    "dispatcher_duplicate_cycle_limit": 18,
                     "sanitize_enabled": True,
                     "sanitize_trades_threshold": 3,
                 },
@@ -1393,6 +2257,25 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                     "cusum_threshold": 5.5,
                     "dd_threshold_multiplier": 1.7,
                     "inactivity_multiplier": 6.2,
+                },
+                "postProcess": {
+                    "enabled": True,
+                    "ftPeriodDays": 14,
+                    "topK": 10,
+                    "sortMetric": "profit_degradation",
+                    "ftThresholdPct": 4.0,
+                    "ftRejectAction": "cooldown_reoptimize",
+                    "ftRejectCooldownDays": 5,
+                    "ftRejectMaxAttempts": 2,
+                    "ftRejectMinRemainingOosDays": 10,
+                    "dsrEnabled": True,
+                    "dsrTopK": 18,
+                    "stressTest": {
+                        "enabled": True,
+                        "topK": 7,
+                        "failureThreshold": 0.65,
+                        "sortMetric": "profit_retention",
+                    },
                 },
             },
         )
@@ -1409,6 +2292,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                 """
                 UPDATE studies
                 SET
+                    cooldown_enabled = 1,
+                    cooldown_days = 15,
                     max_oos_period_days = 110,
                     min_oos_trades = 9,
                     check_interval_trades = 8,
@@ -1444,6 +2329,7 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         by_id = {row["study_id"]: row for row in studies}
 
         first = by_id["wfa_focus_1"]
+        assert first["optimization_mode"] == "wfa"
         assert first["optuna_settings"]["objectives"] == ["net_profit_pct", "max_drawdown_pct"]
         assert first["optuna_settings"]["primary_objective"] == "net_profit_pct"
         assert first["optuna_settings"]["budget_mode"] == "trials"
@@ -1451,6 +2337,11 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["optuna_settings"]["sampler_type"] == "tpe"
         assert first["optuna_settings"]["enable_pruning"] is False
         assert first["optuna_settings"]["pruner"] == "median"
+        assert first["optuna_settings"]["warmup_trials"] == 132
+        assert first["optuna_settings"]["coverage_mode"] is True
+        assert first["optuna_settings"]["dispatcher_batch_result_processing"] is False
+        assert first["optuna_settings"]["dispatcher_soft_duplicate_cycle_limit_enabled"] is True
+        assert first["optuna_settings"]["dispatcher_duplicate_cycle_limit"] == 18
         assert first["optuna_settings"]["workers"] == 4
         assert first["optuna_settings"]["sanitize_enabled"] is True
         assert first["optuna_settings"]["sanitize_trades_threshold"] == 3
@@ -1462,6 +2353,8 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["wfa_settings"]["is_period_days"] == 60
         assert first["wfa_settings"]["oos_period_days"] == 30
         assert first["wfa_settings"]["adaptive_mode"] is True
+        assert first["wfa_settings"]["cooldown_enabled"] is True
+        assert first["wfa_settings"]["cooldown_days"] == 15
         assert first["wfa_settings"]["max_oos_period_days"] == 110
         assert first["wfa_settings"]["min_oos_trades"] == 9
         assert first["wfa_settings"]["check_interval_trades"] == 8
@@ -1469,11 +2362,32 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["wfa_settings"]["dd_threshold_multiplier"] == 1.8
         assert first["wfa_settings"]["inactivity_multiplier"] == 7.2
         assert first["wfa_settings"]["run_time_seconds"] == 3661
+        assert first["post_process_settings"]["ft_enabled"] is True
+        assert first["post_process_settings"]["ft_period_days"] == 14
+        assert first["post_process_settings"]["ft_top_k"] == 10
+        assert first["post_process_settings"]["ft_sort_metric"] == "profit_degradation"
+        assert first["post_process_settings"]["ft_threshold_pct"] == 4.0
+        assert first["post_process_settings"]["ft_reject_action"] == "cooldown_reoptimize"
+        assert first["post_process_settings"]["ft_reject_cooldown_days"] == 5
+        assert first["post_process_settings"]["ft_reject_max_attempts"] == 2
+        assert first["post_process_settings"]["ft_reject_min_remaining_oos_days"] == 10
+        assert first["post_process_settings"]["dsr_enabled"] is True
+        assert first["post_process_settings"]["dsr_top_k"] == 18
+        assert first["post_process_settings"]["st_enabled"] is True
+        assert first["post_process_settings"]["st_top_k"] == 7
+        assert first["post_process_settings"]["st_failure_threshold"] == 0.65
+        assert first["post_process_settings"]["st_sort_metric"] == "profit_retention"
 
         second = by_id["wfa_focus_2"]
+        assert second["optimization_mode"] == "wfa"
         assert second["optuna_settings"]["budget_mode"] == "time"
         assert second["optuna_settings"]["time_limit"] == 1800
         assert second["optuna_settings"]["sampler_type"] == "random"
+        assert second["optuna_settings"]["warmup_trials"] is None
+        assert second["optuna_settings"]["coverage_mode"] is None
+        assert second["optuna_settings"]["dispatcher_batch_result_processing"] is None
+        assert second["optuna_settings"]["dispatcher_soft_duplicate_cycle_limit_enabled"] is None
+        assert second["optuna_settings"]["dispatcher_duplicate_cycle_limit"] is None
         assert second["optuna_settings"]["sanitize_enabled"] is False
         assert second["optuna_settings"]["sanitize_trades_threshold"] == 11
         assert second["optuna_settings"]["filter_min_profit"] is True
@@ -1482,6 +2396,9 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["optuna_settings"]["score_min_threshold"] == 73.5
         assert second["wfa_settings"]["adaptive_mode"] is None
         assert second["wfa_settings"]["run_time_seconds"] == 95
+        assert second["post_process_settings"]["ft_enabled"] is False
+        assert second["post_process_settings"]["dsr_enabled"] is False
+        assert second["post_process_settings"]["st_enabled"] is False
 
 
 def test_analytics_sets_crud_and_reorder(client):
@@ -1504,6 +2421,7 @@ def test_analytics_sets_crud_and_reorder(client):
         assert create_response.status_code == 201
         created_first = create_response.get_json()
         assert created_first["name"] == "First Set"
+        assert created_first["color_token"] is None
         assert created_first["study_ids"] == ["wfa_set_1", "wfa_set_2"]
 
         second_response = client.post(
@@ -1516,11 +2434,14 @@ def test_analytics_sets_crud_and_reorder(client):
         list_response = client.get("/api/analytics/sets")
         assert list_response.status_code == 200
         payload = list_response.get_json()
+        assert "all_metrics" in payload
+        assert payload["all_metrics"]["selected_count"] == 2
         assert [item["name"] for item in payload["sets"]] == ["First Set", "Second Set"]
+        assert all("metrics" in item for item in payload["sets"])
 
         update_response = client.put(
             f"/api/analytics/sets/{created_first['id']}",
-            json={"name": "First Set Updated", "study_ids": ["wfa_set_1"]},
+            json={"name": "First Set Updated", "study_ids": ["wfa_set_1"], "color_token": "blue"},
         )
         assert update_response.status_code == 200
         assert update_response.get_json()["ok"] is True
@@ -1539,7 +2460,9 @@ def test_analytics_sets_crud_and_reorder(client):
         ]
         by_id = {item["id"]: item for item in list_after_reorder["sets"]}
         assert by_id[created_first["id"]]["name"] == "First Set Updated"
+        assert by_id[created_first["id"]]["color_token"] == "blue"
         assert by_id[created_first["id"]]["study_ids"] == ["wfa_set_1"]
+        assert by_id[created_first["id"]]["metrics"]["selected_count"] == 1
 
         delete_response = client.delete(f"/api/analytics/sets/{created_first['id']}")
         assert delete_response.status_code == 200
@@ -1586,6 +2509,50 @@ def test_analytics_sets_create_auto_suffixes_duplicate_names(client):
         ]
 
 
+def test_analytics_sets_rename_auto_suffixes_duplicate_names(client):
+    with _temporary_active_db(f"analytics_sets_rename_duplicates_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_rename_dup_1",
+            study_name="WFA_RENAME_DUP_1",
+            optimization_mode="wfa",
+        )
+
+        first = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Duplicate", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert first.status_code == 201
+        assert first.get_json()["name"] == "Rename Duplicate"
+
+        second = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Duplicate", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert second.status_code == 201
+        assert second.get_json()["name"] == "Rename Duplicate (1)"
+
+        target = client.post(
+            "/api/analytics/sets",
+            json={"name": "Rename Target", "study_ids": ["wfa_rename_dup_1"]},
+        )
+        assert target.status_code == 201
+        target_id = target.get_json()["id"]
+
+        rename_response = client.put(
+            f"/api/analytics/sets/{target_id}",
+            json={"name": "Rename Duplicate"},
+        )
+        assert rename_response.status_code == 200
+        assert rename_response.get_json()["ok"] is True
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert [item["name"] for item in payload["sets"]] == [
+            "Rename Duplicate",
+            "Rename Duplicate (1)",
+            "Rename Duplicate (2)",
+        ]
+
+
 def test_analytics_sets_reject_non_wfa_study_ids(client):
     with _temporary_active_db(f"analytics_sets_validation_{uuid.uuid4().hex[:8]}"):
         _insert_analytics_study(
@@ -1600,6 +2567,93 @@ def test_analytics_sets_reject_non_wfa_study_ids(client):
         assert response.status_code == 400
         payload = response.get_json()
         assert "non-WFA" in payload["error"]
+
+
+def test_analytics_sets_reject_invalid_color_token(client):
+    with _temporary_active_db(f"analytics_sets_bad_color_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_color_1",
+            study_name="WFA_COLOR_1",
+            optimization_mode="wfa",
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Color Set", "study_ids": ["wfa_color_1"]},
+        ).get_json()
+
+        response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"color_token": "magenta"},
+        )
+        assert response.status_code == 400
+        assert "Unsupported set color" in response.get_json()["error"]
+
+
+def test_analytics_sets_color_token_can_be_cleared(client):
+    with _temporary_active_db(f"analytics_sets_clear_color_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_color_clear_1",
+            study_name="WFA_COLOR_CLEAR_1",
+            optimization_mode="wfa",
+        )
+
+        created = client.post(
+            "/api/analytics/sets",
+            json={"name": "Clear Color Set", "study_ids": ["wfa_color_clear_1"], "color_token": "teal"},
+        ).get_json()
+        assert created["color_token"] == "teal"
+
+        response = client.put(
+            f"/api/analytics/sets/{created['id']}",
+            json={"color_token": None},
+        )
+        assert response.status_code == 200
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert payload["sets"][0]["color_token"] is None
+
+
+def test_analytics_sets_bulk_color_and_delete(client):
+    with _temporary_active_db(f"analytics_sets_bulk_{uuid.uuid4().hex[:8]}"):
+        _insert_analytics_study(
+            study_id="wfa_bulk_1",
+            study_name="WFA_BULK_1",
+            optimization_mode="wfa",
+        )
+        _insert_analytics_study(
+            study_id="wfa_bulk_2",
+            study_name="WFA_BULK_2",
+            optimization_mode="wfa",
+        )
+
+        first = client.post(
+            "/api/analytics/sets",
+            json={"name": "Bulk First", "study_ids": ["wfa_bulk_1"], "color_token": "blue"},
+        ).get_json()
+        second = client.post(
+            "/api/analytics/sets",
+            json={"name": "Bulk Second", "study_ids": ["wfa_bulk_2"], "color_token": "teal"},
+        ).get_json()
+
+        color_response = client.put(
+            "/api/analytics/sets/bulk-color",
+            json={"set_ids": [first["id"], second["id"]], "color_token": "amber"},
+        )
+        assert color_response.status_code == 200
+        assert color_response.get_json()["ok"] is True
+
+        payload = client.get("/api/analytics/sets").get_json()
+        assert [item["color_token"] for item in payload["sets"]] == ["amber", "amber"]
+
+        delete_response = client.post(
+            "/api/analytics/sets/bulk-delete",
+            json={"set_ids": [first["id"], second["id"]]},
+        )
+        assert delete_response.status_code == 200
+        assert delete_response.get_json()["ok"] is True
+        assert delete_response.get_json()["deleted"] == 2
+        assert client.get("/api/analytics/sets").get_json()["sets"] == []
 
 
 def test_analytics_sets_members_cascade_on_study_delete(client):
@@ -1620,6 +2674,7 @@ def test_analytics_sets_members_cascade_on_study_delete(client):
         payload = client.get("/api/analytics/sets").get_json()
         assert payload["sets"][0]["name"] == "Cascade Set"
         assert payload["sets"][0]["study_ids"] == []
+        assert payload["sets"][0]["metrics"]["selected_count"] == 0
 
 
 def test_analytics_sets_reorder_requires_complete_order(client):
