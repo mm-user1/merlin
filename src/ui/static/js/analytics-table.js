@@ -19,6 +19,7 @@
     profitable_windows_pct: { label: 'OOS Wins', bestDirection: 'desc' },
     median_window_profit: { label: 'OOS P(med)', bestDirection: 'desc' },
     median_window_wr: { label: 'OOS WR(med)', bestDirection: 'desc' },
+    consistency: { label: 'Consist', bestDirection: 'desc' },
   };
 
   const tableState = {
@@ -270,6 +271,40 @@
     return direction === 'asc' ? left - right : right - left;
   }
 
+  function formatConsistencyValue(value, digits = 2) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return 'N/A';
+    return parsed.toFixed(digits);
+  }
+
+  function getRecentConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < -0.2) return 'val-negative';
+    if (parsed > 0) return 'val-positive';
+    return '';
+  }
+
+  function getFullConsistencyClass(value) {
+    const parsed = toFiniteNumber(value);
+    if (parsed === null) return '';
+    if (parsed < 0) return 'val-negative';
+    if (parsed > 0.8) return 'val-positive';
+    return '';
+  }
+
+  function renderConsistencyPair(recentValue, fullValue, digits = 2) {
+    const recent = toFiniteNumber(recentValue);
+    const full = toFiniteNumber(fullValue);
+    if (recent === null && full === null) return 'N/A';
+
+    return [
+      `<span class="${getRecentConsistencyClass(recent)}">${escapeHtml(formatConsistencyValue(recent, digits))}</span>`,
+      '<span>/</span>',
+      `<span class="${getFullConsistencyClass(full)}">${escapeHtml(formatConsistencyValue(full, digits))}</span>`,
+    ].join('');
+  }
+
   function compareStudyNameRows(leftStudy, rightStudy) {
     const left = leftStudy?._study_name_sort || buildStudyNameSortIdentity(leftStudy, leftStudy?._study_name_display);
     const right = rightStudy?._study_name_sort || buildStudyNameSortIdentity(rightStudy, rightStudy?._study_name_display);
@@ -313,6 +348,23 @@
     if (sortColumn === 'study_name') {
       const cmp = compareStudyNameRows(leftStudy, rightStudy);
       if (cmp !== 0) return sortDirection === 'asc' ? cmp : -cmp;
+      return compareDefaultRows(leftStudy, rightStudy);
+    }
+
+    if (sortColumn === 'consistency') {
+      let cmp = compareNumbersWithNulls(
+        leftStudy?.consistency_recent,
+        rightStudy?.consistency_recent,
+        sortDirection
+      );
+      if (cmp === 0) {
+        cmp = compareNumbersWithNulls(
+          leftStudy?.consistency_full,
+          rightStudy?.consistency_full,
+          sortDirection
+        );
+      }
+      if (cmp !== 0) return cmp;
       return compareDefaultRows(leftStudy, rightStudy);
     }
 
@@ -795,6 +847,7 @@
     const oosProfitText = escapeHtml(formatSignedPercentValue(study.median_window_profit, 1));
     const oosWrRaw = toFiniteNumber(study.median_window_wr);
     const oosWrText = escapeHtml(oosWrRaw === null ? 'N/A' : `${oosWrRaw.toFixed(1)}%`);
+    const consistencyText = renderConsistencyPair(study.consistency_recent, study.consistency_full, 2);
 
     const profitClass = (toFiniteNumber(study.profit_pct) || 0) >= 0 ? 'val-positive' : 'val-negative';
     const maxDdValue = toFiniteNumber(study.max_dd_pct);
@@ -839,6 +892,7 @@
         <td>${oosWinsText}</td>
         <td class="${oosProfitClass}">${oosProfitText}</td>
         <td>${oosWrText}</td>
+        <td title="Recent / Full signed R² for the stitched OOS curve">${consistencyText}</td>
       </tr>
     `;
   }
@@ -859,7 +913,7 @@
         aria-expanded="${group.isCollapsed ? 'false' : 'true'}"${groupHiddenStyle}
       >
         <td class="col-check"><input type="checkbox" class="analytics-group-check" data-group="${group.groupId}" /></td>
-        <td colspan="13">
+        <td colspan="14">
           <div class="group-label">
             <span class="group-toggle-icon" aria-hidden="true">${toggleIcon}</span>
             <span class="group-dates">${groupStart} &mdash; ${groupEnd}</span>
@@ -883,7 +937,7 @@
     if (!preparedStudies.length) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="14" class="analytics-empty-cell">No WFA studies found in this database.</td>
+          <td colspan="15" class="analytics-empty-cell">No WFA studies found in this database.</td>
         </tr>
       `;
       updateSortHeaders();

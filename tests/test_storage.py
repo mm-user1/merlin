@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from core.storage import (
     update_study_set,
 )
 from core.metrics import _calculate_r2_consistency
-from core.post_process import PostProcessConfig
+from core.post_process import DSRConfig, PostProcessConfig, StressTestConfig
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
 
 
@@ -207,6 +208,8 @@ def test_studies_stitched_columns():
     assert "stitched_oos_total_trades" in columns
     assert "stitched_oos_winning_trades" in columns
     assert "stitched_oos_win_rate" in columns
+    assert "stitched_oos_consistency_full" in columns
+    assert "stitched_oos_consistency_recent" in columns
     assert "profitable_windows" in columns
     assert "total_windows" in columns
     assert "median_window_profit" in columns
@@ -316,6 +319,94 @@ def test_study_sets_storage_roundtrip():
     assert [entry["id"] for entry in sets[:2]] == [second["id"], created["id"]]
     assert sets[0]["color_token"] is None
     assert sets[1]["color_token"] == "blue"
+
+
+def test_save_wfa_study_persists_stitched_consistency_scores():
+    wf_result = _build_dummy_wfa_result()
+    curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+    timestamps = [pd.Timestamp(f"2025-03-{day:02d}", tz="UTC") for day in range(1, 10)]
+    wf_result.stitched_oos.equity_curve = curve
+    wf_result.stitched_oos.timestamps = timestamps
+    wf_result.stitched_oos.window_ids = list(range(1, 10))
+
+    study_id = save_wfa_study_to_db(
+        wf_result=wf_result,
+        config={},
+        csv_file_path="",
+        start_time=0.0,
+        score_config=None,
+    )
+
+    loaded = load_study_from_db(study_id)
+    assert loaded is not None
+    expected_full = _calculate_r2_consistency(curve)
+    expected_recent = _calculate_r2_consistency(curve[-3:])
+
+    study = loaded["study"]
+    stitched = loaded["stitched_oos"]
+    assert study.get("stitched_oos_consistency_full") == pytest.approx(expected_full, abs=1e-6)
+    assert study.get("stitched_oos_consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+    assert stitched.get("consistency_full") == pytest.approx(expected_full, abs=1e-6)
+    assert stitched.get("consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+
+
+def test_load_study_backfills_missing_stitched_consistency_for_legacy_rows():
+    with _temporary_active_db("storage_stitched_consistency_backfill"):
+        curve = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 109.0, 107.0, 105.0]
+        timestamps = [f"2025-04-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id,
+                    study_name,
+                    strategy_id,
+                    optimization_mode,
+                    stitched_oos_equity_curve,
+                    stitched_oos_timestamps_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy_wfa_consistency",
+                    "LEGACY_WFA_CONSISTENCY",
+                    "s01_trailing_ma",
+                    "wfa",
+                    json.dumps(curve),
+                    json.dumps(timestamps),
+                ),
+            )
+            conn.commit()
+
+        loaded = load_study_from_db("legacy_wfa_consistency")
+        assert loaded is not None
+        assert loaded["study"].get("stitched_oos_consistency_full") == pytest.approx(expected_full, abs=1e-6)
+        assert loaded["study"].get("stitched_oos_consistency_recent") == pytest.approx(expected_recent, abs=1e-6)
+
+        with get_db_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    stitched_oos_start_ts,
+                    stitched_oos_end_ts,
+                    stitched_oos_point_count,
+                    stitched_oos_consistency_full,
+                    stitched_oos_consistency_recent
+                FROM studies
+                WHERE study_id = ?
+                """,
+                ("legacy_wfa_consistency",),
+            ).fetchone()
+
+        assert row is not None
+        assert row["stitched_oos_start_ts"] == timestamps[0]
+        assert row["stitched_oos_end_ts"] == timestamps[-1]
+        assert row["stitched_oos_point_count"] == len(timestamps)
+        assert row["stitched_oos_consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert row["stitched_oos_consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
 
 
 def test_study_sets_reject_invalid_color_token():
@@ -694,6 +785,13 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
         ft_reject_max_attempts=2,
         ft_reject_min_remaining_oos_days=10,
     )
+    wf_result.config.dsr_config = DSRConfig(enabled=True, top_k=18)
+    wf_result.config.stress_test_config = StressTestConfig(
+        enabled=True,
+        top_k=7,
+        failure_threshold=0.65,
+        sort_metric="profit_retention",
+    )
     wf_result.windows[0].trigger_type = "cusum"
     wf_result.windows[0].oos_actual_days = 4.0
     wf_result.windows[0].cooldown_days_applied = 15.0
@@ -774,6 +872,12 @@ def test_save_wfa_study_persists_optuna_and_wfa_metadata():
     assert study.get("ft_reject_cooldown_days") == 5
     assert study.get("ft_reject_max_attempts") == 2
     assert study.get("ft_reject_min_remaining_oos_days") == 10
+    assert study.get("dsr_enabled") == 1
+    assert study.get("dsr_top_k") == 18
+    assert study.get("st_enabled") == 1
+    assert study.get("st_top_k") == 7
+    assert study.get("st_failure_threshold") == 0.65
+    assert study.get("st_sort_metric") == "profit_retention"
 
     config_json = study.get("config_json") or {}
     assert config_json.get("optuna_config", {}).get("pruner") == "median"

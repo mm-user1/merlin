@@ -618,6 +618,10 @@
       ?? summary?.oos_win_rate
       ?? summary?.win_rate
       ?? null;
+    const stitchedConsistency = summary?.stitched_oos_consistency_full
+      ?? stitchedSummary.consistency_full
+      ?? summary?.consistency_full
+      ?? null;
 
     const stitchedTrial = {
       trial_number: '',
@@ -632,7 +636,7 @@
       profit_factor: null,
       ulcer_index: null,
       sqn: null,
-      consistency_score: null,
+      consistency_score: stitchedConsistency,
       objective_values: []
     };
 
@@ -694,18 +698,34 @@
         max_period: 'MAX'
       };
       const triggerLabel = triggerLabels[triggerType] || '';
-      const triggerBadge = triggerLabel
-        ? `<span class="wfa-trigger-badge wfa-trigger-${triggerType}">${triggerLabel}</span>`
-        : '';
+      const badges = [];
+      if (triggerLabel) {
+        badges.push(`<span class="wfa-trigger-badge wfa-trigger-${triggerType}">${triggerLabel}</span>`);
+      }
+      const ftRetryAttemptsRaw = window.ft_retry_attempts_used;
+      const ftRetryAttempts = Number.isFinite(Number(ftRetryAttemptsRaw))
+        ? Math.max(0, Math.round(Number(ftRetryAttemptsRaw)))
+        : 0;
+      const windowStatus = String(window.window_status || '').trim().toLowerCase();
+      const noTradeReason = String(window.no_trade_reason || '').trim().toLowerCase();
+      const ftRejectedWindow = windowStatus === 'no_trade' && noTradeReason.startsWith('ft_');
+      const shouldShowFtBadge = ftRetryAttempts > 0 || ftRejectedWindow;
+      if (shouldShowFtBadge) {
+        const ftTotalAttempts = Math.max(1, ftRetryAttempts + 1);
+        const ftBadgeClass = ftRejectedWindow ? 'wfa-trigger-ft-reject' : 'wfa-trigger-ft-pass';
+        badges.push(`<span class="wfa-trigger-badge ${ftBadgeClass}">FT ${ftTotalAttempts}</span>`);
+      }
+      const badgeMarkup = badges.join('');
       const adaptiveModeRaw = window.ResultsState?.wfa?.adaptiveMode ?? window.ResultsState?.wfa?.adaptive_mode;
       const adaptiveMode = adaptiveModeRaw === null || adaptiveModeRaw === undefined
         ? null
         : Boolean(adaptiveModeRaw);
       const hasAdaptiveMeta = Boolean(triggerLabel || actualDays || cooldownDays);
       const showAdaptiveMeta = adaptiveMode === true || (adaptiveMode === null && hasAdaptiveMeta);
-      const adaptiveSuffix = showAdaptiveMeta && hasAdaptiveMeta
-        ? ` (${[actualDays || '-', cooldownDays].filter(Boolean).join(' + ')}) ${triggerBadge}`
+      const adaptiveMetaLabel = showAdaptiveMeta && hasAdaptiveMeta
+        ? ` (${[actualDays || '-', cooldownDays].filter(Boolean).join(' + ')})`
         : '';
+      const adaptiveSuffix = `${adaptiveMetaLabel}${badgeMarkup ? ` ${badgeMarkup}` : ''}`;
 
       const headerRow = document.createElement('tr');
       headerRow.className = 'wfa-window-header';

@@ -138,6 +138,29 @@ def register_routes(app):
             return parsed
         return []
 
+    def _extract_post_process_settings(config_payload: Dict[str, Any]) -> Dict[str, Any]:
+        post_process_payload = _parse_json_dict(config_payload.get("postProcess"))
+        stress_payload = _parse_json_dict(post_process_payload.get("stressTest"))
+        return {
+            "ft_enabled": bool(post_process_payload.get("enabled")),
+            "ft_period_days": _safe_int(post_process_payload.get("ftPeriodDays")),
+            "ft_top_k": _safe_int(post_process_payload.get("topK")),
+            "ft_sort_metric": str(post_process_payload.get("sortMetric") or "").strip() or None,
+            "ft_threshold_pct": _safe_float(post_process_payload.get("ftThresholdPct")),
+            "ft_reject_action": str(post_process_payload.get("ftRejectAction") or "").strip() or None,
+            "ft_reject_cooldown_days": _safe_int(post_process_payload.get("ftRejectCooldownDays")),
+            "ft_reject_max_attempts": _safe_int(post_process_payload.get("ftRejectMaxAttempts")),
+            "ft_reject_min_remaining_oos_days": _safe_int(
+                post_process_payload.get("ftRejectMinRemainingOosDays")
+            ),
+            "dsr_enabled": bool(post_process_payload.get("dsrEnabled")),
+            "dsr_top_k": _safe_int(post_process_payload.get("dsrTopK")),
+            "st_enabled": bool(stress_payload.get("enabled")),
+            "st_top_k": _safe_int(stress_payload.get("topK")),
+            "st_failure_threshold": _safe_float(stress_payload.get("failureThreshold")),
+            "st_sort_metric": str(stress_payload.get("sortMetric") or "").strip() or None,
+        }
+
     def _timeframe_to_minutes(value: Any) -> float:
         token = str(value or "").strip().lower()
         if not token:
@@ -678,6 +701,7 @@ def register_routes(app):
                     study_name,
                     strategy_id,
                     strategy_version,
+                    optimization_mode,
                     created_at,
                     completed_at,
                     CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch,
@@ -715,6 +739,8 @@ def register_routes(app):
                     stitched_oos_total_trades,
                     stitched_oos_winning_trades,
                     best_value,
+                    stitched_oos_consistency_full,
+                    stitched_oos_consistency_recent,
                     profitable_windows,
                     total_windows,
                     stitched_oos_win_rate,
@@ -885,6 +911,7 @@ def register_routes(app):
                 {
                     "study_id": row_dict.get("study_id"),
                     "study_name": row_dict.get("study_name"),
+                    "optimization_mode": row_dict.get("optimization_mode"),
                     "strategy": strategy_label,
                     "strategy_id": row_dict.get("strategy_id"),
                     "strategy_version": row_dict.get("strategy_version"),
@@ -903,6 +930,8 @@ def register_routes(app):
                     "total_trades": total_trades,
                     "winning_trades": winning_trades,
                     "wfe_pct": _safe_float(row_dict.get("best_value")),
+                    "consistency_full": _safe_float(row_dict.get("stitched_oos_consistency_full")),
+                    "consistency_recent": _safe_float(row_dict.get("stitched_oos_consistency_recent")),
                     "total_windows": total_windows,
                     "profitable_windows": profitable_windows,
                     "profitable_windows_pct": profitable_windows_pct,
@@ -1025,6 +1054,7 @@ def register_routes(app):
                         ),
                         "run_time_seconds": run_time_seconds,
                     },
+                    "post_process_settings": _extract_post_process_settings(config_payload),
                 }
             )
 

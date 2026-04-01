@@ -64,6 +64,7 @@
   const state = {
     studies: [],
     studyMap: new Map(),
+    focusedStudyId: null,
     sets: [],
     allMetrics: null,
     focusedSetId: null,
@@ -325,6 +326,60 @@
 
   function getVisibleSetIdSet() {
     return new Set(getVisibleOrderedSetIds());
+  }
+
+  function getNormalizedFocusedStudyId() {
+    const normalized = String(state.focusedStudyId || '').trim();
+    return normalized || null;
+  }
+
+  function getFocusedStudyMembershipInfo() {
+    const focusedStudyId = getNormalizedFocusedStudyId();
+    if (!focusedStudyId) {
+      return {
+        focusedStudyId: null,
+        totalCount: 0,
+        visibleCount: 0,
+        matchingSetIds: new Set(),
+      };
+    }
+
+    const visibleSetIds = getVisibleSetIdSet();
+    const matchingSetIds = new Set();
+    let visibleCount = 0;
+
+    state.sets.forEach((setItem) => {
+      if (!Array.isArray(setItem?.study_ids) || !setItem.study_ids.includes(focusedStudyId)) {
+        return;
+      }
+      matchingSetIds.add(setItem.id);
+      if (visibleSetIds.has(setItem.id)) {
+        visibleCount += 1;
+      }
+    });
+
+    return {
+      focusedStudyId,
+      totalCount: matchingSetIds.size,
+      visibleCount,
+      matchingSetIds,
+    };
+  }
+
+  function applyFocusedStudyMembershipClasses() {
+    const membership = getFocusedStudyMembershipInfo();
+    const { tableWrap } = getDom();
+    if (!tableWrap) return;
+
+    tableWrap.querySelectorAll('tr.analytics-set-row').forEach((row) => {
+      const setId = normalizeSetId(row.dataset.setId || '');
+      const shouldHighlight = setId !== null
+        && membership.matchingSetIds.has(setId)
+        && !row.classList.contains('analytics-set-focused')
+        && !row.classList.contains('analytics-set-batch-selected')
+        && !row.classList.contains('analytics-set-moving');
+      row.classList.toggle('analytics-set-study-match', shouldHighlight);
+    });
   }
 
   function getInteractiveSetIds() {
@@ -1439,6 +1494,7 @@
     const allMetrics = computeMetrics(state.studies, state.allMetrics);
     const moveSelectionSet = getMoveSelectionSet();
     const visibleRows = getVisibleSetRows();
+    const focusedStudyMembership = getFocusedStudyMembershipInfo();
     const sortState = getActiveSetSortState();
     const rows = [];
     rows.push(`
@@ -1471,10 +1527,14 @@
         ? ' analytics-set-batch-selected'
         : '';
       const movingClass = state.moveMode && moveSelectionSet.has(setItem.id) ? ' analytics-set-moving' : '';
+      const focusedStudyMatchClass = !focusedClass && !batchSelectedClass && !movingClass
+        && focusedStudyMembership.matchingSetIds.has(setItem.id)
+        ? ' analytics-set-study-match'
+        : '';
       const colorTokenAttr = setItem.color_token ? ` data-color-token="${setItem.color_token}"` : '';
       const encodedName = escapeHtml(setItem.name || `Set ${setItem.id}`);
       rows.push(`
-        <tr class="analytics-set-row${focusedClass}${batchSelectedClass}${movingClass}" data-set-id="${setItem.id}"${colorTokenAttr}>
+        <tr class="analytics-set-row${focusedClass}${batchSelectedClass}${movingClass}${focusedStudyMatchClass}" data-set-id="${setItem.id}"${colorTokenAttr}>
           <td class="col-check"><input type="checkbox" class="analytics-set-check" data-set-id="${setItem.id}"${checked} /></td>
           <td title="${encodedName}">${encodedName} (${setItem.study_ids.length})</td>
           <td class="${getSignedClass(metrics.annProfitPct)}">${escapeHtml(formatSignedPercent(metrics.annProfitPct, 1))}</td>
@@ -1573,8 +1633,10 @@
           return;
         }
         handleCheckboxToggle(setId, event);
-      });
+        });
     });
+
+    applyFocusedStudyMembershipClasses();
   }
 
   function renderHeader() {
@@ -1721,6 +1783,12 @@
   function updateCheckedStudyIds(checkedStudyIds) {
     state.checkedStudyIds = new Set(Array.from(checkedStudyIds || []));
     renderActions();
+  }
+
+  function setFocusedStudyId(studyId) {
+    state.focusedStudyId = String(studyId || '').trim() || null;
+    renderSummaryText();
+    applyFocusedStudyMembershipClasses();
   }
 
   function handleEscapeFromSetFocus() {
@@ -1957,6 +2025,7 @@
     init,
     updateStudies,
     updateCheckedStudyIds,
+    setFocusedStudyId,
     loadSets,
     getFocusedSetId,
     getCheckedSetIds,

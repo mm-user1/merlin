@@ -48,6 +48,16 @@
         </div>
       </div>
 
+      <div class="collapsible open" id="analytics-post-process-section" style="display: none;">
+        <div class="collapsible-header">
+          <span class="collapsible-icon">&#9660;</span>
+          <span class="collapsible-title">Post Process Settings</span>
+        </div>
+        <div class="collapsible-content">
+          <div class="settings-list" id="analyticsPostProcessSettings"></div>
+        </div>
+      </div>
+
       <div class="collapsible open" id="analytics-wfa-section" style="display: none;">
         <div class="collapsible-header">
           <span class="collapsible-icon">&#9660;</span>
@@ -165,6 +175,9 @@
                 </th>
                 <th class="analytics-sortable" data-sort-key="median_window_wr">
                   <span class="sort-label">OOS WR(med)</span><span class="sort-arrow"></span>
+                </th>
+                <th class="analytics-sortable" data-sort-key="consistency" title="Recent / Full signed R² for the stitched OOS curve">
+                  <span class="sort-label">Consist</span><span class="sort-arrow"></span>
                 </th>
               </tr>
             </thead>

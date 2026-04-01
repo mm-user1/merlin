@@ -106,6 +106,13 @@
     ulcer_index: '<=',
     consistency_score: '>=',
   };
+  const SORT_METRIC_LABELS = {
+    profit_degradation: 'Profit Degradation',
+    ft_romad: 'FT RoMaD',
+    profit_retention: 'Profit Retention',
+    romad_retention: 'RoMaD Retention',
+    combined_score: 'Combined Score',
+  };
 
   function toFiniteNumber(value) {
     const parsed = Number(value);
@@ -933,6 +940,88 @@
     return OBJECTIVE_LABELS[key] || key || MISSING_TEXT;
   }
 
+  function formatTitleFromKey(value) {
+    const safe = String(value || '').trim();
+    if (!safe) return '';
+    return safe
+      .split(/[_\s-]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+      .join(' ');
+  }
+
+  function formatSortMetricLabel(metric) {
+    const key = String(metric || '').trim().toLowerCase();
+    return SORT_METRIC_LABELS[key] || formatTitleFromKey(key) || MISSING_TEXT;
+  }
+
+  function formatCompactPostProcessSortMetricLabel(metric) {
+    const normalized = String(metric || '').trim().toLowerCase();
+    const compactLabels = {
+      profit_degradation: 'Profit Deg',
+      profit_retention: 'Profit Ret',
+      romad_retention: 'RoMaD Ret',
+    };
+    return compactLabels[normalized] || formatSortMetricLabel(normalized) || MISSING_TEXT;
+  }
+
+  function formatPercentWithOptionalSign(value, digits = 1) {
+    const number = toFiniteNumber(value);
+    if (number === null) return MISSING_TEXT;
+    const sign = number > 0 ? '+' : (number < 0 ? '-' : '');
+    return `${sign}${Math.abs(number).toFixed(digits)}%`;
+  }
+
+  function formatPostProcessActionLabel(action) {
+    const normalized = String(action || '').trim().toLowerCase();
+    if (normalized === 'cooldown_reoptimize') return 'CD + Re-opt';
+    if (normalized === 'no_trade') return 'No Trade';
+    return formatTitleFromKey(normalized) || MISSING_TEXT;
+  }
+
+  function buildPostProcessSettingsRows(settings, isWfaStudy) {
+    const config = settings && typeof settings === 'object' ? settings : {};
+    const rows = [];
+    if (config.ft_enabled) {
+      const ftParts = [
+        `${config.ft_period_days ?? MISSING_TEXT}d`,
+        `Top ${config.ft_top_k ?? MISSING_TEXT}`,
+        `Sort: ${formatCompactPostProcessSortMetricLabel(config.ft_sort_metric)}`,
+        `Threshold: ${formatPercentWithOptionalSign(config.ft_threshold_pct, 1)}`,
+      ];
+      if (isWfaStudy) {
+        const rejectAction = String(config.ft_reject_action || '').trim().toLowerCase();
+        ftParts.push(`Policy: ${formatPostProcessActionLabel(rejectAction)}`);
+        if (rejectAction === 'cooldown_reoptimize') {
+          ftParts.push(`CD ${config.ft_reject_cooldown_days ?? MISSING_TEXT}d`);
+          ftParts.push(`Retry ${config.ft_reject_max_attempts ?? MISSING_TEXT}`);
+          ftParts.push(`Min OOS ${config.ft_reject_min_remaining_oos_days ?? MISSING_TEXT}d`);
+        }
+      }
+      rows.push({
+        key: 'Forward Test',
+        val: ftParts.join(', '),
+      });
+    }
+    if (config.dsr_enabled) {
+      rows.push({
+        key: 'DSR',
+        val: `Top ${config.dsr_top_k ?? MISSING_TEXT}`,
+      });
+    }
+    if (config.st_enabled) {
+      const failureThresholdRaw = toFiniteNumber(config.st_failure_threshold);
+      const failureThresholdPct = failureThresholdRaw === null
+        ? MISSING_TEXT
+        : `${((failureThresholdRaw > 1 ? failureThresholdRaw : failureThresholdRaw * 100)).toFixed(1)}%`;
+      rows.push({
+        key: 'Stress Test',
+        val: `Top ${config.st_top_k ?? MISSING_TEXT}, Failure: ${failureThresholdPct}, Sort: ${formatCompactPostProcessSortMetricLabel(config.st_sort_metric)}`,
+      });
+    }
+    return rows;
+  }
+
   function formatObjectivesList(objectives) {
     if (!Array.isArray(objectives) || !objectives.length) return MISSING_TEXT;
     return objectives.map((item) => formatObjectiveLabel(item)).join(', ');
@@ -1080,19 +1169,24 @@
 
   function hideFocusSidebar() {
     const optunaSection = document.getElementById('analytics-optuna-section');
+    const postProcessSection = document.getElementById('analytics-post-process-section');
     const wfaSection = document.getElementById('analytics-wfa-section');
     if (optunaSection) optunaSection.style.display = 'none';
+    if (postProcessSection) postProcessSection.style.display = 'none';
     if (wfaSection) wfaSection.style.display = 'none';
   }
 
   function renderFocusedSidebar(study) {
     const optunaSection = document.getElementById('analytics-optuna-section');
+    const postProcessSection = document.getElementById('analytics-post-process-section');
     const wfaSection = document.getElementById('analytics-wfa-section');
     const optunaContainer = document.getElementById('analyticsOptunaSettings');
+    const postProcessContainer = document.getElementById('analyticsPostProcessSettings');
     const wfaContainer = document.getElementById('analyticsWfaSettings');
-    if (!optunaSection || !wfaSection || !optunaContainer || !wfaContainer) return;
+    if (!optunaSection || !postProcessSection || !wfaSection || !optunaContainer || !postProcessContainer || !wfaContainer) return;
 
     const optunaSettings = study?.optuna_settings || {};
+    const postProcessSettings = study?.post_process_settings || {};
     const wfaSettings = study?.wfa_settings || {};
     const enablePruning = optunaSettings.enable_pruning === null || optunaSettings.enable_pruning === undefined
       ? null
@@ -1206,7 +1300,14 @@
     });
     renderSettingsList(wfaContainer, wfaRows);
 
+    const postProcessRows = buildPostProcessSettingsRows(
+      postProcessSettings,
+      String(study?.optimization_mode || '').trim().toLowerCase() === 'wfa'
+    );
+    renderSettingsList(postProcessContainer, postProcessRows);
+
     optunaSection.style.display = '';
+    postProcessSection.style.display = postProcessRows.length ? '' : 'none';
     wfaSection.style.display = '';
   }
 
@@ -1708,6 +1809,9 @@
 
   function updateVisualsForSelection() {
     renderTableHeaderMeta();
+    if (window.AnalyticsSets && typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
+      window.AnalyticsSets.setFocusedStudyId(AnalyticsState.focusedStudyId);
+    }
     const focusedStudy = getFocusedStudy();
     if (focusedStudy) {
       renderFocusedSidebar(focusedStudy);
@@ -1778,6 +1882,34 @@
     subtitle.textContent = `Sorted by ${label} ${arrow}`;
   }
 
+  function getFocusedStudySetMembershipMeta() {
+    const focusedStudyId = String(AnalyticsState.focusedStudyId || '').trim();
+    if (!focusedStudyId) return null;
+
+    const visibleSetIds = window.AnalyticsSets && typeof window.AnalyticsSets.getVisibleSetIds === 'function'
+      ? new Set(
+        window.AnalyticsSets.getVisibleSetIds()
+          .map((setId) => toNonNegativeInteger(setId))
+          .filter((setId) => setId > 0)
+      )
+      : null;
+
+    let total = 0;
+    let visible = 0;
+    (AnalyticsState.sets || []).forEach((setItem) => {
+      if (!Array.isArray(setItem?.study_ids) || !setItem.study_ids.includes(focusedStudyId)) {
+        return;
+      }
+      total += 1;
+      const setId = toNonNegativeInteger(setItem?.id);
+      if (visibleSetIds === null || (setId > 0 && visibleSetIds.has(setId))) {
+        visible += 1;
+      }
+    });
+
+    return { visible, total };
+  }
+
   function renderTableHeaderMeta() {
     const meta = document.getElementById('analyticsTableHeaderMeta');
     if (!meta) return;
@@ -1785,8 +1917,25 @@
     const checkedCount = AnalyticsState.checkedStudyIds.size;
     const shownCount = getVisibleStudyCount();
     const totalCount = getTotalWfaStudyCount();
+    const focusedStudySetMembership = getFocusedStudySetMembershipMeta();
+    const inSetsMetric = focusedStudySetMembership
+      ? `
+      <span class="analytics-table-header-metric">
+        <span class="analytics-table-header-value">${
+          focusedStudySetMembership.visible < focusedStudySetMembership.total
+            ? `${formatHeaderCount(focusedStudySetMembership.visible)}/${formatHeaderCount(focusedStudySetMembership.total)}`
+            : formatHeaderCount(focusedStudySetMembership.total)
+        }</span>
+        <span class="analytics-table-header-label">${
+          focusedStudySetMembership.total === 1 ? 'set' : 'sets'
+        }</span>
+      </span>
+      <span class="analytics-table-header-separator">|</span>
+    `
+      : '';
 
     meta.innerHTML = `
+      ${inSetsMetric}
       <span class="analytics-table-header-metric">
         <span class="analytics-table-header-value">${formatHeaderCount(checkedCount)}</span>
         <span class="analytics-table-header-label">checked</span>
@@ -2016,6 +2165,9 @@
       checkedStudyIds: AnalyticsState.checkedStudyIds,
       onStateChange: handleSetsStateChange,
     });
+    if (typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
+      window.AnalyticsSets.setFocusedStudyId(AnalyticsState.focusedStudyId);
+    }
     syncSetStateFromModule();
   }
 

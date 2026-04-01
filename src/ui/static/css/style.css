@@ -544,6 +544,18 @@
   border-color: #93c5fd;
 }
 
+.wfa-trigger-ft-pass {
+  background: #e9f8ee;
+  color: #166534;
+  border-color: #86efac;
+}
+
+.wfa-trigger-ft-reject {
+  background: #ffe7e7;
+  color: #b91c1c;
+  border-color: #f87171;
+}
+
 .wfa-window-row {
   background: #fff;
 }
@@ -2466,6 +2478,11 @@
 
     .analytics-set-row.analytics-set-focused > td:first-child {
       border-left: 3px solid #3498db;
+    }
+
+    .analytics-set-row.analytics-set-study-match,
+    .analytics-set-row.analytics-set-study-match:hover {
+      background: #fff4d9;
     }
 
     .analytics-set-row.analytics-set-moving {

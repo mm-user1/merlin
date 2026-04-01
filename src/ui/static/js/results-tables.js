@@ -1176,6 +1176,104 @@ function displaySummaryCards(stitchedOOS) {
   container.style.display = 'grid';
 }
 
+function formatPercentWithOptionalSign(value, digits = 1) {
+  const number = getFiniteNumber(value);
+  if (number === null) return '-';
+  const sign = number > 0 ? '+' : (number < 0 ? '-' : '');
+  return `${sign}${Math.abs(number).toFixed(digits)}%`;
+}
+
+function formatPostProcessActionLabel(action) {
+  const normalized = String(action || '').trim().toLowerCase();
+  if (normalized === 'cooldown_reoptimize') return 'CD + Re-opt';
+  if (normalized === 'no_trade') return 'No Trade';
+  return formatTitleFromKey(normalized) || '-';
+}
+
+function formatCompactPostProcessSortMetricLabel(metric) {
+  const normalized = String(metric || '').trim().toLowerCase();
+  const compactLabels = {
+    profit_degradation: 'Profit Deg',
+    profit_retention: 'Profit Ret',
+    romad_retention: 'RoMaD Ret'
+  };
+  return compactLabels[normalized] || formatSortMetricLabel(normalized) || '-';
+}
+
+function renderSidebarSettingsList(containerId, rows) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+  (rows || []).forEach((row) => {
+    const item = document.createElement('div');
+    item.className = 'setting-item';
+
+    const key = document.createElement('span');
+    key.className = 'key';
+    key.textContent = String(row.key || '');
+
+    const val = document.createElement('span');
+    val.className = 'val';
+    val.textContent = String(row.val ?? '-');
+
+    item.appendChild(key);
+    item.appendChild(val);
+    container.appendChild(item);
+  });
+}
+
+function buildPostProcessSettingsRows(postProcessConfig, isWfaMode) {
+  const config = postProcessConfig && typeof postProcessConfig === 'object'
+    ? postProcessConfig
+    : {};
+  const rows = [];
+  const stressConfig = config.stressTest && typeof config.stressTest === 'object'
+    ? config.stressTest
+    : {};
+
+  if (config.enabled) {
+    const ftParts = [
+      `${config.ftPeriodDays ?? '-'}d`,
+      `Top ${config.topK ?? '-'}`,
+      `Sort: ${formatCompactPostProcessSortMetricLabel(config.sortMetric)}`,
+      `Threshold: ${formatPercentWithOptionalSign(config.ftThresholdPct, 1)}`,
+    ];
+    if (isWfaMode) {
+      const rejectAction = String(config.ftRejectAction || '').trim().toLowerCase();
+      ftParts.push(`Policy: ${formatPostProcessActionLabel(rejectAction)}`);
+      if (rejectAction === 'cooldown_reoptimize') {
+        ftParts.push(`CD ${config.ftRejectCooldownDays ?? '-'}d`);
+        ftParts.push(`Retry ${config.ftRejectMaxAttempts ?? '-'}`);
+        ftParts.push(`Min OOS ${config.ftRejectMinRemainingOosDays ?? '-'}d`);
+      }
+    }
+    rows.push({
+      key: 'Forward Test',
+      val: ftParts.join(', '),
+    });
+  }
+
+  if (config.dsrEnabled) {
+    rows.push({
+      key: 'DSR',
+      val: `Top ${config.dsrTopK ?? '-'}`,
+    });
+  }
+
+  if (stressConfig.enabled) {
+    const failureThresholdRaw = getFiniteNumber(stressConfig.failureThreshold);
+    const failureThresholdPct = failureThresholdRaw === null
+      ? '-'
+      : `${((failureThresholdRaw > 1 ? failureThresholdRaw : failureThresholdRaw * 100)).toFixed(1)}%`;
+    rows.push({
+      key: 'Stress Test',
+      val: `Top ${stressConfig.topK ?? '-'}, Failure: ${failureThresholdPct}, Sort: ${formatCompactPostProcessSortMetricLabel(stressConfig.sortMetric)}`,
+    });
+  }
+
+  return rows;
+}
+
 function updateSidebarSettings() {
   setText('optuna-objectives', formatObjectivesList(ResultsState.optuna.objectives || []));
   setText('optuna-primary', ResultsState.optuna.primaryObjective ? formatObjectiveLabel(ResultsState.optuna.primaryObjective) : '-');
@@ -1238,6 +1336,10 @@ function updateSidebarSettings() {
   const optimizationTime = ResultsState.optuna.optimizationTimeSeconds;
   const timeLabel = ResultsState.mode === 'wfa' ? '-' : (formatDuration(optimizationTime) || '-');
   setText('optuna-time', timeLabel);
+
+  const postProcessRows = buildPostProcessSettingsRows(ResultsState.postProcess, ResultsState.mode === 'wfa');
+  renderSidebarSettingsList('post-process-settings-list', postProcessRows);
+  setElementVisible('post-process-settings-section', postProcessRows.length > 0);
 
   if (ResultsState.mode === 'wfa') {
     setElementVisible('wfa-progress-section', true);

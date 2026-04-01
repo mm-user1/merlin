@@ -242,6 +242,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             stitched_oos_total_trades INTEGER,
             stitched_oos_winning_trades INTEGER,
             stitched_oos_win_rate REAL,
+            stitched_oos_consistency_full REAL,
+            stitched_oos_consistency_recent REAL,
             profitable_windows INTEGER,
             total_windows INTEGER,
             median_window_profit REAL,
@@ -486,6 +488,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "stitched_oos_total_trades", "INTEGER")
     ensure("studies", "stitched_oos_winning_trades", "INTEGER")
     ensure("studies", "stitched_oos_win_rate", "REAL")
+    ensure("studies", "stitched_oos_consistency_full", "REAL")
+    ensure("studies", "stitched_oos_consistency_recent", "REAL")
     ensure("studies", "profitable_windows", "INTEGER")
     ensure("studies", "total_windows", "INTEGER")
     ensure("studies", "median_window_profit", "REAL")
@@ -927,6 +931,17 @@ def _extract_stitched_oos_metadata(
     return start_ts, end_ts, len(timestamps)
 
 
+def _extract_stitched_oos_metadata_and_consistency(
+    raw_curve: Any,
+    raw_timestamps: Any,
+) -> tuple[Optional[str], Optional[str], int, Optional[float], Optional[float]]:
+    curve = _parse_json_array_text(raw_curve)
+    timestamps = _parse_json_array_text(raw_timestamps)
+    start_ts, end_ts, point_count = _extract_stitched_oos_metadata(curve, timestamps)
+    consistency_full, consistency_recent = _compute_cached_curve_consistency_scores(curve, timestamps)
+    return start_ts, end_ts, point_count, consistency_full, consistency_recent
+
+
 def _coerce_finite_float(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -1018,42 +1033,98 @@ def backfill_stitched_oos_metadata(
     db_path: Optional[Path] = None,
     *,
     conn: Optional[sqlite3.Connection] = None,
+    study_ids: Optional[Sequence[str]] = None,
 ) -> int:
     if conn is not None:
-        return _backfill_stitched_oos_metadata_with_conn(conn)
+        return _backfill_stitched_oos_metadata_with_conn(conn, study_ids=study_ids)
 
     updated_count = 0
     with get_db_connection() as local_conn:
-        updated_count = _backfill_stitched_oos_metadata_with_conn(local_conn)
+        updated_count = _backfill_stitched_oos_metadata_with_conn(local_conn, study_ids=study_ids)
         if updated_count > 0:
             local_conn.commit()
     return updated_count
 
 
-def _backfill_stitched_oos_metadata_with_conn(conn: sqlite3.Connection) -> int:
-    rows = conn.execute(
+def _backfill_stitched_oos_metadata_with_conn(
+    conn: sqlite3.Connection,
+    *,
+    study_ids: Optional[Sequence[str]] = None,
+) -> int:
+    normalized_ids = [
+        str(study_id or "").strip()
+        for study_id in (study_ids or [])
+        if str(study_id or "").strip()
+    ]
+    where_clauses = [
+        "LOWER(COALESCE(optimization_mode, '')) = 'wfa'",
+        "TRIM(COALESCE(stitched_oos_equity_curve, '')) <> ''",
+        "TRIM(COALESCE(stitched_oos_timestamps_json, '')) <> ''",
+    ]
+    params: List[Any] = []
+    if normalized_ids:
+        placeholders = ", ".join(["?"] * len(normalized_ids))
+        where_clauses.append(f"study_id IN ({placeholders})")
+        params.extend(normalized_ids)
+    where_clauses.append(
         """
+        (
+            stitched_oos_point_count IS NULL
+            OR stitched_oos_start_ts IS NULL
+            OR stitched_oos_end_ts IS NULL
+            OR stitched_oos_consistency_full IS NULL
+        )
+        """.strip()
+    )
+
+    rows = conn.execute(
+        f"""
         SELECT
             study_id,
             stitched_oos_equity_curve,
-            stitched_oos_timestamps_json
+            stitched_oos_timestamps_json,
+            stitched_oos_start_ts,
+            stitched_oos_end_ts,
+            stitched_oos_point_count,
+            stitched_oos_consistency_full,
+            stitched_oos_consistency_recent
         FROM studies
-        WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
-          AND (
-              stitched_oos_point_count IS NULL
-              OR stitched_oos_start_ts IS NULL
-              OR stitched_oos_end_ts IS NULL
-          )
-        """
+        WHERE {" AND ".join(where_clauses)}
+        """,
+        tuple(params),
     ).fetchall()
 
-    updates: List[tuple[Optional[str], Optional[str], int, str]] = []
+    updates: List[tuple[Optional[str], Optional[str], int, Optional[float], Optional[float], str]] = []
     for row in rows:
-        start_ts, end_ts, point_count = _extract_stitched_oos_metadata(
-            row["stitched_oos_equity_curve"],
-            row["stitched_oos_timestamps_json"],
+        start_ts, end_ts, point_count, consistency_full, consistency_recent = (
+            _extract_stitched_oos_metadata_and_consistency(
+                row["stitched_oos_equity_curve"],
+                row["stitched_oos_timestamps_json"],
+            )
         )
-        updates.append((start_ts, end_ts, point_count, str(row["study_id"])))
+        existing_start_ts = row["stitched_oos_start_ts"]
+        existing_end_ts = row["stitched_oos_end_ts"]
+        existing_point_count = int(row["stitched_oos_point_count"] or 0)
+        existing_consistency_full = _round_consistency_value(row["stitched_oos_consistency_full"])
+        existing_consistency_recent = _round_consistency_value(row["stitched_oos_consistency_recent"])
+        if (
+            existing_start_ts == start_ts
+            and existing_end_ts == end_ts
+            and existing_point_count == point_count
+            and existing_consistency_full == consistency_full
+            and existing_consistency_recent == consistency_recent
+        ):
+            continue
+        updates.append(
+            (
+                start_ts,
+                end_ts,
+                point_count,
+                consistency_full,
+                consistency_recent,
+                str(row["study_id"]),
+            )
+        )
 
     if not updates:
         return 0
@@ -1064,7 +1135,9 @@ def _backfill_stitched_oos_metadata_with_conn(conn: sqlite3.Connection) -> int:
         SET
             stitched_oos_start_ts = ?,
             stitched_oos_end_ts = ?,
-            stitched_oos_point_count = ?
+            stitched_oos_point_count = ?,
+            stitched_oos_consistency_full = ?,
+            stitched_oos_consistency_recent = ?
         WHERE study_id = ?
         """,
         updates,
@@ -2462,6 +2535,8 @@ def save_wfa_study_to_db(
             stitched_total_trades = None
             stitched_winning_trades = None
             stitched_win_rate = None
+            stitched_consistency_full = None
+            stitched_consistency_recent = None
             profitable_windows = 0
             total_windows = 0
             median_window_profit = None
@@ -2517,6 +2592,12 @@ def save_wfa_study_to_db(
                     stitched_point_count = len(stitched_timestamps_values)
                     stitched_start_ts = _format_timestamp(stitched_timestamps_values[0])
                     stitched_end_ts = _format_timestamp(stitched_timestamps_values[-1])
+                    stitched_consistency_full, stitched_consistency_recent = (
+                        _compute_cached_curve_consistency_scores(
+                            stitched_curve_values,
+                            stitched_timestamps_values,
+                        )
+                    )
                 stitched_net_profit_pct = getattr(stitched, "final_net_profit_pct", None)
                 stitched_max_drawdown_pct = getattr(stitched, "max_drawdown_pct", None)
                 stitched_total_trades = getattr(stitched, "total_trades", None)
@@ -2612,6 +2693,14 @@ def save_wfa_study_to_db(
             ft_reject_min_remaining_oos_days = getattr(
                 post_process_cfg, "ft_reject_min_remaining_oos_days", None
             )
+            dsr_cfg = getattr(wf_cfg, "dsr_config", None)
+            dsr_enabled = 1 if bool(getattr(dsr_cfg, "enabled", False)) else 0
+            dsr_top_k = getattr(dsr_cfg, "top_k", None)
+            st_cfg = getattr(wf_cfg, "stress_test_config", None)
+            st_enabled = 1 if bool(getattr(st_cfg, "enabled", False)) else 0
+            st_top_k = getattr(st_cfg, "top_k", None)
+            st_failure_threshold = getattr(st_cfg, "failure_threshold", None)
+            st_sort_metric = getattr(st_cfg, "sort_metric", None)
             sampler_type = (
                 optuna_config.get("sampler_type")
                 or optuna_config.get("sampler")
@@ -2650,6 +2739,8 @@ def save_wfa_study_to_db(
                 "ft_enabled", "ft_period_days", "ft_top_k", "ft_sort_metric",
                 "ft_threshold_pct", "ft_reject_action", "ft_reject_cooldown_days",
                 "ft_reject_max_attempts", "ft_reject_min_remaining_oos_days",
+                "dsr_enabled", "dsr_top_k",
+                "st_enabled", "st_top_k", "st_failure_threshold", "st_sort_metric",
                 "adaptive_mode", "max_oos_period_days", "min_oos_trades",
                 "check_interval_trades", "cusum_threshold",
                 "dd_threshold_multiplier", "inactivity_multiplier",
@@ -2663,6 +2754,7 @@ def save_wfa_study_to_db(
                 "stitched_oos_net_profit_pct",
                 "stitched_oos_max_drawdown_pct", "stitched_oos_total_trades",
                 "stitched_oos_winning_trades", "stitched_oos_win_rate",
+                "stitched_oos_consistency_full", "stitched_oos_consistency_recent",
                 "profitable_windows", "total_windows",
                 "median_window_profit", "median_window_wr",
                 "worst_window_profit", "worst_window_dd",
@@ -2710,6 +2802,12 @@ def save_wfa_study_to_db(
                 ft_reject_cooldown_days,
                 ft_reject_max_attempts,
                 ft_reject_min_remaining_oos_days,
+                dsr_enabled,
+                dsr_top_k,
+                st_enabled,
+                st_top_k,
+                st_failure_threshold,
+                st_sort_metric,
                 adaptive_mode,
                 max_oos_period_days,
                 min_oos_trades,
@@ -2734,6 +2832,8 @@ def save_wfa_study_to_db(
                 stitched_total_trades,
                 stitched_winning_trades,
                 stitched_win_rate,
+                stitched_consistency_full,
+                stitched_consistency_recent,
                 profitable_windows,
                 total_windows,
                 median_window_profit,
@@ -3057,6 +3157,8 @@ def list_studies() -> List[Dict]:
 
 def load_study_from_db(study_id: str) -> Optional[Dict]:
     with get_db_connection() as conn:
+        if backfill_stitched_oos_metadata(conn=conn, study_ids=[study_id]) > 0:
+            conn.commit()
         cursor = conn.execute("SELECT * FROM studies WHERE study_id = ?", (study_id,))
         study_row = cursor.fetchone()
         if not study_row:
@@ -3113,6 +3215,8 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
                 "winning_trades": study.get("stitched_oos_winning_trades"),
                 "wfe": study.get("best_value"),
                 "oos_win_rate": study.get("stitched_oos_win_rate"),
+                "consistency_full": study.get("stitched_oos_consistency_full"),
+                "consistency_recent": study.get("stitched_oos_consistency_recent"),
                 "profitable_windows": study.get("profitable_windows"),
                 "total_windows": study.get("total_windows"),
                 "median_window_profit": study.get("median_window_profit"),

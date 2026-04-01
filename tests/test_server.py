@@ -1950,6 +1950,7 @@ def test_analytics_summary_wfa_phase1_contract(client):
         assert [row["study_id"] for row in studies] == ["wfa_a1", "wfa_a2", "wfa_b1"]
 
         first = studies[0]
+        expected_first_full = _calculate_r2_consistency([100.0, 101.5, 110.0])
         assert first["strategy"] == "S01 v2.1"
         assert first["symbol"] == "LINKUSDT.P"
         assert first["tf"] == "15m"
@@ -1960,6 +1961,8 @@ def test_analytics_summary_wfa_phase1_contract(client):
         assert first["equity_start_ts"] == "2025-01-01T00:00:00+00:00"
         assert first["equity_end_ts"] == "2025-01-31T00:00:00+00:00"
         assert first["oos_span_days_exact"] == pytest.approx(30.0)
+        assert first["consistency_full"] == pytest.approx(expected_first_full, abs=1e-6)
+        assert first["consistency_recent"] is None
         assert "equity_curve" not in first
         assert "equity_timestamps" not in first
 
@@ -2184,6 +2187,31 @@ def test_analytics_sets_payload_includes_consistency_pair(client):
         assert equity_payload["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
 
 
+def test_analytics_summary_includes_per_study_consistency_pair(client):
+    with _temporary_active_db(f"analytics_summary_consistency_{uuid.uuid4().hex[:8]}"):
+        curve = [100.0, 104.0, 108.0, 112.0, 116.0, 120.0, 119.0, 117.0, 115.0]
+        timestamps = [f"2025-03-{day:02d}T00:00:00+00:00" for day in range(1, 10)]
+        expected_full = _calculate_r2_consistency(curve)
+        expected_recent = _calculate_r2_consistency(curve[-3:])
+
+        _insert_analytics_study(
+            study_id="wfa_summary_consistency",
+            study_name="WFA_SUMMARY_CONSISTENCY",
+            optimization_mode="wfa",
+            stitched_oos_equity_curve=curve,
+            stitched_oos_timestamps_json=timestamps,
+        )
+
+        response = client.get("/api/analytics/summary")
+        assert response.status_code == 200
+        payload = response.get_json()
+
+        studies = payload["studies"]
+        assert len(studies) == 1
+        assert studies[0]["consistency_full"] == pytest.approx(expected_full, abs=1e-6)
+        assert studies[0]["consistency_recent"] == pytest.approx(expected_recent, abs=1e-6)
+
+
 def test_analytics_summary_includes_focus_settings_payload(client):
     with _temporary_active_db(f"analytics_focus_settings_{uuid.uuid4().hex[:8]}"):
         _insert_analytics_study(
@@ -2229,6 +2257,25 @@ def test_analytics_summary_includes_focus_settings_payload(client):
                     "cusum_threshold": 5.5,
                     "dd_threshold_multiplier": 1.7,
                     "inactivity_multiplier": 6.2,
+                },
+                "postProcess": {
+                    "enabled": True,
+                    "ftPeriodDays": 14,
+                    "topK": 10,
+                    "sortMetric": "profit_degradation",
+                    "ftThresholdPct": 4.0,
+                    "ftRejectAction": "cooldown_reoptimize",
+                    "ftRejectCooldownDays": 5,
+                    "ftRejectMaxAttempts": 2,
+                    "ftRejectMinRemainingOosDays": 10,
+                    "dsrEnabled": True,
+                    "dsrTopK": 18,
+                    "stressTest": {
+                        "enabled": True,
+                        "topK": 7,
+                        "failureThreshold": 0.65,
+                        "sortMetric": "profit_retention",
+                    },
                 },
             },
         )
@@ -2282,6 +2329,7 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         by_id = {row["study_id"]: row for row in studies}
 
         first = by_id["wfa_focus_1"]
+        assert first["optimization_mode"] == "wfa"
         assert first["optuna_settings"]["objectives"] == ["net_profit_pct", "max_drawdown_pct"]
         assert first["optuna_settings"]["primary_objective"] == "net_profit_pct"
         assert first["optuna_settings"]["budget_mode"] == "trials"
@@ -2314,8 +2362,24 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert first["wfa_settings"]["dd_threshold_multiplier"] == 1.8
         assert first["wfa_settings"]["inactivity_multiplier"] == 7.2
         assert first["wfa_settings"]["run_time_seconds"] == 3661
+        assert first["post_process_settings"]["ft_enabled"] is True
+        assert first["post_process_settings"]["ft_period_days"] == 14
+        assert first["post_process_settings"]["ft_top_k"] == 10
+        assert first["post_process_settings"]["ft_sort_metric"] == "profit_degradation"
+        assert first["post_process_settings"]["ft_threshold_pct"] == 4.0
+        assert first["post_process_settings"]["ft_reject_action"] == "cooldown_reoptimize"
+        assert first["post_process_settings"]["ft_reject_cooldown_days"] == 5
+        assert first["post_process_settings"]["ft_reject_max_attempts"] == 2
+        assert first["post_process_settings"]["ft_reject_min_remaining_oos_days"] == 10
+        assert first["post_process_settings"]["dsr_enabled"] is True
+        assert first["post_process_settings"]["dsr_top_k"] == 18
+        assert first["post_process_settings"]["st_enabled"] is True
+        assert first["post_process_settings"]["st_top_k"] == 7
+        assert first["post_process_settings"]["st_failure_threshold"] == 0.65
+        assert first["post_process_settings"]["st_sort_metric"] == "profit_retention"
 
         second = by_id["wfa_focus_2"]
+        assert second["optimization_mode"] == "wfa"
         assert second["optuna_settings"]["budget_mode"] == "time"
         assert second["optuna_settings"]["time_limit"] == 1800
         assert second["optuna_settings"]["sampler_type"] == "random"
@@ -2332,6 +2396,9 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["optuna_settings"]["score_min_threshold"] == 73.5
         assert second["wfa_settings"]["adaptive_mode"] is None
         assert second["wfa_settings"]["run_time_seconds"] == 95
+        assert second["post_process_settings"]["ft_enabled"] is False
+        assert second["post_process_settings"]["dsr_enabled"] is False
+        assert second["post_process_settings"]["st_enabled"] is False
 
 
 def test_analytics_sets_crud_and_reorder(client):

@@ -473,6 +473,7 @@ function resetForDbSwitch() {
   ResultsState.strategyId = '';
   ResultsState.dataset = {};
   ResultsState.optuna = {};
+  ResultsState.postProcess = {};
   ResultsState.wfa = {};
   ResultsState.summary = {};
   ResultsState.results = [];
@@ -766,11 +767,18 @@ async function applyStudyPayload(data) {
   ResultsState.dataPath = study.csv_file_path || ResultsState.dataPath;
 
   const config = study.config_json || {};
+  const postProcessConfig = config.postProcess && typeof config.postProcess === 'object'
+    ? config.postProcess
+    : {};
+  const stressConfig = postProcessConfig.stressTest && typeof postProcessConfig.stressTest === 'object'
+    ? postProcessConfig.stressTest
+    : {};
   const configWfa = config.wfa || {};
   const adaptiveModeRaw = study.adaptive_mode ?? configWfa.adaptive_mode ?? config.adaptive_mode;
   const cooldownEnabledRaw = study.cooldown_enabled ?? configWfa.cooldown_enabled ?? config.cooldown_enabled;
+  ResultsState.postProcess = postProcessConfig;
   ResultsState.wfa = {
-    postProcess: config.postProcess || {},
+    postProcess: postProcessConfig,
     isPeriodDays: study.is_period_days ?? configWfa.is_period_days ?? config.is_period_days ?? null,
     oosPeriodDays: configWfa.oos_period_days ?? config.oos_period_days ?? null,
     storeTopNTrials: configWfa.store_top_n_trials ?? null,
@@ -801,19 +809,19 @@ async function applyStudyPayload(data) {
   }
   ResultsState.selectedRowId = null;
 
-  ResultsState.forwardTest.enabled = Boolean(study.ft_enabled);
+  ResultsState.forwardTest.enabled = Boolean(study.ft_enabled) || Boolean(postProcessConfig.enabled);
   ResultsState.forwardTest.startDate = study.ft_start_date || '';
   ResultsState.forwardTest.endDate = study.ft_end_date || '';
-  ResultsState.forwardTest.periodDays = study.ft_period_days ?? null;
-  ResultsState.forwardTest.sortMetric = study.ft_sort_metric || 'profit_degradation';
+  ResultsState.forwardTest.periodDays = study.ft_period_days ?? postProcessConfig.ftPeriodDays ?? null;
+  ResultsState.forwardTest.sortMetric = study.ft_sort_metric || postProcessConfig.sortMetric || 'profit_degradation';
   ResultsState.forwardTest.trials = (data.trials || []).filter((trial) => trial.ft_rank !== null && trial.ft_rank !== undefined);
   ResultsState.forwardTest.trials.sort((a, b) => (a.ft_rank || 0) - (b.ft_rank || 0));
 
   const dsrTrials = (data.trials || []).filter((trial) => trial.dsr_rank !== null && trial.dsr_rank !== undefined);
   dsrTrials.sort((a, b) => (a.dsr_rank || 0) - (b.dsr_rank || 0));
   ResultsState.dsr = {
-    enabled: Boolean(study.dsr_enabled),
-    topK: study.dsr_top_k ?? null,
+    enabled: Boolean(study.dsr_enabled) || Boolean(postProcessConfig.dsrEnabled),
+    topK: study.dsr_top_k ?? postProcessConfig.dsrTopK ?? null,
     trials: dsrTrials,
     nTrials: study.dsr_n_trials ?? null,
     meanSharpe: study.dsr_mean_sharpe ?? null,
@@ -826,11 +834,11 @@ async function applyStudyPayload(data) {
   const stTrials = (data.trials || []).filter((trial) => trial.st_rank !== null && trial.st_rank !== undefined);
   stTrials.sort((a, b) => (a.st_rank || 0) - (b.st_rank || 0));
   ResultsState.stressTest = {
-    enabled: Boolean(study.st_enabled),
-    topK: study.st_top_k ?? null,
+    enabled: Boolean(study.st_enabled) || Boolean(stressConfig.enabled),
+    topK: study.st_top_k ?? stressConfig.topK ?? null,
     trials: stTrials,
-    sortMetric: study.st_sort_metric || 'profit_retention',
-    failureThreshold: study.st_failure_threshold ?? 0.7,
+    sortMetric: study.st_sort_metric || stressConfig.sortMetric || 'profit_retention',
+    failureThreshold: study.st_failure_threshold ?? stressConfig.failureThreshold ?? 0.7,
     avgProfitRetention: study.st_avg_profit_retention ?? null,
     avgRomadRetention: study.st_avg_romad_retention ?? null,
     avgCombinedFailureRate: study.st_avg_combined_failure_rate ?? null,
@@ -908,6 +916,8 @@ async function applyStudyPayload(data) {
         winning_trades: storedStitched.winning_trades ?? study.stitched_oos_winning_trades ?? winningTrades,
         wfe: storedStitched.wfe ?? study.best_value ?? 0,
         oos_win_rate: storedStitched.oos_win_rate ?? study.stitched_oos_win_rate ?? winRate,
+        consistency_full: storedStitched.consistency_full ?? study.stitched_oos_consistency_full ?? null,
+        consistency_recent: storedStitched.consistency_recent ?? study.stitched_oos_consistency_recent ?? null,
         profitable_windows: storedStitched.profitable_windows ?? study.profitable_windows ?? profitableWindows,
         total_windows: storedStitched.total_windows ?? study.total_windows ?? totalWindows,
         median_window_profit: storedStitched.median_window_profit ?? study.median_window_profit ?? medianWindowProfit,
@@ -928,6 +938,8 @@ async function applyStudyPayload(data) {
         winning_trades: study.stitched_oos_winning_trades ?? winningTrades,
         wfe: study.best_value ?? 0,
         oos_win_rate: study.stitched_oos_win_rate ?? winRate,
+        consistency_full: study.stitched_oos_consistency_full ?? null,
+        consistency_recent: study.stitched_oos_consistency_recent ?? null,
         profitable_windows: study.profitable_windows ?? profitableWindows,
         total_windows: study.total_windows ?? totalWindows,
         median_window_profit: study.median_window_profit ?? medianWindowProfit,
