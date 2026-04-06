@@ -50,6 +50,8 @@
     rangeAnchorStudyId: null,
     rangeAnchorChecked: null,
     focusedStudyId: null,
+    compareMarkers: new Map(),
+    onCompareToggle: null,
     bound: false,
   };
 
@@ -418,6 +420,29 @@
     };
   }
 
+  function cloneCompareMarkers(compareMarkers) {
+    const next = new Map();
+    if (!(compareMarkers instanceof Map)) return next;
+
+    compareMarkers.forEach((marker, rawStudyId) => {
+      const studyId = String(rawStudyId || '').trim();
+      if (!studyId || !marker || typeof marker !== 'object') return;
+
+      const color = String(marker.color || '').trim();
+      if (!color) return;
+
+      const slotIndex = Number.isInteger(marker.slotIndex)
+        ? marker.slotIndex
+        : Number.parseInt(marker.slotIndex, 10);
+      next.set(studyId, {
+        color,
+        slotIndex: Number.isInteger(slotIndex) ? slotIndex : null,
+      });
+    });
+
+    return next;
+  }
+
   function setsEqual(leftSet, rightSet) {
     if (leftSet.size !== rightSet.size) return false;
     for (const value of leftSet) {
@@ -675,11 +700,23 @@
   function applyFocusedRowClass() {
     const focused = String(tableState.focusedStudyId || '');
     getStudyRows().forEach((row) => {
-      row.classList.remove('analytics-focused');
-      if (!focused) return;
       const rowStudyId = decodeStudyId(row.dataset.studyId || '');
-      if (rowStudyId === focused) {
-        row.classList.add('analytics-focused');
+      const marker = tableState.compareMarkers.get(rowStudyId) || null;
+      const isFocused = Boolean(focused) && rowStudyId === focused;
+
+      row.classList.toggle('analytics-focused', isFocused);
+      row.classList.toggle('analytics-compare', !isFocused && Boolean(marker));
+
+      if (!isFocused && marker?.color) {
+        row.style.setProperty('--analytics-compare-marker-color', marker.color);
+      } else {
+        row.style.removeProperty('--analytics-compare-marker-color');
+      }
+
+      if (!isFocused && Number.isInteger(marker?.slotIndex)) {
+        row.setAttribute('data-compare-slot', String(marker.slotIndex + 1));
+      } else {
+        row.removeAttribute('data-compare-slot');
       }
     });
   }
@@ -1098,6 +1135,17 @@
       if (!(rowCheckbox instanceof HTMLInputElement) || rowCheckbox.type !== 'checkbox') return;
       const studyId = decodeStudyId(rowCheckbox.dataset.studyId || '');
       const clickedRowCheckbox = Boolean(target.closest('input.analytics-row-check'));
+      const isCompareShortcut = event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey;
+
+      if (isCompareShortcut) {
+        if (clickedRowCheckbox) {
+          event.preventDefault();
+        }
+        if (studyId && typeof tableState.onCompareToggle === 'function') {
+          tableState.onCompareToggle(studyId);
+        }
+        return;
+      }
 
       if (event.altKey) {
         event.preventDefault();
@@ -1147,6 +1195,7 @@
     tableState.onSelectionChange = onSelectionChange;
     tableState.onSortChange = typeof opts.onSortChange === 'function' ? opts.onSortChange : null;
     tableState.onFocusToggle = typeof opts.onFocusToggle === 'function' ? opts.onFocusToggle : null;
+    tableState.onCompareToggle = typeof opts.onCompareToggle === 'function' ? opts.onCompareToggle : null;
     tableState.onViewChange = typeof opts.onViewChange === 'function' ? opts.onViewChange : null;
     tableState.filters = normalizeFilters(opts.filters);
     tableState.visibleStudyIds = normalizeVisibleStudyIds(opts.visibleStudyIds);
@@ -1154,6 +1203,7 @@
     tableState.groupDatesEnabled = opts.groupDatesEnabled !== false;
     tableState.sortState = normalizeSortState(opts.sortState);
     tableState.focusedStudyId = String(opts.focusedStudyId || '') || null;
+    tableState.compareMarkers = cloneCompareMarkers(opts.compareMarkers);
 
     bindEventsOnce();
     renderTableBody();
@@ -1179,6 +1229,11 @@
   function setFocusedStudyId(studyId) {
     const normalized = String(studyId || '').trim();
     tableState.focusedStudyId = normalized || null;
+    applyFocusedRowClass();
+  }
+
+  function setCompareMarkers(compareMarkers) {
+    tableState.compareMarkers = cloneCompareMarkers(compareMarkers);
     applyFocusedRowClass();
   }
 
@@ -1284,6 +1339,7 @@
     getOrderedStudyIds,
     getSortState,
     setFocusedStudyId,
+    setCompareMarkers,
     getVisibleStudyIds,
     scrollStudyIntoView,
     encodeStudyId,

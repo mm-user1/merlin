@@ -16,6 +16,18 @@
     median_window_profit: 'OOS P(med)',
     median_window_wr: 'OOS WR(med)',
   };
+  const FOCUSED_CURVE_COLOR = '#4a90e2';
+  const FOCUSED_CURVE_STROKE_WIDTH = 2;
+  const COMPARE_SLOT_COLORS = [
+    { token: 'cyan', label: 'Cyan', color: '#1192E8' },
+    { token: 'violet', label: 'Violet', color: '#6929C4' },
+    { token: 'green', label: 'Green', color: '#198038' },
+    { token: 'yellow', label: 'Yellow', color: '#B28600' },
+    { token: 'orange', label: 'Orange', color: '#8A3800' },
+    { token: 'red', label: 'Red', color: '#DA1E28' },
+    { token: 'black', label: 'Black', color: '#343A3F' },
+  ];
+  const MAX_COMPARE_SLOTS = COMPARE_SLOT_COLORS.length;
 
   const AnalyticsState = {
     dbName: '',
@@ -66,6 +78,8 @@
     allStudiesEquityPending: false,
     allStudiesEquityAbortController: null,
     allStudiesEquityRequestToken: 0,
+    compareDomain: null,
+    compareSlots: Array(MAX_COMPARE_SLOTS).fill(null),
   };
 
   const EMPTY_FILTERS = {
@@ -476,7 +490,21 @@
   }
 
   function handleSetsStateChange(eventPayload) {
+    const previousFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
     syncSetStateFromModule();
+    const nextFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
+
+    if (nextFocusedSetId > 0) {
+      clearFocus({ clearCompare: true, update: false });
+      if (AnalyticsState.compareDomain === 'study') {
+        clearCompareState({ update: false });
+      }
+      if (previousFocusedSetId > 0 && previousFocusedSetId !== nextFocusedSetId) {
+        transferCompareFocus('set', previousFocusedSetId, nextFocusedSetId);
+      }
+    } else if (previousFocusedSetId > 0) {
+      clearCompareStateForDomain('set', { update: false });
+    }
 
     const syncIds = eventPayload?.syncCheckedStudyIds;
     if (syncIds instanceof Set) {
@@ -513,6 +541,149 @@
 
   function buildSelectionKey(studyIds) {
     return Array.isArray(studyIds) && studyIds.length ? studyIds.join('|') : '';
+  }
+
+  function cloneEmptyCompareSlots() {
+    return Array(MAX_COMPARE_SLOTS).fill(null);
+  }
+
+  function normalizeCompareDomain(domain) {
+    const normalized = String(domain || '').trim().toLowerCase();
+    if (normalized === 'study' || normalized === 'set') return normalized;
+    return null;
+  }
+
+  function normalizeCompareTargetId(domain, rawValue) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (normalizedDomain === 'study') {
+      const studyId = String(rawValue || '').trim();
+      return studyId || null;
+    }
+    if (normalizedDomain === 'set') {
+      const setId = toNonNegativeInteger(rawValue);
+      return setId > 0 ? setId : null;
+    }
+    return null;
+  }
+
+  function compareTargetIdsMatch(domain, leftValue, rightValue) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (!normalizedDomain) return false;
+    const left = normalizeCompareTargetId(normalizedDomain, leftValue);
+    const right = normalizeCompareTargetId(normalizedDomain, rightValue);
+    return left !== null && right !== null && left === right;
+  }
+
+  function getFocusedTargetIdForDomain(domain) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (normalizedDomain === 'study') {
+      return String(AnalyticsState.focusedStudyId || '').trim() || null;
+    }
+    if (normalizedDomain === 'set') {
+      const focusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
+      return focusedSetId > 0 ? focusedSetId : null;
+    }
+    return null;
+  }
+
+  function getActiveCompareEntries(domain = AnalyticsState.compareDomain) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (!normalizedDomain || AnalyticsState.compareDomain !== normalizedDomain) return [];
+
+    return AnalyticsState.compareSlots
+      .map((targetId, slotIndex) => {
+        const normalizedTargetId = normalizeCompareTargetId(normalizedDomain, targetId);
+        if (normalizedTargetId === null) return null;
+        const slotColor = COMPARE_SLOT_COLORS[slotIndex];
+        if (!slotColor) return null;
+        return {
+          domain: normalizedDomain,
+          targetId: normalizedTargetId,
+          slotIndex,
+          token: slotColor.token,
+          label: slotColor.label,
+          color: slotColor.color,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function hasActiveCompareMode(domain = null) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    const activeEntries = getActiveCompareEntries(normalizedDomain || AnalyticsState.compareDomain);
+    return activeEntries.length > 0;
+  }
+
+  function clearCompareState(options = {}) {
+    const hadEntries = hasActiveCompareMode();
+    AnalyticsState.compareDomain = null;
+    AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+    if (hadEntries && options.update !== false) {
+      updateVisualsForSelection();
+    }
+    return hadEntries;
+  }
+
+  function clearCompareStateForDomain(domain, options = {}) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (!normalizedDomain || AnalyticsState.compareDomain !== normalizedDomain) {
+      return false;
+    }
+    return clearCompareState(options);
+  }
+
+  function transferCompareFocus(domain, previousFocusedId, nextFocusedId) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (!normalizedDomain || AnalyticsState.compareDomain !== normalizedDomain) return false;
+
+    const previousId = normalizeCompareTargetId(normalizedDomain, previousFocusedId);
+    const nextId = normalizeCompareTargetId(normalizedDomain, nextFocusedId);
+    if (previousId === null || nextId === null || previousId === nextId) return false;
+
+    let changed = false;
+    let replacedNextSlot = false;
+    const nextSlots = AnalyticsState.compareSlots.map((slotValue) => {
+      const normalizedSlotValue = normalizeCompareTargetId(normalizedDomain, slotValue);
+      if (normalizedSlotValue === null) return null;
+      if (normalizedSlotValue === nextId) {
+        replacedNextSlot = true;
+        changed = true;
+        return previousId;
+      }
+      if (normalizedSlotValue === previousId) {
+        changed = true;
+        return null;
+      }
+      return normalizedSlotValue;
+    });
+
+    if (!replacedNextSlot) {
+      AnalyticsState.compareSlots.forEach((slotValue, slotIndex) => {
+        if (compareTargetIdsMatch(normalizedDomain, slotValue, nextId)) {
+          nextSlots[slotIndex] = null;
+          changed = true;
+        }
+      });
+    }
+
+    if (!changed) return false;
+
+    AnalyticsState.compareSlots = nextSlots;
+    if (!nextSlots.some((slotValue) => normalizeCompareTargetId(normalizedDomain, slotValue) !== null)) {
+      AnalyticsState.compareDomain = null;
+    }
+    return true;
+  }
+
+  function buildCompareMarkerMap(domain) {
+    const markers = new Map();
+    getActiveCompareEntries(domain).forEach((entry) => {
+      markers.set(entry.targetId, {
+        color: entry.color,
+        slotIndex: entry.slotIndex,
+      });
+    });
+    return markers;
   }
 
   function cancelPortfolioFetches() {
@@ -1323,6 +1494,145 @@
     return AnalyticsState.sets.find((setItem) => toNonNegativeInteger(setItem?.id) === focusedSetId) || null;
   }
 
+  function studySupportsCompare(study) {
+    return Boolean(study?.has_equity_curve);
+  }
+
+  function setSupportsCompare(setItem) {
+    if (!setItem) return false;
+    const cached = getCachedSetEquity(setItem.id);
+    if (cached && Object.prototype.hasOwnProperty.call(cached, 'has_curve')) {
+      return Boolean(cached.has_curve);
+    }
+    return Boolean(setItem?.metrics?.has_curve);
+  }
+
+  function compareTargetSupportsCompare(domain, targetId) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (normalizedDomain === 'study') {
+      const study = getStudyMap().get(String(targetId || '').trim());
+      return studySupportsCompare(study);
+    }
+    if (normalizedDomain === 'set') {
+      const normalizedSetId = toNonNegativeInteger(targetId);
+      if (normalizedSetId <= 0) return false;
+      const setItem = AnalyticsState.sets.find((item) => toNonNegativeInteger(item?.id) === normalizedSetId) || null;
+      return setSupportsCompare(setItem);
+    }
+    return false;
+  }
+
+  function reconcileCompareStateToCurrentContext() {
+    const normalizedDomain = normalizeCompareDomain(AnalyticsState.compareDomain);
+    if (!normalizedDomain) {
+      AnalyticsState.compareDomain = null;
+      AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+      return false;
+    }
+
+    const focusedTargetId = getFocusedTargetIdForDomain(normalizedDomain);
+    if (focusedTargetId === null) {
+      AnalyticsState.compareDomain = null;
+      AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+      return true;
+    }
+    if (!compareTargetSupportsCompare(normalizedDomain, focusedTargetId)) {
+      AnalyticsState.compareDomain = null;
+      AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+      return true;
+    }
+
+    const availableIds = normalizedDomain === 'study'
+      ? new Set(getVisibleOrderedStudyIds())
+      : new Set(
+        window.AnalyticsSets && typeof window.AnalyticsSets.getVisibleSetIds === 'function'
+          ? window.AnalyticsSets.getVisibleSetIds().map((setId) => toNonNegativeInteger(setId)).filter((setId) => setId > 0)
+          : []
+      );
+
+    let changed = false;
+    const nextSlots = AnalyticsState.compareSlots.map((slotValue) => {
+      const normalizedSlotValue = normalizeCompareTargetId(normalizedDomain, slotValue);
+      if (normalizedSlotValue === null) return null;
+      if (compareTargetIdsMatch(normalizedDomain, normalizedSlotValue, focusedTargetId)) {
+        changed = true;
+        return null;
+      }
+      if (!availableIds.has(normalizedSlotValue) || !compareTargetSupportsCompare(normalizedDomain, normalizedSlotValue)) {
+        changed = true;
+        return null;
+      }
+      return normalizedSlotValue;
+    });
+
+    const hasEntries = nextSlots.some(
+      (slotValue) => normalizeCompareTargetId(normalizedDomain, slotValue) !== null
+    );
+    if (!hasEntries) {
+      if (AnalyticsState.compareDomain !== null || AnalyticsState.compareSlots.some((slotValue) => slotValue !== null)) {
+        changed = true;
+      }
+      AnalyticsState.compareDomain = null;
+      AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+      return changed;
+    }
+
+    if (changed) {
+      AnalyticsState.compareSlots = nextSlots;
+    }
+    return changed;
+  }
+
+  function toggleCompareTarget(domain, targetId) {
+    const normalizedDomain = normalizeCompareDomain(domain);
+    if (!normalizedDomain) return false;
+
+    const focusedTargetId = getFocusedTargetIdForDomain(normalizedDomain);
+    const normalizedTargetId = normalizeCompareTargetId(normalizedDomain, targetId);
+    if (focusedTargetId === null || normalizedTargetId === null) return false;
+    if (compareTargetIdsMatch(normalizedDomain, focusedTargetId, normalizedTargetId)) return false;
+    if (!compareTargetSupportsCompare(normalizedDomain, focusedTargetId)) return false;
+    if (!compareTargetSupportsCompare(normalizedDomain, normalizedTargetId)) return false;
+
+    let changed = false;
+    if (AnalyticsState.compareDomain && AnalyticsState.compareDomain !== normalizedDomain) {
+      clearCompareState({ update: false });
+      changed = true;
+    }
+
+    const existingIndex = AnalyticsState.compareSlots.findIndex((slotValue) => (
+      compareTargetIdsMatch(normalizedDomain, slotValue, normalizedTargetId)
+    ));
+    if (existingIndex >= 0) {
+      AnalyticsState.compareSlots[existingIndex] = null;
+      changed = true;
+    } else {
+      const freeIndex = AnalyticsState.compareSlots.findIndex((slotValue) => (
+        normalizeCompareTargetId(normalizedDomain, slotValue) === null
+      ));
+      if (freeIndex < 0) {
+        return false;
+      }
+      AnalyticsState.compareDomain = normalizedDomain;
+      AnalyticsState.compareSlots[freeIndex] = normalizedTargetId;
+      changed = true;
+    }
+
+    if (!AnalyticsState.compareSlots.some(
+      (slotValue) => normalizeCompareTargetId(normalizedDomain, slotValue) !== null
+    )) {
+      AnalyticsState.compareDomain = null;
+      AnalyticsState.compareSlots = cloneEmptyCompareSlots();
+    } else {
+      AnalyticsState.compareDomain = normalizedDomain;
+    }
+
+    if (changed) {
+      updateVisualsForSelection();
+    }
+    return changed;
+  }
+
   function renderFocusedCards(study) {
     const container = document.getElementById('analyticsSummaryRow');
     if (!container || !study) return;
@@ -1636,6 +1946,67 @@
     setChartSubtitle('');
   }
 
+  function getRenderableStudyCompareSeries() {
+    const studyMap = getStudyMap();
+    const series = [];
+    let requestedFetch = false;
+
+    getActiveCompareEntries('study').forEach((entry) => {
+      const study = studyMap.get(String(entry.targetId || '').trim());
+      if (!studySupportsCompare(study)) return;
+
+      const studyEquity = getCachedStudyEquity(entry.targetId);
+      if (studyEquity?.has_equity_curve) {
+        series.push({
+          curve: studyEquity.curve || [],
+          timestamps: studyEquity.timestamps || [],
+          color: entry.color,
+          strokeWidth: 1,
+        });
+        return;
+      }
+
+      if (!requestedFetch && AnalyticsState.studyEquityPendingStudyId === null) {
+        ensureStudyEquity(study);
+        requestedFetch = true;
+      }
+    });
+
+    return series;
+  }
+
+  function getRenderableSetCompareSeries() {
+    const series = [];
+    let requestedFetch = false;
+
+    getActiveCompareEntries('set').forEach((entry) => {
+      const normalizedSetId = toNonNegativeInteger(entry.targetId);
+      if (normalizedSetId <= 0) return;
+      const setItem = AnalyticsState.sets.find((item) => toNonNegativeInteger(item?.id) === normalizedSetId) || null;
+      if (!setSupportsCompare(setItem)) return;
+
+      const setData = getCachedSetEquity(normalizedSetId);
+      const curve = Array.isArray(setData?.curve) ? setData.curve : [];
+      const timestamps = Array.isArray(setData?.timestamps) ? setData.timestamps : [];
+      if (curve.length && curve.length === timestamps.length) {
+        series.push({
+          curve,
+          timestamps,
+          color: entry.color,
+          strokeWidth: 1,
+        });
+        return;
+      }
+
+      if (!requestedFetch && AnalyticsState.setEquityPendingSetId === null) {
+        ensureFocusedSetEquity(normalizedSetId);
+        requestedFetch = true;
+      }
+    });
+
+    return series;
+  }
+
   function getPrimaryCheckedStudy() {
     const map = getStudyMap();
     let selectedId = null;
@@ -1674,11 +2045,25 @@
         );
         return;
       }
-      window.AnalyticsEquity.renderChart(
-        studyEquity.curve || [],
-        studyEquity.timestamps || [],
-        { windowBoundaries: focusedBoundaries }
-      );
+      if (hasActiveCompareMode('study')) {
+        const compareSeries = getRenderableStudyCompareSeries();
+        window.AnalyticsEquity.renderMultiChart(
+          [
+            ...compareSeries,
+            {
+              curve: studyEquity.curve || [],
+              timestamps: studyEquity.timestamps || [],
+              color: FOCUSED_CURVE_COLOR,
+              strokeWidth: FOCUSED_CURVE_STROKE_WIDTH,
+            },
+          ],
+          { windowBoundaries: focusedBoundaries }
+        );
+        return;
+      }
+      window.AnalyticsEquity.renderChart(studyEquity.curve || [], studyEquity.timestamps || [], {
+        windowBoundaries: focusedBoundaries,
+      });
       return;
     }
     if (AnalyticsState.focusedWindowBoundariesPendingStudyId) {
@@ -1690,7 +2075,11 @@
       const setData = getCachedSetEquity(focusedSet.id);
       clearChartMeta();
       renderSetChartTitle(focusedSet, setData || focusedSet.metrics);
-      renderPortfolioChartMeta(focusedSet.study_ids.length, setData || focusedSet.metrics);
+      if (hasActiveCompareMode('set')) {
+        setChartWarning(String((setData || focusedSet.metrics)?.warning || '').trim());
+      } else {
+        renderPortfolioChartMeta(focusedSet.study_ids.length, setData || focusedSet.metrics);
+      }
 
       if (!setData) {
         ensureFocusedSetEquity(focusedSet.id);
@@ -1705,6 +2094,25 @@
           ? (setData.warning || 'No overlapping equity data to display')
           : 'No studies in selected set';
         window.AnalyticsEquity.renderEmpty(emptyMessage);
+        return;
+      }
+
+      if (hasActiveCompareMode('set')) {
+        const compareSeries = getRenderableSetCompareSeries();
+        window.AnalyticsEquity.renderMultiChart(
+          [
+            ...compareSeries,
+            {
+              curve,
+              timestamps,
+              color: FOCUSED_CURVE_COLOR,
+              strokeWidth: FOCUSED_CURVE_STROKE_WIDTH,
+            },
+          ],
+          {
+            returnProfile: setData?.return_profile || null,
+          }
+        );
         return;
       }
 
@@ -1807,11 +2215,22 @@
     });
   }
 
+  function applyCompareMarkersToModules() {
+    if (window.AnalyticsTable && typeof window.AnalyticsTable.setCompareMarkers === 'function') {
+      window.AnalyticsTable.setCompareMarkers(buildCompareMarkerMap('study'));
+    }
+    if (window.AnalyticsSets && typeof window.AnalyticsSets.setCompareMarkers === 'function') {
+      window.AnalyticsSets.setCompareMarkers(buildCompareMarkerMap('set'));
+    }
+  }
+
   function updateVisualsForSelection() {
+    reconcileCompareStateToCurrentContext();
     renderTableHeaderMeta();
     if (window.AnalyticsSets && typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
       window.AnalyticsSets.setFocusedStudyId(AnalyticsState.focusedStudyId);
     }
+    applyCompareMarkersToModules();
     const focusedStudy = getFocusedStudy();
     if (focusedStudy) {
       renderFocusedSidebar(focusedStudy);
@@ -1979,6 +2398,8 @@
           AnalyticsState.focusedSetId = null;
           AnalyticsState.checkedSetIds = new Set();
           AnalyticsState.setViewMode = 'allStudies';
+          AnalyticsState.compareDomain = null;
+          AnalyticsState.compareSlots = cloneEmptyCompareSlots();
           clearPortfolioState();
           await Promise.all([loadDatabases(), loadSummary()]);
         } catch (error) {
@@ -1999,14 +2420,37 @@
     updateVisualsForSelection();
   }
 
-  function clearFocus() {
-    if (!AnalyticsState.focusedStudyId) return;
+  function clearSetFocus(options = {}) {
+    if (AnalyticsState.focusedSetId === null) return false;
+    if (options.clearCompare !== false) {
+      clearCompareStateForDomain('set', { update: false });
+    }
+    if (window.AnalyticsSets && typeof window.AnalyticsSets.setFocusedSetId === 'function') {
+      window.AnalyticsSets.setFocusedSetId(null, { emitState: false });
+      syncSetStateFromModule();
+    } else {
+      AnalyticsState.focusedSetId = null;
+    }
+    if (options.update !== false) {
+      updateVisualsForSelection();
+    }
+    return true;
+  }
+
+  function clearFocus(options = {}) {
+    if (!AnalyticsState.focusedStudyId) return false;
     AnalyticsState.focusedStudyId = null;
     cancelFocusedWindowBoundariesFetch();
+    if (options.clearCompare !== false) {
+      clearCompareStateForDomain('study', { update: false });
+    }
     if (window.AnalyticsTable && typeof window.AnalyticsTable.setFocusedStudyId === 'function') {
       window.AnalyticsTable.setFocusedStudyId(null);
     }
-    updateVisualsForSelection();
+    if (options.update !== false) {
+      updateVisualsForSelection();
+    }
+    return true;
   }
 
   function setFocus(studyId) {
@@ -2019,7 +2463,15 @@
       clearFocus();
       return;
     }
+    const previousFocusedStudyId = String(AnalyticsState.focusedStudyId || '').trim() || null;
+    clearSetFocus({ clearCompare: true, update: false });
+    if (AnalyticsState.compareDomain === 'set') {
+      clearCompareState({ update: false });
+    }
     AnalyticsState.focusedStudyId = normalized;
+    if (AnalyticsState.compareDomain === 'study') {
+      transferCompareFocus('study', previousFocusedStudyId, normalized);
+    }
     if (window.AnalyticsTable && typeof window.AnalyticsTable.setFocusedStudyId === 'function') {
       window.AnalyticsTable.setFocusedStudyId(normalized);
     }
@@ -2066,6 +2518,10 @@
 
   function onTableFocusToggle(studyId) {
     setFocus(studyId);
+  }
+
+  function onTableCompareToggle(studyId) {
+    toggleCompareTarget('study', studyId);
   }
 
   function onTableSortChange(sortState) {
@@ -2120,8 +2576,10 @@
         sortState: AnalyticsState.sortState,
         onSortChange: onTableSortChange,
         onFocusToggle: onTableFocusToggle,
+        onCompareToggle: onTableCompareToggle,
         onViewChange: onTableViewChange,
         focusedStudyId: AnalyticsState.focusedStudyId,
+        compareMarkers: buildCompareMarkerMap('study'),
       }
     );
 
@@ -2164,9 +2622,13 @@
       studies: AnalyticsState.studies,
       checkedStudyIds: AnalyticsState.checkedStudyIds,
       onStateChange: handleSetsStateChange,
+      onCompareToggle: (setId) => toggleCompareTarget('set', setId),
     });
     if (typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
       window.AnalyticsSets.setFocusedStudyId(AnalyticsState.focusedStudyId);
+    }
+    if (typeof window.AnalyticsSets.setCompareMarkers === 'function') {
+      window.AnalyticsSets.setCompareMarkers(buildCompareMarkerMap('set'));
     }
     syncSetStateFromModule();
   }
@@ -2207,6 +2669,8 @@
     AnalyticsState.setViewMode = 'allStudies';
     AnalyticsState.setMoveMode = false;
     AnalyticsState.allStudiesMetrics = null;
+    AnalyticsState.compareDomain = null;
+    AnalyticsState.compareSlots = cloneEmptyCompareSlots();
     AnalyticsState.filterContextEpoch += 1;
     AnalyticsState.filterContextSignature = null;
     clearPortfolioState();
@@ -2272,6 +2736,12 @@
       if (event.defaultPrevented) return;
 
       if (event.key === 'Escape') {
+        if (hasActiveCompareMode()) {
+          event.preventDefault();
+          clearCompareState();
+          return;
+        }
+
         if (AnalyticsState.focusedStudyId) {
           event.preventDefault();
           clearFocus();
