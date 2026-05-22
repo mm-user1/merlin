@@ -128,8 +128,9 @@ function renderOptunaTable(results) {
   const objectives = ResultsState.optuna.objectives || [];
   const constraints = ResultsState.optuna.constraints || [];
   const hasConstraints = constraints.some((c) => c && c.enabled);
+  const isGrid = ResultsState.mode === 'grid';
   if (thead && window.OptunaResultsUI) {
-    thead.innerHTML = window.OptunaResultsUI.buildTrialTableHeaders(objectives, hasConstraints);
+    thead.innerHTML = window.OptunaResultsUI.buildTrialTableHeaders(objectives, hasConstraints, { mode: ResultsState.mode });
   }
 
   const list = results || [];
@@ -141,16 +142,20 @@ function renderOptunaTable(results) {
     const row = temp.firstElementChild || document.createElement('tr');
     row.className = 'clickable';
     row.dataset.index = index;
-    const trialNumber = result.trial_number ?? (index + 1);
+    const trialNumber = result.candidate_id ?? result.trial_number ?? (index + 1);
     row.dataset.trialNumber = trialNumber;
 
     const paramId = result.param_id
       || createParamId(result.params || {}, ResultsState.strategyConfig, ResultsState.fixedParams);
 
     const rankCell = row.querySelector('.rank');
-    if (rankCell) rankCell.textContent = index + 1;
+    if (rankCell) rankCell.textContent = isGrid ? (result.grid_rank || index + 1) : index + 1;
     const hashCell = row.querySelector('.param-hash');
-    if (hashCell) hashCell.textContent = paramId;
+    if (hashCell) {
+      hashCell.textContent = isGrid
+        ? `#${trialNumber} · ${result.param_key || result.semantic_key || paramId}`
+        : paramId;
+    }
 
       row.addEventListener('click', async () => {
         selectTableRow(index, trialNumber);

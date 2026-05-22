@@ -346,7 +346,7 @@
             <div class="left-panel">
               <form id="optimizerForm">
                 <div class="info-panel">
-                  <div class="info-row">
+                  <div class="info-row optimizer-mode-row">
                     <label for="workerProcesses">Worker processes:</label>
                     <input
                       type="number"
@@ -356,6 +356,18 @@
                       max="32"
                       value="6"
                     />
+                    <div class="optimizer-mode-group" role="radiogroup" aria-label="Optimizer mode">
+                      <span class="optimizer-mode-label">Mode:</span>
+                      <label class="optimizer-mode-option" for="optimizerModeOptuna">
+                        <input type="radio" id="optimizerModeOptuna" name="optimizerMode" value="optuna" checked />
+                        Optuna
+                      </label>
+                      <label class="optimizer-mode-option" for="optimizerModeGrid" id="optimizerModeGridLabel">
+                        <input type="radio" id="optimizerModeGrid" name="optimizerMode" value="grid" />
+                        Grid
+                      </label>
+                      <span id="gridModeHelp" class="form-hint optimizer-mode-help"></span>
+                    </div>
                   </div>
                 </div>
 
@@ -573,6 +585,109 @@
                             <input type="number" id="nsgaSwappingProb" min="0" max="1" step="0.05" value="0.5" style="width: 80px;" />
                           </div>
                         </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="gridSettings" class="collapsible" style="display: none;">
+                  <div class="collapsible-header">
+                    <span class="collapsible-icon">в–ѕ</span>
+                    <span class="section-title" style="margin: 0; border: none;">GRID SETTINGS</span>
+                  </div>
+                  <div class="collapsible-content">
+                    <div class="grid-settings-grid">
+                      <div class="form-group vertical">
+                        <label for="gridBudget">Grid candidates</label>
+                        <input type="text" id="gridBudget" value="200k" autocomplete="off" />
+                        <span id="gridBudgetHelp" class="form-hint">200,000 candidates</span>
+                      </div>
+                      <div class="form-group vertical">
+                        <label for="gridSeed">Seed</label>
+                        <input type="number" id="gridSeed" min="0" max="2147483647" step="1" value="42" />
+                      </div>
+                      <div class="form-group vertical">
+                        <label for="gridSamplingMethod">Sampling method</label>
+                        <input type="text" id="gridSamplingMethod" value="LHS by mode" readonly />
+                      </div>
+                      <div class="form-group vertical">
+                        <label for="gridTopCandidates">Top candidates</label>
+                        <input type="number" id="gridTopCandidates" min="1" max="500" step="1" value="10" />
+                      </div>
+                    </div>
+
+                    <div class="section-title" style="margin-top: 12px;">Mode Allocation</div>
+                    <div class="grid-allocation-controls">
+                      <label class="optimizer-mode-option" for="gridAllocAuto">
+                        <input type="radio" id="gridAllocAuto" name="gridAllocationMethod" value="auto_sqrt_space" checked />
+                        Auto sqrt-space
+                      </label>
+                      <label class="optimizer-mode-option" for="gridAllocProportional">
+                        <input type="radio" id="gridAllocProportional" name="gridAllocationMethod" value="proportional_space" />
+                        Proportional space
+                      </label>
+                      <label class="optimizer-mode-option" for="gridAllocManual">
+                        <input type="radio" id="gridAllocManual" name="gridAllocationMethod" value="manual" />
+                        Manual %
+                      </label>
+                    </div>
+
+                    <div id="gridMinQuotaRow" class="form-group" style="margin-top: 8px;">
+                      <label for="gridMinQuota">Min quota</label>
+                      <input type="number" id="gridMinQuota" min="0" max="0.33" step="0.01" value="0.10" />
+                    </div>
+
+                    <div id="gridManualAllocation" class="grid-manual-allocation" style="display: none;">
+                      <div class="form-group">
+                        <label for="gridManualCc">Close Count only %</label>
+                        <input type="number" id="gridManualCc" min="0" max="100" step="1" value="33" />
+                      </div>
+                      <div class="form-group">
+                        <label for="gridManualTbands">T Bands only %</label>
+                        <input type="number" id="gridManualTbands" min="0" max="100" step="1" value="33" />
+                      </div>
+                      <div class="form-group">
+                        <label for="gridManualBoth">Both %</label>
+                        <input type="number" id="gridManualBoth" min="0" max="100" step="1" value="34" />
+                      </div>
+                    </div>
+
+                    <div class="grid-preview-summary" id="gridPreviewSummary">
+                      Parameter space: -
+                    </div>
+                    <table class="grid-preview-table">
+                      <thead>
+                        <tr>
+                          <th>Mode</th>
+                          <th>Space</th>
+                          <th>Budget</th>
+                          <th>Coverage</th>
+                          <th>Generation</th>
+                        </tr>
+                      </thead>
+                      <tbody id="gridPreviewRows">
+                        <tr><td colspan="5">Switch to Grid to preview parameter space.</td></tr>
+                      </tbody>
+                    </table>
+                    <div id="gridPreviewError" class="grid-preview-error" style="display: none;"></div>
+
+                    <div class="section-title" style="margin-top: 12px;">Diversity</div>
+                    <div class="form-group">
+                      <div class="checkbox-group">
+                        <input type="checkbox" id="gridDiversityEnabled" checked />
+                        <label for="gridDiversityEnabled">Enable diversity cap</label>
+                      </div>
+                    </div>
+                    <div class="form-group">
+                      <label for="gridDiversityMaxPerGroup">Max per MA group</label>
+                      <input type="number" id="gridDiversityMaxPerGroup" min="1" max="50" step="1" value="2" />
+                    </div>
+
+                    <div class="section-title" style="margin-top: 12px;">Advanced</div>
+                    <div class="form-group">
+                      <div class="checkbox-group">
+                        <input type="checkbox" id="gridStrictValidation" checked />
+                        <label for="gridStrictValidation">Strict fast-vs-slow validation</label>
                       </div>
                     </div>
                   </div>

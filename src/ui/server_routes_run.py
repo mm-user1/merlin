@@ -20,6 +20,7 @@ from core.backtest_engine import (
     prepare_dataset_with_warmup,
 )
 from core.export import export_trades_csv
+from core.grid_engine import build_grid_dsr_results, preview_grid_parameter_space
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
     OBJECTIVE_DIRECTIONS,
@@ -156,6 +157,59 @@ def register_routes(app):
         if run_id:
             payload["run_id"] = run_id
         return jsonify(payload)
+
+
+    @app.post("/api/grid/preview")
+    def grid_preview() -> object:
+        payload = request.get_json(silent=True) if request.is_json else None
+        if not isinstance(payload, dict):
+            config_raw = request.form.get("config")
+            if not config_raw:
+                return jsonify({"error": "Grid preview config is required."}), HTTPStatus.BAD_REQUEST
+            try:
+                payload = json.loads(config_raw)
+            except json.JSONDecodeError:
+                return jsonify({"error": "Invalid Grid preview config JSON."}), HTTPStatus.BAD_REQUEST
+
+        config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+        config_payload = dict(config_payload)
+        config_payload["optimization_mode"] = "grid"
+
+        strategy_id = (
+            config_payload.get("strategy_id")
+            or payload.get("strategyId")
+            or request.form.get("strategyId")
+            or request.args.get("strategy_id")
+            or "s03_reversal_v10"
+        )
+        try:
+            worker_processes = int(
+                config_payload.get("worker_processes", config_payload.get("workerProcesses", 1))
+                or 1
+            )
+        except (TypeError, ValueError):
+            worker_processes = 1
+        try:
+            warmup_bars = int(payload.get("warmupBars", config_payload.get("warmup_bars", 1000)) or 1000)
+        except (TypeError, ValueError):
+            warmup_bars = 1000
+
+        try:
+            optimization_config = _build_optimization_config(
+                "grid-preview.csv",
+                config_payload,
+                worker_processes,
+                str(strategy_id),
+                warmup_bars,
+            )
+            preview = preview_grid_parameter_space(optimization_config)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        except Exception:  # pragma: no cover - defensive
+            app.logger.exception("Failed to build Grid preview")
+            return jsonify({"error": "Failed to build Grid preview."}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+        return jsonify({"preview": preview})
 
     def _resolve_request_run_id(form_data: Any) -> str:
         raw_run_id = ""
@@ -316,8 +370,7 @@ def register_routes(app):
             app.logger.exception("Failed to build optimization config for walk-forward")
             return jsonify({"error": "Failed to prepare optimization config."}), HTTPStatus.INTERNAL_SERVER_ERROR
 
-        if optimization_config.optimization_mode != "optuna":
-            return jsonify({"error": "Walk-Forward requires Optuna optimization mode."}), HTTPStatus.BAD_REQUEST
+        optimizer_mode = str(getattr(optimization_config, "optimization_mode", "optuna") or "optuna").lower()
 
         if hasattr(data_source, "seek"):
             try:
@@ -406,6 +459,7 @@ def register_routes(app):
             "dispatcher_duplicate_cycle_limit": int(
                 getattr(optimization_config, "dispatcher_duplicate_cycle_limit", 18)
             ),
+            "optimization_mode": optimizer_mode,
             "objectives": list(getattr(optimization_config, "objectives", []) or []),
             "primary_objective": getattr(optimization_config, "primary_objective", None),
             "constraints": json.loads(json.dumps(getattr(optimization_config, "constraints", []) or [])),
@@ -416,6 +470,15 @@ def register_routes(app):
             "swapping_prob": getattr(optimization_config, "swapping_prob", None),
             "n_startup_trials": getattr(optimization_config, "n_startup_trials", 20),
             "coverage_mode": bool(getattr(optimization_config, "coverage_mode", False)),
+            "grid_budget": int(getattr(optimization_config, "grid_budget", 200000)),
+            "grid_seed": int(getattr(optimization_config, "grid_seed", 42)),
+            "grid_top_candidates": int(getattr(optimization_config, "grid_top_candidates", 10)),
+            "grid_allocation_method": getattr(optimization_config, "grid_allocation_method", "auto_sqrt_space"),
+            "grid_min_quota": float(getattr(optimization_config, "grid_min_quota", 0.10)),
+            "grid_manual_percents": json.loads(json.dumps(getattr(optimization_config, "grid_manual_percents", {}) or {})),
+            "grid_diversity_enabled": bool(getattr(optimization_config, "grid_diversity_enabled", True)),
+            "grid_diversity_max_per_group": int(getattr(optimization_config, "grid_diversity_max_per_group", 2)),
+            "grid_strict_validation": bool(getattr(optimization_config, "grid_strict_validation", True)),
         }
         if post_process_payload:
             base_template["postProcess"] = post_process_payload
@@ -449,6 +512,14 @@ def register_routes(app):
             ),
         }
         base_template["optuna_config"] = json.loads(json.dumps(optuna_settings))
+        if optimizer_mode == "grid":
+            base_template["grid_config"] = {
+                "budget": int(getattr(optimization_config, "grid_budget", 200000)),
+                "seed": int(getattr(optimization_config, "grid_seed", 42)),
+                "top_candidates": int(getattr(optimization_config, "grid_top_candidates", 10)),
+                "allocation_method": getattr(optimization_config, "grid_allocation_method", "auto_sqrt_space"),
+                "min_quota": float(getattr(optimization_config, "grid_min_quota", 0.10)),
+            }
 
         try:
             is_period_days = int(data.get("wf_is_period_days", 90))
@@ -969,6 +1040,7 @@ def register_routes(app):
         fixed_params_payload = config_payload.get("fixed_params") or {}
         is_start_date = fixed_params_payload.get("start")
         is_end_date = fixed_params_payload.get("end")
+        requested_optimizer_mode = str(config_payload.get("optimization_mode", "optuna") or "optuna").lower()
 
         try:
             worker_processes_raw = config_payload.get("worker_processes")
@@ -996,7 +1068,7 @@ def register_routes(app):
         except ValueError as exc:
             _set_optimization_state({
                 "status": "error",
-                "mode": "optuna",
+                "mode": "grid" if requested_optimizer_mode == "grid" else "optuna",
                 "run_id": run_id,
                 "error": str(exc),
             })
@@ -1004,7 +1076,7 @@ def register_routes(app):
         except Exception:  # pragma: no cover - defensive
             _set_optimization_state({
                 "status": "error",
-                "mode": "optuna",
+                "mode": "grid" if requested_optimizer_mode == "grid" else "optuna",
                 "run_id": run_id,
                 "error": "Failed to prepare optimization config.",
             })
@@ -1012,6 +1084,9 @@ def register_routes(app):
             return ("Failed to prepare optimization config.", HTTPStatus.INTERNAL_SERVER_ERROR)
 
         optimization_config.csv_original_name = source_name
+        optimizer_mode = str(getattr(optimization_config, "optimization_mode", "optuna") or "optuna").lower()
+        optimization_config.grid_needs_dsr = bool(dsr_enabled)
+        optimization_config.grid_dsr_top_k = int(dsr_top_k)
         optimization_config.ft_enabled = ft_enabled
         if ft_enabled:
             optimization_config.ft_period_days = ft_days
@@ -1028,7 +1103,7 @@ def register_routes(app):
 
         _set_optimization_state({
             "status": "running",
-            "mode": "optuna",
+            "mode": optimizer_mode,
             "run_id": run_id,
             "strategy_id": optimization_config.strategy_id,
             "data_path": data_path,
@@ -1052,7 +1127,7 @@ def register_routes(app):
             _set_optimization_state(
                 {
                     "status": "cancelled",
-                    "mode": "optuna",
+                    "mode": optimizer_mode,
                     "run_id": run_id,
                     "strategy_id": optimization_config.strategy_id,
                     "data_path": data_path,
@@ -1065,7 +1140,7 @@ def register_routes(app):
             return jsonify(
                 {
                     "status": "cancelled",
-                    "mode": "optuna",
+                    "mode": optimizer_mode,
                     "run_id": run_id,
                     "study_id": None,
                     "strategy_id": optimization_config.strategy_id,
@@ -1133,7 +1208,7 @@ def register_routes(app):
             )
 
             optimization_metadata = {
-                "method": "Optuna",
+                "method": summary.get("method") or ("Grid" if optimizer_mode == "grid" else "Optuna"),
                 "target": objective_label,
                 "objectives": objectives,
                 "primary_objective": primary_objective,
@@ -1148,7 +1223,7 @@ def register_routes(app):
         except ValueError as exc:
             _set_optimization_state({
                 "status": "error",
-                "mode": "optuna",
+                "mode": optimizer_mode,
                 "run_id": run_id,
                 "strategy_id": optimization_config.strategy_id,
                 "error": str(exc),
@@ -1157,7 +1232,7 @@ def register_routes(app):
         except Exception:  # pragma: no cover - defensive
             _set_optimization_state({
                 "status": "error",
-                "mode": "optuna",
+                "mode": optimizer_mode,
                 "run_id": run_id,
                 "strategy_id": optimization_config.strategy_id,
                 "error": "Optimization execution failed.",
@@ -1187,19 +1262,28 @@ def register_routes(app):
                 top_k=dsr_top_k,
                 warmup_bars=warmup_bars,
             )
-            dsr_results, dsr_summary = run_dsr_analysis(
-                optuna_results=results,
-                all_results=all_results or results,
-                config=dsr_config,
-                n_trials_total=completed_trials,
-                csv_path=data_path,
-                strategy_id=strategy_id,
-                fixed_params=config_payload.get("fixed_params") or {},
-                warmup_bars=warmup_bars,
-                score_config=getattr(optimization_config, "score_config", None),
-                filter_min_profit=bool(getattr(optimization_config, "filter_min_profit", False)),
-                min_profit_threshold=float(getattr(optimization_config, "min_profit_threshold", 0.0) or 0.0),
-            )
+            if optimizer_mode == "grid":
+                dsr_results = build_grid_dsr_results(results, limit=dsr_top_k)
+                grid_summary = (summary.get("grid") or {}).get("dsr") or {}
+                dsr_summary = {
+                    "dsr_n_trials": grid_summary.get("dsr_n_trials"),
+                    "dsr_mean_sharpe": grid_summary.get("dsr_mean_sharpe"),
+                    "dsr_var_sharpe": grid_summary.get("dsr_var_sharpe"),
+                }
+            else:
+                dsr_results, dsr_summary = run_dsr_analysis(
+                    optuna_results=results,
+                    all_results=all_results or results,
+                    config=dsr_config,
+                    n_trials_total=completed_trials,
+                    csv_path=data_path,
+                    strategy_id=strategy_id,
+                    fixed_params=config_payload.get("fixed_params") or {},
+                    warmup_bars=warmup_bars,
+                    score_config=getattr(optimization_config, "score_config", None),
+                    filter_min_profit=bool(getattr(optimization_config, "filter_min_profit", False)),
+                    min_profit_threshold=float(getattr(optimization_config, "min_profit_threshold", 0.0) or 0.0),
+                )
             save_dsr_results(
                 study_id,
                 dsr_results,
@@ -1208,6 +1292,7 @@ def register_routes(app):
                 dsr_n_trials=dsr_summary.get("dsr_n_trials"),
                 dsr_mean_sharpe=dsr_summary.get("dsr_mean_sharpe"),
                 dsr_var_sharpe=dsr_summary.get("dsr_var_sharpe"),
+                clear_existing=optimizer_mode != "grid",
             )
 
         ft_results: List[Any] = []
@@ -1217,7 +1302,7 @@ def register_routes(app):
             ft_candidates = results
             if dsr_results:
                 ft_candidates = [item.original_result for item in dsr_results]
-            ft_source = "dsr" if dsr_results else "optuna"
+            ft_source = "dsr" if dsr_results else optimizer_mode
 
             pp_config = PostProcessConfig(
                 enabled=True,
@@ -1297,7 +1382,7 @@ def register_routes(app):
             )
 
             st_candidates = results
-            st_source = "optuna"
+            st_source = optimizer_mode
             if ft_enabled and ft_results:
                 st_candidates = filter_ft_passed_results(ft_results)
                 st_source = "ft"
@@ -1333,7 +1418,7 @@ def register_routes(app):
 
             _set_optimization_state({
                 "status": "running",
-                "mode": "optuna",
+                "mode": optimizer_mode,
                 "run_id": run_id,
                 "study_id": study_id,
                 "stage": "oos_test",
@@ -1440,7 +1525,7 @@ def register_routes(app):
         _set_optimization_state(
             {
                 "status": "completed",
-                "mode": "optuna",
+                "mode": optimizer_mode,
                 "run_id": run_id,
                 "strategy_id": optimization_config.strategy_id,
                 "data_path": data_path,
@@ -1455,7 +1540,7 @@ def register_routes(app):
         return jsonify(
             {
                 "status": "success",
-                "mode": "optuna",
+                "mode": optimizer_mode,
                 "run_id": run_id,
                 "study_id": study_id,
                 "summary": optimization_metadata or {},

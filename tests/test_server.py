@@ -1450,6 +1450,47 @@ def test_export_lancelot_bundle_from_optuna_trial(client):
             csv_path.unlink()
 
 
+def test_export_lancelot_bundle_from_grid_candidate(client):
+    csv_path = Path(__file__).parent / "_tmp_lancelot_export_grid.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_grid_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_grid_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_grid_1",
+                optimization_mode="grid",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_SOLUSDT.P, 5 2025.05.01-2025.11.20.csv",
+                warmup_bars=500,
+            )
+            _insert_lancelot_export_trial(
+                study_id=study_id,
+                trial_number=9,
+                params={"maType3": "EMA", "maLength3": 75, "useCloseCount": True},
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"trialNumber": 9},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "SOL/USDT:USDT"
+            assert payload["timeframe"] == "5m"
+            assert payload["warmupBars"] == 500
+            assert payload["params"] == {"maType3": "EMA", "maLength3": 75, "useCloseCount": True}
+            assert payload["source"]["trialNumber"] == 9
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
 def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
     csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa.csv"
     csv_path.write_text(

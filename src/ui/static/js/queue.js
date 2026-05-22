@@ -1896,7 +1896,9 @@ function collectQueueItem() {
     return null;
   }
 
-  const config = buildOptunaConfig(state);
+  const config = typeof buildCurrentOptimizerConfig === 'function'
+    ? buildCurrentOptimizerConfig(state)
+    : buildOptunaConfig(state);
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
   if (!hasEnabledParams) {
     showQueueError('Please enable at least one parameter to optimize.');
@@ -1905,7 +1907,8 @@ function collectQueueItem() {
 
   const wfToggle = document.getElementById('enableWF');
   const wfEnabled = Boolean(wfToggle && wfToggle.checked && !wfToggle.disabled);
-  const mode = wfEnabled ? 'wfa' : 'optuna';
+  const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
+  const mode = wfEnabled ? 'wfa' : optimizerMode;
 
   const queue = loadQueue();
   const itemIndex = queue.nextIndex || 1;
@@ -1980,7 +1983,7 @@ function generateQueueLabel(item) {
     dateLabel = fmtDate(startRaw) + '-' + fmtDate(endRaw);
   }
 
-  let modeLabel = 'OPT';
+  let modeLabel = item.config?.optimization_mode === 'grid' || item.mode === 'grid' ? 'GRID' : 'OPT';
   if (item.mode === 'wfa') {
     const isPeriod = item.wfa?.isPeriodDays || '?';
     const oosPeriod = item.wfa?.oosPeriodDays || '?';
@@ -1988,14 +1991,18 @@ function generateQueueLabel(item) {
   }
 
   let budgetLabel;
-  const budgetMode = item.config?.optuna_budget_mode || 'trials';
-  if (budgetMode === 'trials') {
-    budgetLabel = String(item.config?.optuna_n_trials || 500) + 't';
-  } else if (budgetMode === 'time') {
-    const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-    budgetLabel = String(minutes) + 'min';
+  if (item.config?.optimization_mode === 'grid' || item.mode === 'grid') {
+    budgetLabel = String(item.config?.grid_budget || 200000) + 'c';
   } else {
-    budgetLabel = 'conv ' + String(item.config?.optuna_convergence || 50);
+    const budgetMode = item.config?.optuna_budget_mode || 'trials';
+    if (budgetMode === 'trials') {
+      budgetLabel = String(item.config?.optuna_n_trials || 500) + 't';
+    } else if (budgetMode === 'time') {
+      const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+      budgetLabel = String(minutes) + 'min';
+    } else {
+      budgetLabel = 'conv ' + String(item.config?.optuna_convergence || 50);
+    }
   }
 
   return '#' + index + ' \u00B7 ' + strategyLabel + ' \u00B7 ' + csvLabel + ' \u00B7 '
@@ -2087,19 +2094,26 @@ function buildQueueTooltip(item) {
   if (item.mode === 'wfa') {
     const typeLabel = item.wfa?.adaptiveMode ? 'Adaptive' : 'Fixed';
     lines.push('Mode: WFA ' + typeLabel + ' (IS: ' + item.wfa?.isPeriodDays + 'd, OOS: ' + item.wfa?.oosPeriodDays + 'd)');
+  } else if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+    lines.push('Mode: Grid Optimization');
   } else {
     lines.push('Mode: Optuna Optimization');
   }
 
-  const budgetMode = item.config?.optuna_budget_mode || 'trials';
-  const sampler = (item.config?.sampler || 'tpe').toUpperCase();
-  if (budgetMode === 'trials') {
-    lines.push('Budget: ' + item.config?.optuna_n_trials + ' trials (' + sampler + ' sampler)');
-  } else if (budgetMode === 'time') {
-    const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-    lines.push('Budget: ' + minutes + ' min (' + sampler + ' sampler)');
+  if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+    const candidates = Number(item.config?.grid_budget || 200000).toLocaleString('en-US');
+    lines.push('Budget: ' + candidates + ' candidates (LHS by mode)');
   } else {
-    lines.push('Budget: convergence ' + item.config?.optuna_convergence + ' (' + sampler + ' sampler)');
+    const budgetMode = item.config?.optuna_budget_mode || 'trials';
+    const sampler = (item.config?.sampler || 'tpe').toUpperCase();
+    if (budgetMode === 'trials') {
+      lines.push('Budget: ' + item.config?.optuna_n_trials + ' trials (' + sampler + ' sampler)');
+    } else if (budgetMode === 'time') {
+      const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+      lines.push('Budget: ' + minutes + ' min (' + sampler + ' sampler)');
+    } else {
+      lines.push('Budget: convergence ' + item.config?.optuna_convergence + ' (' + sampler + ' sampler)');
+    }
   }
 
   const objectives = item.config?.objectives || [];
@@ -2561,19 +2575,26 @@ async function runQueue() {
 
         if (optunaProgressFill) optunaProgressFill.style.width = '0%';
         if (optunaProgressText) {
-          const budgetMode = item.config?.optuna_budget_mode;
-          if (budgetMode === 'trials') {
-            const trials = item.config?.optuna_n_trials || 500;
-            optunaProgressText.textContent = 'Trial: 0 / ' + trials.toLocaleString('en-US') + ' (0%)';
-          } else if (budgetMode === 'time') {
-            const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-            optunaProgressText.textContent = 'Time budget: ' + minutes + ' min';
+          if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+            const candidates = Number(item.config?.grid_budget || 200000);
+            optunaProgressText.textContent = 'Candidate: 0 / ' + candidates.toLocaleString('en-US') + ' (0%)';
           } else {
-            optunaProgressText.textContent = 'Running...';
+            const budgetMode = item.config?.optuna_budget_mode;
+            if (budgetMode === 'trials') {
+              const trials = item.config?.optuna_n_trials || 500;
+              optunaProgressText.textContent = 'Trial: 0 / ' + trials.toLocaleString('en-US') + ' (0%)';
+            } else if (budgetMode === 'time') {
+              const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+              optunaProgressText.textContent = 'Time budget: ' + minutes + ' min';
+            } else {
+              optunaProgressText.textContent = 'Running...';
+            }
           }
         }
         if (optunaBestTrial) {
-          optunaBestTrial.textContent = 'Waiting for first trial...';
+          optunaBestTrial.textContent = (item.mode === 'grid' || item.config?.optimization_mode === 'grid')
+            ? 'Waiting for first candidate...'
+            : 'Waiting for first trial...';
         }
 
         const formData = new FormData();

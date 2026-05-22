@@ -22,6 +22,7 @@ const SORT_METRIC_LABELS = {
 
 const SOURCE_LABELS = {
   optuna: 'Optuna IS',
+  grid: 'Grid Candidates',
   dsr: 'DSR',
   forward_test: 'Forward Test',
   stress_test: 'Stress Test',

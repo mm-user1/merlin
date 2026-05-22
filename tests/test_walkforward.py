@@ -478,6 +478,92 @@ def test_best_params_source_tracked(monkeypatch):
     assert result.windows[0].constraints_satisfied is False
 
 
+def test_grid_wfa_dsr_candidate_does_not_replace_objective_winner(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=index,
+    )
+
+    objective_result = OptimizationResult(
+        params={"source": "objective", "maType3": "SMA", "maLength3": 20},
+        net_profit_pct=5.0,
+        max_drawdown_pct=1.0,
+        total_trades=4,
+        optuna_trial_number=1,
+        objective_values=[5.0],
+        constraints_satisfied=True,
+    )
+    objective_result.candidate_id = 1
+    objective_result.grid_rank = 1
+    objective_result.selection_sources = ["objective"]
+    objective_result.is_objective_selected = True
+
+    dsr_result = OptimizationResult(
+        params={"source": "dsr", "maType3": "EMA", "maLength3": 50},
+        net_profit_pct=1.0,
+        max_drawdown_pct=1.0,
+        total_trades=4,
+        optuna_trial_number=5,
+        objective_values=[1.0],
+        constraints_satisfied=True,
+    )
+    dsr_result.candidate_id = 5
+    dsr_result.grid_rank = 5
+    dsr_result.selection_sources = ["dsr"]
+    dsr_result.is_dsr_selected = True
+    dsr_result.dsr_rank = 1
+    dsr_result.dsr_probability = 0.99
+
+    def fake_grid_window(self, df_slice, start_time, end_time):  # noqa: ARG001
+        return [objective_result, dsr_result], [objective_result, dsr_result]
+
+    def unexpected_dsr(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("Grid WFA must use precomputed Grid DSR metadata.")
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", fake_grid_window)
+    monkeypatch.setattr("core.walkforward_engine.run_dsr_analysis", unexpected_dsr)
+
+    wf_config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        is_period_days=10,
+        oos_period_days=5,
+        warmup_bars=5,
+        dsr_config=DSRConfig(enabled=True, top_k=1),
+    )
+    base_template = {
+        "optimization_mode": "grid",
+        "fixed_params": {"dateFilter": False},
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 1,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+    }
+    engine = WalkForwardEngine(wf_config, base_template, {})
+
+    class FakeStrategy:
+        @staticmethod
+        def run(df_slice, params, trade_start_idx):  # noqa: ARG001
+            return StrategyResult(
+                trades=[],
+                equity_curve=[100.0],
+                balance_curve=[100.0],
+                timestamps=[df_slice.index[min(trade_start_idx, len(df_slice) - 1)]],
+            )
+
+    engine.strategy_class = FakeStrategy
+    result, _study_id = engine.run_wf_optimization(df)
+
+    window = result.windows[0]
+    assert window.best_params_source == "grid"
+    assert window.best_params["source"] == "objective"
+    assert window.is_best_trial_number == 1
+    assert window.selection_chain["dsr"] == 5
+
+
 def test_fixed_wfa_ft_retry_delays_entry_and_trades_remaining_window(monkeypatch):
     index = pd.date_range("2025-01-01", periods=70, freq="D", tz="UTC")
     df = pd.DataFrame(

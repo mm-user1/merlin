@@ -24,6 +24,7 @@ from core.backtest_engine import (
     prepare_dataset_with_warmup,
 )
 from core.export import export_trades_csv
+from core.grid_engine import parse_grid_budget
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
     OBJECTIVE_DIRECTIONS,
@@ -1663,8 +1664,8 @@ def _build_optimization_config(
 
     optimization_mode_raw = payload.get("optimization_mode", "optuna")
     optimization_mode = str(optimization_mode_raw).strip().lower() or "optuna"
-    if optimization_mode != "optuna":
-        raise ValueError("Grid Search has been removed. Use Optuna optimization only.")
+    if optimization_mode not in {"optuna", "grid"}:
+        raise ValueError(f"Unsupported optimization mode: {optimization_mode}")
 
     objectives = payload.get("objectives", [])
     if not isinstance(objectives, list):
@@ -1776,6 +1777,55 @@ def _build_optimization_config(
         "sanitize_trades_threshold": sanitize_trades_threshold,
     }
 
+    try:
+        grid_budget = parse_grid_budget(
+            payload.get("grid_budget", payload.get("gridBudget", "200k"))
+        )
+    except ValueError as exc:
+        raise ValueError(str(exc))
+    try:
+        grid_seed = int(payload.get("grid_seed", payload.get("gridSeed", 42)))
+    except (TypeError, ValueError):
+        raise ValueError("Grid seed must be an integer.")
+    try:
+        grid_top_candidates = int(
+            payload.get("grid_top_candidates", payload.get("gridTopCandidates", 10))
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Grid top candidates must be an integer.")
+    if grid_top_candidates <= 0:
+        raise ValueError("Grid top candidates must be greater than zero.")
+    grid_allocation_method = str(
+        payload.get("grid_allocation_method", payload.get("gridAllocationMethod", "auto_sqrt_space"))
+    ).strip().lower()
+    try:
+        grid_min_quota = float(payload.get("grid_min_quota", payload.get("gridMinQuota", 0.10)))
+    except (TypeError, ValueError):
+        raise ValueError("Grid min quota must be numeric.")
+    manual_raw = payload.get("grid_manual_percents", payload.get("gridManualPercents", {}))
+    grid_manual_percents: Dict[str, float] = {}
+    if isinstance(manual_raw, dict):
+        for key in ("cc_only", "tbands_only", "both"):
+            try:
+                grid_manual_percents[key] = float(manual_raw.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raise ValueError("Grid manual allocation percentages must be numeric.")
+    grid_diversity_enabled = _parse_bool(
+        payload.get("grid_diversity_enabled", payload.get("gridDiversityEnabled", True)),
+        True,
+    )
+    try:
+        grid_diversity_max_per_group = int(
+            payload.get("grid_diversity_max_per_group", payload.get("gridDiversityMaxPerGroup", 2))
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Grid diversity max per group must be an integer.")
+    grid_diversity_max_per_group = max(1, grid_diversity_max_per_group)
+    grid_strict_validation = _parse_bool(
+        payload.get("grid_strict_validation", payload.get("gridStrictValidation", True)),
+        True,
+    )
+
     config = OptimizationConfig(
         csv_file=csv_file,
         strategy_id=str(strategy_id),
@@ -1809,10 +1859,25 @@ def _build_optimization_config(
         swapping_prob=swapping_prob if swapping_prob is not None else 0.5,
         n_startup_trials=n_startup_trials,
         coverage_mode=coverage_mode,
+        grid_budget=grid_budget,
+        grid_seed=grid_seed,
+        grid_top_candidates=grid_top_candidates,
+        grid_allocation_method=grid_allocation_method,
+        grid_min_quota=grid_min_quota,
+        grid_manual_percents=grid_manual_percents,
+        grid_diversity_enabled=grid_diversity_enabled,
+        grid_diversity_max_per_group=grid_diversity_max_per_group,
+        grid_strict_validation=grid_strict_validation,
     )
 
     if optimization_mode == "optuna":
         for key, value in optuna_params.items():
+            setattr(config, key, value)
+    elif optimization_mode == "grid":
+        for key, value in optuna_params.items():
+            # Preserve objective/constraint/sanitization metadata for storage and
+            # shared result rendering; Optuna sampler/pruner settings are ignored
+            # by the Grid engine.
             setattr(config, key, value)
 
     return config

@@ -9,12 +9,14 @@ import hashlib
 import io
 import json
 import logging
+import math
 import time
 
 import pandas as pd
 
 from . import metrics
 from .backtest_engine import StrategyResult, prepare_dataset_with_warmup
+from .grid_engine import build_grid_dsr_results, run_grid_optimization
 from .optuna_engine import OptunaConfig, OptimizationConfig, SamplerConfig, run_optuna_optimization
 from .storage import save_wfa_study_to_db
 from .post_process import (
@@ -721,6 +723,8 @@ class WalkForwardEngine:
         is_end: pd.Timestamp,
         window_id: int,
     ) -> ISPipelineResult:
+        optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
+        is_grid_mode = optimizer_mode == "grid"
         available_modules = ["optuna_is"]
         module_status: Dict[str, Any] = {
             "optuna_is": {"enabled": True, "ran": True, "reason": None}
@@ -765,7 +769,7 @@ class WalkForwardEngine:
             raise ValueError(f"No optimization results for window {window_id}.")
 
         best_result = optimization_results[0]
-        best_params_source = "optuna_is"
+        best_params_source = "grid" if is_grid_mode else "optuna_is"
 
         optuna_map: Dict[int, Any] = {}
         for result in (optimization_all_results or optimization_results):
@@ -795,22 +799,26 @@ class WalkForwardEngine:
                 "end": optimization_end.isoformat(),
             }
             try:
-                dsr_results, _summary = run_dsr_analysis(
-                    optuna_results=optimization_results,
-                    all_results=optimization_all_results or optimization_results,
-                    config=dsr_config,
-                    n_trials_total=len(optimization_all_results or optimization_results),
-                    csv_path=self.csv_file_path,
-                    strategy_id=self.config.strategy_id,
-                    fixed_params=fixed_params,
-                    warmup_bars=self.config.warmup_bars,
-                    score_config=deepcopy(self.base_config_template.get("score_config", {})),
-                    filter_min_profit=bool(self.base_config_template.get("filter_min_profit")),
-                    min_profit_threshold=float(
-                        self.base_config_template.get("min_profit_threshold") or 0.0
-                    ),
-                    df=df,
-                )
+                if is_grid_mode:
+                    dsr_results = build_grid_dsr_results(optimization_results, limit=dsr_config.top_k)
+                else:
+                    dsr_trials_total = len(optimization_all_results or optimization_results)
+                    dsr_results, _summary = run_dsr_analysis(
+                        optuna_results=optimization_results,
+                        all_results=optimization_all_results or optimization_results,
+                        config=dsr_config,
+                        n_trials_total=dsr_trials_total,
+                        csv_path=self.csv_file_path,
+                        strategy_id=self.config.strategy_id,
+                        fixed_params=fixed_params,
+                        warmup_bars=self.config.warmup_bars,
+                        score_config=deepcopy(self.base_config_template.get("score_config", {})),
+                        filter_min_profit=bool(self.base_config_template.get("filter_min_profit")),
+                        min_profit_threshold=float(
+                            self.base_config_template.get("min_profit_threshold") or 0.0
+                        ),
+                        df=df,
+                    )
                 module_status["dsr"]["ran"] = True
             except Exception as exc:
                 module_status["dsr"]["reason"] = str(exc)
@@ -823,7 +831,7 @@ class WalkForwardEngine:
             if dsr_trials:
                 dsr_trials[0]["is_selected"] = True
                 selection_chain["dsr"] = dsr_trials[0].get("trial_number")
-            if dsr_results:
+            if dsr_results and not is_grid_mode:
                 best_result = dsr_results[0].original_result
                 best_params_source = "dsr"
                 is_pareto_optimal = getattr(best_result, "is_pareto_optimal", None)
@@ -852,16 +860,18 @@ class WalkForwardEngine:
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
             ft_pass_count = len(ft_passed_results)
-            if ft_passed_results:
+            if ft_passed_results and not is_grid_mode:
                 best_result = ft_passed_results[0]
                 best_params_source = "forward_test"
                 selection_chain["forward_test"] = ft_passed_results[0].trial_number
-            elif ft_results:
+            elif ft_results and not is_grid_mode:
                 ft_gate_failed = True
                 module_status["forward_test"]["reason"] = "threshold_reject_all"
-            else:
+            elif not ft_results:
                 ft_gate_failed = True
                 module_status["forward_test"]["reason"] = "no_ft_results"
+            elif is_grid_mode:
+                module_status["forward_test"]["reason"] = "analysis_only_grid"
             ft_trials = self._convert_ft_results_for_storage(
                 ft_results, int(self.config.store_top_n_trials), optuna_map
             )
@@ -935,7 +945,7 @@ class WalkForwardEngine:
 
                 if st_results:
                     selected = candidate_map.get(st_results[0].trial_number)
-                    if selected is not None:
+                    if selected is not None and not is_grid_mode:
                         best_result = selected
                         best_params_source = "stress_test"
                         selection_chain["stress_test"] = st_results[0].trial_number
@@ -2379,7 +2389,7 @@ class WalkForwardEngine:
     def _run_optuna_on_window(
         self, df: pd.DataFrame, start_time: pd.Timestamp, end_time: pd.Timestamp
     ) -> Tuple[List[Any], List[Any]]:
-        """Run Optuna optimization for a single WFA window."""
+        """Run the configured optimizer for a single WFA window."""
         csv_buffer = self._dataframe_to_csv_buffer(df)
 
         fixed_params = deepcopy(self.base_config_template.get("fixed_params", {}))
@@ -2387,6 +2397,7 @@ class WalkForwardEngine:
         fixed_params["start"] = start_time.isoformat()
         fixed_params["end"] = end_time.isoformat()
 
+        optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
         base_config = OptimizationConfig(
             csv_file=csv_buffer,
             strategy_id=self.config.strategy_id,
@@ -2414,7 +2425,7 @@ class WalkForwardEngine:
             dispatcher_duplicate_cycle_limit=int(
                 self.base_config_template.get("dispatcher_duplicate_cycle_limit", 18)
             ),
-            optimization_mode="wfa",
+            optimization_mode="grid" if optimizer_mode == "grid" else "wfa",
             objectives=list(self.base_config_template.get("objectives") or []),
             primary_objective=self.base_config_template.get("primary_objective"),
             constraints=deepcopy(self.base_config_template.get("constraints", [])),
@@ -2425,7 +2436,27 @@ class WalkForwardEngine:
             swapping_prob=self.base_config_template.get("swapping_prob", 0.5),
             n_startup_trials=self.base_config_template.get("n_startup_trials", 20),
             coverage_mode=bool(self.base_config_template.get("coverage_mode", False)),
+            grid_budget=self.base_config_template.get("grid_budget", 200_000),
+            grid_seed=self.base_config_template.get("grid_seed", 42),
+            grid_top_candidates=self.base_config_template.get("grid_top_candidates", 10),
+            grid_allocation_method=self.base_config_template.get("grid_allocation_method", "auto_sqrt_space"),
+            grid_min_quota=self.base_config_template.get("grid_min_quota", 0.10),
+            grid_manual_percents=deepcopy(self.base_config_template.get("grid_manual_percents", {})),
+            grid_diversity_enabled=bool(self.base_config_template.get("grid_diversity_enabled", True)),
+            grid_diversity_max_per_group=int(self.base_config_template.get("grid_diversity_max_per_group", 2)),
+            grid_strict_validation=bool(self.base_config_template.get("grid_strict_validation", True)),
+            grid_needs_dsr=bool(self.config.dsr_config and self.config.dsr_config.enabled),
+            grid_dsr_top_k=int(
+                getattr(self.config.dsr_config, "top_k", 20)
+                if self.config.dsr_config and self.config.dsr_config.enabled
+                else 20
+            ),
         )
+
+        if optimizer_mode == "grid":
+            results, _study_id = run_grid_optimization(base_config, save_study=False)
+            all_results = list(getattr(base_config, "optuna_all_results", []))
+            return results, all_results
 
         objectives = list(self.optuna_settings.get("objectives") or [])
         primary_objective = self.optuna_settings.get("primary_objective")

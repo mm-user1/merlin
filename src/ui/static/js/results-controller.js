@@ -131,7 +131,8 @@ function updateTabsVisibility() {
   const tabsContainer = document.getElementById('resultsTabs');
   const manualBtn = document.getElementById('manualTestBtn');
 
-  if (ResultsState.mode !== 'optuna') {
+  const isCandidateStudy = ['optuna', 'grid'].includes(ResultsState.mode);
+  if (!isCandidateStudy) {
     if (tabsContainer) tabsContainer.style.display = 'none';
     if (manualBtn) manualBtn.style.display = 'none';
     return;
@@ -778,6 +779,7 @@ async function applyStudyPayload(data) {
   const cooldownEnabledRaw = study.cooldown_enabled ?? configWfa.cooldown_enabled ?? config.cooldown_enabled;
   ResultsState.postProcess = postProcessConfig;
   ResultsState.wfa = {
+    optimizerMode: config.optimization_mode || 'optuna',
     postProcess: postProcessConfig,
     isPeriodDays: study.is_period_days ?? configWfa.is_period_days ?? config.is_period_days ?? null,
     oosPeriodDays: configWfa.oos_period_days ?? config.oos_period_days ?? null,
@@ -870,7 +872,7 @@ async function applyStudyPayload(data) {
   ResultsState.activeManualTest = null;
   ResultsState.manualTestResults = [];
 
-  if (ResultsState.mode === 'optuna') {
+  if (['optuna', 'grid'].includes(ResultsState.mode)) {
     const hasDsr = ResultsState.dsr.enabled && ResultsState.dsr.trials.length > 0;
     const hasForward = ResultsState.forwardTest.enabled && ResultsState.forwardTest.trials.length > 0;
     const hasStress = ResultsState.stressTest.enabled && ResultsState.stressTest.trials.length > 0;
@@ -1247,7 +1249,7 @@ function refreshResultsView() {
 
   const progressLabel = document.getElementById('progressLabel');
   const progressPercent = document.getElementById('progressPercent');
-  if (progressLabel) progressLabel.textContent = 'Trial - / -';
+  if (progressLabel) progressLabel.textContent = ResultsState.mode === 'grid' ? 'Candidate - / -' : 'Trial - / -';
   if (progressPercent) progressPercent.textContent = '0%';
 
   if (ResultsState.mode === 'wfa') {
@@ -1299,7 +1301,7 @@ function refreshResultsView() {
       updateTableHeader('Test Results', subtitle, periodLabel);
       renderManualTestTable(ResultsState.manualTestResults || []);
     } else {
-      updateTableHeader('Optuna IS', getOptunaSortSubtitle(), periodLabel);
+      updateTableHeader(ResultsState.mode === 'grid' ? 'Grid Candidates' : 'Optuna IS', getOptunaSortSubtitle(), periodLabel);
       renderOptunaTable(ResultsState.results || []);
     }
     renderManualTestControls();
@@ -1420,9 +1422,10 @@ function openManualTestModal() {
   const dataPath = document.getElementById('manualDataPath');
   const dataOriginal = document.getElementById('manualDataOriginal');
   if (selectedLabel) {
+    const itemLabel = ResultsState.mode === 'grid' ? 'Candidate' : 'Trial';
     selectedLabel.textContent = ResultsState.selectedRowId
-      ? `Trial #${ResultsState.selectedRowId}`
-      : 'Trial # -';
+      ? `${itemLabel} #${ResultsState.selectedRowId}`
+      : `${itemLabel} # -`;
   }
   if (dataPath && dataOriginal) {
     dataPath.disabled = dataOriginal.checked;
@@ -1476,7 +1479,7 @@ async function runManualTestFromModal() {
 
   const trialNumbers = getManualTrialNumbers();
   if (!trialNumbers.length) {
-    alert('Select at least one trial.');
+    alert(ResultsState.mode === 'grid' ? 'Select at least one candidate.' : 'Select at least one trial.');
     return;
   }
 
@@ -1544,7 +1547,7 @@ function getLancelotExportSelection() {
     return { windowNumber };
   }
   if (!ResultsState.selectedRowId) {
-    throw new Error('Select a trial in the table.');
+    throw new Error(ResultsState.mode === 'grid' ? 'Select a candidate in the table.' : 'Select a trial in the table.');
   }
   return { trialNumber: ResultsState.selectedRowId };
 }
@@ -1650,13 +1653,13 @@ function bindEventHandlers() {
         const activeTab = ResultsState.activeTab || 'optuna';
         if (activeTab === 'forward_test') {
           if (!ResultsState.selectedRowId) {
-            alert('Select a trial in the table.');
+            alert(ResultsState.mode === 'grid' ? 'Select a candidate in the table.' : 'Select a trial in the table.');
             return;
           }
           endpoint = `/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${ResultsState.selectedRowId}/ft-trades`;
         } else if (activeTab === 'oos_test') {
           if (!ResultsState.selectedRowId) {
-            alert('Select a trial in the table.');
+            alert(ResultsState.mode === 'grid' ? 'Select a candidate in the table.' : 'Select a trial in the table.');
             return;
           }
           endpoint = `/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${ResultsState.selectedRowId}/oos-trades`;
@@ -1666,13 +1669,13 @@ function bindEventHandlers() {
             return;
           }
           if (!ResultsState.selectedRowId) {
-            alert('Select a trial in the table.');
+            alert(ResultsState.mode === 'grid' ? 'Select a candidate in the table.' : 'Select a trial in the table.');
             return;
           }
           endpoint = `/api/studies/${encodeURIComponent(ResultsState.studyId)}/tests/${ResultsState.activeManualTest.id}/trials/${ResultsState.selectedRowId}/mt-trades`;
         } else {
           if (!ResultsState.selectedRowId) {
-            alert('Select a trial in the table.');
+            alert(ResultsState.mode === 'grid' ? 'Select a candidate in the table.' : 'Select a trial in the table.');
             return;
           }
           endpoint = `/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${ResultsState.selectedRowId}/trades`;
