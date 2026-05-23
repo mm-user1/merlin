@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -24,7 +25,12 @@ from core.backtest_engine import (
     prepare_dataset_with_warmup,
 )
 from core.export import export_trades_csv
-from core.grid_engine import parse_grid_budget
+from core.grid_engine import (
+    format_compact_count,
+    format_coverage_pct,
+    parse_grid_budget,
+    preview_grid_parameter_space,
+)
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
     OBJECTIVE_DIRECTIONS,
@@ -969,6 +975,309 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _parse_json_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _grid_setting_number(value: Any, *, integer: bool = True) -> Optional[Any]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return int(round(parsed)) if integer else parsed
+
+
+def _grid_setting_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _grid_config_value(config: Dict[str, Any], key: str, *aliases: str) -> Any:
+    grid_config = _parse_json_dict(config.get("grid_config"))
+    for candidate_key in (key, *aliases):
+        if candidate_key in config and config.get(candidate_key) not in (None, ""):
+            return config.get(candidate_key)
+        if candidate_key in grid_config and grid_config.get(candidate_key) not in (None, ""):
+            return grid_config.get(candidate_key)
+    return None
+
+
+def _grid_allocation_label(value: Any) -> str:
+    normalized = str(value or "auto_sqrt_space").strip().lower()
+    labels = {
+        "auto": "Auto sqrt-space",
+        "auto_sqrt": "Auto sqrt-space",
+        "auto_sqrt_space": "Auto sqrt-space",
+        "auto-sqrt-space": "Auto sqrt-space",
+        "proportional": "Proportional space",
+        "proportional_space": "Proportional space",
+        "proportional-space": "Proportional space",
+        "manual": "Manual",
+        "manual_percent": "Manual",
+        "manual_pct": "Manual",
+    }
+    return labels.get(normalized, normalized.replace("_", " ").replace("-", " ").title() or "-")
+
+
+def _grid_mode_label(value: Any) -> str:
+    labels = {
+        "cc_only": "CC only",
+        "tbands_only": "T Bands only",
+        "both": "Both",
+    }
+    return labels.get(str(value or "").strip(), str(value or "").strip() or "-")
+
+
+def _format_duration_seconds(seconds: Any) -> str:
+    total = _grid_setting_number(seconds)
+    if total is None or total < 0:
+        return "-"
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _grid_preview_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    grid_section = _parse_json_dict(summary.get("grid"))
+    preview = _parse_json_dict(grid_section.get("preview"))
+    if preview:
+        return preview
+    return _parse_json_dict(summary.get("preview"))
+
+
+def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[str, Any]:
+    payload = deepcopy(config)
+    grid_config = _parse_json_dict(payload.get("grid_config"))
+    aliases = {
+        "grid_budget": ("budget",),
+        "grid_seed": ("seed",),
+        "grid_top_candidates": ("top_candidates",),
+        "grid_allocation_method": ("allocation_method",),
+        "grid_min_quota": ("min_quota",),
+        "grid_manual_percents": ("manual_percents",),
+    }
+    for target, source_keys in aliases.items():
+        if payload.get(target) in (None, ""):
+            for source_key in source_keys:
+                if grid_config.get(source_key) not in (None, ""):
+                    payload[target] = grid_config.get(source_key)
+                    break
+    payload["optimization_mode"] = "grid"
+
+    strategy_id = str(
+        study.get("strategy_id")
+        or payload.get("strategy_id")
+        or "s03_reversal_v10"
+    )
+    worker_processes = _grid_setting_number(
+        payload.get("worker_processes", payload.get("workerProcesses")),
+    )
+    warmup_bars = _grid_setting_number(payload.get("warmup_bars"))
+    try:
+        config_obj = _build_optimization_config(
+            "grid-sidebar.csv",
+            payload,
+            worker_processes or 1,
+            strategy_id,
+            warmup_bars or 1000,
+        )
+        return preview_grid_parameter_space(config_obj)
+    except Exception:
+        return {}
+
+
+def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build compact Grid sidebar rows for Results and Analytics."""
+    if not isinstance(study, dict):
+        return None
+
+    config = _parse_json_dict(study.get("config_json"))
+    mode = str(study.get("optimization_mode") or "").strip().lower()
+    optimizer_mode = str(
+        study.get("optimizer_mode")
+        or _grid_config_value(config, "optimization_mode")
+        or ""
+    ).strip().lower()
+    has_grid_config = bool(_parse_json_dict(config.get("grid_config")))
+    if mode == "grid":
+        is_wfa_grid = False
+    elif mode == "wfa" and (optimizer_mode == "grid" or has_grid_config):
+        is_wfa_grid = True
+    else:
+        return None
+
+    grid_summary = _parse_json_dict(study.get("grid_summary"))
+    if not grid_summary:
+        grid_summary = _parse_json_dict(study.get("grid_summary_json"))
+    if not grid_summary:
+        grid_summary = _parse_json_dict(config.get("grid_summary"))
+    preview = _grid_preview_from_summary(grid_summary)
+    if not preview:
+        preview = _derive_grid_preview(config, study)
+
+    requested_budget = _grid_setting_number(
+        study.get("grid_requested_budget")
+        or grid_summary.get("requested_budget")
+        or _grid_config_value(config, "grid_budget", "budget", "gridBudget")
+    )
+    actual_budget = _grid_setting_number(
+        study.get("grid_actual_budget")
+        or grid_summary.get("actual_budget")
+        or preview.get("actual_budget")
+        or requested_budget
+    )
+    total_space = _grid_setting_number(preview.get("total_space"))
+    coverage_pct = _grid_setting_number(study.get("grid_coverage_pct"), integer=False)
+    if coverage_pct is None:
+        coverage_pct = _grid_setting_number(preview.get("coverage_pct"), integer=False)
+    seed = _grid_setting_number(_grid_config_value(config, "grid_seed", "seed", "gridSeed"))
+    top_candidates = _grid_setting_number(
+        study.get("grid_top_candidates")
+        or _grid_config_value(config, "grid_top_candidates", "top_candidates", "gridTopCandidates")
+    )
+    workers = _grid_setting_number(_grid_config_value(config, "worker_processes", "workerProcesses"))
+    diversity_enabled = _grid_setting_bool(
+        _grid_config_value(config, "grid_diversity_enabled", "gridDiversityEnabled"),
+        True,
+    )
+    diversity_max = _grid_setting_number(
+        _grid_config_value(config, "grid_diversity_max_per_group", "gridDiversityMaxPerGroup")
+    ) or 2
+    strict_validation = _grid_setting_bool(
+        _grid_config_value(config, "grid_strict_validation", "gridStrictValidation"),
+        True,
+    )
+    allocation_method = (
+        preview.get("allocation_method")
+        or _grid_config_value(config, "grid_allocation_method", "allocation_method", "gridAllocationMethod")
+        or "auto_sqrt_space"
+    )
+
+    mode_rows = []
+    generations = set()
+    for mode_item in preview.get("modes") or []:
+        if not isinstance(mode_item, dict):
+            continue
+        generation = str(mode_item.get("generation") or "-")
+        generations.add(generation.lower())
+        budget_label = mode_item.get("budget_label") or format_compact_count(mode_item.get("budget"))
+        space_label = mode_item.get("space_label") or format_compact_count(mode_item.get("space_size"))
+        coverage_label = mode_item.get("coverage_label") or format_coverage_pct(mode_item.get("coverage_pct"))
+        mode_rows.append(
+            {
+                "key": _grid_mode_label(mode_item.get("mode")),
+                "val": f"{budget_label} / {space_label} | {coverage_label} | {generation}",
+            }
+        )
+
+    if not mode_rows:
+        allocation = _parse_json_dict((_parse_json_dict(grid_summary.get("grid"))).get("allocation"))
+        mode_budgets = _parse_json_dict(allocation.get("mode_budgets"))
+        mode_spaces = _parse_json_dict(allocation.get("mode_space_sizes"))
+        mode_coverages = _parse_json_dict(allocation.get("mode_coverage_pct"))
+        for mode_key in ("cc_only", "tbands_only", "both"):
+            if mode_key not in mode_spaces and mode_key not in mode_budgets:
+                continue
+            budget = mode_budgets.get(mode_key)
+            space = mode_spaces.get(mode_key)
+            coverage = mode_coverages.get(mode_key)
+            generation = "Full" if _grid_setting_number(budget) == _grid_setting_number(space) else "LHS"
+            mode_rows.append(
+                {
+                    "key": _grid_mode_label(mode_key),
+                    "val": (
+                        f"{format_compact_count(budget)} / {format_compact_count(space)} "
+                        f"| {format_coverage_pct(coverage)} | {generation}"
+                    ),
+                }
+            )
+            generations.add(generation.lower())
+
+    if generations and generations <= {"full"}:
+        sampling_label = "Full enumeration"
+    elif any("lhs" in item for item in generations):
+        sampling_label = "LHS by mode"
+    elif generations:
+        sampling_label = "Mixed by mode"
+    else:
+        sampling_label = "-"
+
+    rows = [
+        {
+            "key": "Budget",
+            "val": f"{format_compact_count(actual_budget)} candidates" if actual_budget is not None else "-",
+        },
+        {
+            "key": "Parameter Space",
+            "val": f"{format_compact_count(total_space)} combinations" if total_space is not None else "-",
+        },
+        {"key": "Coverage", "val": format_coverage_pct(coverage_pct)},
+        {"key": "Sampling", "val": sampling_label},
+        {"key": "Seed", "val": str(seed) if seed is not None else "-"},
+        {"key": "Top Candidates", "val": str(top_candidates) if top_candidates is not None else "-"},
+        {
+            "key": "Workers",
+            "val": f"{workers} Numba threads" if workers is not None else "-",
+        },
+        {
+            "key": "Diversity",
+            "val": (
+                f"On, max {diversity_max} / Mode+MA+Period"
+                if diversity_enabled
+                else "Off"
+            ),
+        },
+        {
+            "key": "Validation",
+            "val": "Strict fast-vs-slow" if strict_validation else "Non-strict fast-vs-slow",
+        },
+    ]
+    if not is_wfa_grid:
+        rows.append(
+            {
+                "key": "Runtime",
+                "val": _format_duration_seconds(study.get("optimization_time_seconds")),
+            }
+        )
+
+    allocation_rows = [{"key": "Allocation", "val": _grid_allocation_label(allocation_method)}]
+    allocation_rows.extend(mode_rows)
+    return {
+        "enabled": True,
+        "is_wfa_grid": is_wfa_grid,
+        "rows": rows,
+        "allocation_rows": allocation_rows,
+    }
 
 
 def _split_timestamp(value: str) -> Tuple[str, str]:

@@ -724,6 +724,16 @@ def register_routes(app):
         try:
             result, study_id = engine.run_wf_optimization(df)
         except ValueError as exc:
+            app.logger.warning(
+                "Walk-forward optimization rejected "
+                "(run_id=%s, strategy=%s, optimizer=%s, adaptive=%s): %s",
+                run_id,
+                strategy_id,
+                optimizer_mode,
+                adaptive_mode,
+                exc,
+                exc_info=True,
+            )
             _set_optimization_state(
                 {
                     "status": "error",

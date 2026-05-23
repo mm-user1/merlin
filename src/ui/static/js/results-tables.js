@@ -1342,6 +1342,18 @@ function updateSidebarSettings() {
   const timeLabel = ResultsState.mode === 'wfa' ? '-' : (formatDuration(optimizationTime) || '-');
   setText('optuna-time', timeLabel);
 
+  const gridSettings = ResultsState.gridSettings && ResultsState.gridSettings.enabled
+    ? ResultsState.gridSettings
+    : null;
+  const gridRows = gridSettings
+    ? [
+        ...(Array.isArray(gridSettings.rows) ? gridSettings.rows : []),
+        ...(Array.isArray(gridSettings.allocation_rows) ? gridSettings.allocation_rows : [])
+      ]
+    : [];
+  renderSidebarSettingsList('grid-settings-list', gridRows);
+  setElementVisible('grid-settings-section', gridRows.length > 0);
+
   const postProcessRows = buildPostProcessSettingsRows(ResultsState.postProcess, ResultsState.mode === 'wfa');
   renderSidebarSettingsList('post-process-settings-list', postProcessRows);
   setElementVisible('post-process-settings-section', postProcessRows.length > 0);

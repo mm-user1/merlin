@@ -766,6 +766,7 @@ async function applyStudyPayload(data) {
   ResultsState.strategyId = study.strategy_id || ResultsState.strategyId;
   ResultsState.dataset = { label: study.csv_file_name || '' };
   ResultsState.dataPath = study.csv_file_path || ResultsState.dataPath;
+  ResultsState.gridSettings = study.grid_settings || null;
 
   const config = study.config_json || {};
   const postProcessConfig = config.postProcess && typeof config.postProcess === 'object'

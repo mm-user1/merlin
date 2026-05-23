@@ -91,6 +91,7 @@ try:
         _validate_preset_name,
         _validate_strategy_params,
         _write_preset,
+        build_grid_settings_view,
         validate_constraints_config,
         validate_objectives_config,
         validate_sampler_config,
@@ -125,6 +126,7 @@ except ImportError:
         _validate_preset_name,
         _validate_strategy_params,
         _write_preset,
+        build_grid_settings_view,
         validate_constraints_config,
         validate_objectives_config,
         validate_sampler_config,
@@ -364,6 +366,9 @@ def register_routes(app):
         study_data = load_study_from_db(study_id)
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
+        grid_settings = build_grid_settings_view(study_data.get("study") or {})
+        if grid_settings:
+            study_data["study"]["grid_settings"] = grid_settings
         return jsonify(_json_safe(study_data))
 
 

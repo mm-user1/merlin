@@ -18,6 +18,7 @@ const ResultsState = {
   fixedParams: {},
   strategyConfig: {},
   optuna: {},
+  gridSettings: null,
   postProcess: {},
   wfa: {},
   summary: {},

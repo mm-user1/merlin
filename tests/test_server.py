@@ -55,6 +55,18 @@ def test_core_logger_console_handler_is_configured_once():
     assert core_logger.level <= logging.INFO
 
 
+def test_grid_start_page_label_and_marker_are_compact():
+    repo_root = Path(__file__).parent.parent
+    index_html = (repo_root / "src" / "ui" / "templates" / "index.html").read_text(encoding="utf-8")
+    ui_handlers_js = (repo_root / "src" / "ui" / "static" / "js" / "ui-handlers.js").read_text(encoding="utf-8")
+
+    assert "Grid v1 is supported only for S03 Reversal v10." not in ui_handlers_js
+    assert "S03 Reversal v10 only" in ui_handlers_js
+    assert "в–ѕ" not in index_html
+    assert "&#9660;" in index_html
+    assert "GRID SETTINGS" in index_html
+
+
 @contextmanager
 def _temporary_active_db(label: str):
     previous_db = get_active_db_name()
@@ -269,6 +281,76 @@ def _insert_lancelot_export_trial(*, study_id: str, trial_number: int, params: d
             ),
         )
         conn.commit()
+
+
+def _grid_sidebar_config() -> dict:
+    return {
+        "strategy_id": "s03_reversal_v10",
+        "optimization_mode": "grid",
+        "enabled_params": {
+            "maType3": True,
+            "maLength3": True,
+            "maOffset3": False,
+            "useCloseCount": True,
+            "useTBands": True,
+            "closeCountLong": True,
+            "closeCountShort": True,
+            "tBandLongPct": True,
+            "tBandShortPct": True,
+        },
+        "param_ranges": {
+            "maLength3": [3, 4, 1],
+            "closeCountLong": [1, 2, 1],
+            "closeCountShort": [1, 1, 1],
+            "tBandLongPct": [0.5, 1.0, 0.5],
+            "tBandShortPct": [0.5, 1.0, 0.5],
+        },
+        "param_types": {
+            "maType3": "select",
+            "maLength3": "int",
+            "maOffset3": "float",
+            "useCloseCount": "bool",
+            "useTBands": "bool",
+            "closeCountLong": "int",
+            "closeCountShort": "int",
+            "tBandLongPct": "float",
+            "tBandShortPct": "float",
+        },
+        "fixed_params": {
+            "maType3_options": ["SMA"],
+            "useCloseCount_options": [True],
+            "useTBands_options": [True],
+            "contractSize": 0.01,
+            "commissionPct": 0.05,
+            "dateFilter": False,
+        },
+        "worker_processes": 6,
+        "warmup_bars": 20,
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "grid_budget": 10,
+        "grid_seed": 42,
+        "grid_top_candidates": 5,
+        "grid_allocation_method": "auto_sqrt_space",
+        "grid_min_quota": 0.10,
+        "grid_diversity_enabled": True,
+        "grid_diversity_max_per_group": 2,
+        "grid_strict_validation": True,
+        "grid_config": {
+            "budget": 10,
+            "seed": 42,
+            "top_candidates": 5,
+            "allocation_method": "auto_sqrt_space",
+            "min_quota": 0.10,
+        },
+    }
 
 
 def _insert_lancelot_export_wfa_window(
@@ -913,6 +995,60 @@ def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert deleted_studies == ["study_cancel_wfa"]
 
 
+def test_walkforward_route_logs_value_error_details(client, monkeypatch, caplog):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = _ensure_local_test_tmp_dir() / "wfa_value_error.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]},
+        index=pd.to_datetime(["2026-01-01 00:00:00"], utc=True),
+    )
+    error_text = (
+        "Adaptive WFA window 12 IS optimization failed "
+        "(2025-05-26 to 2025-07-25, optimizer=grid): "
+        "Grid fast-vs-slow validation failed: {\"candidate_id\": 99}"
+    )
+
+    class DummyWalkForwardEngine:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run_wf_optimization(self, _dataframe):
+            raise ValueError(error_text)
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["optimization_mode"] = "grid"
+    payload["strategy_id"] = "s03_reversal_v10"
+    payload["primary_objective"] = "net_profit_pct"
+
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        response = client.post(
+            "/api/walkforward",
+            data={
+                "strategy": "s03_reversal_v10",
+                "csvPath": str(csv_path),
+                "runId": "run_wfa_error",
+                "config": json.dumps(payload),
+                "wf_adaptive_mode": "true",
+            },
+        )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data["error"] == error_text
+    assert any(error_text in record.getMessage() for record in caplog.records)
+
+
 def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
@@ -1489,6 +1625,90 @@ def test_export_lancelot_bundle_from_grid_candidate(client):
     finally:
         if csv_path.exists():
             csv_path.unlink()
+
+
+def test_study_endpoint_includes_single_grid_settings(client):
+    preview = {
+        "total_space": 20,
+        "total_space_label": "20",
+        "actual_budget": 10,
+        "actual_budget_label": "10",
+        "coverage_pct": 50.0,
+        "coverage_label": "50.0%",
+        "allocation_method": "auto_sqrt_space",
+        "modes": [
+            {
+                "mode": "cc_only",
+                "space_size": 8,
+                "space_label": "8",
+                "budget": 4,
+                "budget_label": "4",
+                "coverage_pct": 50.0,
+                "coverage_label": "50.0%",
+                "generation": "LHS",
+            }
+        ],
+    }
+    config = _grid_sidebar_config()
+    summary = {
+        "requested_budget": 10,
+        "actual_budget": 10,
+        "grid": {"preview": preview},
+        "optimization_time_seconds": 26,
+    }
+
+    with _temporary_active_db(f"grid_settings_single_{uuid.uuid4().hex[:8]}"):
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id,
+                    study_name,
+                    strategy_id,
+                    optimization_mode,
+                    optimizer_mode,
+                    config_json,
+                    grid_requested_budget,
+                    grid_actual_budget,
+                    grid_coverage_pct,
+                    grid_top_candidates,
+                    grid_summary_json,
+                    optimization_time_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "grid_settings_single",
+                    "GRID_SETTINGS_SINGLE",
+                    "s03_reversal_v10",
+                    "grid",
+                    "grid",
+                    json.dumps(config),
+                    10,
+                    10,
+                    50.0,
+                    5,
+                    json.dumps(summary),
+                    26,
+                ),
+            )
+            conn.commit()
+
+        response = client.get("/api/studies/grid_settings_single")
+        assert response.status_code == 200
+        study = response.get_json()["study"]
+        grid = study["grid_settings"]
+        rows = {row["key"]: row["val"] for row in grid["rows"]}
+        allocation = {row["key"]: row["val"] for row in grid["allocation_rows"]}
+
+        assert grid["enabled"] is True
+        assert grid["is_wfa_grid"] is False
+        assert rows["Budget"] == "10 candidates"
+        assert rows["Parameter Space"] == "20 combinations"
+        assert rows["Coverage"] == "50.0%"
+        assert rows["Workers"] == "6 Numba threads"
+        assert rows["Runtime"] == "26s"
+        assert allocation["Allocation"] == "Auto sqrt-space"
+        assert allocation["CC only"] == "4 / 8 | 50.0% | LHS"
 
 
 def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
@@ -2440,6 +2660,48 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["post_process_settings"]["ft_enabled"] is False
         assert second["post_process_settings"]["dsr_enabled"] is False
         assert second["post_process_settings"]["st_enabled"] is False
+
+
+def test_analytics_summary_includes_wfa_grid_settings_from_config(client):
+    with _temporary_active_db(f"analytics_grid_settings_{uuid.uuid4().hex[:8]}"):
+        grid_config = _grid_sidebar_config()
+        grid_config["wfa"] = {"is_period_days": 60, "oos_period_days": 30}
+        _insert_analytics_study(
+            study_id="wfa_grid_settings",
+            study_name="WFA_GRID_SETTINGS",
+            strategy_id="s03_reversal_v10",
+            optimization_mode="wfa",
+            adaptive_mode=0,
+            is_period_days=60,
+            config_json=grid_config,
+        )
+        _insert_analytics_study(
+            study_id="wfa_optuna_settings",
+            study_name="WFA_OPTUNA_SETTINGS",
+            optimization_mode="wfa",
+            adaptive_mode=0,
+            is_period_days=60,
+            config_json={"wfa": {"oos_period_days": 30}},
+        )
+
+        response = client.get("/api/analytics/summary")
+        assert response.status_code == 200
+        studies = {row["study_id"]: row for row in response.get_json()["studies"]}
+
+        grid = studies["wfa_grid_settings"]["grid_settings"]
+        rows = {row["key"]: row["val"] for row in grid["rows"]}
+        allocation_rows = {row["key"]: row["val"] for row in grid["allocation_rows"]}
+
+        assert grid["enabled"] is True
+        assert grid["is_wfa_grid"] is True
+        assert rows["Budget"] == "10 candidates"
+        assert rows["Seed"] == "42"
+        assert rows["Top Candidates"] == "5"
+        assert rows["Workers"] == "6 Numba threads"
+        assert "Runtime" not in rows
+        assert allocation_rows["Allocation"] == "Auto sqrt-space"
+        assert any("|" in value for key, value in allocation_rows.items() if key != "Allocation")
+        assert studies["wfa_optuna_settings"]["grid_settings"] is None
 
 
 def test_analytics_sets_crud_and_reorder(client):

@@ -953,7 +953,7 @@ function getEnabledGridMetadata() {
   const numbaAvailable = metadata.numba_available !== false;
   return {
     available: Boolean(metadata.available ?? (window.currentStrategyId === 's03_reversal_v10' && numbaAvailable)),
-    reason: metadata.reason || (supported ? '' : 'Grid v1 is supported only for S03 Reversal v10.')
+    reason: metadata.reason || (supported ? '' : 'S03 Reversal v10 only')
   };
 }
 

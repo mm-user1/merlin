@@ -26,6 +26,11 @@ from core.storage import (
     update_study_set,
 )
 
+try:
+    from .server_services import build_grid_settings_view
+except ImportError:
+    from server_services import build_grid_settings_view
+
 
 def register_routes(app):
     analytics_equity_cache: Dict[Tuple[str, Tuple[str, ...]], Tuple[float, Dict[str, Any]]] = {}
@@ -702,6 +707,7 @@ def register_routes(app):
                     strategy_id,
                     strategy_version,
                     optimization_mode,
+                    optimizer_mode,
                     created_at,
                     completed_at,
                     CAST(strftime('%s', created_at) AS INTEGER) AS created_at_epoch,
@@ -731,6 +737,11 @@ def register_routes(app):
                     min_profit_threshold,
                     sanitize_enabled,
                     sanitize_trades_threshold,
+                    grid_requested_budget,
+                    grid_actual_budget,
+                    grid_coverage_pct,
+                    grid_top_candidates,
+                    grid_summary_json,
                     config_json,
                     dataset_start_date,
                     dataset_end_date,
@@ -1054,6 +1065,7 @@ def register_routes(app):
                         ),
                         "run_time_seconds": run_time_seconds,
                     },
+                    "grid_settings": build_grid_settings_view(row_dict),
                     "post_process_settings": _extract_post_process_settings(config_payload),
                 }
             )

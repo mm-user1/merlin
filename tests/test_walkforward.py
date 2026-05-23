@@ -478,7 +478,7 @@ def test_best_params_source_tracked(monkeypatch):
     assert result.windows[0].constraints_satisfied is False
 
 
-def test_grid_wfa_dsr_candidate_does_not_replace_objective_winner(monkeypatch):
+def test_grid_wfa_dsr_candidate_replaces_objective_winner(monkeypatch):
     index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
     df = pd.DataFrame(
         {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
@@ -543,10 +543,12 @@ def test_grid_wfa_dsr_candidate_does_not_replace_objective_winner(monkeypatch):
         "score_config": {},
     }
     engine = WalkForwardEngine(wf_config, base_template, {})
+    backtest_params = []
 
     class FakeStrategy:
         @staticmethod
-        def run(df_slice, params, trade_start_idx):  # noqa: ARG001
+        def run(df_slice, params, trade_start_idx):
+            backtest_params.append(dict(params))
             return StrategyResult(
                 trades=[],
                 equity_curve=[100.0],
@@ -558,10 +560,50 @@ def test_grid_wfa_dsr_candidate_does_not_replace_objective_winner(monkeypatch):
     result, _study_id = engine.run_wf_optimization(df)
 
     window = result.windows[0]
-    assert window.best_params_source == "grid"
-    assert window.best_params["source"] == "objective"
-    assert window.is_best_trial_number == 1
+    assert window.best_params_source == "dsr"
+    assert window.best_params["source"] == "dsr"
+    assert window.is_best_trial_number == 5
     assert window.selection_chain["dsr"] == 5
+    assert backtest_params
+    assert all(params.get("source") == "dsr" for params in backtest_params)
+
+
+def test_fixed_wfa_is_failure_includes_window_context(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=index,
+    )
+
+    wf_config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        is_period_days=10,
+        oos_period_days=5,
+        warmup_bars=5,
+    )
+    engine = WalkForwardEngine(
+        wf_config,
+        {"optimization_mode": "grid", "fixed_params": {"dateFilter": False}},
+        {},
+    )
+
+    def fail_pipeline(self, df, is_start, is_end, window_id):  # noqa: ARG001
+        raise ValueError(
+            "Grid fast-vs-slow validation failed: "
+            '{"candidate_id": 7, "semantic_key": "abc", "diffs": {"net_profit_pct": 1.2}}'
+        )
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_window_is_pipeline", fail_pipeline)
+
+    with pytest.raises(ValueError) as excinfo:
+        engine.run_wf_optimization(df)
+
+    message = str(excinfo.value)
+    assert "Fixed WFA window 1 IS optimization failed" in message
+    assert "2025-01-01 to 2025-01-10" in message
+    assert "optimizer=grid" in message
+    assert "Grid fast-vs-slow validation failed" in message
+    assert '"candidate_id": 7' in message
 
 
 def test_fixed_wfa_ft_retry_delays_entry_and_trades_remaining_window(monkeypatch):

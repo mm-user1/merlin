@@ -831,7 +831,7 @@ class WalkForwardEngine:
             if dsr_trials:
                 dsr_trials[0]["is_selected"] = True
                 selection_chain["dsr"] = dsr_trials[0].get("trial_number")
-            if dsr_results and not is_grid_mode:
+            if dsr_results:
                 best_result = dsr_results[0].original_result
                 best_params_source = "dsr"
                 is_pareto_optimal = getattr(best_result, "is_pareto_optimal", None)
@@ -1105,6 +1105,31 @@ class WalkForwardEngine:
         plan.pipeline.module_status = module_status
         return plan
 
+    def _run_window_is_pipeline_with_context(
+        self,
+        *,
+        df: pd.DataFrame,
+        is_start: pd.Timestamp,
+        is_end: pd.Timestamp,
+        window_id: int,
+    ) -> ISPipelineResult:
+        try:
+            return self._run_window_is_pipeline(
+                df=df,
+                is_start=is_start,
+                is_end=is_end,
+                window_id=window_id,
+            )
+        except ValueError as exc:
+            wfa_mode = "Adaptive WFA" if self.config.adaptive_mode else "Fixed WFA"
+            optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
+            start_label = is_start.date() if hasattr(is_start, "date") else is_start
+            end_label = is_end.date() if hasattr(is_end, "date") else is_end
+            raise ValueError(
+                f"{wfa_mode} window {window_id} IS optimization failed "
+                f"({start_label} to {end_label}, optimizer={optimizer_mode}): {exc}"
+            ) from exc
+
     def _resolve_window_execution_plan(
         self,
         *,
@@ -1142,7 +1167,7 @@ class WalkForwardEngine:
             )
             if shifted_is_start is None or shifted_is_end is None:
                 if last_pipeline is None:
-                    last_pipeline = self._run_window_is_pipeline(
+                    last_pipeline = self._run_window_is_pipeline_with_context(
                         df=df,
                         is_start=is_start,
                         is_end=is_end,
@@ -1164,7 +1189,7 @@ class WalkForwardEngine:
 
             last_is_start = shifted_is_start
             last_is_end = shifted_is_end
-            pipeline = self._run_window_is_pipeline(
+            pipeline = self._run_window_is_pipeline_with_context(
                 df=df,
                 is_start=shifted_is_start,
                 is_end=shifted_is_end,

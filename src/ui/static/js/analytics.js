@@ -1340,21 +1340,25 @@
 
   function hideFocusSidebar() {
     const optunaSection = document.getElementById('analytics-optuna-section');
+    const gridSection = document.getElementById('analytics-grid-section');
     const postProcessSection = document.getElementById('analytics-post-process-section');
     const wfaSection = document.getElementById('analytics-wfa-section');
     if (optunaSection) optunaSection.style.display = 'none';
+    if (gridSection) gridSection.style.display = 'none';
     if (postProcessSection) postProcessSection.style.display = 'none';
     if (wfaSection) wfaSection.style.display = 'none';
   }
 
   function renderFocusedSidebar(study) {
     const optunaSection = document.getElementById('analytics-optuna-section');
+    const gridSection = document.getElementById('analytics-grid-section');
     const postProcessSection = document.getElementById('analytics-post-process-section');
     const wfaSection = document.getElementById('analytics-wfa-section');
     const optunaContainer = document.getElementById('analyticsOptunaSettings');
+    const gridContainer = document.getElementById('analyticsGridSettings');
     const postProcessContainer = document.getElementById('analyticsPostProcessSettings');
     const wfaContainer = document.getElementById('analyticsWfaSettings');
-    if (!optunaSection || !postProcessSection || !wfaSection || !optunaContainer || !postProcessContainer || !wfaContainer) return;
+    if (!optunaSection || !gridSection || !postProcessSection || !wfaSection || !optunaContainer || !gridContainer || !postProcessContainer || !wfaContainer) return;
 
     const optunaSettings = study?.optuna_settings || {};
     const postProcessSettings = study?.post_process_settings || {};
@@ -1392,6 +1396,17 @@
       },
     ];
     renderSettingsList(optunaContainer, optunaRows);
+
+    const gridSettings = study?.grid_settings && study.grid_settings.enabled
+      ? study.grid_settings
+      : null;
+    const gridRows = gridSettings
+      ? [
+          ...(Array.isArray(gridSettings.rows) ? gridSettings.rows : []),
+          ...(Array.isArray(gridSettings.allocation_rows) ? gridSettings.allocation_rows : [])
+        ]
+      : [];
+    renderSettingsList(gridContainer, gridRows);
 
     const adaptiveModeRaw = wfaSettings.adaptive_mode;
     const adaptiveMode = adaptiveModeRaw === null || adaptiveModeRaw === undefined
@@ -1478,6 +1493,7 @@
     renderSettingsList(postProcessContainer, postProcessRows);
 
     optunaSection.style.display = '';
+    gridSection.style.display = gridRows.length ? '' : 'none';
     postProcessSection.style.display = postProcessRows.length ? '' : 'none';
     wfaSection.style.display = '';
   }
