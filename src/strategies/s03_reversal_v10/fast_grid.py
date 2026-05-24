@@ -664,6 +664,41 @@ def prepare_fast_data(
     )
 
 
+def legacy_recovered_max_drawdown_pct(balance_values: Sequence[float]) -> float:
+    """Match Merlin's current slow drawdown boundary behavior."""
+    values = [] if balance_values is None else balance_values
+    running_peak = None
+    period_max_drawdown_pct = 0.0
+    max_drawdown_pct = 0.0
+    last_boundary_index = -1
+
+    for index, raw_value in enumerate(values):
+        try:
+            balance = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(balance):
+            continue
+        if running_peak is None:
+            running_peak = balance
+            continue
+        if balance >= running_peak:
+            if index > last_boundary_index + 1 and period_max_drawdown_pct > max_drawdown_pct:
+                max_drawdown_pct = period_max_drawdown_pct
+            running_peak = balance
+            period_max_drawdown_pct = 0.0
+            last_boundary_index = index
+        elif running_peak > 0.0:
+            drawdown_pct = (1.0 - balance / running_peak) * 100.0
+            if drawdown_pct > period_max_drawdown_pct:
+                period_max_drawdown_pct = drawdown_pct
+
+    final_index = len(values) - 1
+    if final_index > last_boundary_index + 1 and period_max_drawdown_pct > max_drawdown_pct:
+        max_drawdown_pct = period_max_drawdown_pct
+    return max_drawdown_pct
+
+
 def _s03_fast_loop_impl(
     close_values: np.ndarray,
     high_values: np.ndarray,
@@ -697,6 +732,8 @@ def _s03_fast_loop_impl(
     balance = initial_capital
     running_max_balance = balance
     max_drawdown_pct = 0.0
+    current_drawdown_pct = 0.0
+    last_drawdown_boundary_index = -1
 
     position = 0
     prev_position = 0
@@ -894,14 +931,21 @@ def _s03_fast_loop_impl(
                 current_month = month_key
                 month_start_equity = equity_value
 
-        if balance > running_max_balance:
+        if balance >= running_max_balance:
+            if i > last_drawdown_boundary_index + 1 and current_drawdown_pct > max_drawdown_pct:
+                max_drawdown_pct = current_drawdown_pct
             running_max_balance = balance
-        if running_max_balance > 0.0:
+            current_drawdown_pct = 0.0
+            last_drawdown_boundary_index = i
+        elif running_max_balance > 0.0:
             drawdown_pct = (1.0 - balance / running_max_balance) * 100.0
-            if drawdown_pct > max_drawdown_pct:
-                max_drawdown_pct = drawdown_pct
+            if drawdown_pct > current_drawdown_pct:
+                current_drawdown_pct = drawdown_pct
 
         prev_position = position
+
+    if last_bar_index > last_drawdown_boundary_index + 1 and current_drawdown_pct > max_drawdown_pct:
+        max_drawdown_pct = current_drawdown_pct
 
     net_profit = balance - initial_capital
     net_profit_pct = (net_profit / initial_capital * 100.0) if initial_capital != 0.0 else 0.0

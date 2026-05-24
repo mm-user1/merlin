@@ -5,9 +5,7 @@ Walk-Forward Analysis Engine - Rolling WFA (Phase 2)
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from copy import deepcopy
-import hashlib
 import io
-import json
 import logging
 import math
 import time
@@ -18,6 +16,7 @@ from . import metrics
 from .backtest_engine import StrategyResult, prepare_dataset_with_warmup
 from .grid_engine import build_grid_dsr_results, run_grid_optimization
 from .optuna_engine import OptunaConfig, OptimizationConfig, SamplerConfig, run_optuna_optimization
+from .param_identity import create_display_param_id
 from .storage import save_wfa_study_to_db
 from .post_process import (
     DSRConfig,
@@ -860,18 +859,16 @@ class WalkForwardEngine:
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
             ft_pass_count = len(ft_passed_results)
-            if ft_passed_results and not is_grid_mode:
+            if ft_passed_results:
                 best_result = ft_passed_results[0]
                 best_params_source = "forward_test"
                 selection_chain["forward_test"] = ft_passed_results[0].trial_number
-            elif ft_results and not is_grid_mode:
+            elif ft_results:
                 ft_gate_failed = True
                 module_status["forward_test"]["reason"] = "threshold_reject_all"
             elif not ft_results:
                 ft_gate_failed = True
                 module_status["forward_test"]["reason"] = "no_ft_results"
-            elif is_grid_mode:
-                module_status["forward_test"]["reason"] = "analysis_only_grid"
             ft_trials = self._convert_ft_results_for_storage(
                 ft_results, int(self.config.store_top_n_trials), optuna_map
             )
@@ -945,7 +942,7 @@ class WalkForwardEngine:
 
                 if st_results:
                     selected = candidate_map.get(st_results[0].trial_number)
-                    if selected is not None and not is_grid_mode:
+                    if selected is not None:
                         best_result = selected
                         best_params_source = "stress_test"
                         selection_chain["stress_test"] = st_results[0].trial_number
@@ -2266,6 +2263,7 @@ class WalkForwardEngine:
                     "is_pareto_optimal": getattr(original, "is_pareto_optimal", None),
                     "dominance_rank": getattr(original, "dominance_rank", None),
                     "module_metrics": {
+                        "grid_rank": getattr(original, "grid_rank", None),
                         "dsr_probability": getattr(result, "dsr_probability", None),
                         "dsr_rank": getattr(result, "dsr_rank", None),
                         "dsr_skewness": getattr(result, "dsr_skewness", None),
@@ -2545,44 +2543,8 @@ class WalkForwardEngine:
 
     def _create_param_id(self, params: Dict[str, Any]) -> str:
         """Create unique ID for param set using first 2 optimizable parameters."""
-        param_str = json.dumps(params, sort_keys=True)
-        param_hash = hashlib.md5(param_str.encode()).hexdigest()[:8]
-
-        try:
-            from strategies import get_strategy_config
-
-            config = get_strategy_config(self.config.strategy_id)
-            parameters = config.get("parameters", {}) if isinstance(config, dict) else {}
-
-            preferred_pairs = [
-                ("maType", "maLength"),
-                ("maType3", "maLength3"),
-                ("maType2", "maLength2"),
-            ]
-            for left, right in preferred_pairs:
-                if left in params and right in params:
-                    label = f"{params.get(left)} {params.get(right)}"
-                    return f"{label}_{param_hash}"
-
-            optimizable: List[str] = []
-            for param_name, param_spec in parameters.items():
-                if not isinstance(param_spec, dict):
-                    continue
-                optimize_cfg = param_spec.get("optimize", {})
-                if isinstance(optimize_cfg, dict) and optimize_cfg.get("enabled", False):
-                    optimizable.append(param_name)
-                if len(optimizable) == 2:
-                    break
-
-            label_parts = [str(params.get(param_name, "?")) for param_name in optimizable]
-            if label_parts:
-                label = " ".join(label_parts)
-                return f"{label}_{param_hash}"
-        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            logger.warning(
-                "Falling back to hash-only param_id for strategy '%s': %s",
-                self.config.strategy_id,
-                exc,
-            )
-
-        return param_hash
+        return create_display_param_id(
+            params,
+            strategy_id=self.config.strategy_id,
+            logger=logger,
+        )

@@ -59,12 +59,20 @@ def test_grid_start_page_label_and_marker_are_compact():
     repo_root = Path(__file__).parent.parent
     index_html = (repo_root / "src" / "ui" / "templates" / "index.html").read_text(encoding="utf-8")
     ui_handlers_js = (repo_root / "src" / "ui" / "static" / "js" / "ui-handlers.js").read_text(encoding="utf-8")
+    results_html = (repo_root / "src" / "ui" / "templates" / "results.html").read_text(encoding="utf-8")
+    results_tables_js = (repo_root / "src" / "ui" / "static" / "js" / "results-tables.js").read_text(encoding="utf-8")
+    analytics_js = (repo_root / "src" / "ui" / "static" / "js" / "analytics.js").read_text(encoding="utf-8")
 
     assert "Grid v1 is supported only for S03 Reversal v10." not in ui_handlers_js
     assert "S03 Reversal v10 only" in ui_handlers_js
     assert "в–ѕ" not in index_html
     assert "&#9660;" in index_html
     assert "GRID SETTINGS" in index_html
+    assert 'id="optuna-settings-section"' in results_html
+    assert results_html.index('id="optuna-settings-section"') < results_html.index("Optuna Settings")
+    assert results_html.index('id="optuna-settings-section"') > results_html.index("Status &amp; Controls")
+    assert "setElementVisible('optuna-settings-section', gridRows.length === 0)" in results_tables_js
+    assert "optunaSection.style.display = gridRows.length ? 'none' : ''" in analytics_js
 
 
 @contextmanager
@@ -520,6 +528,14 @@ def test_csv_import_fails_when_strategy_config_unloadable(monkeypatch, client):
     message = response.get_data(as_text=True)
     assert "s01_trailing_ma" in message
     assert "parameter types are unavailable" in message
+
+
+def test_grid_availability_reason_uses_short_backend_label(client):
+    response = client.get("/api/strategy/s01_trailing_ma/config")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["grid_optimizer"]["reason"] == "S03 Reversal v10 only"
 
 
 def test_csv_import_rejects_invalid_int(client):

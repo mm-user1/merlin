@@ -152,9 +152,7 @@ function renderOptunaTable(results) {
     if (rankCell) rankCell.textContent = isGrid ? (result.grid_rank || index + 1) : index + 1;
     const hashCell = row.querySelector('.param-hash');
     if (hashCell) {
-      hashCell.textContent = isGrid
-        ? `#${trialNumber} · ${result.param_key || result.semantic_key || paramId}`
-        : paramId;
+      hashCell.textContent = isGrid ? `#${trialNumber} \u00b7 ${paramId}` : paramId;
     }
 
       row.addEventListener('click', async () => {
@@ -1353,6 +1351,7 @@ function updateSidebarSettings() {
     : [];
   renderSidebarSettingsList('grid-settings-list', gridRows);
   setElementVisible('grid-settings-section', gridRows.length > 0);
+  setElementVisible('optuna-settings-section', gridRows.length === 0);
 
   const postProcessRows = buildPostProcessSettingsRows(ResultsState.postProcess, ResultsState.mode === 'wfa');
   renderSidebarSettingsList('post-process-settings-list', postProcessRows);

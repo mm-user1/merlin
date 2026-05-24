@@ -1492,7 +1492,7 @@
     );
     renderSettingsList(postProcessContainer, postProcessRows);
 
-    optunaSection.style.display = '';
+    optunaSection.style.display = gridRows.length ? 'none' : '';
     gridSection.style.display = gridRows.length ? '' : 'none';
     postProcessSection.style.display = postProcessRows.length ? '' : 'none';
     wfaSection.style.display = '';

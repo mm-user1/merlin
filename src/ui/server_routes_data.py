@@ -1543,7 +1543,7 @@ def register_routes(app):
                 grid_numba_available = bool(getattr(fast_grid, "NUMBA_AVAILABLE", False))
                 grid_reason = ""
                 if not grid_strategy_supported:
-                    grid_reason = "Grid v1 is supported only for S03 Reversal v10."
+                    grid_reason = "S03 Reversal v10 only"
                 elif not grid_numba_available:
                     grid_reason = f"Numba is unavailable: {getattr(fast_grid, 'NUMBA_IMPORT_ERROR', '') or 'import failed'}"
                 payload["grid_optimizer"] = {

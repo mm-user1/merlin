@@ -17,6 +17,8 @@ from core.grid_engine import (
     parse_grid_budget,
     rank_grid_results,
 )
+from core.backtest_engine import StrategyResult
+from core.metrics import calculate_basic
 from core.optuna_engine import ConstraintSpec, OptimizationConfig, OptimizationResult
 from core.storage import load_study_from_db, save_grid_study_to_db
 from ui.server_services import _build_optimization_config
@@ -284,30 +286,49 @@ def _synthetic_grid_result(candidate_id, *, net_profit, win_rate=50.0, sharpe=0.
     return result
 
 
-def test_grid_dsr_selects_from_full_pool_outside_objective_top_n():
+def test_fast_grid_legacy_drawdown_ignores_unrecovered_tail_like_slow_metrics():
+    balance_path = [100.0, 90.0, 105.0, 80.0]
+    slow = calculate_basic(
+        StrategyResult(
+            trades=[],
+            equity_curve=list(balance_path),
+            balance_curve=list(balance_path),
+            timestamps=list(pd.date_range("2025-01-01", periods=len(balance_path), freq="D", tz="UTC")),
+        ),
+        initial_balance=100.0,
+    )
+
+    assert slow.max_drawdown_pct == pytest.approx(10.0)
+    assert fast_grid.legacy_recovered_max_drawdown_pct(balance_path) == pytest.approx(slow.max_drawdown_pct)
+
+
+def test_grid_dsr_selects_only_from_previous_module_top_n():
     pytest.importorskip("scipy.stats")
-    ranked = [
-        _synthetic_grid_result(1, net_profit=10.0, sharpe=0.1, grid_rank=1),
-        _synthetic_grid_result(2, net_profit=8.0, sharpe=0.2, grid_rank=2),
-        _synthetic_grid_result(3, net_profit=1.0, sharpe=2.5, grid_rank=3),
-    ]
+    ranked = [_synthetic_grid_result(idx, net_profit=100.0 - idx, sharpe=0.1, grid_rank=idx) for idx in range(1, 51)]
+    outside = _synthetic_grid_result(99_999, net_profit=1.0, sharpe=4.0, grid_rank=99_999)
+    reference = ranked + [outside]
+    eligible = ranked[:20]
+    eligible[-1].sharpe_ratio = 2.0
 
-    dsr_selected, dsr_summary = apply_fast_grid_dsr(ranked, top_k=1)
-    objective_selected = [ranked[0]]
-    union = build_grid_dsr_results([ranked[0], dsr_selected[0]], limit=1)
+    dsr_selected, dsr_summary = apply_fast_grid_dsr(
+        eligible,
+        reference_results=reference,
+        top_k=5,
+    )
+    union = build_grid_dsr_results(ranked, limit=5)
 
-    assert dsr_summary["dsr_n_trials"] == 3
-    assert dsr_selected[0].candidate_id == 3
-    assert ranked[0].grid_rank == 1
-    assert union[0].trial_number == 3
-    assert union[0].optuna_rank == 3
+    assert dsr_summary["dsr_n_trials"] == 51
+    assert outside.candidate_id not in {item.candidate_id for item in dsr_selected}
+    assert {item.grid_rank for item in dsr_selected} <= set(range(1, 21))
+    assert {item.trial_number for item in union} <= set(range(1, 21))
+    assert {item.optuna_rank for item in union} <= set(range(1, 21))
 
     from core.grid_engine import _union_selected_candidates
 
-    selected_union = _union_selected_candidates(objective_selected, dsr_selected)
-    assert [item.candidate_id for item in selected_union] == [1, 3]
-    assert selected_union[0].selection_sources == ["objective"]
-    assert selected_union[1].selection_sources == ["dsr"]
+    selected_union = _union_selected_candidates(ranked[:50], dsr_selected)
+    assert len(selected_union) == 50
+    assert all(item.grid_rank <= 50 for item in selected_union)
+    assert all("dsr" in item.selection_sources for item in dsr_selected)
 
 
 def test_grid_dsr_trial_count_uses_all_finite_sharpe_candidates():
@@ -318,7 +339,11 @@ def test_grid_dsr_trial_count_uses_all_finite_sharpe_candidates():
         _synthetic_grid_result(3, net_profit=1.0, sharpe=1.0, grid_rank=3),
     ]
 
-    _selected, dsr_summary = apply_fast_grid_dsr(ranked, top_k=1)
+    _selected, dsr_summary = apply_fast_grid_dsr(
+        ranked[:1],
+        reference_results=ranked,
+        top_k=1,
+    )
 
     assert dsr_summary["dsr_n_trials"] == 2
 

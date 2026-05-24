@@ -658,15 +658,18 @@ def _add_selection_source(result: OptimizationResult, source: str) -> None:
 
 
 def apply_fast_grid_dsr(
-    ranked_fast: Sequence[OptimizationResult],
+    candidate_results: Sequence[OptimizationResult],
     *,
+    reference_results: Optional[Sequence[OptimizationResult]] = None,
     top_k: int,
 ) -> Tuple[List[OptimizationResult], Dict[str, Any]]:
-    """Compute fast DSR fields and select DSR top-K from the full valid Grid pool."""
+    """Compute fast DSR fields and select DSR top-K from eligible Grid candidates."""
     top_k = max(1, int(top_k or 1))
+    references = list(reference_results if reference_results is not None else candidate_results)
+    eligible = list(candidate_results or [])[:top_k]
     finite_sharpes = [
         value
-        for value in (_finite_float(getattr(result, "sharpe_ratio", None)) for result in ranked_fast)
+        for value in (_finite_float(getattr(result, "sharpe_ratio", None)) for result in references)
         if value is not None
     ]
     mean_sharpe = sum(finite_sharpes) / len(finite_sharpes) if finite_sharpes else None
@@ -679,7 +682,7 @@ def apply_fast_grid_dsr(
         sr0 = calculate_expected_max_sharpe(0.0, var_sharpe, len(finite_sharpes))
 
     candidates: List[OptimizationResult] = []
-    for result in ranked_fast:
+    for source_rank, result in enumerate(eligible, 1):
         sr_value = _finite_float(getattr(result, "sharpe_ratio", None))
         skewness = _finite_float(getattr(result, "dsr_skewness", None))
         kurtosis = _finite_float(getattr(result, "dsr_kurtosis", None))
@@ -699,6 +702,7 @@ def apply_fast_grid_dsr(
         setattr(result, "dsr_kurtosis", kurtosis)
         setattr(result, "dsr_track_length", track_length if track_length > 0 else None)
         setattr(result, "dsr_luck_share_pct", luck_share)
+        setattr(result, "dsr_source_rank", source_rank)
         if sr_value is not None:
             candidates.append(result)
 
@@ -790,7 +794,7 @@ def build_grid_dsr_results(
         payloads.append(
             DSRResult(
                 trial_number=int(trial_number),
-                optuna_rank=int(getattr(result, "grid_rank", idx) or idx),
+                optuna_rank=int(getattr(result, "dsr_source_rank", idx) or idx),
                 params=dict(getattr(result, "params", {}) or {}),
                 original_result=result,
                 dsr_probability=getattr(result, "dsr_probability", None),
@@ -922,7 +926,11 @@ def run_grid_optimization(
             1,
             int(getattr(config, "grid_dsr_top_k", settings.top_candidates) or settings.top_candidates),
         )
-        dsr_selected_fast, dsr_metadata = apply_fast_grid_dsr(ranked_fast, top_k=dsr_top_k)
+        dsr_selected_fast, dsr_metadata = apply_fast_grid_dsr(
+            selected_fast[:dsr_top_k],
+            reference_results=ranked_fast,
+            top_k=dsr_top_k,
+        )
     else:
         dsr_selected_fast = []
         dsr_metadata = {

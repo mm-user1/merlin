@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -19,7 +20,7 @@ from core.walkforward_engine import (
     WindowResult,
 )
 from core.optuna_engine import OptimizationResult
-from core.post_process import DSRConfig, DSRResult, PostProcessConfig
+from core.post_process import DSRConfig, DSRResult, PostProcessConfig, StressTestConfig
 from core.backtest_engine import StrategyResult, TradeRecord
 from core.backtest_engine import load_data
 from strategies import get_strategy_config
@@ -93,7 +94,7 @@ def test_param_id_generation_s01():
     engine = WalkForwardEngine(WFConfig(strategy_id="s01_trailing_ma"), {}, {})
     params = {"maType": "EMA", "maLength": 45, "closeCountLong": 7}
 
-    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
     assert engine._create_param_id(params) == f"EMA 45_{expected_hash}"
 
 
@@ -101,8 +102,26 @@ def test_param_id_generation_s04():
     engine = WalkForwardEngine(WFConfig(strategy_id="s04_stochrsi"), {}, {})
     params = {"rsiLen": 16, "stochLen": 20, "kLen": 3}
 
-    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
     assert engine._create_param_id(params) == f"16 20_{expected_hash}"
+
+
+def test_param_id_ignores_runtime_fields_for_display_identity():
+    engine = WalkForwardEngine(WFConfig(strategy_id="s03_reversal_v10"), {}, {})
+    base = {"maType3": "HMA", "maLength3": 300, "useCloseCount": True, "closeCountLong": 2}
+    with_runtime = {
+        **base,
+        "riskPerTrade": 0.0,
+        "commissionRate": 0.05,
+        "dateFilter": True,
+        "start": "2025-01-01",
+        "end": "2025-02-01",
+    }
+    different_strategy_params = {**base, "maLength3": 301}
+
+    assert engine._create_param_id(base) == engine._create_param_id(with_runtime)
+    assert engine._create_param_id(base) != engine._create_param_id(different_strategy_params)
+    assert engine._create_param_id(base).startswith("HMA 300_")
 
 
 def test_param_id_falls_back_and_logs_warning(monkeypatch, caplog):
@@ -112,7 +131,7 @@ def test_param_id_falls_back_and_logs_warning(monkeypatch, caplog):
 
     engine = WalkForwardEngine(WFConfig(strategy_id="s01_trailing_ma"), {}, {})
     params = {"maType": "EMA", "maLength": 45, "closeCountLong": 7}
-    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
+    expected_hash = hashlib.md5(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:8]
 
     def raise_value_error(strategy_id):  # noqa: ARG001
         raise ValueError("boom")
@@ -566,6 +585,214 @@ def test_grid_wfa_dsr_candidate_replaces_objective_winner(monkeypatch):
     assert window.selection_chain["dsr"] == 5
     assert backtest_params
     assert all(params.get("source") == "dsr" for params in backtest_params)
+
+
+def _grid_post_process_result(candidate_id: int, source: str, *, grid_rank: int) -> OptimizationResult:
+    result = OptimizationResult(
+        params={"source": source, "maType3": "HMA", "maLength3": 100 + candidate_id},
+        net_profit_pct=10.0 - candidate_id,
+        max_drawdown_pct=1.0,
+        total_trades=4,
+        optuna_trial_number=candidate_id,
+        objective_values=[10.0 - candidate_id],
+        constraints_satisfied=True,
+    )
+    result.candidate_id = candidate_id
+    result.grid_rank = grid_rank
+    result.selection_sources = ["objective"]
+    result.is_objective_selected = True
+    return result
+
+
+def _grid_post_process_engine(*, dsr: bool = False, ft: bool = False, st: bool = False) -> WalkForwardEngine:
+    wf_config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        is_period_days=20,
+        oos_period_days=5,
+        warmup_bars=5,
+        dsr_config=DSRConfig(enabled=dsr, top_k=1) if dsr else None,
+        post_process=PostProcessConfig(enabled=ft, ft_period_days=5, ft_threshold_pct=-99.0) if ft else None,
+        stress_test_config=StressTestConfig(enabled=st, top_k=1) if st else None,
+    )
+    return WalkForwardEngine(
+        wf_config,
+        {
+            "optimization_mode": "grid",
+            "fixed_params": {"dateFilter": False},
+            "risk_per_trade_pct": 2.0,
+            "contract_size": 0.01,
+            "commission_rate": 0.0005,
+            "worker_processes": 1,
+            "filter_min_profit": False,
+            "min_profit_threshold": 0.0,
+            "score_config": {},
+        },
+        {},
+        csv_file_path="dummy.csv",
+    )
+
+
+def test_grid_wfa_forward_test_selects_ft_rank_one(monkeypatch):
+    objective = _grid_post_process_result(1, "objective", grid_rank=1)
+    ft_selected_trial = 1
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", lambda *args, **kwargs: ([objective], [objective]))
+
+    def fake_forward_test(**kwargs):
+        assert [item.params["source"] for item in kwargs["optuna_results"]] == ["objective"]
+        return [
+            SimpleNamespace(
+                trial_number=ft_selected_trial,
+                source_rank=1,
+                params={"source": "ft", "maType3": "HMA", "maLength3": 101},
+                ft_rank=1,
+                ft_passes_threshold=True,
+                ft_net_profit_pct=3.0,
+                ft_max_drawdown_pct=1.0,
+                ft_total_trades=2,
+                ft_win_rate=50.0,
+            )
+        ]
+
+    monkeypatch.setattr("core.walkforward_engine.run_forward_test", fake_forward_test)
+    engine = _grid_post_process_engine(ft=True)
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC"),
+    )
+
+    pipeline = engine._run_window_is_pipeline(df, df.index[0], df.index[19], 1)
+
+    assert pipeline.best_params_source == "forward_test"
+    assert pipeline.best_params["source"] == "ft"
+    assert pipeline.best_trial_number == ft_selected_trial
+    assert pipeline.selection_chain["forward_test"] == ft_selected_trial
+    assert pipeline.module_status["forward_test"]["reason"] is None
+
+
+def test_grid_wfa_dsr_then_forward_test_uses_dsr_candidates(monkeypatch):
+    objective = _grid_post_process_result(1, "objective", grid_rank=1)
+    dsr_base = _grid_post_process_result(5, "dsr", grid_rank=5)
+    dsr_base.selection_sources = ["objective", "dsr"]
+    dsr_base.is_dsr_selected = True
+    dsr_base.dsr_rank = 1
+    dsr_base.dsr_probability = 0.99
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", lambda *args, **kwargs: ([objective, dsr_base], [objective, dsr_base]))
+
+    def fake_forward_test(**kwargs):
+        assert [item.params["source"] for item in kwargs["optuna_results"]] == ["dsr"]
+        return [
+            SimpleNamespace(
+                trial_number=5,
+                source_rank=1,
+                params={"source": "ft_after_dsr", "maType3": "HMA", "maLength3": 105},
+                ft_rank=1,
+                ft_passes_threshold=True,
+                ft_net_profit_pct=4.0,
+                ft_max_drawdown_pct=1.0,
+                ft_total_trades=2,
+                ft_win_rate=50.0,
+            )
+        ]
+
+    monkeypatch.setattr("core.walkforward_engine.run_forward_test", fake_forward_test)
+    engine = _grid_post_process_engine(dsr=True, ft=True)
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC"),
+    )
+
+    pipeline = engine._run_window_is_pipeline(df, df.index[0], df.index[19], 1)
+
+    assert pipeline.best_params_source == "forward_test"
+    assert pipeline.best_params["source"] == "ft_after_dsr"
+    assert pipeline.selection_chain["dsr"] == 5
+    assert pipeline.selection_chain["forward_test"] == 5
+
+
+def test_grid_wfa_stress_test_selects_st_rank_one(monkeypatch):
+    objective = _grid_post_process_result(1, "objective", grid_rank=1)
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", lambda *args, **kwargs: ([objective], [objective]))
+
+    def fake_stress_test(**kwargs):
+        assert [item.params["source"] for item in kwargs["source_results"]] == ["objective"]
+        return [
+            SimpleNamespace(
+                trial_number=1,
+                source_rank=1,
+                st_rank=1,
+                status="ok",
+                base_net_profit_pct=2.0,
+                base_max_drawdown_pct=1.0,
+                base_romad=2.0,
+                base_sharpe_ratio=None,
+            )
+        ], {}
+
+    monkeypatch.setattr("core.walkforward_engine.run_stress_test", fake_stress_test)
+    engine = _grid_post_process_engine(st=True)
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC"),
+    )
+
+    pipeline = engine._run_window_is_pipeline(df, df.index[0], df.index[19], 1)
+
+    assert pipeline.best_params_source == "stress_test"
+    assert pipeline.best_params["source"] == "objective"
+    assert pipeline.best_trial_number == 1
+    assert pipeline.selection_chain["stress_test"] == 1
+
+
+def test_grid_wfa_forward_test_then_stress_test_uses_ft_candidates(monkeypatch):
+    objective = _grid_post_process_result(1, "objective", grid_rank=1)
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", lambda *args, **kwargs: ([objective], [objective]))
+
+    def fake_forward_test(**kwargs):
+        return [
+            SimpleNamespace(
+                trial_number=1,
+                source_rank=1,
+                params={"source": "ft", "maType3": "HMA", "maLength3": 101},
+                ft_rank=1,
+                ft_passes_threshold=True,
+                ft_net_profit_pct=4.0,
+                ft_max_drawdown_pct=1.0,
+                ft_total_trades=2,
+                ft_win_rate=50.0,
+            )
+        ]
+
+    def fake_stress_test(**kwargs):
+        assert [item.params["source"] for item in kwargs["source_results"]] == ["ft"]
+        return [
+            SimpleNamespace(
+                trial_number=1,
+                source_rank=1,
+                st_rank=1,
+                status="ok",
+                base_net_profit_pct=2.0,
+                base_max_drawdown_pct=1.0,
+                base_romad=2.0,
+                base_sharpe_ratio=None,
+            )
+        ], {}
+
+    monkeypatch.setattr("core.walkforward_engine.run_forward_test", fake_forward_test)
+    monkeypatch.setattr("core.walkforward_engine.run_stress_test", fake_stress_test)
+    engine = _grid_post_process_engine(ft=True, st=True)
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC"),
+    )
+
+    pipeline = engine._run_window_is_pipeline(df, df.index[0], df.index[19], 1)
+
+    assert pipeline.best_params_source == "stress_test"
+    assert pipeline.best_params["source"] == "ft"
+    assert pipeline.selection_chain["forward_test"] == 1
+    assert pipeline.selection_chain["stress_test"] == 1
 
 
 def test_fixed_wfa_is_failure_includes_window_context(monkeypatch):
