@@ -2,6 +2,7 @@ import math
 import shutil
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,9 @@ from core.grid_engine import (
     format_compact_count,
     parse_grid_budget,
     rank_grid_results,
+    resolve_grid_selection_config,
+    run_grid_optimization,
+    validate_grid_config,
 )
 from core.backtest_engine import StrategyResult
 from core.metrics import calculate_basic
@@ -174,6 +178,11 @@ def test_server_build_config_parses_grid_fields_and_select_options():
         "grid_top_candidates": 3,
         "grid_allocation_method": "manual",
         "grid_manual_percents": {"cc_only": 100, "tbands_only": 0, "both": 0},
+        "grid_fast_objectives": ["net_profit_pct", "max_drawdown_pct"],
+        "grid_fast_primary_objective": "max_drawdown_pct",
+        "grid_slow_refinement_enabled": True,
+        "grid_slow_objectives": ["sharpe_ratio", "ulcer_index"],
+        "grid_slow_primary_objective": "sharpe_ratio",
     }
 
     config = _build_optimization_config(
@@ -190,6 +199,11 @@ def test_server_build_config_parses_grid_fields_and_select_options():
     assert config.grid_top_candidates == 3
     assert config.fixed_params["maType3_options"] == ["SMA", "EMA"]
     assert config.fixed_params["useCloseCount_options"] == [True]
+    assert config.grid_fast_objectives == ["net_profit_pct", "max_drawdown_pct"]
+    assert config.grid_fast_primary_objective == "max_drawdown_pct"
+    assert config.grid_slow_refinement_enabled is True
+    assert config.grid_slow_objectives == ["sharpe_ratio", "ulcer_index"]
+    assert config.grid_slow_primary_objective == "sharpe_ratio"
 
     config = _grid_config(fixed_params={
         "maType3_options": ["SMA"],
@@ -348,6 +362,25 @@ def test_grid_dsr_trial_count_uses_all_finite_sharpe_candidates():
     assert dsr_summary["dsr_n_trials"] == 2
 
 
+def test_grid_dsr_tie_break_uses_previous_module_rank_before_grid_rank(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    first_previous = _synthetic_grid_result(10, net_profit=10.0, sharpe=1.0, grid_rank=50)
+    second_previous = _synthetic_grid_result(11, net_profit=10.0, sharpe=1.0, grid_rank=1)
+    monkeypatch.setattr(grid_engine, "calculate_expected_max_sharpe", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(grid_engine, "calculate_dsr", lambda *_args, **_kwargs: 0.5)
+
+    selected, _summary = apply_fast_grid_dsr(
+        [first_previous, second_previous],
+        reference_results=[first_previous, second_previous],
+        top_k=2,
+    )
+
+    assert [item.candidate_id for item in selected] == [10, 11]
+    assert [item.dsr_source_rank for item in selected] == [1, 2]
+    assert [item.grid_rank for item in selected] == [50, 1]
+
+
 def test_grid_display_score_does_not_filter_objective_or_dsr_union():
     objective = _synthetic_grid_result(1, net_profit=10.0, sharpe=0.1, grid_rank=1)
     objective.selection_sources = ["objective"]
@@ -389,6 +422,234 @@ def test_multi_objective_ranking_uses_secondary_objective_before_semantic_key():
     )
 
     assert [item.candidate_id for item in ranked] == [2, 1]
+
+
+def test_fast_grid_default_objective_preserves_net_profit_order():
+    results = [
+        _synthetic_grid_result(1, net_profit=5.0),
+        _synthetic_grid_result(2, net_profit=12.0),
+        _synthetic_grid_result(3, net_profit=8.0),
+    ]
+
+    ranked = rank_grid_results(
+        results,
+        objectives=["net_profit_pct"],
+        primary_objective=None,
+        constraints=[],
+    )
+
+    assert [item.candidate_id for item in ranked] == [2, 3, 1]
+    assert [item.grid_rank for item in ranked] == [1, 2, 3]
+
+
+def test_multi_objective_grid_ranks_feasible_pareto_before_non_pareto_and_infeasible():
+    constraints = [ConstraintSpec(metric="net_profit_pct", threshold=0.0, enabled=True)]
+    pareto_low_dd = _synthetic_grid_result(1, net_profit=12.0, win_rate=55.0)
+    pareto_low_dd.max_drawdown_pct = 1.0
+    pareto_profit = _synthetic_grid_result(2, net_profit=20.0, win_rate=50.0)
+    pareto_profit.max_drawdown_pct = 3.0
+    dominated = _synthetic_grid_result(3, net_profit=10.0, win_rate=40.0)
+    dominated.max_drawdown_pct = 5.0
+    infeasible = _synthetic_grid_result(4, net_profit=-1.0, win_rate=90.0)
+    infeasible.max_drawdown_pct = 0.5
+
+    ranked = rank_grid_results(
+        [dominated, infeasible, pareto_profit, pareto_low_dd],
+        objectives=["max_drawdown_pct", "win_rate", "net_profit_pct"],
+        primary_objective="max_drawdown_pct",
+        constraints=constraints,
+    )
+
+    assert [item.candidate_id for item in ranked] == [1, 2, 3, 4]
+    assert ranked[0].is_pareto_optimal is True
+    assert ranked[1].is_pareto_optimal is True
+    assert ranked[2].is_pareto_optimal is False
+    assert ranked[-1].constraints_satisfied is False
+
+
+def test_grid_selection_config_rejects_advanced_fast_and_composite_objectives(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    monkeypatch.setattr(
+        grid_engine,
+        "_load_backend",
+        lambda strategy_id: SimpleNamespace(NUMBA_AVAILABLE=True, NUMBA_IMPORT_ERROR=None),
+    )
+
+    with pytest.raises(ValueError, match="fast screening"):
+        validate_grid_config(_grid_config(grid_fast_objectives=["sharpe_ratio"]))
+
+    with pytest.raises(ValueError, match="Composite Score"):
+        validate_grid_config(_grid_config(grid_fast_objectives=["composite_score"]))
+
+    config = _grid_config(
+        grid_fast_objectives=["net_profit_pct", "max_drawdown_pct"],
+        grid_fast_primary_objective="max_drawdown_pct",
+        grid_slow_refinement_enabled=True,
+        grid_slow_objectives=["sharpe_ratio", "ulcer_index"],
+        grid_slow_primary_objective="sharpe_ratio",
+    )
+    selection = resolve_grid_selection_config(config)
+
+    assert selection.fast_objectives == ["net_profit_pct", "max_drawdown_pct"]
+    assert selection.fast_primary_objective == "max_drawdown_pct"
+    assert selection.final_objectives == ["sharpe_ratio", "ulcer_index"]
+    validate_grid_config(config)
+
+
+def test_grid_slow_refinement_reranks_only_grid_top_candidates(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    fast_results = [
+        _synthetic_grid_result(1, net_profit=30.0, sharpe=0.1, grid_rank=1),
+        _synthetic_grid_result(2, net_profit=20.0, sharpe=0.2, grid_rank=2),
+        _synthetic_grid_result(3, net_profit=10.0, sharpe=3.0, grid_rank=3),
+    ]
+    for result, sqn in zip(fast_results, [1.0, 9.0, 99.0]):
+        result.sqn = sqn
+        result.ulcer_index = 1.0
+
+    class FakeBackend:
+        NUMBA_AVAILABLE = True
+        NUMBA_IMPORT_ERROR = None
+
+        @staticmethod
+        def build_parameter_space(config):  # noqa: ARG004
+            return SimpleNamespace(mode_space_sizes={"cc_only": 3, "tbands_only": 0, "both": 0})
+
+        @staticmethod
+        def build_preview(space, allocation):  # noqa: ARG004
+            return {"total_space": 3, "coverage_pct": 100.0}
+
+        @staticmethod
+        def generate_candidates(config, space, allocation, seed):  # noqa: ARG004
+            return SimpleNamespace(candidates=[SimpleNamespace(candidate_id=i) for i in (1, 2, 3)], diagnostics={})
+
+        @staticmethod
+        def prepare_fast_data(df, trade_start_idx, candidates):  # noqa: ARG004
+            return SimpleNamespace(ma_cache_build_seconds=0.0, ma_cache_entries=0, ma_cache_estimated_mb=0.0)
+
+        @staticmethod
+        def evaluate_candidates(data, candidates, *, n_workers, needs_dsr):  # noqa: ARG004
+            return list(fast_results)
+
+        @staticmethod
+        def validate_selected_candidates(df, trade_start_idx, selected_fast, *, tolerances, fail_on_error):  # noqa: ARG004
+            validated = []
+            for fast in selected_fast:
+                slow = _synthetic_grid_result(
+                    fast.candidate_id,
+                    net_profit=fast.net_profit_pct,
+                    sharpe=fast.sharpe_ratio or 0.0,
+                    grid_rank=fast.grid_rank,
+                )
+                slow.sqn = getattr(fast, "sqn", None)
+                slow.ulcer_index = getattr(fast, "ulcer_index", None)
+                slow.semantic_key = fast.semantic_key
+                slow.candidate_id = fast.candidate_id
+                slow.optuna_trial_number = fast.candidate_id
+                validated.append(slow)
+            return validated
+
+    monkeypatch.setattr(grid_engine, "_load_backend", lambda strategy_id: FakeBackend)
+    monkeypatch.setattr(
+        grid_engine,
+        "_prepare_grid_dataframe",
+        lambda config: (pd.DataFrame({"Close": [1.0]}), 0, None, None),
+    )
+
+    results, study_id = run_grid_optimization(
+        _grid_config(
+            grid_top_candidates=2,
+            grid_diversity_enabled=False,
+            grid_slow_refinement_enabled=True,
+            grid_slow_objectives=["sqn"],
+            grid_slow_primary_objective=None,
+        ),
+        save_study=False,
+    )
+
+    assert study_id is None
+    assert [item.candidate_id for item in results] == [2, 1]
+    assert {item.candidate_id for item in results} == {1, 2}
+    assert all(item.candidate_id != 3 for item in results)
+    assert [item.slow_refinement_rank for item in results] == [1, 2]
+    assert [item.grid_rank for item in results] == [2, 1]
+
+
+def test_fast_only_grid_preserves_pareto_metadata_after_slow_validation(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    fast_results = [
+        _synthetic_grid_result(1, net_profit=20.0, grid_rank=1),
+        _synthetic_grid_result(2, net_profit=15.0, grid_rank=2),
+        _synthetic_grid_result(3, net_profit=10.0, grid_rank=3),
+    ]
+    fast_results[0].max_drawdown_pct = 2.0
+    fast_results[1].max_drawdown_pct = 1.0
+    fast_results[2].max_drawdown_pct = 5.0
+
+    class FakeBackend:
+        NUMBA_AVAILABLE = True
+        NUMBA_IMPORT_ERROR = None
+
+        @staticmethod
+        def build_parameter_space(config):  # noqa: ARG004
+            return SimpleNamespace(mode_space_sizes={"cc_only": 3, "tbands_only": 0, "both": 0})
+
+        @staticmethod
+        def build_preview(space, allocation):  # noqa: ARG004
+            return {"total_space": 3, "coverage_pct": 100.0}
+
+        @staticmethod
+        def generate_candidates(config, space, allocation, seed):  # noqa: ARG004
+            return SimpleNamespace(candidates=[SimpleNamespace(candidate_id=i) for i in (1, 2, 3)], diagnostics={})
+
+        @staticmethod
+        def prepare_fast_data(df, trade_start_idx, candidates):  # noqa: ARG004
+            return SimpleNamespace(ma_cache_build_seconds=0.0, ma_cache_entries=0, ma_cache_estimated_mb=0.0)
+
+        @staticmethod
+        def evaluate_candidates(data, candidates, *, n_workers, needs_dsr):  # noqa: ARG004
+            return list(fast_results)
+
+        @staticmethod
+        def validate_selected_candidates(df, trade_start_idx, selected_fast, *, tolerances, fail_on_error):  # noqa: ARG004
+            validated = []
+            for fast in selected_fast:
+                slow = _synthetic_grid_result(
+                    fast.candidate_id,
+                    net_profit=fast.net_profit_pct,
+                    grid_rank=fast.grid_rank,
+                )
+                slow.max_drawdown_pct = fast.max_drawdown_pct
+                slow.semantic_key = fast.semantic_key
+                slow.candidate_id = fast.candidate_id
+                slow.optuna_trial_number = fast.candidate_id
+                validated.append(slow)
+            return validated
+
+    monkeypatch.setattr(grid_engine, "_load_backend", lambda strategy_id: FakeBackend)
+    monkeypatch.setattr(
+        grid_engine,
+        "_prepare_grid_dataframe",
+        lambda config: (pd.DataFrame({"Close": [1.0]}), 0, None, None),
+    )
+    config = _grid_config(
+        grid_top_candidates=3,
+        grid_diversity_enabled=False,
+        grid_fast_objectives=["max_drawdown_pct", "net_profit_pct"],
+        grid_fast_primary_objective="max_drawdown_pct",
+        grid_slow_refinement_enabled=False,
+    )
+
+    results, study_id = run_grid_optimization(config, save_study=False)
+
+    assert study_id is None
+    assert [item.candidate_id for item in results] == [2, 1, 3]
+    assert [item.is_pareto_optimal for item in results] == [True, True, False]
+    assert [item.grid_rank for item in results] == [1, 2, 3]
+    assert config.grid_summary["pareto_front_size"] == 2
 
 
 @pytest.mark.skipif(not fast_grid.NUMBA_AVAILABLE, reason="Numba is required for fast Grid parity")
@@ -481,6 +742,46 @@ def test_fast_grid_dsr_disabled_does_not_populate_dsr_fields():
 
     assert not hasattr(result, "dsr_track_length")
     assert "dsr_track_length" not in result.fast_metrics
+
+
+def test_fast_to_slow_validation_preserves_dsr_source_rank(monkeypatch):
+    fast_result = _synthetic_grid_result(7, net_profit=10.0, sharpe=1.0, grid_rank=3)
+    fast_result.dsr_source_rank = 4
+
+    def fake_run_single_combination(args):  # noqa: ARG001
+        return OptimizationResult(
+            params=dict(fast_result.params),
+            net_profit_pct=fast_result.net_profit_pct,
+            max_drawdown_pct=fast_result.max_drawdown_pct,
+            total_trades=fast_result.total_trades,
+            winning_trades=fast_result.winning_trades,
+            losing_trades=fast_result.losing_trades,
+            win_rate=fast_result.win_rate,
+            profit_factor=fast_result.profit_factor,
+            romad=fast_result.romad,
+            optuna_trial_number=fast_result.candidate_id,
+        )
+
+    monkeypatch.setattr(fast_grid, "_run_single_combination", fake_run_single_combination)
+    validated = fast_grid.validate_selected_candidates(
+        pd.DataFrame({"Close": [1.0, 1.0]}),
+        0,
+        [fast_result],
+        tolerances={
+            "net_profit_pct_abs": 0.001,
+            "max_drawdown_pct_abs": 0.001,
+            "romad_abs": 0.005,
+            "win_rate_abs": 0.001,
+            "total_trades_abs": 0.0,
+            "winning_trades_abs": 0.0,
+            "losing_trades_abs": 0.0,
+            "max_consecutive_losses_abs": 0.0,
+        },
+        fail_on_error=False,
+    )
+
+    assert validated[0].dsr_source_rank == 4
+    assert validated[0].grid_rank == 3
 
 
 @pytest.mark.skipif(not fast_grid.NUMBA_AVAILABLE, reason="Numba is required for fast Grid parallelism")

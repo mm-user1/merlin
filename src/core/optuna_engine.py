@@ -111,6 +111,11 @@ class OptimizationConfig:
     grid_strict_validation: bool = True
     grid_needs_dsr: bool = False
     grid_dsr_top_k: int = 20
+    grid_fast_objectives: List[str] = field(default_factory=list)
+    grid_fast_primary_objective: Optional[str] = None
+    grid_slow_refinement_enabled: bool = False
+    grid_slow_objectives: List[str] = field(default_factory=list)
+    grid_slow_primary_objective: Optional[str] = None
 
 
 @dataclass

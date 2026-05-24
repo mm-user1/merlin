@@ -62,6 +62,7 @@ def test_grid_start_page_label_and_marker_are_compact():
     results_html = (repo_root / "src" / "ui" / "templates" / "results.html").read_text(encoding="utf-8")
     results_tables_js = (repo_root / "src" / "ui" / "static" / "js" / "results-tables.js").read_text(encoding="utf-8")
     analytics_js = (repo_root / "src" / "ui" / "static" / "js" / "analytics.js").read_text(encoding="utf-8")
+    queue_js = (repo_root / "src" / "ui" / "static" / "js" / "queue.js").read_text(encoding="utf-8")
 
     assert "Grid v1 is supported only for S03 Reversal v10." not in ui_handlers_js
     assert "S03 Reversal v10 only" in ui_handlers_js
@@ -69,6 +70,14 @@ def test_grid_start_page_label_and_marker_are_compact():
     assert "&#9660;" in index_html
     assert "GRID SETTINGS" in index_html
     assert 'id="optuna-settings-section"' in results_html
+    assert 'id="gridFastObjectivesSection"' in index_html
+    assert 'class="grid-fast-objective-checkbox"' in index_html
+    assert 'id="gridSlowRefinementEnabled"' in index_html
+    assert 'class="grid-slow-objective-checkbox"' in index_html
+    assert "collectGridObjectiveSelection('fast')" in ui_handlers_js
+    assert "grid_fast_objectives" in ui_handlers_js
+    assert "applyQueueGridConfig" in queue_js
+    assert "grid_slow_refinement_enabled" in queue_js
     assert results_html.index('id="optuna-settings-section"') < results_html.index("Optuna Settings")
     assert results_html.index('id="optuna-settings-section"') > results_html.index("Status &amp; Controls")
     assert "setElementVisible('optuna-settings-section', gridRows.length === 0)" in results_tables_js
@@ -1722,6 +1731,9 @@ def test_study_endpoint_includes_single_grid_settings(client):
         assert rows["Parameter Space"] == "20 combinations"
         assert rows["Coverage"] == "50.0%"
         assert rows["Workers"] == "6 Numba threads"
+        assert rows["Fast Objectives"] == "Net Profit %"
+        assert rows["Fast Primary"] == "Net Profit %"
+        assert rows["Slow Refinement"] == "Off"
         assert rows["Runtime"] == "26s"
         assert allocation["Allocation"] == "Auto sqrt-space"
         assert allocation["CC only"] == "4 / 8 | 50.0% | LHS"
@@ -2714,6 +2726,8 @@ def test_analytics_summary_includes_wfa_grid_settings_from_config(client):
         assert rows["Seed"] == "42"
         assert rows["Top Candidates"] == "5"
         assert rows["Workers"] == "6 Numba threads"
+        assert rows["Fast Objectives"] == "Net Profit %"
+        assert rows["Slow Refinement"] == "Off"
         assert "Runtime" not in rows
         assert allocation_rows["Allocation"] == "Auto sqrt-space"
         assert any("|" in value for key, value in allocation_rows.items() if key != "Allocation")

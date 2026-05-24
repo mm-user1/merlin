@@ -26,6 +26,8 @@ from core.backtest_engine import (
 )
 from core.export import export_trades_csv
 from core.grid_engine import (
+    GRID_SUPPORTED_FAST_OBJECTIVES,
+    GRID_SUPPORTED_SLOW_OBJECTIVES,
     format_compact_count,
     format_coverage_pct,
     parse_grid_budget,
@@ -1053,6 +1055,28 @@ def _grid_mode_label(value: Any) -> str:
     return labels.get(str(value or "").strip(), str(value or "").strip() or "-")
 
 
+def _grid_objective_list(
+    config: Dict[str, Any],
+    key: str,
+    *aliases: str,
+    fallback: Optional[List[str]] = None,
+) -> List[str]:
+    raw = _grid_config_value(config, key, *aliases)
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        values = []
+    if not values and fallback:
+        values = [str(item).strip() for item in fallback if str(item).strip()]
+    return values
+
+
+def _grid_objectives_label(values: List[str]) -> str:
+    if not values:
+        return "-"
+    return ", ".join(OBJECTIVE_DISPLAY_NAMES.get(value, value) for value in values)
+
+
 def _format_duration_seconds(seconds: Any) -> str:
     total = _grid_setting_number(seconds)
     if total is None or total < 0:
@@ -1085,6 +1109,11 @@ def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[
         "grid_allocation_method": ("allocation_method",),
         "grid_min_quota": ("min_quota",),
         "grid_manual_percents": ("manual_percents",),
+        "grid_fast_objectives": ("fast_objectives",),
+        "grid_fast_primary_objective": ("fast_primary_objective",),
+        "grid_slow_refinement_enabled": ("slow_refinement_enabled",),
+        "grid_slow_objectives": ("slow_objectives",),
+        "grid_slow_primary_objective": ("slow_primary_objective",),
     }
     for target, source_keys in aliases.items():
         if payload.get(target) in (None, ""):
@@ -1182,6 +1211,40 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         or _grid_config_value(config, "grid_allocation_method", "allocation_method", "gridAllocationMethod")
         or "auto_sqrt_space"
     )
+    legacy_objectives = _grid_objective_list(config, "objectives", fallback=["net_profit_pct"])
+    fast_objectives = _grid_objective_list(
+        config,
+        "grid_fast_objectives",
+        "fast_objectives",
+        "gridFastObjectives",
+        fallback=legacy_objectives or ["net_profit_pct"],
+    )
+    fast_primary = (
+        _grid_config_value(config, "grid_fast_primary_objective", "fast_primary_objective", "gridFastPrimaryObjective")
+        or _grid_config_value(config, "primary_objective")
+        or (fast_objectives[0] if fast_objectives else None)
+    )
+    slow_refinement_enabled = _grid_setting_bool(
+        _grid_config_value(
+            config,
+            "grid_slow_refinement_enabled",
+            "slow_refinement_enabled",
+            "gridSlowRefinementEnabled",
+        ),
+        False,
+    )
+    slow_objectives = _grid_objective_list(
+        config,
+        "grid_slow_objectives",
+        "slow_objectives",
+        "gridSlowObjectives",
+        fallback=legacy_objectives or ["net_profit_pct"],
+    )
+    slow_primary = (
+        _grid_config_value(config, "grid_slow_primary_objective", "slow_primary_objective", "gridSlowPrimaryObjective")
+        or _grid_config_value(config, "primary_objective")
+        or (slow_objectives[0] if slow_objectives else None)
+    )
 
     mode_rows = []
     generations = set()
@@ -1261,7 +1324,23 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "key": "Validation",
             "val": "Strict fast-vs-slow" if strict_validation else "Non-strict fast-vs-slow",
         },
+        {"key": "Fast Objectives", "val": _grid_objectives_label(fast_objectives)},
+        {
+            "key": "Fast Primary",
+            "val": OBJECTIVE_DISPLAY_NAMES.get(str(fast_primary), str(fast_primary)) if fast_primary else "-",
+        },
+        {"key": "Slow Refinement", "val": "On" if slow_refinement_enabled else "Off"},
     ]
+    if slow_refinement_enabled:
+        rows.extend(
+            [
+                {"key": "Slow Objectives", "val": _grid_objectives_label(slow_objectives)},
+                {
+                    "key": "Slow Primary",
+                    "val": OBJECTIVE_DISPLAY_NAMES.get(str(slow_primary), str(slow_primary)) if slow_primary else "-",
+                },
+            ]
+        )
     if not is_wfa_grid:
         rows.append(
             {
@@ -1733,6 +1812,56 @@ def _resolve_wfa_period(
     return start, end, None
 
 
+def _payload_objective_list(payload: Dict[str, Any], *keys: str, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    for key in keys:
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+            if values:
+                break
+    if not values and fallback:
+        values = [str(item).strip() for item in fallback if str(item).strip()]
+    return values or ["net_profit_pct"]
+
+
+def _payload_primary_objective(
+    payload: Dict[str, Any],
+    objectives: List[str],
+    *keys: str,
+    fallback: Any = None,
+) -> Optional[str]:
+    primary = ""
+    for key in keys:
+        raw = payload.get(key)
+        if raw not in (None, ""):
+            primary = str(raw).strip()
+            break
+    if not primary and fallback not in (None, ""):
+        primary = str(fallback).strip()
+    if len(objectives) <= 1:
+        return None
+    return primary or None
+
+
+def _validate_grid_objective_payload(
+    *,
+    stage: str,
+    objectives: List[str],
+    primary_objective: Optional[str],
+    supported: set,
+) -> None:
+    if not objectives:
+        raise ValueError(f"At least 1 Grid {stage} objective is required.")
+    unsupported = sorted(set(objectives) - supported)
+    if unsupported:
+        if "composite_score" in unsupported:
+            raise ValueError("Composite Score is not supported in Grid v1.")
+        raise ValueError(f"Grid {stage} objective is not available: " + ", ".join(unsupported))
+    if len(objectives) > 1 and primary_objective not in objectives:
+        raise ValueError(f"Primary Grid {stage} objective must be one of the selected objectives.")
+
+
 def _build_optimization_config(
     csv_file,
     payload: dict,
@@ -2134,6 +2263,54 @@ def _build_optimization_config(
         payload.get("grid_strict_validation", payload.get("gridStrictValidation", True)),
         True,
     )
+    grid_fast_objectives = _payload_objective_list(
+        payload,
+        "grid_fast_objectives",
+        "gridFastObjectives",
+        fallback=objectives or ["net_profit_pct"],
+    )
+    grid_fast_primary_objective = _payload_primary_objective(
+        payload,
+        grid_fast_objectives,
+        "grid_fast_primary_objective",
+        "gridFastPrimaryObjective",
+        fallback=primary_objective,
+    )
+    grid_slow_refinement_enabled = _parse_bool(
+        payload.get("grid_slow_refinement_enabled", payload.get("gridSlowRefinementEnabled", False)),
+        False,
+    )
+    grid_slow_objectives = _payload_objective_list(
+        payload,
+        "grid_slow_objectives",
+        "gridSlowObjectives",
+        fallback=objectives or ["net_profit_pct"],
+    )
+    grid_slow_primary_objective = _payload_primary_objective(
+        payload,
+        grid_slow_objectives,
+        "grid_slow_primary_objective",
+        "gridSlowPrimaryObjective",
+        fallback=primary_objective,
+    )
+    if optimization_mode == "grid":
+        _validate_grid_objective_payload(
+            stage="fast screening",
+            objectives=grid_fast_objectives,
+            primary_objective=grid_fast_primary_objective,
+            supported=GRID_SUPPORTED_FAST_OBJECTIVES,
+        )
+        if grid_slow_refinement_enabled:
+            _validate_grid_objective_payload(
+                stage="slow refinement",
+                objectives=grid_slow_objectives,
+                primary_objective=grid_slow_primary_objective,
+                supported=GRID_SUPPORTED_SLOW_OBJECTIVES,
+            )
+        objectives = list(grid_fast_objectives)
+        primary_objective = grid_fast_primary_objective
+        optuna_params["objectives"] = list(objectives)
+        optuna_params["primary_objective"] = primary_objective
 
     config = OptimizationConfig(
         csv_file=csv_file,
@@ -2177,6 +2354,11 @@ def _build_optimization_config(
         grid_diversity_enabled=grid_diversity_enabled,
         grid_diversity_max_per_group=grid_diversity_max_per_group,
         grid_strict_validation=grid_strict_validation,
+        grid_fast_objectives=grid_fast_objectives,
+        grid_fast_primary_objective=grid_fast_primary_objective,
+        grid_slow_refinement_enabled=grid_slow_refinement_enabled,
+        grid_slow_objectives=grid_slow_objectives,
+        grid_slow_primary_objective=grid_slow_primary_objective,
     )
 
     if optimization_mode == "optuna":

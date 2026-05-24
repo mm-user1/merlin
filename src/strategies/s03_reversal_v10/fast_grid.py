@@ -1422,12 +1422,16 @@ def validate_selected_candidates(
             "selection_sources",
             "is_objective_selected",
             "is_dsr_selected",
+            "is_pareto_optimal",
+            "dominance_rank",
             "dsr_probability",
             "dsr_rank",
             "dsr_skewness",
             "dsr_kurtosis",
             "dsr_track_length",
             "dsr_luck_share_pct",
+            "dsr_source_rank",
+            "slow_refinement_rank",
         ):
             if hasattr(fast_result, attr):
                 setattr(slow_result, attr, getattr(fast_result, attr, None))

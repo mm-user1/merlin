@@ -39,6 +39,26 @@ const GRID_SUPPORTED_OBJECTIVES = new Set([
   'profit_factor',
   'win_rate'
 ]);
+const GRID_SUPPORTED_SLOW_OBJECTIVES = new Set([
+  ...GRID_SUPPORTED_OBJECTIVES,
+  'sharpe_ratio',
+  'sortino_ratio',
+  'sqn',
+  'ulcer_index',
+  'consistency_score'
+]);
+const GRID_OBJECTIVE_LABELS = {
+  net_profit_pct: 'Net Profit %',
+  max_drawdown_pct: 'Max DD %',
+  sharpe_ratio: 'Sharpe Ratio',
+  sortino_ratio: 'Sortino Ratio',
+  romad: 'RoMaD',
+  profit_factor: 'Profit Factor',
+  win_rate: 'Win Rate %',
+  sqn: 'SQN',
+  ulcer_index: 'Ulcer Index',
+  consistency_score: 'Consistency'
+};
 const GRID_SUPPORTED_CONSTRAINTS = new Set([
   'total_trades',
   'net_profit_pct',
@@ -939,12 +959,100 @@ function getGridBudgetValue() {
 }
 
 function getSelectedObjectiveKeys() {
+  if (getOptimizerMode() === 'grid') {
+    return collectGridObjectiveSelection('fast').objectives;
+  }
   if (window.OptunaUI && typeof window.OptunaUI.collectObjectives === 'function') {
     return window.OptunaUI.collectObjectives().objectives || [];
   }
   return Array.from(document.querySelectorAll('.objective-checkbox'))
     .filter((cb) => cb.checked)
     .map((cb) => cb.dataset.objective);
+}
+
+function getGridObjectiveElements(kind) {
+  const selector = kind === 'slow' ? '.grid-slow-objective-checkbox' : '.grid-fast-objective-checkbox';
+  return Array.from(document.querySelectorAll(selector));
+}
+
+function getGridPrimarySelect(kind) {
+  return document.getElementById(kind === 'slow' ? 'gridSlowPrimaryObjective' : 'gridFastPrimaryObjective');
+}
+
+function getGridPrimaryRow(kind) {
+  return document.getElementById(kind === 'slow' ? 'gridSlowPrimaryObjectiveRow' : 'gridFastPrimaryObjectiveRow');
+}
+
+function collectGridObjectiveSelection(kind = 'fast') {
+  const checkboxes = getGridObjectiveElements(kind);
+  const objectives = checkboxes
+    .filter((checkbox) => checkbox.checked && !checkbox.disabled)
+    .map((checkbox) => checkbox.dataset.objective)
+    .filter(Boolean);
+  const primarySelect = getGridPrimarySelect(kind);
+  const primary = objectives.length > 1 && primarySelect ? primarySelect.value : null;
+  return { objectives, primary_objective: primary };
+}
+
+function updateGridObjectiveSelection(kind = 'fast') {
+  const checkboxes = getGridObjectiveElements(kind);
+  if (!checkboxes.length) return;
+
+  const enabled = kind !== 'slow' || Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
+  const supported = kind === 'slow' ? GRID_SUPPORTED_SLOW_OBJECTIVES : GRID_SUPPORTED_OBJECTIVES;
+  const selected = [];
+
+  checkboxes.forEach((checkbox) => {
+    const objective = checkbox.dataset.objective;
+    const unsupported = !supported.has(objective);
+    checkbox.disabled = !enabled || unsupported;
+    if (unsupported || (!enabled && kind === 'slow')) {
+      checkbox.title = unsupported ? 'This objective is not supported for Grid.' : '';
+    } else {
+      checkbox.title = '';
+    }
+    if (checkbox.checked && !checkbox.disabled) {
+      selected.push(objective);
+    }
+    const item = checkbox.closest('.objective-item');
+    if (item) {
+      item.classList.toggle('disabled', checkbox.disabled);
+      item.title = checkbox.title || '';
+    }
+  });
+
+  if (!selected.length) {
+    const firstAvailable = checkboxes.find((checkbox) => !checkbox.disabled);
+    if (firstAvailable) {
+      firstAvailable.checked = true;
+      selected.push(firstAvailable.dataset.objective);
+    }
+  }
+
+  const row = getGridPrimaryRow(kind);
+  const select = getGridPrimarySelect(kind);
+  if (row && select) {
+    if (enabled && selected.length > 1) {
+      row.style.display = 'flex';
+      const previous = select.value;
+      select.innerHTML = '';
+      selected.forEach((objective) => {
+        const option = document.createElement('option');
+        option.value = objective;
+        option.textContent = GRID_OBJECTIVE_LABELS[objective] || objective;
+        select.appendChild(option);
+      });
+      select.value = selected.includes(previous) ? previous : selected[0];
+    } else {
+      row.style.display = 'none';
+      select.innerHTML = '';
+    }
+  }
+}
+
+function syncGridObjectiveUi() {
+  updateGridObjectiveSelection('fast');
+  updateGridObjectiveSelection('slow');
 }
 
 function getEnabledGridMetadata() {
@@ -1045,8 +1153,11 @@ function validateOptimizerForm(config) {
       errors.push(gridMeta.reason || 'Grid mode is unavailable for this strategy.');
     }
 
-    const objectives = getSelectedObjectiveKeys();
-    objectives.forEach((objective) => {
+    const fastSelection = collectGridObjectiveSelection('fast');
+    if (!fastSelection.objectives.length) {
+      errors.push('Select at least one Grid fast objective.');
+    }
+    fastSelection.objectives.forEach((objective) => {
       if (!GRID_SUPPORTED_OBJECTIVES.has(objective)) {
         errors.push(
           objective === 'composite_score'
@@ -1055,6 +1166,31 @@ function validateOptimizerForm(config) {
         );
       }
     });
+    if (
+      fastSelection.objectives.length > 1
+      && !fastSelection.objectives.includes(fastSelection.primary_objective)
+    ) {
+      errors.push('Primary Grid fast objective must be selected.');
+    }
+
+    const slowEnabled = Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
+    const slowSelection = collectGridObjectiveSelection('slow');
+    if (slowEnabled) {
+      if (!slowSelection.objectives.length) {
+        errors.push('Select at least one Grid slow objective when slow refinement is enabled.');
+      }
+      slowSelection.objectives.forEach((objective) => {
+        if (!GRID_SUPPORTED_SLOW_OBJECTIVES.has(objective)) {
+          errors.push(`${objective}: objective is not supported for Grid slow refinement.`);
+        }
+      });
+      if (
+        slowSelection.objectives.length > 1
+        && !slowSelection.objectives.includes(slowSelection.primary_objective)
+      ) {
+        errors.push('Primary Grid slow objective must be selected.');
+      }
+    }
 
     const constraints = window.OptunaUI ? window.OptunaUI.collectConstraints() : [];
     constraints.filter((item) => item && item.enabled).forEach((item) => {
@@ -1363,11 +1499,16 @@ function buildGridConfig(state) {
   const diversityMaxRaw = Number(document.getElementById('gridDiversityMaxPerGroup')?.value);
   const allocationMethod = Array.from(document.querySelectorAll('input[name="gridAllocationMethod"]'))
     .find((radio) => radio.checked)?.value || 'auto_sqrt_space';
+  const fastObjectiveConfig = collectGridObjectiveSelection('fast');
+  const slowObjectiveConfig = collectGridObjectiveSelection('slow');
+  const slowRefinementEnabled = Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
 
   const config = {
     ...optunaCompatibleConfig,
     ...gridBaseConfig,
     optimization_mode: 'grid',
+    objectives: fastObjectiveConfig.objectives,
+    primary_objective: fastObjectiveConfig.primary_objective,
     grid_budget: budget,
     grid_seed: Number.isFinite(seedRaw) ? Math.max(0, Math.round(seedRaw)) : 42,
     grid_top_candidates: Number.isFinite(topRaw) ? Math.max(1, Math.min(500, Math.round(topRaw))) : 10,
@@ -1382,7 +1523,12 @@ function buildGridConfig(state) {
     grid_diversity_max_per_group: Number.isFinite(diversityMaxRaw)
       ? Math.max(1, Math.min(50, Math.round(diversityMaxRaw)))
       : 2,
-    grid_strict_validation: Boolean(document.getElementById('gridStrictValidation')?.checked)
+    grid_strict_validation: Boolean(document.getElementById('gridStrictValidation')?.checked),
+    grid_fast_objectives: fastObjectiveConfig.objectives,
+    grid_fast_primary_objective: fastObjectiveConfig.primary_objective,
+    grid_slow_refinement_enabled: slowRefinementEnabled,
+    grid_slow_objectives: slowObjectiveConfig.objectives,
+    grid_slow_primary_objective: slowObjectiveConfig.primary_objective
   };
 
   return config;
@@ -1500,7 +1646,12 @@ async function runWalkForward({ sources, state }) {
       budget: config.grid_budget,
       seed: config.grid_seed,
       topCandidates: config.grid_top_candidates,
-      allocationMethod: config.grid_allocation_method
+      allocationMethod: config.grid_allocation_method,
+      fastObjectives: config.grid_fast_objectives,
+      fastPrimaryObjective: config.grid_fast_primary_objective,
+      slowRefinementEnabled: config.grid_slow_refinement_enabled,
+      slowObjectives: config.grid_slow_objectives,
+      slowPrimaryObjective: config.grid_slow_primary_objective
     } : null,
     wfa: {
       isPeriodDays: Number(wfIsPeriodDays),
@@ -1997,10 +2148,12 @@ function syncOptimizerModeUI() {
   syncGridBudgetHelp();
   syncGridAllocationUi();
   syncGridParameterOptions();
+  syncGridObjectiveUi();
   syncGridObjectiveAndConstraintUi();
 
   if (window.OptunaUI && typeof window.OptunaUI.updateObjectiveSelection === 'function') {
     window.OptunaUI.updateObjectiveSelection();
+    syncGridObjectiveUi();
     syncGridObjectiveAndConstraintUi();
   }
 
@@ -2523,7 +2676,8 @@ function bindGridControls() {
     'gridManualBoth',
     'gridDiversityEnabled',
     'gridDiversityMaxPerGroup',
-    'gridStrictValidation'
+    'gridStrictValidation',
+    'gridSlowRefinementEnabled'
   ].forEach((id) => {
     const element = document.getElementById(id);
     if (!element || element.dataset.gridBound === '1') return;
@@ -2545,8 +2699,34 @@ function bindGridControls() {
     });
   }
 
+  const slowToggle = document.getElementById('gridSlowRefinementEnabled');
+  if (slowToggle && slowToggle.dataset.gridSlowToggleBound !== '1') {
+    slowToggle.dataset.gridSlowToggleBound = '1';
+    slowToggle.addEventListener('change', () => {
+      syncGridObjectiveUi();
+      scheduleGridPreviewUpdate();
+    });
+  }
+
+  document.querySelectorAll('.grid-fast-objective-checkbox, .grid-slow-objective-checkbox').forEach((checkbox) => {
+    if (!checkbox || checkbox.dataset.gridObjectiveBound === '1') return;
+    checkbox.dataset.gridObjectiveBound = '1';
+    checkbox.addEventListener('change', () => {
+      syncGridObjectiveUi();
+      scheduleGridPreviewUpdate();
+    });
+  });
+
+  ['gridFastPrimaryObjective', 'gridSlowPrimaryObjective'].forEach((id) => {
+    const select = document.getElementById(id);
+    if (!select || select.dataset.gridObjectiveBound === '1') return;
+    select.dataset.gridObjectiveBound = '1';
+    select.addEventListener('change', scheduleGridPreviewUpdate);
+  });
+
   syncGridBudgetHelp();
   syncGridAllocationUi();
+  syncGridObjectiveUi();
 }
 
 function setCheckboxGroup(group, selectedTypes) {

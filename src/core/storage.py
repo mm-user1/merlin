@@ -2537,8 +2537,17 @@ def save_grid_study_to_db(
     except Exception:
         pass
 
-    objectives = list(getattr(config, "objectives", None) or ["net_profit_pct"])
-    primary_objective = getattr(config, "primary_objective", None)
+    objectives = list(
+        grid_summary.get("selection_objectives")
+        or grid_summary.get("objectives")
+        or getattr(config, "objectives", None)
+        or ["net_profit_pct"]
+    )
+    primary_objective = (
+        grid_summary.get("selection_primary_objective")
+        or grid_summary.get("primary_objective")
+        or getattr(config, "primary_objective", None)
+    )
     directions = [OBJECTIVE_DIRECTIONS.get(obj, "maximize") for obj in objectives]
     constraints_payload = list(getattr(config, "constraints", []) or [])
     resolved_score_config = score_config or getattr(config, "score_config", None) or {}

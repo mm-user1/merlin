@@ -532,6 +532,7 @@ def test_grid_wfa_dsr_candidate_replaces_objective_winner(monkeypatch):
     dsr_result.selection_sources = ["dsr"]
     dsr_result.is_dsr_selected = True
     dsr_result.dsr_rank = 1
+    dsr_result.dsr_source_rank = 2
     dsr_result.dsr_probability = 0.99
 
     def fake_grid_window(self, df_slice, start_time, end_time):  # noqa: ARG001
@@ -583,6 +584,8 @@ def test_grid_wfa_dsr_candidate_replaces_objective_winner(monkeypatch):
     assert window.best_params["source"] == "dsr"
     assert window.is_best_trial_number == 5
     assert window.selection_chain["dsr"] == 5
+    assert window.dsr_trials[0]["source_rank"] == 2
+    assert window.dsr_trials[0]["module_rank"] == 1
     assert backtest_params
     assert all(params.get("source") == "dsr" for params in backtest_params)
 
@@ -630,6 +633,39 @@ def _grid_post_process_engine(*, dsr: bool = False, ft: bool = False, st: bool =
         {},
         csv_file_path="dummy.csv",
     )
+
+
+def test_grid_wfa_optuna_is_trials_include_grid_audit_module_metrics():
+    engine = _grid_post_process_engine()
+    grid_result = _grid_post_process_result(3, "objective", grid_rank=123)
+    grid_result.slow_refinement_rank = 4
+    grid_result.grid_mode_name = "both"
+    grid_result.grid_generation_mode = "lhs"
+    grid_result.diversity_group = "both|HMA|275"
+    grid_result.selection_sources = ["objective"]
+
+    trials = engine._convert_optuna_results_for_storage([grid_result], 1)
+    module_metrics = trials[0]["module_metrics"]
+
+    assert module_metrics == {
+        "grid_rank": 123,
+        "slow_refinement_rank": 4,
+        "grid_mode_name": "both",
+        "grid_generation_mode": "lhs",
+        "diversity_group": "both|HMA|275",
+        "selection_sources": ["objective"],
+    }
+
+    optuna_result = OptimizationResult(
+        params={"source": "optuna"},
+        net_profit_pct=1.0,
+        max_drawdown_pct=1.0,
+        total_trades=1,
+        optuna_trial_number=1,
+    )
+    optuna_trials = engine._convert_optuna_results_for_storage([optuna_result], 1)
+
+    assert "module_metrics" not in optuna_trials[0]
 
 
 def test_grid_wfa_forward_test_selects_ft_rank_one(monkeypatch):

@@ -771,9 +771,13 @@ class WalkForwardEngine:
         best_params_source = "grid" if is_grid_mode else "optuna_is"
 
         optuna_map: Dict[int, Any] = {}
-        for result in (optimization_all_results or optimization_results):
+        for result in optimization_results:
             trial_num = getattr(result, "optuna_trial_number", None)
             if trial_num is not None:
+                optuna_map[int(trial_num)] = result
+        for result in (optimization_all_results or []):
+            trial_num = getattr(result, "optuna_trial_number", None)
+            if trial_num is not None and int(trial_num) not in optuna_map:
                 optuna_map[int(trial_num)] = result
 
         optuna_is_trials = self._convert_optuna_results_for_storage(
@@ -2201,34 +2205,56 @@ class WalkForwardEngine:
                 trial_number = index
 
             params = getattr(result, "params", {}) or {}
-            trials.append(
-                {
-                    "trial_number": trial_number,
-                    "params": params,
-                    "param_id": self._create_param_id(params),
-                    "source_rank": None,
-                    "module_rank": index + 1,
-                    "net_profit_pct": getattr(result, "net_profit_pct", None),
-                    "max_drawdown_pct": getattr(result, "max_drawdown_pct", None),
-                    "total_trades": getattr(result, "total_trades", None),
-                    "win_rate": getattr(result, "win_rate", None),
-                    "profit_factor": getattr(result, "profit_factor", None),
-                    "romad": getattr(result, "romad", None),
-                    "sharpe_ratio": getattr(result, "sharpe_ratio", None),
-                    "sortino_ratio": getattr(result, "sortino_ratio", None),
-                    "sqn": getattr(result, "sqn", None),
-                    "ulcer_index": getattr(result, "ulcer_index", None),
-                    "consistency_score": getattr(result, "consistency_score", None),
-                    "max_consecutive_losses": getattr(result, "max_consecutive_losses", None),
-                    "composite_score": getattr(result, "score", None),
-                    "objective_values": getattr(result, "objective_values", []) or [],
-                    "constraint_values": getattr(result, "constraint_values", []) or [],
-                    "constraints_satisfied": getattr(result, "constraints_satisfied", None),
-                    "is_pareto_optimal": getattr(result, "is_pareto_optimal", None),
-                    "dominance_rank": getattr(result, "dominance_rank", None),
-                }
-            )
+            trial = {
+                "trial_number": trial_number,
+                "params": params,
+                "param_id": self._create_param_id(params),
+                "source_rank": None,
+                "module_rank": index + 1,
+                "net_profit_pct": getattr(result, "net_profit_pct", None),
+                "max_drawdown_pct": getattr(result, "max_drawdown_pct", None),
+                "total_trades": getattr(result, "total_trades", None),
+                "win_rate": getattr(result, "win_rate", None),
+                "profit_factor": getattr(result, "profit_factor", None),
+                "romad": getattr(result, "romad", None),
+                "sharpe_ratio": getattr(result, "sharpe_ratio", None),
+                "sortino_ratio": getattr(result, "sortino_ratio", None),
+                "sqn": getattr(result, "sqn", None),
+                "ulcer_index": getattr(result, "ulcer_index", None),
+                "consistency_score": getattr(result, "consistency_score", None),
+                "max_consecutive_losses": getattr(result, "max_consecutive_losses", None),
+                "composite_score": getattr(result, "score", None),
+                "objective_values": getattr(result, "objective_values", []) or [],
+                "constraint_values": getattr(result, "constraint_values", []) or [],
+                "constraints_satisfied": getattr(result, "constraints_satisfied", None),
+                "is_pareto_optimal": getattr(result, "is_pareto_optimal", None),
+                "dominance_rank": getattr(result, "dominance_rank", None),
+            }
+            module_metrics = self._grid_module_metrics_for_result(result)
+            if module_metrics is not None:
+                trial["module_metrics"] = module_metrics
+            trials.append(trial)
         return trials
+
+    @staticmethod
+    def _grid_module_metrics_for_result(result: Any) -> Optional[Dict[str, Any]]:
+        if getattr(result, "grid_rank", None) is None:
+            return None
+        selection_sources = getattr(result, "selection_sources", None)
+        if isinstance(selection_sources, (list, tuple)):
+            normalized_sources = [str(item) for item in selection_sources]
+        elif isinstance(selection_sources, str) and selection_sources:
+            normalized_sources = [selection_sources]
+        else:
+            normalized_sources = []
+        return {
+            "grid_rank": getattr(result, "grid_rank", None),
+            "slow_refinement_rank": getattr(result, "slow_refinement_rank", None),
+            "grid_mode_name": getattr(result, "grid_mode_name", None),
+            "grid_generation_mode": getattr(result, "grid_generation_mode", None),
+            "diversity_group": getattr(result, "diversity_group", None),
+            "selection_sources": normalized_sources,
+        }
 
     def _convert_dsr_results_for_storage(
         self, results: List[Any], limit: int
@@ -2468,6 +2494,13 @@ class WalkForwardEngine:
             grid_diversity_enabled=bool(self.base_config_template.get("grid_diversity_enabled", True)),
             grid_diversity_max_per_group=int(self.base_config_template.get("grid_diversity_max_per_group", 2)),
             grid_strict_validation=bool(self.base_config_template.get("grid_strict_validation", True)),
+            grid_fast_objectives=list(self.base_config_template.get("grid_fast_objectives") or []),
+            grid_fast_primary_objective=self.base_config_template.get("grid_fast_primary_objective"),
+            grid_slow_refinement_enabled=bool(
+                self.base_config_template.get("grid_slow_refinement_enabled", False)
+            ),
+            grid_slow_objectives=list(self.base_config_template.get("grid_slow_objectives") or []),
+            grid_slow_primary_objective=self.base_config_template.get("grid_slow_primary_objective"),
             grid_needs_dsr=bool(self.config.dsr_config and self.config.dsr_config.enabled),
             grid_dsr_top_k=int(
                 getattr(self.config.dsr_config, "top_k", 20)

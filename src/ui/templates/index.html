@@ -616,6 +616,107 @@
                       </div>
                     </div>
 
+                    <div class="optuna-objectives-section" id="gridFastObjectivesSection">
+                      <div class="section-title" style="margin-top: 0;">FAST OBJECTIVES</div>
+                      <div class="objective-hint">Select 1-5 objectives.</div>
+                      <div class="objective-grid" id="gridFastObjectiveGrid">
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-fast-objective-checkbox" data-objective="net_profit_pct" checked />
+                          Net Profit %
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-fast-objective-checkbox" data-objective="max_drawdown_pct" />
+                          Max DD %
+                          <span class="objective-direction">&darr; min</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-fast-objective-checkbox" data-objective="romad" />
+                          RoMaD
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-fast-objective-checkbox" data-objective="profit_factor" />
+                          Profit Factor
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-fast-objective-checkbox" data-objective="win_rate" />
+                          Win Rate %
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                      </div>
+                      <div class="primary-objective-row" id="gridFastPrimaryObjectiveRow" style="display: none;">
+                        <label for="gridFastPrimaryObjective">Primary Objective:</label>
+                        <select id="gridFastPrimaryObjective" style="width: 220px;"></select>
+                      </div>
+                    </div>
+
+                    <div class="optuna-objectives-section" id="gridSlowObjectivesSection">
+                      <div class="checkbox-group" style="margin-bottom: 10px;">
+                        <input type="checkbox" id="gridSlowRefinementEnabled" />
+                        <label for="gridSlowRefinementEnabled">Enable slow refinement</label>
+                      </div>
+                      <div class="section-title" style="margin-top: 0;">SLOW OBJECTIVES</div>
+                      <div class="objective-hint">Select 1-10 objectives when slow refinement is enabled.</div>
+                      <div class="objective-grid" id="gridSlowObjectiveGrid">
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="net_profit_pct" checked />
+                          Net Profit %
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="max_drawdown_pct" />
+                          Max DD %
+                          <span class="objective-direction">&darr; min</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="sharpe_ratio" />
+                          Sharpe Ratio
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="sortino_ratio" />
+                          Sortino Ratio
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="romad" />
+                          RoMaD
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="profit_factor" />
+                          Profit Factor
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="win_rate" />
+                          Win Rate %
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="sqn" />
+                          SQN
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="ulcer_index" />
+                          Ulcer Index
+                          <span class="objective-direction">&darr; min</span>
+                        </label>
+                        <label class="objective-item">
+                          <input type="checkbox" class="grid-slow-objective-checkbox" data-objective="consistency_score" />
+                          Consistency
+                          <span class="objective-direction">&uarr; max</span>
+                        </label>
+                      </div>
+                      <div class="primary-objective-row" id="gridSlowPrimaryObjectiveRow" style="display: none;">
+                        <label for="gridSlowPrimaryObjective">Primary Objective:</label>
+                        <select id="gridSlowPrimaryObjective" style="width: 220px;"></select>
+                      </div>
+                    </div>
+
                     <div class="section-title" style="margin-top: 12px;">Mode Allocation</div>
                     <div class="grid-allocation-controls">
                       <label class="optimizer-mode-option" for="gridAllocAuto">

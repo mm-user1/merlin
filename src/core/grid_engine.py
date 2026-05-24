@@ -40,12 +40,20 @@ logger = logging.getLogger(__name__)
 
 GRID_MODE = "grid"
 GRID_STRATEGY_ID = "s03_reversal_v10"
-GRID_SUPPORTED_OBJECTIVES = {
+GRID_SUPPORTED_FAST_OBJECTIVES = {
     "net_profit_pct",
     "max_drawdown_pct",
     "romad",
     "profit_factor",
     "win_rate",
+}
+GRID_SUPPORTED_OBJECTIVES = GRID_SUPPORTED_FAST_OBJECTIVES
+GRID_SUPPORTED_SLOW_OBJECTIVES = GRID_SUPPORTED_FAST_OBJECTIVES | {
+    "sharpe_ratio",
+    "sortino_ratio",
+    "sqn",
+    "ulcer_index",
+    "consistency_score",
 }
 GRID_SUPPORTED_CONSTRAINTS = {
     "total_trades",
@@ -57,6 +65,23 @@ GRID_SUPPORTED_CONSTRAINTS = {
     "max_consecutive_losses",
 }
 MODE_ORDER = ("cc_only", "tbands_only", "both")
+
+
+@dataclass(frozen=True)
+class GridSelectionConfig:
+    fast_objectives: List[str]
+    fast_primary_objective: Optional[str]
+    slow_refinement_enabled: bool
+    slow_objectives: List[str]
+    slow_primary_objective: Optional[str]
+
+    @property
+    def final_objectives(self) -> List[str]:
+        return self.slow_objectives if self.slow_refinement_enabled else self.fast_objectives
+
+    @property
+    def final_primary_objective(self) -> Optional[str]:
+        return self.slow_primary_objective if self.slow_refinement_enabled else self.fast_primary_objective
 
 
 @dataclass
@@ -362,6 +387,80 @@ def _load_backend(strategy_id: str):
     return fast_grid
 
 
+def _objective_list(value: Any, fallback: Sequence[str]) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        objectives = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        objectives = []
+    if not objectives:
+        objectives = [str(item).strip() for item in fallback if str(item).strip()]
+    return objectives or ["net_profit_pct"]
+
+
+def _primary_objective(value: Any, objectives: Sequence[str], fallback: Any = None) -> Optional[str]:
+    primary = str(value).strip() if value not in (None, "") else ""
+    if not primary and fallback not in (None, ""):
+        primary = str(fallback).strip()
+    if len(objectives) <= 1:
+        return None
+    return primary or None
+
+
+def resolve_grid_selection_config(config: OptimizationConfig) -> GridSelectionConfig:
+    """Resolve explicit Grid objective settings with old-study fallback."""
+    legacy_objectives = _objective_list(getattr(config, "objectives", None), ["net_profit_pct"])
+    legacy_primary = getattr(config, "primary_objective", None)
+
+    fast_objectives = _objective_list(
+        getattr(config, "grid_fast_objectives", None),
+        legacy_objectives,
+    )
+    fast_primary = _primary_objective(
+        getattr(config, "grid_fast_primary_objective", None),
+        fast_objectives,
+        legacy_primary,
+    )
+
+    slow_refinement_enabled = bool(getattr(config, "grid_slow_refinement_enabled", False))
+    slow_objectives = _objective_list(
+        getattr(config, "grid_slow_objectives", None),
+        legacy_objectives,
+    )
+    slow_primary = _primary_objective(
+        getattr(config, "grid_slow_primary_objective", None),
+        slow_objectives,
+        legacy_primary,
+    )
+
+    return GridSelectionConfig(
+        fast_objectives=fast_objectives,
+        fast_primary_objective=fast_primary,
+        slow_refinement_enabled=slow_refinement_enabled,
+        slow_objectives=slow_objectives,
+        slow_primary_objective=slow_primary,
+    )
+
+
+def _validate_objective_set(
+    *,
+    stage: str,
+    objectives: Sequence[str],
+    primary_objective: Optional[str],
+    supported: set[str],
+) -> None:
+    if not objectives:
+        raise ValueError(f"At least 1 Grid {stage} objective is required.")
+    unsupported = sorted(set(objectives) - supported)
+    if unsupported:
+        if "composite_score" in unsupported:
+            raise ValueError("Composite Score is not supported in Grid v1.")
+        raise ValueError(
+            f"Grid {stage} objective is not available: " + ", ".join(unsupported)
+        )
+    if len(objectives) > 1 and primary_objective not in objectives:
+        raise ValueError(f"Primary Grid {stage} objective must be one of the selected objectives.")
+
+
 def validate_grid_config(config: OptimizationConfig) -> None:
     if not supports_fast_grid(config.strategy_id):
         raise ValueError("Grid mode is supported only for S03 Reversal v10.")
@@ -371,21 +470,20 @@ def validate_grid_config(config: OptimizationConfig) -> None:
         reason = getattr(backend, "NUMBA_IMPORT_ERROR", None) or "Numba import failed"
         raise ValueError(f"Grid mode requires Numba: {reason}")
 
-    objectives = list(getattr(config, "objectives", []) or ["net_profit_pct"])
-    if not objectives:
-        raise ValueError("At least 1 objective is required.")
-    unsupported_objectives = sorted(set(objectives) - GRID_SUPPORTED_OBJECTIVES)
-    if unsupported_objectives:
-        if "composite_score" in unsupported_objectives:
-            raise ValueError("Composite Score is not supported in Grid v1.")
-        raise ValueError(
-            "Grid v1 objective is not available for fast screening: "
-            + ", ".join(unsupported_objectives)
+    selection = resolve_grid_selection_config(config)
+    _validate_objective_set(
+        stage="fast screening",
+        objectives=selection.fast_objectives,
+        primary_objective=selection.fast_primary_objective,
+        supported=GRID_SUPPORTED_FAST_OBJECTIVES,
+    )
+    if selection.slow_refinement_enabled:
+        _validate_objective_set(
+            stage="slow refinement",
+            objectives=selection.slow_objectives,
+            primary_objective=selection.slow_primary_objective,
+            supported=GRID_SUPPORTED_SLOW_OBJECTIVES,
         )
-
-    primary = getattr(config, "primary_objective", None)
-    if len(objectives) > 1 and primary not in objectives:
-        raise ValueError("Primary objective must be one of the selected Grid objectives.")
 
     constraint_specs = _build_constraint_specs(getattr(config, "constraints", []) or [])
     unsupported_constraints = sorted(
@@ -481,6 +579,8 @@ def rank_grid_results(
     objectives: Sequence[str],
     primary_objective: Optional[str],
     constraints: Sequence[ConstraintSpec],
+    stage_label: str = "Grid screening",
+    rank_attr: str = "grid_rank",
 ) -> List[OptimizationResult]:
     if not results:
         return []
@@ -501,7 +601,11 @@ def rank_grid_results(
         valid.append(result)
 
     if not valid:
-        raise ValueError("Grid screening produced no candidates with usable objective values.")
+        objective_list = ", ".join(objectives)
+        raise ValueError(
+            f"{stage_label} produced no candidates with usable objective values"
+            + (f" for: {objective_list}" if objective_list else ".")
+        )
 
     _mark_grid_pareto(valid, mo_config)
 
@@ -543,7 +647,7 @@ def rank_grid_results(
         ),
     )
     for rank, item in enumerate(ranked, 1):
-        setattr(item, "grid_rank", rank)
+        setattr(item, rank_attr, rank)
     return ranked
 
 
@@ -706,13 +810,21 @@ def apply_fast_grid_dsr(
         if sr_value is not None:
             candidates.append(result)
 
+    def rank_value(item: OptimizationResult, attr: str) -> int:
+        try:
+            value = int(getattr(item, attr, 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else 10**9
+
     def dsr_sort_key(item: OptimizationResult) -> Tuple[Any, ...]:
         probability = getattr(item, "dsr_probability", None)
         probability_key = float(probability) if probability is not None else float("-inf")
         return (
             probability is None,
             -probability_key,
-            int(getattr(item, "grid_rank", 0) or 0),
+            rank_value(item, "dsr_source_rank"),
+            rank_value(item, "grid_rank"),
             str(getattr(item, "semantic_key", "") or ""),
             int(getattr(item, "candidate_id", getattr(item, "optuna_trial_number", 0)) or 0),
         )
@@ -808,6 +920,16 @@ def build_grid_dsr_results(
     return payloads
 
 
+def _preserve_fast_selection_metadata(
+    selected_fast: Sequence[OptimizationResult],
+    selected_results: Sequence[OptimizationResult],
+) -> None:
+    for fast_result, slow_result in zip(selected_fast, selected_results):
+        for attr in ("is_pareto_optimal", "dominance_rank"):
+            if hasattr(fast_result, attr):
+                setattr(slow_result, attr, getattr(fast_result, attr, None))
+
+
 def _refresh_selected_metrics(
     results: Sequence[OptimizationResult],
     *,
@@ -867,8 +989,11 @@ def run_grid_optimization(
     backend = _load_backend(config.strategy_id)
     settings = _settings_from_config(config)
     constraints = _build_constraint_specs(getattr(config, "constraints", []) or [])
-    objectives = list(getattr(config, "objectives", []) or ["net_profit_pct"])
-    primary_objective = getattr(config, "primary_objective", None)
+    selection_config = resolve_grid_selection_config(config)
+    fast_objectives = selection_config.fast_objectives
+    fast_primary_objective = selection_config.fast_primary_objective
+    final_objectives = selection_config.final_objectives
+    final_primary_objective = selection_config.final_primary_objective
     needs_dsr = bool(getattr(config, "grid_needs_dsr", False))
 
     started = time.time()
@@ -909,9 +1034,10 @@ def run_grid_optimization(
 
     ranked_fast = rank_grid_results(
         all_fast_results,
-        objectives=objectives,
-        primary_objective=primary_objective,
+        objectives=fast_objectives,
+        primary_objective=fast_primary_objective,
         constraints=constraints,
+        stage_label="Grid fast screening",
     )
     selected_fast, diversity_metadata = apply_diversity_cap(
         ranked_fast,
@@ -921,18 +1047,50 @@ def run_grid_optimization(
     )
     objective_selected_count = len(selected_fast)
 
+    validation_started = time.time()
+    selected_results = backend.validate_selected_candidates(
+        df,
+        trade_start_idx,
+        selected_fast,
+        tolerances=settings.validation_tolerances,
+        fail_on_error=settings.strict_validation,
+    )
+    _preserve_fast_selection_metadata(selected_fast, selected_results)
+    timings["slow_validation_seconds"] = time.time() - validation_started
+
+    slow_refinement_started = time.time()
+    if selection_config.slow_refinement_enabled:
+        ranked_selected = rank_grid_results(
+            selected_results,
+            objectives=selection_config.slow_objectives,
+            primary_objective=selection_config.slow_primary_objective,
+            constraints=constraints,
+            stage_label="Grid slow refinement",
+            rank_attr="slow_refinement_rank",
+        )
+    else:
+        ranked_selected = _refresh_selected_metrics(
+            selected_results,
+            objectives=fast_objectives,
+            constraints=constraints,
+        )
+    timings["slow_refinement_seconds"] = time.time() - slow_refinement_started
+
+    for result in ranked_selected:
+        _add_selection_source(result, "objective")
+
     if needs_dsr:
         dsr_top_k = max(
             1,
             int(getattr(config, "grid_dsr_top_k", settings.top_candidates) or settings.top_candidates),
         )
-        dsr_selected_fast, dsr_metadata = apply_fast_grid_dsr(
-            selected_fast[:dsr_top_k],
+        dsr_selected, dsr_metadata = apply_fast_grid_dsr(
+            ranked_selected[:dsr_top_k],
             reference_results=ranked_fast,
             top_k=dsr_top_k,
         )
     else:
-        dsr_selected_fast = []
+        dsr_selected = []
         dsr_metadata = {
             "enabled": False,
             "top_k": None,
@@ -942,23 +1100,8 @@ def run_grid_optimization(
             "dsr_var_sharpe": None,
             "dsr_sr0": None,
         }
-    union_fast = _union_selected_candidates(selected_fast, dsr_selected_fast)
 
-    validation_started = time.time()
-    selected_results = backend.validate_selected_candidates(
-        df,
-        trade_start_idx,
-        union_fast,
-        tolerances=settings.validation_tolerances,
-        fail_on_error=settings.strict_validation,
-    )
-    timings["slow_validation_seconds"] = time.time() - validation_started
-
-    ranked_selected = _refresh_selected_metrics(
-        selected_results,
-        objectives=objectives,
-        constraints=constraints,
-    )
+    ranked_selected = _union_selected_candidates(ranked_selected, dsr_selected)
     ranked_selected = calculate_grid_display_scores(ranked_selected, getattr(config, "score_config", None))
     for result in ranked_selected:
         setattr(result, "optimizer_mode", GRID_MODE)
@@ -976,8 +1119,15 @@ def run_grid_optimization(
     summary = {
         "method": "Grid",
         "optimizer_mode": GRID_MODE,
-        "objectives": objectives,
-        "primary_objective": primary_objective,
+        "objectives": final_objectives,
+        "primary_objective": final_primary_objective,
+        "selection_objectives": final_objectives,
+        "selection_primary_objective": final_primary_objective,
+        "grid_fast_objectives": fast_objectives,
+        "grid_fast_primary_objective": fast_primary_objective,
+        "grid_slow_refinement_enabled": selection_config.slow_refinement_enabled,
+        "grid_slow_objectives": selection_config.slow_objectives,
+        "grid_slow_primary_objective": selection_config.slow_primary_objective,
         "requested_budget": allocation.requested_budget,
         "actual_budget": allocation.actual_budget,
         "unused_budget": allocation.unused_budget,
@@ -996,12 +1146,17 @@ def run_grid_optimization(
         "dsr_var_sharpe": dsr_metadata.get("dsr_var_sharpe"),
         "best_trial_number": getattr(ranked_selected[0], "candidate_id", None) if ranked_selected else None,
         "best_value": ranked_selected[0].objective_values[0] if ranked_selected and ranked_selected[0].objective_values else None,
-        "best_values": dict(zip(objectives, ranked_selected[0].objective_values)) if ranked_selected and len(objectives) > 1 else None,
-        "pareto_front_size": sum(1 for result in ranked_fast if getattr(result, "is_pareto_optimal", False))
-        if len(objectives) > 1
+        "best_values": dict(zip(final_objectives, ranked_selected[0].objective_values)) if ranked_selected and len(final_objectives) > 1 else None,
+        "pareto_front_size": sum(1 for result in ranked_selected if getattr(result, "is_pareto_optimal", False))
+        if len(final_objectives) > 1
         else None,
         "optimization_time_seconds": total_seconds,
         "grid": {
+            "fast_objectives": fast_objectives,
+            "fast_primary_objective": fast_primary_objective,
+            "slow_refinement_enabled": selection_config.slow_refinement_enabled,
+            "slow_objectives": selection_config.slow_objectives,
+            "slow_primary_objective": selection_config.slow_primary_objective,
             "preview": preview,
             "allocation": allocation.__dict__,
             "candidate_generation": candidate_set.diagnostics,

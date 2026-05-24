@@ -130,6 +130,22 @@ except ImportError:
     )
 
 
+def _objectives_for_route_validation(config_payload: Dict[str, Any]) -> Tuple[List[str], Optional[str]]:
+    mode = str(config_payload.get("optimization_mode", "optuna") or "optuna").strip().lower()
+    if mode != "grid":
+        return config_payload.get("objectives", []), config_payload.get("primary_objective")
+
+    objectives = config_payload.get("grid_fast_objectives") or config_payload.get("gridFastObjectives")
+    if not isinstance(objectives, list) or not objectives:
+        objectives = config_payload.get("objectives", []) or ["net_profit_pct"]
+    primary = (
+        config_payload.get("grid_fast_primary_objective")
+        or config_payload.get("gridFastPrimaryObjective")
+        or config_payload.get("primary_objective")
+    )
+    return objectives, primary
+
+
 def register_routes(app):
 
     @app.get("/api/optimization/status")
@@ -319,8 +335,7 @@ def register_routes(app):
         if not isinstance(post_process_payload, dict):
             post_process_payload = {}
 
-        objectives = config_payload.get("objectives", [])
-        primary_objective = config_payload.get("primary_objective")
+        objectives, primary_objective = _objectives_for_route_validation(config_payload)
         valid, error = validate_objectives_config(objectives, primary_objective)
         if not valid:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
@@ -479,6 +494,13 @@ def register_routes(app):
             "grid_diversity_enabled": bool(getattr(optimization_config, "grid_diversity_enabled", True)),
             "grid_diversity_max_per_group": int(getattr(optimization_config, "grid_diversity_max_per_group", 2)),
             "grid_strict_validation": bool(getattr(optimization_config, "grid_strict_validation", True)),
+            "grid_fast_objectives": list(getattr(optimization_config, "grid_fast_objectives", []) or []),
+            "grid_fast_primary_objective": getattr(optimization_config, "grid_fast_primary_objective", None),
+            "grid_slow_refinement_enabled": bool(
+                getattr(optimization_config, "grid_slow_refinement_enabled", False)
+            ),
+            "grid_slow_objectives": list(getattr(optimization_config, "grid_slow_objectives", []) or []),
+            "grid_slow_primary_objective": getattr(optimization_config, "grid_slow_primary_objective", None),
         }
         if post_process_payload:
             base_template["postProcess"] = post_process_payload
@@ -519,6 +541,13 @@ def register_routes(app):
                 "top_candidates": int(getattr(optimization_config, "grid_top_candidates", 10)),
                 "allocation_method": getattr(optimization_config, "grid_allocation_method", "auto_sqrt_space"),
                 "min_quota": float(getattr(optimization_config, "grid_min_quota", 0.10)),
+                "fast_objectives": list(getattr(optimization_config, "grid_fast_objectives", []) or []),
+                "fast_primary_objective": getattr(optimization_config, "grid_fast_primary_objective", None),
+                "slow_refinement_enabled": bool(
+                    getattr(optimization_config, "grid_slow_refinement_enabled", False)
+                ),
+                "slow_objectives": list(getattr(optimization_config, "grid_slow_objectives", []) or []),
+                "slow_primary_objective": getattr(optimization_config, "grid_slow_primary_objective", None),
             }
 
         try:
@@ -918,8 +947,7 @@ def register_routes(app):
         if not isinstance(post_process_payload, dict):
             post_process_payload = {}
 
-        objectives = config_payload.get("objectives", [])
-        primary_objective = config_payload.get("primary_objective")
+        objectives, primary_objective = _objectives_for_route_validation(config_payload)
         valid, error = validate_objectives_config(objectives, primary_objective)
         if not valid:
             return (error, HTTPStatus.BAD_REQUEST)
@@ -1209,8 +1237,8 @@ def register_routes(app):
                 except (TypeError, ValueError):
                     best_value_str = str(best_value)
 
-            objectives = getattr(optimization_config, "objectives", []) or []
-            primary_objective = getattr(optimization_config, "primary_objective", None)
+            objectives = summary.get("objectives") or getattr(optimization_config, "objectives", []) or []
+            primary_objective = summary.get("primary_objective") or getattr(optimization_config, "primary_objective", None)
             objective_label = (
                 OBJECTIVE_DISPLAY_NAMES.get(objectives[0], objectives[0])
                 if len(objectives) == 1
