@@ -377,6 +377,31 @@ Strategies are auto-discovered. Ensure:
 
 The strategy will appear in UI dropdown after server restart.
 
+## Optional: Add a Fast Grid Backend
+
+Merlin's Grid optimizer (`core/grid_engine.py`) supports deterministic, mode-aware
+parameter sweeps with optional Numba-accelerated fast screening. Optuna mode
+works for any strategy out of the box; Grid mode only becomes available for a
+strategy once it ships a dedicated fast backend module.
+
+See `src/strategies/s03_reversal_v10/fast_grid.py` for a complete reference. A
+fast backend typically provides:
+
+- `build_parameter_space(config)` — derive a `GridParameterSpace` from the
+  strategy's `config.json` (per-mode axes, bool group rules, fixed values).
+- `build_preview(space, allocation)` — describe the parameter space size, mode
+  allocation and coverage for the Start page Grid preview.
+- `generate_candidates(...)` — emit deterministic `GridCandidate` objects via
+  LHS-by-mode (or full enumeration where feasible).
+- A Numba inner loop that evaluates the restricted fast objective set
+  (`net_profit_pct`, `max_drawdown_pct`, `romad`, `profit_factor`, `win_rate`)
+  cheaply per candidate.
+- A slow-path validator that re-runs the top-N candidates through the regular
+  Python strategy using `core.optuna_engine._run_single_combination` to keep
+  scoring/constraints consistent with Optuna.
+
+If you only need Optuna optimization, you can skip this step.
+
 ## Reference: S04 StochRSI Example
 
 See `src/strategies/s04_stochrsi/` for a complete working example:
