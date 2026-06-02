@@ -590,6 +590,176 @@ def test_grid_wfa_dsr_candidate_replaces_objective_winner(monkeypatch):
     assert all(params.get("source") == "dsr" for params in backtest_params)
 
 
+def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=index,
+    )
+
+    def make_candidate(candidate_id: int, *, dsr_rank=None) -> OptimizationResult:
+        result = _grid_post_process_result(candidate_id, f"candidate-{candidate_id}", grid_rank=candidate_id)
+        result.dsr_skewness = 0.10 + candidate_id
+        result.dsr_kurtosis = 3.0 + candidate_id
+        result.dsr_track_length = 12 + candidate_id
+        result.dsr_probability = 0.90 - (candidate_id * 0.01)
+        result.dsr_luck_share_pct = 5.0 + candidate_id
+        if dsr_rank is not None:
+            result.is_dsr_selected = True
+            result.dsr_rank = dsr_rank
+            result.dsr_source_rank = candidate_id
+            result.selection_sources = ["objective", "dsr"]
+        return result
+
+    def fake_grid_window(self, df_slice, start_time, end_time):  # noqa: ARG001
+        candidates = [make_candidate(1, dsr_rank=1), make_candidate(2)]
+        summary = {
+            "valid_candidate_count": 2,
+            "selected_candidate_count": 2,
+            "grid": {
+                "dsr": {
+                    "enabled": True,
+                    "top_k": 2,
+                    "dsr_n_trials": 10,
+                    "dsr_mean_sharpe": 0.25,
+                    "dsr_var_sharpe": 0.04,
+                    "dsr_sr0": 0.70,
+                }
+            },
+        }
+        return candidates, list(candidates), summary
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", fake_grid_window)
+
+    wf_config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        is_period_days=10,
+        oos_period_days=5,
+        warmup_bars=5,
+        dsr_config=DSRConfig(enabled=True, top_k=1),
+    )
+    base_template = {
+        "optimization_mode": "grid",
+        "fixed_params": {"dateFilter": False},
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 1,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+    }
+    engine = WalkForwardEngine(wf_config, base_template, {})
+
+    class FakeStrategy:
+        @staticmethod
+        def run(df_slice, params, trade_start_idx):  # noqa: ARG001
+            return StrategyResult(
+                trades=[],
+                equity_curve=[100.0],
+                balance_curve=[100.0],
+                timestamps=[df_slice.index[min(trade_start_idx, len(df_slice) - 1)]],
+            )
+
+    engine.strategy_class = FakeStrategy
+    result, _study_id = engine.run_wf_optimization(df)
+
+    assert result.windows
+    for window in result.windows:
+        assert window.grid_dsr_enabled is True
+        assert window.grid_dsr_top_k == 2
+        assert window.grid_dsr_n_trials == 10
+        assert window.grid_dsr_mean_sharpe == pytest.approx(0.25)
+        assert window.grid_dsr_var_sharpe == pytest.approx(0.04)
+        assert window.grid_dsr_sr0 == pytest.approx(0.70)
+        assert window.grid_valid_candidate_count == 2
+        assert window.grid_selected_candidate_count == 2
+        for trial in window.optuna_is_trials:
+            module_metrics = trial["module_metrics"]
+            assert module_metrics["semantic_key"].startswith("candidate:")
+            assert module_metrics["candidate_id"] in {1, 2}
+            assert "dsr_skewness" in module_metrics
+            assert "dsr_kurtosis" in module_metrics
+            assert "dsr_track_length" in module_metrics
+
+
+def test_grid_wfa_dsr_disabled_leaves_replay_dsr_fields_empty(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100},
+        index=index,
+    )
+
+    def fake_grid_window(self, df_slice, start_time, end_time):  # noqa: ARG001
+        candidate = _grid_post_process_result(1, "candidate-1", grid_rank=1)
+        summary = {
+            "valid_candidate_count": 1,
+            "selected_candidate_count": 1,
+            "grid": {
+                "dsr": {
+                    "enabled": False,
+                    "top_k": None,
+                    "dsr_n_trials": None,
+                    "dsr_mean_sharpe": None,
+                    "dsr_var_sharpe": None,
+                    "dsr_sr0": None,
+                }
+            },
+        }
+        return [candidate], [candidate], summary
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_optuna_on_window", fake_grid_window)
+
+    wf_config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        is_period_days=10,
+        oos_period_days=5,
+        warmup_bars=5,
+    )
+    base_template = {
+        "optimization_mode": "grid",
+        "fixed_params": {"dateFilter": False},
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "worker_processes": 1,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+    }
+    engine = WalkForwardEngine(wf_config, base_template, {})
+
+    class FakeStrategy:
+        @staticmethod
+        def run(df_slice, params, trade_start_idx):  # noqa: ARG001
+            return StrategyResult(
+                trades=[],
+                equity_curve=[100.0],
+                balance_curve=[100.0],
+                timestamps=[df_slice.index[min(trade_start_idx, len(df_slice) - 1)]],
+            )
+
+    engine.strategy_class = FakeStrategy
+    result, _study_id = engine.run_wf_optimization(df)
+
+    assert result.windows
+    for window in result.windows:
+        assert window.grid_dsr_enabled is None
+        assert window.grid_dsr_top_k is None
+        assert window.grid_dsr_n_trials is None
+        assert window.grid_dsr_mean_sharpe is None
+        assert window.grid_dsr_var_sharpe is None
+        assert window.grid_dsr_sr0 is None
+        assert window.grid_valid_candidate_count == 1
+        assert window.grid_selected_candidate_count == 1
+        module_metrics = window.optuna_is_trials[0]["module_metrics"]
+        assert module_metrics["semantic_key"] == "candidate:1"
+        assert module_metrics["candidate_id"] == 1
+        assert "dsr_skewness" not in module_metrics
+        assert "dsr_kurtosis" not in module_metrics
+        assert "dsr_track_length" not in module_metrics
+
+
 def _grid_post_process_result(candidate_id: int, source: str, *, grid_rank: int) -> OptimizationResult:
     result = OptimizationResult(
         params={"source": source, "maType3": "HMA", "maLength3": 100 + candidate_id},
@@ -601,6 +771,7 @@ def _grid_post_process_result(candidate_id: int, source: str, *, grid_rank: int)
         constraints_satisfied=True,
     )
     result.candidate_id = candidate_id
+    result.semantic_key = f"candidate:{candidate_id}"
     result.grid_rank = grid_rank
     result.selection_sources = ["objective"]
     result.is_objective_selected = True
@@ -654,6 +825,8 @@ def test_grid_wfa_optuna_is_trials_include_grid_audit_module_metrics():
         "grid_generation_mode": "lhs",
         "diversity_group": "both|HMA|275",
         "selection_sources": ["objective"],
+        "semantic_key": "candidate:3",
+        "candidate_id": 3,
     }
 
     optuna_result = OptimizationResult(

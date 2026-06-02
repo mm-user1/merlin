@@ -15,7 +15,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -761,16 +761,9 @@ def _add_selection_source(result: OptimizationResult, source: str) -> None:
     setattr(result, f"is_{source}_selected", True)
 
 
-def apply_fast_grid_dsr(
-    candidate_results: Sequence[OptimizationResult],
-    *,
-    reference_results: Optional[Sequence[OptimizationResult]] = None,
-    top_k: int,
-) -> Tuple[List[OptimizationResult], Dict[str, Any]]:
-    """Compute fast DSR fields and select DSR top-K from eligible Grid candidates."""
-    top_k = max(1, int(top_k or 1))
-    references = list(reference_results if reference_results is not None else candidate_results)
-    eligible = list(candidate_results or [])[:top_k]
+def compute_grid_dsr_benchmark(reference_results: Sequence[OptimizationResult]) -> Dict[str, Any]:
+    """Compute the full-population Grid DSR benchmark used for candidate ranking."""
+    references = list(reference_results or [])
     finite_sharpes = [
         value
         for value in (_finite_float(getattr(result, "sharpe_ratio", None)) for result in references)
@@ -784,6 +777,34 @@ def apply_fast_grid_dsr(
     sr0 = None
     if var_sharpe is not None:
         sr0 = calculate_expected_max_sharpe(0.0, var_sharpe, len(finite_sharpes))
+
+    return {
+        "enabled": True,
+        "dsr_n_trials": len(finite_sharpes),
+        "dsr_mean_sharpe": mean_sharpe,
+        "dsr_var_sharpe": var_sharpe,
+        "dsr_sr0": sr0,
+    }
+
+
+def _benchmark_sr0(dsr_benchmark: Mapping[str, Any]) -> Optional[float]:
+    for key in ("dsr_sr0", "sr0", "grid_dsr_sr0"):
+        value = _finite_float(dsr_benchmark.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def rank_grid_candidates_by_dsr(
+    candidate_results: Sequence[OptimizationResult],
+    *,
+    dsr_benchmark: Mapping[str, Any],
+    top_k: int,
+) -> List[OptimizationResult]:
+    """Rank candidates by DSR using a persisted full-population benchmark."""
+    top_k = max(1, int(top_k or 1))
+    eligible = list(candidate_results or [])[:top_k]
+    sr0 = _benchmark_sr0(dsr_benchmark)
 
     candidates: List[OptimizationResult] = []
     for source_rank, result in enumerate(eligible, 1):
@@ -835,14 +856,39 @@ def apply_fast_grid_dsr(
         setattr(result, "dsr_rank", rank)
         _add_selection_source(result, "dsr")
 
+    return selected
+
+
+def apply_fast_grid_dsr(
+    candidate_results: Sequence[OptimizationResult],
+    *,
+    reference_results: Optional[Sequence[OptimizationResult]] = None,
+    top_k: int,
+) -> Tuple[List[OptimizationResult], Dict[str, Any]]:
+    """Compute fast DSR fields and select DSR top-K from eligible Grid candidates."""
+    top_k = max(1, int(top_k or 1))
+    references = list(reference_results if reference_results is not None else candidate_results)
+    dsr_metadata = compute_grid_dsr_benchmark(references)
+    selected = rank_grid_candidates_by_dsr(
+        candidate_results,
+        dsr_benchmark=dsr_metadata,
+        top_k=top_k,
+    )
+    dsr_metadata = dict(dsr_metadata)
+    dsr_metadata.update(
+        {
+            "top_k": top_k,
+            "selected_count": len(selected),
+        }
+    )
     return selected, {
-        "enabled": True,
-        "top_k": top_k,
-        "selected_count": len(selected),
-        "dsr_n_trials": len(finite_sharpes),
-        "dsr_mean_sharpe": mean_sharpe,
-        "dsr_var_sharpe": var_sharpe,
-        "dsr_sr0": sr0,
+        "enabled": dsr_metadata.get("enabled"),
+        "top_k": dsr_metadata.get("top_k"),
+        "selected_count": dsr_metadata.get("selected_count"),
+        "dsr_n_trials": dsr_metadata.get("dsr_n_trials"),
+        "dsr_mean_sharpe": dsr_metadata.get("dsr_mean_sharpe"),
+        "dsr_var_sharpe": dsr_metadata.get("dsr_var_sharpe"),
+        "dsr_sr0": dsr_metadata.get("dsr_sr0"),
     }
 
 

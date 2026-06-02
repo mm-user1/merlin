@@ -1,8 +1,8 @@
 import json
+import sqlite3
 import shutil
 import sys
 import time
-import json
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from core import storage
 from core.storage import (
     create_new_db,
     create_study_set,
@@ -252,6 +253,14 @@ def test_wfa_window_new_columns():
     assert "remaining_oos_days_at_entry" in columns
     assert "window_status" in columns
     assert "no_trade_reason" in columns
+    assert "grid_dsr_enabled" in columns
+    assert "grid_dsr_top_k" in columns
+    assert "grid_dsr_n_trials" in columns
+    assert "grid_dsr_mean_sharpe" in columns
+    assert "grid_dsr_var_sharpe" in columns
+    assert "grid_dsr_sr0" in columns
+    assert "grid_valid_candidate_count" in columns
+    assert "grid_selected_candidate_count" in columns
 
 
 def test_studies_stitched_columns():
@@ -321,6 +330,12 @@ def test_save_wfa_study_with_trials():
     assert window.get("is_pareto_optimal") is True
     assert window.get("constraints_satisfied") is False
     assert window.get("oos_winning_trades") == 1
+    assert window.get("grid_dsr_enabled") is None
+    assert window.get("grid_dsr_top_k") is None
+    assert window.get("grid_dsr_n_trials") is None
+    assert window.get("grid_dsr_mean_sharpe") is None
+    assert window.get("grid_dsr_var_sharpe") is None
+    assert window.get("grid_dsr_sr0") is None
 
     study = study_data["study"]
     assert study.get("stitched_oos_winning_trades") == 1
@@ -333,6 +348,130 @@ def test_save_wfa_study_with_trials():
     assert study.get("stitched_oos_start_ts") == "2025-01-11T00:00:00+00:00"
     assert study.get("stitched_oos_end_ts") == "2025-01-15T00:00:00+00:00"
     assert study.get("stitched_oos_point_count") == 2
+
+
+def test_save_wfa_grid_dsr_replay_fields_and_candidate_metrics():
+    wf_result = _build_dummy_wfa_result()
+    wf_result.strategy_id = "s03_reversal_v10"
+    wf_result.config.strategy_id = "s03_reversal_v10"
+    window = wf_result.windows[0]
+    window.best_params_source = "grid"
+    window.available_modules = ["optuna_is", "dsr"]
+    window.grid_dsr_enabled = True
+    window.grid_dsr_top_k = 50
+    window.grid_dsr_n_trials = 1000
+    window.grid_dsr_mean_sharpe = 0.22
+    window.grid_dsr_var_sharpe = 0.033
+    window.grid_dsr_sr0 = 0.44
+    window.grid_valid_candidate_count = 50
+    window.grid_selected_candidate_count = 50
+    window.optuna_is_trials = [
+        {
+            "trial_number": 101,
+            "params": {"candidate": 101},
+            "param_id": "candidate-101",
+            "module_rank": 1,
+            "net_profit_pct": 3.0,
+            "max_drawdown_pct": 0.5,
+            "total_trades": 10,
+            "sharpe_ratio": 1.1,
+            "is_selected": True,
+            "module_metrics": {
+                "grid_rank": 1,
+                "semantic_key": "candidate:101",
+                "candidate_id": 101,
+                "dsr_skewness": 0.12,
+                "dsr_kurtosis": 3.2,
+                "dsr_track_length": 15,
+                "dsr_probability": 0.91,
+                "dsr_luck_share_pct": 4.0,
+            },
+        },
+        {
+            "trial_number": 102,
+            "params": {"candidate": 102},
+            "param_id": "candidate-102",
+            "module_rank": 2,
+            "net_profit_pct": 2.0,
+            "max_drawdown_pct": 0.6,
+            "total_trades": 9,
+            "sharpe_ratio": 0.9,
+            "module_metrics": {
+                "grid_rank": 2,
+                "semantic_key": "candidate:102",
+                "candidate_id": 102,
+                "dsr_skewness": 0.15,
+                "dsr_kurtosis": 3.4,
+                "dsr_track_length": 14,
+            },
+        },
+    ]
+
+    with _temporary_active_db("wfa_grid_dsr_replay_fields"):
+        study_id = save_wfa_study_to_db(
+            wf_result=wf_result,
+            config={"optimization_mode": "grid"},
+            csv_file_path="",
+            start_time=0.0,
+            score_config=None,
+        )
+
+        study_data = load_study_from_db(study_id)
+        assert study_data is not None
+        loaded_window = study_data["windows"][0]
+        assert loaded_window["grid_dsr_enabled"] == 1
+        assert loaded_window["grid_dsr_top_k"] == 50
+        assert loaded_window["grid_dsr_n_trials"] == 1000
+        assert loaded_window["grid_dsr_mean_sharpe"] == pytest.approx(0.22)
+        assert loaded_window["grid_dsr_var_sharpe"] == pytest.approx(0.033)
+        assert loaded_window["grid_dsr_sr0"] == pytest.approx(0.44)
+        assert loaded_window["grid_valid_candidate_count"] == 50
+        assert loaded_window["grid_selected_candidate_count"] == 50
+
+        modules = load_wfa_window_trials(loaded_window["window_id"])
+        optuna_is = modules["optuna_is"]
+        assert len(optuna_is) == 2
+        for trial in optuna_is:
+            metrics = trial["module_metrics"]
+            assert metrics["semantic_key"].startswith("candidate:")
+            assert metrics["candidate_id"] in {101, 102}
+            assert "dsr_skewness" in metrics
+            assert "dsr_kurtosis" in metrics
+            assert "dsr_track_length" in metrics
+
+
+def test_legacy_wfa_windows_schema_migrates_grid_dsr_columns():
+    legacy_db = storage.STORAGE_DIR / f"legacy_wfa_windows_{uuid.uuid4().hex}.db"
+    with sqlite3.connect(legacy_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE wfa_windows (
+                window_id TEXT PRIMARY KEY,
+                study_id TEXT NOT NULL,
+                window_number INTEGER NOT NULL,
+                best_params_json TEXT NOT NULL
+            )
+            """
+        )
+
+    original_initialized = storage.DB_INITIALIZED
+    storage.DB_INITIALIZED = False
+    try:
+        storage.init_database(db_path=legacy_db)
+    finally:
+        storage.DB_INITIALIZED = original_initialized
+
+    with sqlite3.connect(legacy_db) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(wfa_windows)").fetchall()}
+
+    assert "grid_dsr_enabled" in columns
+    assert "grid_dsr_top_k" in columns
+    assert "grid_dsr_n_trials" in columns
+    assert "grid_dsr_mean_sharpe" in columns
+    assert "grid_dsr_var_sharpe" in columns
+    assert "grid_dsr_sr0" in columns
+    assert "grid_valid_candidate_count" in columns
+    assert "grid_selected_candidate_count" in columns
 
 
 def test_save_dsr_results_preserves_grid_precomputed_fields_when_not_clearing():

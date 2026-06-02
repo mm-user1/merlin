@@ -14,8 +14,10 @@ from core.grid_engine import (
     apply_fast_grid_dsr,
     build_grid_dsr_results,
     calculate_grid_display_scores,
+    compute_grid_dsr_benchmark,
     format_compact_count,
     parse_grid_budget,
+    rank_grid_candidates_by_dsr,
     rank_grid_results,
     resolve_grid_selection_config,
     run_grid_optimization,
@@ -379,6 +381,76 @@ def test_grid_dsr_tie_break_uses_previous_module_rank_before_grid_rank(monkeypat
     assert [item.candidate_id for item in selected] == [10, 11]
     assert [item.dsr_source_rank for item in selected] == [1, 2]
     assert [item.grid_rank for item in selected] == [50, 1]
+
+
+def test_grid_dsr_helper_matches_apply_fast_grid_dsr(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    monkeypatch.setattr(grid_engine, "calculate_expected_max_sharpe", lambda *_args, **_kwargs: 0.25)
+    monkeypatch.setattr(grid_engine, "calculate_dsr", lambda sr, sr0, *_args: sr - sr0)
+
+    apply_candidates = [
+        _synthetic_grid_result(1, net_profit=10.0, sharpe=0.5, grid_rank=1),
+        _synthetic_grid_result(2, net_profit=9.0, sharpe=1.0, grid_rank=2),
+        _synthetic_grid_result(3, net_profit=8.0, sharpe=0.2, grid_rank=3),
+    ]
+    apply_reference = apply_candidates + [
+        _synthetic_grid_result(99, net_profit=1.0, sharpe=4.0, grid_rank=99)
+    ]
+
+    helper_candidates = [
+        _synthetic_grid_result(1, net_profit=10.0, sharpe=0.5, grid_rank=1),
+        _synthetic_grid_result(2, net_profit=9.0, sharpe=1.0, grid_rank=2),
+        _synthetic_grid_result(3, net_profit=8.0, sharpe=0.2, grid_rank=3),
+    ]
+    helper_reference = helper_candidates + [
+        _synthetic_grid_result(99, net_profit=1.0, sharpe=4.0, grid_rank=99)
+    ]
+
+    apply_selected, apply_summary = apply_fast_grid_dsr(
+        apply_candidates,
+        reference_results=apply_reference,
+        top_k=3,
+    )
+    benchmark = compute_grid_dsr_benchmark(helper_reference)
+    helper_selected = rank_grid_candidates_by_dsr(
+        helper_candidates,
+        dsr_benchmark=benchmark,
+        top_k=3,
+    )
+
+    assert benchmark["dsr_sr0"] == apply_summary["dsr_sr0"]
+    assert benchmark["dsr_n_trials"] == apply_summary["dsr_n_trials"]
+    assert [item.candidate_id for item in helper_selected] == [
+        item.candidate_id for item in apply_selected
+    ]
+    assert [item.dsr_rank for item in helper_selected] == [item.dsr_rank for item in apply_selected]
+    assert [item.dsr_source_rank for item in helper_selected] == [
+        item.dsr_source_rank for item in apply_selected
+    ]
+
+
+def test_grid_dsr_ranking_uses_persisted_benchmark_without_recomputing(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    def unexpected_benchmark(*_args, **_kwargs):
+        raise AssertionError("Pure DSR ranking must not recompute sr0.")
+
+    monkeypatch.setattr(grid_engine, "calculate_expected_max_sharpe", unexpected_benchmark)
+    monkeypatch.setattr(grid_engine, "calculate_dsr", lambda sr, sr0, *_args: sr0 - sr)
+
+    candidates = [
+        _synthetic_grid_result(1, net_profit=10.0, sharpe=0.5, grid_rank=1),
+        _synthetic_grid_result(2, net_profit=9.0, sharpe=0.1, grid_rank=2),
+    ]
+    selected = rank_grid_candidates_by_dsr(
+        candidates,
+        dsr_benchmark={"dsr_sr0": 1.0},
+        top_k=2,
+    )
+
+    assert [item.candidate_id for item in selected] == [2, 1]
+    assert [item.dsr_probability for item in selected] == pytest.approx([0.9, 0.5])
 
 
 def test_grid_display_score_does_not_filter_objective_or_dsr_union():

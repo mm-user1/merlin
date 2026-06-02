@@ -175,6 +175,16 @@ class WindowResult:
     window_status: str = "traded"
     no_trade_reason: Optional[str] = None
 
+    # Grid WFA replay prerequisites (None for non-Grid or DSR-disabled windows)
+    grid_dsr_enabled: Optional[bool] = None
+    grid_dsr_top_k: Optional[int] = None
+    grid_dsr_n_trials: Optional[int] = None
+    grid_dsr_mean_sharpe: Optional[float] = None
+    grid_dsr_var_sharpe: Optional[float] = None
+    grid_dsr_sr0: Optional[float] = None
+    grid_valid_candidate_count: Optional[int] = None
+    grid_selected_candidate_count: Optional[int] = None
+
 
 @dataclass
 class StitchWindow:
@@ -225,6 +235,14 @@ class ISPipelineResult:
     stress_test_trials: Optional[List[Dict[str, Any]]]
     ft_gate_failed: bool = False
     ft_pass_count: int = 0
+    grid_dsr_enabled: Optional[bool] = None
+    grid_dsr_top_k: Optional[int] = None
+    grid_dsr_n_trials: Optional[int] = None
+    grid_dsr_mean_sharpe: Optional[float] = None
+    grid_dsr_var_sharpe: Optional[float] = None
+    grid_dsr_sr0: Optional[float] = None
+    grid_valid_candidate_count: Optional[int] = None
+    grid_selected_candidate_count: Optional[int] = None
 
 
 @dataclass
@@ -641,6 +659,14 @@ class WalkForwardEngine:
                     remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
                     window_status=execution_plan.window_status,
                     no_trade_reason=execution_plan.no_trade_reason,
+                    grid_dsr_enabled=is_pipeline.grid_dsr_enabled,
+                    grid_dsr_top_k=is_pipeline.grid_dsr_top_k,
+                    grid_dsr_n_trials=is_pipeline.grid_dsr_n_trials,
+                    grid_dsr_mean_sharpe=is_pipeline.grid_dsr_mean_sharpe,
+                    grid_dsr_var_sharpe=is_pipeline.grid_dsr_var_sharpe,
+                    grid_dsr_sr0=is_pipeline.grid_dsr_sr0,
+                    grid_valid_candidate_count=is_pipeline.grid_valid_candidate_count,
+                    grid_selected_candidate_count=is_pipeline.grid_selected_candidate_count,
                 )
             )
 
@@ -761,9 +787,15 @@ class WalkForwardEngine:
                     window_id,
                 )
 
-        optimization_results, optimization_all_results = self._run_optuna_on_window(
+        self._last_grid_summary = None
+        optimization_payload = self._run_optuna_on_window(
             df, optimization_start, optimization_end
         )
+        if len(optimization_payload) == 3:
+            optimization_results, optimization_all_results, grid_summary = optimization_payload
+        else:
+            optimization_results, optimization_all_results = optimization_payload
+            grid_summary = getattr(self, "_last_grid_summary", None)
         if not optimization_results:
             raise ValueError(f"No optimization results for window {window_id}.")
 
@@ -789,6 +821,9 @@ class WalkForwardEngine:
 
         is_pareto_optimal = getattr(best_result, "is_pareto_optimal", None)
         constraints_satisfied = getattr(best_result, "constraints_satisfied", None)
+        grid_replay_metadata = (
+            self._grid_replay_metadata_from_summary(grid_summary) if is_grid_mode else {}
+        )
 
         dsr_results = []
         dsr_trials = None
@@ -996,7 +1031,70 @@ class WalkForwardEngine:
             stress_test_trials=st_trials,
             ft_gate_failed=ft_gate_failed,
             ft_pass_count=ft_pass_count,
+            grid_dsr_enabled=grid_replay_metadata.get("grid_dsr_enabled"),
+            grid_dsr_top_k=grid_replay_metadata.get("grid_dsr_top_k"),
+            grid_dsr_n_trials=grid_replay_metadata.get("grid_dsr_n_trials"),
+            grid_dsr_mean_sharpe=grid_replay_metadata.get("grid_dsr_mean_sharpe"),
+            grid_dsr_var_sharpe=grid_replay_metadata.get("grid_dsr_var_sharpe"),
+            grid_dsr_sr0=grid_replay_metadata.get("grid_dsr_sr0"),
+            grid_valid_candidate_count=grid_replay_metadata.get("grid_valid_candidate_count"),
+            grid_selected_candidate_count=grid_replay_metadata.get("grid_selected_candidate_count"),
         )
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_float(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) else None
+
+    @classmethod
+    def _grid_replay_metadata_from_summary(cls, summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(summary, dict):
+            return {}
+
+        grid_summary = summary.get("grid")
+        grid_summary = grid_summary if isinstance(grid_summary, dict) else {}
+        dsr_summary = grid_summary.get("dsr")
+        dsr_summary = dsr_summary if isinstance(dsr_summary, dict) else {}
+
+        metadata: Dict[str, Any] = {
+            "grid_valid_candidate_count": cls._safe_int(
+                summary.get("valid_candidate_count", grid_summary.get("valid_candidate_count"))
+            ),
+            "grid_selected_candidate_count": cls._safe_int(
+                summary.get(
+                    "selected_candidate_count",
+                    grid_summary.get("union_selected_count", grid_summary.get("selected_candidate_count")),
+                )
+            ),
+        }
+        if not bool(dsr_summary.get("enabled")):
+            return metadata
+
+        metadata.update(
+            {
+                "grid_dsr_enabled": True,
+                "grid_dsr_top_k": cls._safe_int(dsr_summary.get("top_k")),
+                "grid_dsr_n_trials": cls._safe_int(dsr_summary.get("dsr_n_trials")),
+                "grid_dsr_mean_sharpe": cls._safe_float(dsr_summary.get("dsr_mean_sharpe")),
+                "grid_dsr_var_sharpe": cls._safe_float(dsr_summary.get("dsr_var_sharpe")),
+                "grid_dsr_sr0": cls._safe_float(dsr_summary.get("dsr_sr0")),
+            }
+        )
+        return metadata
 
     @staticmethod
     def _duration_days(start: pd.Timestamp, end: pd.Timestamp) -> float:
@@ -1959,6 +2057,14 @@ class WalkForwardEngine:
                     remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
                     window_status=execution_plan.window_status,
                     no_trade_reason=execution_plan.no_trade_reason,
+                    grid_dsr_enabled=is_pipeline.grid_dsr_enabled,
+                    grid_dsr_top_k=is_pipeline.grid_dsr_top_k,
+                    grid_dsr_n_trials=is_pipeline.grid_dsr_n_trials,
+                    grid_dsr_mean_sharpe=is_pipeline.grid_dsr_mean_sharpe,
+                    grid_dsr_var_sharpe=is_pipeline.grid_dsr_var_sharpe,
+                    grid_dsr_sr0=is_pipeline.grid_dsr_sr0,
+                    grid_valid_candidate_count=is_pipeline.grid_valid_candidate_count,
+                    grid_selected_candidate_count=is_pipeline.grid_selected_candidate_count,
                 )
             )
 
@@ -2247,14 +2353,23 @@ class WalkForwardEngine:
             normalized_sources = [selection_sources]
         else:
             normalized_sources = []
-        return {
+        module_metrics = {
             "grid_rank": getattr(result, "grid_rank", None),
             "slow_refinement_rank": getattr(result, "slow_refinement_rank", None),
             "grid_mode_name": getattr(result, "grid_mode_name", None),
             "grid_generation_mode": getattr(result, "grid_generation_mode", None),
             "diversity_group": getattr(result, "diversity_group", None),
             "selection_sources": normalized_sources,
+            "semantic_key": getattr(result, "semantic_key", None) or getattr(result, "param_key", None),
+            "candidate_id": getattr(result, "candidate_id", getattr(result, "optuna_trial_number", None)),
         }
+        for field_name in ("dsr_skewness", "dsr_kurtosis", "dsr_track_length"):
+            if hasattr(result, field_name):
+                module_metrics[field_name] = getattr(result, field_name, None)
+        for field_name in ("dsr_probability", "dsr_luck_share_pct"):
+            if hasattr(result, field_name):
+                module_metrics[field_name] = getattr(result, field_name, None)
+        return module_metrics
 
     def _convert_dsr_results_for_storage(
         self, results: List[Any], limit: int
@@ -2512,6 +2627,7 @@ class WalkForwardEngine:
         if optimizer_mode == "grid":
             results, _study_id = run_grid_optimization(base_config, save_study=False)
             all_results = list(getattr(base_config, "optuna_all_results", []))
+            self._last_grid_summary = getattr(base_config, "grid_summary", None)
             return results, all_results
 
         objectives = list(self.optuna_settings.get("objectives") or [])
@@ -2550,6 +2666,7 @@ class WalkForwardEngine:
 
         results, _study_id = run_optuna_optimization(base_config, optuna_cfg)
         all_results = list(getattr(base_config, "optuna_all_results", []))
+        self._last_grid_summary = None
         return results, all_results
 
     def _dataframe_to_csv_buffer(self, df_window: pd.DataFrame) -> io.StringIO:

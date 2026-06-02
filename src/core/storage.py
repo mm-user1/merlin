@@ -433,6 +433,14 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             no_trade_reason TEXT,
 
             wfe REAL,
+            grid_dsr_enabled INTEGER,
+            grid_dsr_top_k INTEGER,
+            grid_dsr_n_trials INTEGER,
+            grid_dsr_mean_sharpe REAL,
+            grid_dsr_var_sharpe REAL,
+            grid_dsr_sr0 REAL,
+            grid_valid_candidate_count INTEGER,
+            grid_selected_candidate_count INTEGER,
 
             FOREIGN KEY (study_id) REFERENCES studies(study_id) ON DELETE CASCADE,
             UNIQUE(study_id, window_number)
@@ -699,6 +707,17 @@ def _ensure_wfa_schema_updated(conn: sqlite3.Connection) -> None:
     )
     add_col("ALTER TABLE wfa_windows ADD COLUMN window_status TEXT;", "window_status")
     add_col("ALTER TABLE wfa_windows ADD COLUMN no_trade_reason TEXT;", "no_trade_reason")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_enabled INTEGER;", "grid_dsr_enabled")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_top_k INTEGER;", "grid_dsr_top_k")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_n_trials INTEGER;", "grid_dsr_n_trials")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_mean_sharpe REAL;", "grid_dsr_mean_sharpe")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_var_sharpe REAL;", "grid_dsr_var_sharpe")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_sr0 REAL;", "grid_dsr_sr0")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_valid_candidate_count INTEGER;", "grid_valid_candidate_count")
+    add_col(
+        "ALTER TABLE wfa_windows ADD COLUMN grid_selected_candidate_count INTEGER;",
+        "grid_selected_candidate_count",
+    )
 
     conn.commit()
 
@@ -3156,6 +3175,14 @@ def save_wfa_study_to_db(
                         _tri_state(getattr(window, "constraints_satisfied", None)),
                         json.dumps(available_modules) if available_modules is not None else None,
                         getattr(wf_result.config, "store_top_n_trials", None),
+                        _tri_state(getattr(window, "grid_dsr_enabled", None)),
+                        getattr(window, "grid_dsr_top_k", None),
+                        getattr(window, "grid_dsr_n_trials", None),
+                        getattr(window, "grid_dsr_mean_sharpe", None),
+                        getattr(window, "grid_dsr_var_sharpe", None),
+                        getattr(window, "grid_dsr_sr0", None),
+                        getattr(window, "grid_valid_candidate_count", None),
+                        getattr(window, "grid_selected_candidate_count", None),
                         json.dumps(getattr(window, "module_status", None))
                         if getattr(window, "module_status", None) is not None
                         else None,
@@ -3233,6 +3260,9 @@ def save_wfa_study_to_db(
                     "best_params_json", "param_id", "best_params_source",
                     "is_pareto_optimal", "constraints_satisfied",
                     "available_modules", "store_top_n_trials",
+                    "grid_dsr_enabled", "grid_dsr_top_k", "grid_dsr_n_trials",
+                    "grid_dsr_mean_sharpe", "grid_dsr_var_sharpe", "grid_dsr_sr0",
+                    "grid_valid_candidate_count", "grid_selected_candidate_count",
                     "module_status_json", "selection_chain_json",
                     "optimization_start_date", "optimization_end_date",
                     "optimization_start_ts", "optimization_end_ts",
