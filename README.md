@@ -7,7 +7,7 @@ Config-driven backtesting and Optuna optimization platform for cryptocurrency tr
 - **Database persistence** - All optimization results automatically saved to SQLite database
 - **Multi-database support** - Multiple `.db` files with active DB switching
 - **Studies browser** - Web UI for browsing, opening, and managing historical optimization studies
-- **Multi-strategy support** - S01 Trailing MA, S03 Reversal, and S04 StochRSI included, easily extensible
+- **Multi-strategy support** - S01 Trailing MA, S03 Reversal, S04 StochRSI, and S06 R-Trend included, easily extensible
 - **Optuna optimization** - Single- and multi-objective optimization (1-6 objectives) with Pareto front results, primary-objective sorting, and multiple samplers (Random, TPE/MOTPE, NSGA-II/NSGA-III)
 - **Grid optimization** - Deterministic optimizer with per-mode parameter spaces (cc_only / tbands_only / both), seeded LHS sampling, Numba-accelerated fast pass and optional slow refinement (currently enabled for `s03_reversal_v10`)
 - **Initial Search Coverage** - Optional systematic parameter space exploration during Optuna startup with configurable coverage block sizes
@@ -41,6 +41,10 @@ python server.py
 
 Open http://127.0.0.1:5000 in your browser.
 
+S06 R-Trend v02 supports Reversal/Trend entries and Bracket/MA-Trail
+execution through Backtest, standard Optuna, and WFA. Its fast Numba Grid
+backend is intentionally not available yet.
+
 ## Project Structure
 
 ```
@@ -48,7 +52,7 @@ project-root/
 |-- src/
 |   |-- core/           # Backtest, Optuna, Grid, WFA engines + metrics + analytics + storage + export + bundle_export + param_identity + post-process + testing
 |   |-- indicators/     # MA (11 types), ATR, RSI, StochRSI
-|   |-- strategies/     # s01_trailing_ma, s03_reversal_v10 (+ fast_grid.py), s04_stochrsi
+|   |-- strategies/     # S01, S03 (+ fast_grid.py), S04, and S06 strategy packages
 |   |-- storage/        # SQLite databases (multiple .db files) + queue state
 |   `-- ui/             # Flask server + three-page frontend (Start/Results/Analytics)
 |-- data/               # OHLCV CSVs and regression baselines

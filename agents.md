@@ -80,7 +80,8 @@ src/
 |   |-- base.py               # BaseStrategy class
 |   |-- s01_trailing_ma/
 |   |-- s03_reversal_v10/     # Includes fast_grid.py (Numba-accelerated Grid backend)
-|   `-- s04_stochrsi/
+|   |-- s04_stochrsi/
+|   `-- s06_r_trend_v02/      # Slow Backtest/Optuna/WFA strategy; no Grid backend
 |-- storage/                  # Database storage (gitignored)
 |   |-- *.db                  # SQLite database files (WAL mode, multiple supported)
 |   |-- journals/             # SQLite journal files
@@ -271,6 +272,7 @@ pytest tests/ -v
 - `test_regression_s01.py` - S01 baseline regression
 - `test_s03_reversal_v10.py` - S03 strategy tests
 - `test_s04_stochrsi.py` - S04 strategy tests
+- `test_s06_r_trend_v02.py` - S06 strategy, execution, and reference tests
 - `test_naming_consistency.py` - camelCase guardrails
 - `test_storage.py` - Database storage tests
 - `test_server.py` - HTTP API endpoint tests
@@ -543,6 +545,7 @@ python tools/generate_baseline_s01.py
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA with 11 MA types, close counts, ATR stops |
 | `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
+| `s06_r_trend_v02` | S06 R-Trend | Dual Williams %R Reversal/Trend entries with Bracket or MA-Trail execution; standard Backtest/Optuna/WFA only |
 
 ## Key Files for Reference
 
@@ -565,5 +568,6 @@ python tools/generate_baseline_s01.py
 | Flask analytics routes | `src/ui/server_routes_analytics.py` |
 | S03 example | `src/strategies/s03_reversal_v10/strategy.py` |
 | S04 example | `src/strategies/s04_stochrsi/strategy.py` |
+| S06 implementation | `src/strategies/s06_r_trend_v02/strategy.py` |
 | config.json example | `src/strategies/s04_stochrsi/config.json` |
 | Test baseline | `data/baseline/` |

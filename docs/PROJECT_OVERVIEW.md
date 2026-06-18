@@ -28,6 +28,7 @@ project-root/
 |   |-- test_s01_migration.py  # S01 migration validation
 |   |-- test_s03_reversal_v10.py # S03 strategy tests
 |   |-- test_s04_stochrsi.py   # S04 strategy tests
+|   |-- test_s06_r_trend_v02.py # S06 execution and reference tests
 |   |-- test_metrics.py        # Metrics calculation tests
 |   |-- test_export.py         # Export functionality tests
 |   |-- test_indicators.py     # Indicator tests
@@ -77,7 +78,10 @@ project-root/
     |   |   |-- config.json
     |   |   |-- strategy.py
     |   |   `-- fast_grid.py   # Numba-accelerated Grid fast backend
-    |   `-- s04_stochrsi/      # StochRSI strategy
+    |   |-- s04_stochrsi/      # StochRSI strategy
+    |   |   |-- config.json
+    |   |   `-- strategy.py
+    |   `-- s06_r_trend_v02/   # Slow R-Trend strategy (no fast Grid backend)
     |       |-- config.json
     |       `-- strategy.py
     |-- storage/              # Database storage (gitignored)
@@ -484,6 +488,7 @@ pytest tests/ -v
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA strategy with 11 MA types, close counts, ATR stops |
 | `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
+| `s06_r_trend_v02` | S06 R-Trend | Williams %R Reversal/Trend entries with Bracket or ratcheting MA-Trail execution; Backtest/Optuna/WFA supported, fast Grid not yet available |
 
 ## Adding New Strategies
 
