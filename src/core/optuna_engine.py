@@ -99,10 +99,11 @@ class OptimizationConfig:
     n_startup_trials: int = 20
     coverage_mode: bool = False
 
-    # Grid mode settings (S03 fast Grid v1)
+    # Grid mode settings
     grid_budget: int = 200_000
     grid_seed: int = 42
     grid_top_candidates: int = 10
+    grid_enabled_modes: List[str] = field(default_factory=list)
     grid_allocation_method: str = "auto_sqrt_space"
     grid_min_quota: float = 0.10
     grid_manual_percents: Dict[str, float] = field(default_factory=dict)

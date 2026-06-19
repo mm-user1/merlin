@@ -129,7 +129,7 @@ def reference_data():
     )
 
 
-def test_config_identity_discovery_and_grid_stage_one():
+def test_config_identity_discovery_and_grid_backend():
     config = get_strategy_config("s06_r_trend_v02")
     strategy_ids = {item["id"] for item in list_strategies()}
 
@@ -146,7 +146,9 @@ def test_config_identity_discovery_and_grid_stage_one():
     assert config["parameters"]["enableLong"]["default"] is True
     assert config["parameters"]["enableShort"]["default"] is True
     assert "features" not in config
-    assert supports_fast_grid("s06_r_trend_v02") is False
+    assert supports_fast_grid("s06_r_trend_v02") is True
+    assert config["parameters"]["thresholdOS"]["optimize"]["default_enabled"] is False
+    assert config["parameters"]["thresholdOB"]["optimize"]["default_enabled"] is False
 
 
 def test_config_params_match_dataclass_and_are_camel_case():
@@ -185,7 +187,7 @@ def test_params_parse_dates_bools_and_reject_invalid_enums():
         S06Params.from_dict({"contractSize": 0})
 
 
-def test_strategy_config_api_returns_s06_and_grid_unavailable():
+def test_strategy_config_api_returns_s06_grid_profile():
     from ui.server import app
 
     with app.test_client() as client:
@@ -195,8 +197,12 @@ def test_strategy_config_api_returns_s06_and_grid_unavailable():
     payload = response.get_json()
     assert payload["id"] == "s06_r_trend_v02"
     assert payload["parameter_order"][0] == "entryMode"
-    assert payload["grid_optimizer"]["available"] is False
-    assert payload["grid_optimizer"]["reason"] == "S03 Reversal v10 only"
+    assert payload["grid_optimizer"]["available"] is True
+    assert payload["grid_optimizer"]["profile"] == "full_enumeration"
+    assert [mode["id"] for mode in payload["grid_optimizer"]["modes"]] == [
+        "bracket",
+        "trail",
+    ]
 
 
 def test_williams_r_known_values_bounds_and_zero_range():

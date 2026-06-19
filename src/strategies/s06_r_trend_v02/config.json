@@ -75,7 +75,7 @@
       "max": 50,
       "step": 1,
       "group": "%R Trend Exhaustion",
-      "optimize": { "enabled": false }
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
     },
     "thresholdOB": {
       "type": "int",
@@ -85,7 +85,7 @@
       "max": 50,
       "step": 1,
       "group": "%R Trend Exhaustion",
-      "optimize": { "enabled": false }
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
     },
     "stopX": {
       "type": "float",

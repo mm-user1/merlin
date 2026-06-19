@@ -1051,6 +1051,8 @@ def _grid_mode_label(value: Any) -> str:
         "cc_only": "CC only",
         "tbands_only": "T Bands only",
         "both": "Both",
+        "bracket": "Bracket",
+        "trail": "Trail",
     }
     return labels.get(str(value or "").strip(), str(value or "").strip() or "-")
 
@@ -1106,6 +1108,7 @@ def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[
         "grid_budget": ("budget",),
         "grid_seed": ("seed",),
         "grid_top_candidates": ("top_candidates",),
+        "grid_enabled_modes": ("enabled_modes",),
         "grid_allocation_method": ("allocation_method",),
         "grid_min_quota": ("min_quota",),
         "grid_manual_percents": ("manual_percents",),
@@ -1268,7 +1271,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         mode_budgets = _parse_json_dict(allocation.get("mode_budgets"))
         mode_spaces = _parse_json_dict(allocation.get("mode_space_sizes"))
         mode_coverages = _parse_json_dict(allocation.get("mode_coverage_pct"))
-        for mode_key in ("cc_only", "tbands_only", "both"):
+        for mode_key in ("cc_only", "tbands_only", "both", "bracket", "trail"):
             if mode_key not in mode_spaces and mode_key not in mode_budgets:
                 continue
             budget = mode_budgets.get(mode_key)
@@ -1286,7 +1289,9 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             )
             generations.add(generation.lower())
 
-    if generations and generations <= {"full"}:
+    if str(preview.get("profile") or "").strip().lower() == "full_enumeration":
+        sampling_label = "Full enumeration"
+    elif generations and generations <= {"full", "full enumeration", "disabled"}:
         sampling_label = "Full enumeration"
     elif any("lhs" in item for item in generations):
         sampling_label = "LHS by mode"
@@ -1294,6 +1299,10 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         sampling_label = "Mixed by mode"
     else:
         sampling_label = "-"
+    is_full_enumeration = (
+        str(preview.get("profile") or "").strip().lower() == "full_enumeration"
+        or str(allocation_method).strip().lower() == "full_enumeration"
+    )
 
     rows = [
         {
@@ -1306,7 +1315,6 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         },
         {"key": "Coverage", "val": format_coverage_pct(coverage_pct)},
         {"key": "Sampling", "val": sampling_label},
-        {"key": "Seed", "val": str(seed) if seed is not None else "-"},
         {"key": "Top Candidates", "val": str(top_candidates) if top_candidates is not None else "-"},
         {
             "key": "Workers",
@@ -1315,7 +1323,11 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         {
             "key": "Diversity",
             "val": (
-                f"On, max {diversity_max} / Mode+MA+Period"
+                (
+                    f"On, max {diversity_max} / strategy group"
+                    if is_full_enumeration
+                    else f"On, max {diversity_max} / Mode+MA+Period"
+                )
                 if diversity_enabled
                 else "Off"
             ),
@@ -1331,6 +1343,8 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         },
         {"key": "Slow Refinement", "val": "On" if slow_refinement_enabled else "Off"},
     ]
+    if not is_full_enumeration:
+        rows.insert(4, {"key": "Seed", "val": str(seed) if seed is not None else "-"})
     if slow_refinement_enabled:
         rows.extend(
             [
@@ -1349,7 +1363,12 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             }
         )
 
-    allocation_rows = [{"key": "Allocation", "val": _grid_allocation_label(allocation_method)}]
+    allocation_label = (
+        "Full enumeration"
+        if str(allocation_method).lower() == "full_enumeration"
+        else _grid_allocation_label(allocation_method)
+    )
+    allocation_rows = [{"key": "Allocation", "val": allocation_label}]
     allocation_rows.extend(mode_rows)
     return {
         "enabled": True,
@@ -2233,6 +2252,30 @@ def _build_optimization_config(
         raise ValueError("Grid top candidates must be an integer.")
     if grid_top_candidates <= 0:
         raise ValueError("Grid top candidates must be greater than zero.")
+    enabled_modes_present = (
+        "grid_enabled_modes" in payload or "gridEnabledModes" in payload
+    )
+    enabled_modes_raw = payload.get(
+        "grid_enabled_modes",
+        payload.get("gridEnabledModes", []),
+    )
+    if enabled_modes_raw in (None, ""):
+        grid_enabled_modes: List[str] = []
+    elif isinstance(enabled_modes_raw, (list, tuple)):
+        grid_enabled_modes = list(
+            dict.fromkeys(
+                str(value).strip().lower()
+                for value in enabled_modes_raw
+                if str(value).strip()
+            )
+        )
+    else:
+        raise ValueError("Grid enabled modes must be an array.")
+    if (
+        not enabled_modes_present
+        and str(strategy_id).strip().lower() == "s06_r_trend_v02"
+    ):
+        grid_enabled_modes = ["bracket", "trail"]
     grid_allocation_method = str(
         payload.get("grid_allocation_method", payload.get("gridAllocationMethod", "auto_sqrt_space"))
     ).strip().lower()
@@ -2348,6 +2391,7 @@ def _build_optimization_config(
         grid_budget=grid_budget,
         grid_seed=grid_seed,
         grid_top_candidates=grid_top_candidates,
+        grid_enabled_modes=grid_enabled_modes,
         grid_allocation_method=grid_allocation_method,
         grid_min_quota=grid_min_quota,
         grid_manual_percents=grid_manual_percents,

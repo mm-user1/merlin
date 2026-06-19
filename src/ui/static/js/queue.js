@@ -1255,6 +1255,12 @@ function applyQueueGridConfig(config) {
   if (Object.prototype.hasOwnProperty.call(config, 'grid_top_candidates')) {
     setInputValue('gridTopCandidates', config.grid_top_candidates);
   }
+  if (Array.isArray(config.grid_enabled_modes)) {
+    const enabledModes = new Set(config.grid_enabled_modes.map((value) => String(value)));
+    document.querySelectorAll('input[name="gridEnabledMode"]').forEach((checkbox) => {
+      checkbox.checked = enabledModes.has(String(checkbox.value));
+    });
+  }
   const allocationMethod = String(config.grid_allocation_method || 'auto_sqrt_space');
   const allocationRadio = document.querySelector(`input[name="gridAllocationMethod"][value="${allocationMethod}"]`);
   if (allocationRadio) {
@@ -2531,6 +2537,7 @@ function buildStateForItem(item, status) {
       budget: item.config?.grid_budget,
       seed: item.config?.grid_seed,
       topCandidates: item.config?.grid_top_candidates,
+      enabledModes: item.config?.grid_enabled_modes,
       allocationMethod: item.config?.grid_allocation_method,
       fastObjectives: item.config?.grid_fast_objectives,
       fastPrimaryObjective: item.config?.grid_fast_primary_objective,

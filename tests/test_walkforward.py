@@ -145,6 +145,73 @@ def test_param_id_falls_back_and_logs_warning(monkeypatch, caplog):
     assert any("Falling back to hash-only param_id" in record.message for record in caplog.records)
 
 
+def test_s06_grid_wfa_threads_full_enumeration_modes(monkeypatch):
+    captured = {}
+    result = OptimizationResult(
+        params={"useTrailMA": False},
+        net_profit_pct=1.0,
+        max_drawdown_pct=0.5,
+        total_trades=1,
+        optuna_trial_number=1,
+    )
+
+    def fake_run_grid(config, save_study=False):
+        captured["config"] = config
+        captured["save_study"] = save_study
+        config.grid_summary = {"grid": {"backend": {"profile": "full_enumeration"}}}
+        config.optuna_all_results = []
+        return [result], None
+
+    monkeypatch.setattr("core.walkforward_engine.run_grid_optimization", fake_run_grid)
+    base_template = {
+        "enabled_params": {},
+        "param_ranges": {},
+        "param_types": {},
+        "fixed_params": {"dateFilter": True},
+        "worker_processes": 2,
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.05,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "optimization_mode": "grid",
+        "objectives": ["net_profit_pct"],
+        "grid_enabled_modes": ["bracket"],
+        "grid_budget": 1,
+        "grid_seed": 999,
+        "grid_top_candidates": 1,
+    }
+    engine = WalkForwardEngine(
+        WFConfig(strategy_id="s06_r_trend_v02", warmup_bars=20),
+        base_template,
+        {},
+    )
+    index = pd.date_range("2025-01-01", periods=80, freq="30min", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "Open": 100.0,
+            "High": 101.0,
+            "Low": 99.0,
+            "Close": 100.0,
+            "Volume": 1.0,
+        },
+        index=index,
+    )
+    selected, all_results = engine._run_optuna_on_window(
+        df,
+        index[20],
+        index[-1],
+    )
+
+    assert selected == [result]
+    assert all_results == []
+    assert captured["save_study"] is False
+    assert captured["config"].strategy_id == "s06_r_trend_v02"
+    assert captured["config"].grid_enabled_modes == ["bracket"]
+    assert captured["config"].fixed_params["start"] == index[20].isoformat()
+    assert captured["config"].fixed_params["end"] == index[-1].isoformat()
+
+
 def test_split_data_rolls_forward():
     index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
     base_row = {"Open": 1.0, "High": 1.1, "Low": 0.9, "Close": 1.0, "Volume": 100}

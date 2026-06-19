@@ -488,6 +488,9 @@ def register_routes(app):
             "grid_budget": int(getattr(optimization_config, "grid_budget", 200000)),
             "grid_seed": int(getattr(optimization_config, "grid_seed", 42)),
             "grid_top_candidates": int(getattr(optimization_config, "grid_top_candidates", 10)),
+            "grid_enabled_modes": list(
+                getattr(optimization_config, "grid_enabled_modes", []) or []
+            ),
             "grid_allocation_method": getattr(optimization_config, "grid_allocation_method", "auto_sqrt_space"),
             "grid_min_quota": float(getattr(optimization_config, "grid_min_quota", 0.10)),
             "grid_manual_percents": json.loads(json.dumps(getattr(optimization_config, "grid_manual_percents", {}) or {})),
@@ -539,6 +542,9 @@ def register_routes(app):
                 "budget": int(getattr(optimization_config, "grid_budget", 200000)),
                 "seed": int(getattr(optimization_config, "grid_seed", 42)),
                 "top_candidates": int(getattr(optimization_config, "grid_top_candidates", 10)),
+                "enabled_modes": list(
+                    getattr(optimization_config, "grid_enabled_modes", []) or []
+                ),
                 "allocation_method": getattr(optimization_config, "grid_allocation_method", "auto_sqrt_space"),
                 "min_quota": float(getattr(optimization_config, "grid_min_quota", 0.10)),
                 "fast_objectives": list(getattr(optimization_config, "grid_fast_objectives", []) or []),

@@ -1536,17 +1536,27 @@ def register_routes(app):
             payload["parameter_order"] = parameter_order
             payload["group_order"] = group_order
             try:
-                from core.grid_engine import supports_fast_grid
-                from strategies.s03_reversal_v10 import fast_grid
-
+                from core.grid_engine import (
+                    get_fast_grid_backend_metadata,
+                    supports_fast_grid,
+                )
                 grid_strategy_supported = supports_fast_grid(strategy_id)
-                grid_numba_available = bool(getattr(fast_grid, "NUMBA_AVAILABLE", False))
+                backend_metadata = (
+                    get_fast_grid_backend_metadata(strategy_id)
+                    if grid_strategy_supported
+                    else {}
+                )
+                grid_numba_available = bool(backend_metadata.get("numba_available", False))
                 grid_reason = ""
                 if not grid_strategy_supported:
-                    grid_reason = "S03 Reversal v10 only"
+                    grid_reason = "No fast Grid backend is available for this strategy."
                 elif not grid_numba_available:
-                    grid_reason = f"Numba is unavailable: {getattr(fast_grid, 'NUMBA_IMPORT_ERROR', '') or 'import failed'}"
+                    grid_reason = (
+                        "Numba is unavailable: "
+                        f"{backend_metadata.get('numba_import_error') or 'import failed'}"
+                    )
                 payload["grid_optimizer"] = {
+                    **backend_metadata,
                     "supported": grid_strategy_supported,
                     "numba_available": grid_numba_available,
                     "available": grid_strategy_supported and grid_numba_available,

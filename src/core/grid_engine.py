@@ -7,6 +7,7 @@ in per-strategy backends.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import math
@@ -39,7 +40,10 @@ from .post_process import DSRResult, calculate_dsr, calculate_expected_max_sharp
 logger = logging.getLogger(__name__)
 
 GRID_MODE = "grid"
-GRID_STRATEGY_ID = "s03_reversal_v10"
+FAST_GRID_BACKENDS = {
+    "s03_reversal_v10": "strategies.s03_reversal_v10.fast_grid",
+    "s06_r_trend_v02": "strategies.s06_r_trend_v02.fast_grid",
+}
 GRID_SUPPORTED_FAST_OBJECTIVES = {
     "net_profit_pct",
     "max_drawdown_pct",
@@ -123,7 +127,7 @@ class GridAllocation:
 
 
 def supports_fast_grid(strategy_id: str) -> bool:
-    return str(strategy_id or "").strip().lower() == GRID_STRATEGY_ID
+    return str(strategy_id or "").strip().lower() in FAST_GRID_BACKENDS
 
 
 def parse_grid_budget(value: Any) -> int:
@@ -380,11 +384,69 @@ def _settings_from_config(config: OptimizationConfig) -> GridSettings:
 
 
 def _load_backend(strategy_id: str):
-    if not supports_fast_grid(strategy_id):
-        raise ValueError("Grid mode is supported only for S03 Reversal v10.")
-    from strategies.s03_reversal_v10 import fast_grid
+    normalized = str(strategy_id or "").strip().lower()
+    module_name = FAST_GRID_BACKENDS.get(normalized)
+    if not module_name:
+        raise ValueError(f"Grid mode is not supported for strategy '{strategy_id}'.")
+    backend = importlib.import_module(module_name)
+    required = (
+        "build_parameter_space",
+        "build_preview",
+        "generate_candidates",
+        "prepare_fast_data",
+        "evaluate_candidates",
+        "validate_selected_candidates",
+    )
+    missing = [name for name in required if not callable(getattr(backend, name, None))]
+    if missing:
+        raise ValueError(
+            f"Malformed Grid backend '{module_name}': missing callable(s): "
+            + ", ".join(missing)
+        )
+    return backend
 
-    return fast_grid
+
+def get_fast_grid_backend_metadata(strategy_id: str) -> Dict[str, Any]:
+    """Return normalized capability metadata for a strategy fast backend."""
+    backend = _load_backend(strategy_id)
+    metadata_factory = getattr(backend, "get_backend_metadata", None)
+    metadata = metadata_factory() if callable(metadata_factory) else {}
+    if not isinstance(metadata, dict):
+        raise ValueError("Malformed Grid backend metadata: expected a mapping.")
+    normalized = {
+        "profile": "sampled_by_mode",
+        "modes": [],
+        "supports_partial_coverage": True,
+        "supports_seed": True,
+        "supports_mode_allocation": True,
+        "retain_all_fast_results": True,
+        "diversity_group_fields": ["mode", "maType3", "maLength3"],
+    }
+    normalized.update(metadata)
+    normalized["numba_available"] = bool(getattr(backend, "NUMBA_AVAILABLE", False))
+    normalized["numba_import_error"] = getattr(backend, "NUMBA_IMPORT_ERROR", None)
+    return normalized
+
+
+def _build_backend_allocation(
+    backend: Any,
+    config: OptimizationConfig,
+    space: Any,
+    settings: GridSettings,
+) -> GridAllocation:
+    builder = getattr(backend, "build_allocation", None)
+    if callable(builder):
+        allocation = builder(config, space, settings)
+        if not isinstance(allocation, GridAllocation):
+            raise ValueError("Malformed Grid backend allocation: expected GridAllocation.")
+        return allocation
+    return allocate_mode_budgets(
+        space.mode_space_sizes,
+        settings.requested_budget,
+        method=settings.allocation_method,
+        min_quota=settings.min_quota,
+        manual_percents=settings.manual_percents,
+    )
 
 
 def _objective_list(value: Any, fallback: Sequence[str]) -> List[str]:
@@ -463,7 +525,7 @@ def _validate_objective_set(
 
 def validate_grid_config(config: OptimizationConfig) -> None:
     if not supports_fast_grid(config.strategy_id):
-        raise ValueError("Grid mode is supported only for S03 Reversal v10.")
+        raise ValueError(f"Grid mode is not supported for strategy '{config.strategy_id}'.")
 
     backend = _load_backend(config.strategy_id)
     if not getattr(backend, "NUMBA_AVAILABLE", False):
@@ -501,13 +563,7 @@ def preview_grid_parameter_space(config: OptimizationConfig) -> Dict[str, Any]:
     backend = _load_backend(config.strategy_id)
     settings = _settings_from_config(config)
     space = backend.build_parameter_space(config)
-    allocation = allocate_mode_budgets(
-        space.mode_space_sizes,
-        settings.requested_budget,
-        method=settings.allocation_method,
-        min_quota=settings.min_quota,
-        manual_percents=settings.manual_percents,
-    )
+    allocation = _build_backend_allocation(backend, config, space, settings)
     return backend.build_preview(space, allocation)
 
 
@@ -1033,6 +1089,7 @@ def run_grid_optimization(
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
     validate_grid_config(config)
     backend = _load_backend(config.strategy_id)
+    backend_metadata = get_fast_grid_backend_metadata(config.strategy_id)
     settings = _settings_from_config(config)
     constraints = _build_constraint_specs(getattr(config, "constraints", []) or [])
     selection_config = resolve_grid_selection_config(config)
@@ -1047,13 +1104,7 @@ def run_grid_optimization(
 
     space_started = time.time()
     space = backend.build_parameter_space(config)
-    allocation = allocate_mode_budgets(
-        space.mode_space_sizes,
-        settings.requested_budget,
-        method=settings.allocation_method,
-        min_quota=settings.min_quota,
-        manual_percents=settings.manual_percents,
-    )
+    allocation = _build_backend_allocation(backend, config, space, settings)
     preview = backend.build_preview(space, allocation)
     timings["parameter_space_seconds"] = time.time() - space_started
 
@@ -1090,6 +1141,9 @@ def run_grid_optimization(
         top_n=settings.top_candidates,
         enabled=settings.diversity_enabled,
         max_per_group=settings.diversity_max_per_group,
+    )
+    diversity_metadata["diversity_group_fields"] = list(
+        backend_metadata.get("diversity_group_fields") or []
     )
     objective_selected_count = len(selected_fast)
 
@@ -1198,6 +1252,7 @@ def run_grid_optimization(
         else None,
         "optimization_time_seconds": total_seconds,
         "grid": {
+            "backend": backend_metadata,
             "fast_objectives": fast_objectives,
             "fast_primary_objective": fast_primary_objective,
             "slow_refinement_enabled": selection_config.slow_refinement_enabled,
@@ -1223,7 +1278,11 @@ def run_grid_optimization(
     }
     setattr(config, "optuna_summary", summary)
     setattr(config, "grid_summary", summary)
-    setattr(config, "optuna_all_results", all_fast_results)
+    setattr(
+        config,
+        "optuna_all_results",
+        all_fast_results if backend_metadata.get("retain_all_fast_results", True) else [],
+    )
 
     study_id = None
     if save_study:

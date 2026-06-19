@@ -2603,6 +2603,9 @@ class WalkForwardEngine:
             grid_budget=self.base_config_template.get("grid_budget", 200_000),
             grid_seed=self.base_config_template.get("grid_seed", 42),
             grid_top_candidates=self.base_config_template.get("grid_top_candidates", 10),
+            grid_enabled_modes=list(
+                self.base_config_template.get("grid_enabled_modes") or []
+            ),
             grid_allocation_method=self.base_config_template.get("grid_allocation_method", "auto_sqrt_space"),
             grid_min_quota=self.base_config_template.get("grid_min_quota", 0.10),
             grid_manual_percents=deepcopy(self.base_config_template.get("grid_manual_percents", {})),

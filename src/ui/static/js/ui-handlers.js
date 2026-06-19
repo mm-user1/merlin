@@ -1060,9 +1060,70 @@ function getEnabledGridMetadata() {
   const supported = Boolean(metadata.supported);
   const numbaAvailable = metadata.numba_available !== false;
   return {
-    available: Boolean(metadata.available ?? (window.currentStrategyId === 's03_reversal_v10' && numbaAvailable)),
-    reason: metadata.reason || (supported ? '' : 'S03 Reversal v10 only')
+    ...metadata,
+    profile: metadata.profile || 'sampled_by_mode',
+    modes: Array.isArray(metadata.modes) ? metadata.modes : [],
+    available: Boolean(metadata.available ?? (supported && numbaAvailable)),
+    reason: metadata.reason || (supported ? '' : 'No fast Grid backend is available.')
   };
+}
+
+function getSelectedGridModes() {
+  return Array.from(document.querySelectorAll('input[name="gridEnabledMode"]'))
+    .filter((checkbox) => checkbox.checked)
+    .map((checkbox) => String(checkbox.value || '').trim())
+    .filter(Boolean);
+}
+
+function syncGridProfileUi() {
+  const metadata = getEnabledGridMetadata();
+  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const modeSection = document.getElementById('gridProfileModesSection');
+  const modeContainer = document.getElementById('gridEnabledModes');
+  const budgetRow = document.getElementById('gridBudgetRow');
+  const seedRow = document.getElementById('gridSeedRow');
+  const allocationSection = document.getElementById('gridAllocationSection');
+  const samplingInput = document.getElementById('gridSamplingMethod');
+  const diversityLabel = document.getElementById('gridDiversityMaxLabel');
+
+  if (budgetRow) budgetRow.style.display = fullEnumeration ? 'none' : 'flex';
+  if (seedRow) seedRow.style.display = fullEnumeration ? 'none' : 'flex';
+  if (allocationSection) allocationSection.style.display = fullEnumeration ? 'none' : 'block';
+  if (samplingInput) samplingInput.value = fullEnumeration ? 'Full enumeration' : 'LHS by mode';
+  if (diversityLabel) {
+    diversityLabel.textContent = fullEnumeration
+      ? 'Max per diversity group'
+      : 'Max per MA group';
+  }
+
+  if (modeSection) modeSection.style.display = fullEnumeration ? 'block' : 'none';
+  if (!modeContainer) return;
+  const profileKey = `${window.currentStrategyId || ''}:${metadata.profile}`;
+  if (modeContainer.dataset.profileKey === profileKey) return;
+  modeContainer.dataset.profileKey = profileKey;
+  modeContainer.innerHTML = '';
+  metadata.modes.forEach((mode) => {
+    const modeId = String(mode?.id || '').trim();
+    if (!modeId) return;
+    const label = document.createElement('label');
+    label.className = 'optimizer-mode-option';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.name = 'gridEnabledMode';
+    checkbox.id = `gridEnabledMode-${modeId}`;
+    checkbox.value = modeId;
+    checkbox.checked = mode.default_enabled !== false;
+    checkbox.addEventListener('change', () => {
+      if (!getSelectedGridModes().length) {
+        checkbox.checked = true;
+        setGridPreviewError('At least one Grid mode must remain enabled.');
+      }
+      scheduleGridPreviewUpdate();
+    });
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(` ${mode.label || modeId}`));
+    modeContainer.appendChild(label);
+  });
 }
 
 function readSelectedOptimizerOptionValues(paramName) {
@@ -1143,7 +1204,11 @@ function validateOptimizerForm(config) {
     }
   });
 
-  if (enabledCount === 0) {
+  const gridMetadata = getEnabledGridMetadata();
+  if (
+    enabledCount === 0
+    && !(optimizerMode === 'grid' && gridMetadata.profile === 'full_enumeration')
+  ) {
     errors.push('Enable at least one parameter to optimize.');
   }
 
@@ -1151,6 +1216,9 @@ function validateOptimizerForm(config) {
     const gridMeta = getEnabledGridMetadata();
     if (!gridMeta.available) {
       errors.push(gridMeta.reason || 'Grid mode is unavailable for this strategy.');
+    }
+    if (gridMeta.profile === 'full_enumeration' && !getSelectedGridModes().length) {
+      errors.push('Enable at least one Grid mode.');
     }
 
     const fastSelection = collectGridObjectiveSelection('fast');
@@ -1199,10 +1267,12 @@ function validateOptimizerForm(config) {
       }
     });
 
-    const maTypeOptions = readSelectedOptimizerOptionValues('maType3');
-    const selectedMaTypes = maTypeOptions.map((value) => String(value || '').trim().toUpperCase());
-    if (selectedMaTypes.includes('VWAP')) {
-      errors.push('VWAP is not supported in S03 Grid mode.');
+    if (window.currentStrategyId === 's03_reversal_v10') {
+      const maTypeOptions = readSelectedOptimizerOptionValues('maType3');
+      const selectedMaTypes = maTypeOptions.map((value) => String(value || '').trim().toUpperCase());
+      if (selectedMaTypes.includes('VWAP')) {
+        errors.push('VWAP is not supported in S03 Grid mode.');
+      }
     }
   }
 
@@ -1492,7 +1562,12 @@ function buildOptunaConfig(state) {
 function buildGridConfig(state) {
   const optunaCompatibleConfig = buildOptunaConfig(state);
   const gridBaseConfig = buildOptimizationConfig(state, 'grid');
-  const budget = getGridBudgetValue();
+  const metadata = getEnabledGridMetadata();
+  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const previewBudget = Number(window.lastGridPreview?.actual_budget);
+  const budget = fullEnumeration && Number.isFinite(previewBudget) && previewBudget > 0
+    ? previewBudget
+    : getGridBudgetValue();
   const seedRaw = Number(document.getElementById('gridSeed')?.value);
   const topRaw = Number(document.getElementById('gridTopCandidates')?.value);
   const minQuotaRaw = Number(document.getElementById('gridMinQuota')?.value);
@@ -1512,6 +1587,7 @@ function buildGridConfig(state) {
     grid_budget: budget,
     grid_seed: Number.isFinite(seedRaw) ? Math.max(0, Math.round(seedRaw)) : 42,
     grid_top_candidates: Number.isFinite(topRaw) ? Math.max(1, Math.min(500, Math.round(topRaw))) : 10,
+    grid_enabled_modes: fullEnumeration ? getSelectedGridModes() : [],
     grid_allocation_method: allocationMethod,
     grid_min_quota: Number.isFinite(minQuotaRaw) ? Math.max(0, Math.min(0.33, minQuotaRaw)) : 0.10,
     grid_manual_percents: {
@@ -1965,6 +2041,7 @@ function syncGridBudgetHelp({ normalizeInput = false } = {}) {
 }
 
 function syncGridAllocationUi() {
+  if (getEnabledGridMetadata().profile === 'full_enumeration') return;
   const method = Array.from(document.querySelectorAll('input[name="gridAllocationMethod"]'))
     .find((radio) => radio.checked)?.value || 'auto_sqrt_space';
   const minQuotaRow = document.getElementById('gridMinQuotaRow');
@@ -1978,6 +2055,7 @@ function syncGridAllocationUi() {
 }
 
 function updateGridPreviewDom(preview) {
+  window.lastGridPreview = preview || null;
   const summary = document.getElementById('gridPreviewSummary');
   const rowsEl = document.getElementById('gridPreviewRows');
   const errorEl = document.getElementById('gridPreviewError');
@@ -1989,7 +2067,9 @@ function updateGridPreviewDom(preview) {
     const total = preview?.total_space_label || '-';
     const budget = preview?.actual_budget_label || preview?.requested_budget_label || '-';
     const coverage = preview?.coverage_label || '-';
-    summary.textContent = `Parameter space: ${total} semantic combinations. Grid budget: ${budget} candidates, ${coverage} coverage.`;
+    summary.textContent = preview?.profile === 'full_enumeration'
+      ? `Parameter space: ${total} semantic combinations. Coverage: ${coverage}. Method: Full enumeration.`
+      : `Parameter space: ${total} semantic combinations. Grid budget: ${budget} candidates, ${coverage} coverage.`;
   }
   if (!rowsEl) return;
   rowsEl.innerHTML = '';
@@ -2050,11 +2130,12 @@ async function updateGridPreview() {
 
 function syncGridParameterOptions() {
   const isGrid = getOptimizerMode() === 'grid';
+  const isS03Grid = isGrid && window.currentStrategyId === 's03_reversal_v10';
   const vwapOptions = Array.from(
     document.querySelectorAll('input.select-option-checkbox[data-param-name="maType3"][data-option-value="VWAP"]')
   );
   vwapOptions.forEach((checkbox) => {
-    if (isGrid) {
+    if (isS03Grid) {
       checkbox.checked = false;
       checkbox.disabled = true;
       checkbox.title = 'VWAP is not supported in S03 Grid mode.';
@@ -2069,7 +2150,7 @@ function syncGridParameterOptions() {
   });
 
   const allMa = document.getElementById('opt-maType3-all');
-  if (allMa && isGrid && vwapOptions.length) {
+  if (allMa && isS03Grid && vwapOptions.length) {
     const individual = Array.from(
       document.querySelectorAll('input.select-option-checkbox[data-param-name="maType3"]:not([data-option-value="__ALL__"])')
     ).filter((checkbox) => !checkbox.disabled);
@@ -2146,6 +2227,7 @@ function syncOptimizerModeUI() {
   }
 
   syncGridBudgetHelp();
+  syncGridProfileUi();
   syncGridAllocationUi();
   syncGridParameterOptions();
   syncGridObjectiveUi();

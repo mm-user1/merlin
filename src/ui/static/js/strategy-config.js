@@ -80,6 +80,9 @@ async function loadStrategyConfig(strategyId) {
     }
 
     console.log(`Loaded strategy: ${config.name}`);
+    if (typeof syncOptimizerModeUI === 'function') {
+      syncOptimizerModeUI();
+    }
   } catch (error) {
     console.error('Failed to load strategy config:', error);
     if (!window.currentStrategyConfig || !window.currentStrategyConfig.parameters) {
@@ -206,7 +209,10 @@ function createOptimizerRow(paramName, paramDef) {
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
   checkbox.id = `opt-${paramName}`;
-  checkbox.checked = Boolean(paramDef.optimize && paramDef.optimize.enabled);
+  checkbox.checked = Boolean(
+    paramDef.optimize
+    && (paramDef.optimize.default_enabled ?? paramDef.optimize.enabled)
+  );
   checkbox.dataset.paramName = paramName;
   checkbox.classList.add('opt-param-toggle');
 

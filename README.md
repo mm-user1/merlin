@@ -9,7 +9,7 @@ Config-driven backtesting and Optuna optimization platform for cryptocurrency tr
 - **Studies browser** - Web UI for browsing, opening, and managing historical optimization studies
 - **Multi-strategy support** - S01 Trailing MA, S03 Reversal, S04 StochRSI, and S06 R-Trend included, easily extensible
 - **Optuna optimization** - Single- and multi-objective optimization (1-6 objectives) with Pareto front results, primary-objective sorting, and multiple samplers (Random, TPE/MOTPE, NSGA-II/NSGA-III)
-- **Grid optimization** - Deterministic optimizer with per-mode parameter spaces (cc_only / tbands_only / both), seeded LHS sampling, Numba-accelerated fast pass and optional slow refinement (currently enabled for `s03_reversal_v10`)
+- **Grid optimization** - Per-strategy Numba backends: S03 uses budgeted seeded LHS/full generation; S06 uses deterministic 100% Bracket/Trail enumeration
 - **Initial Search Coverage** - Optional systematic parameter space exploration during Optuna startup with configurable coverage block sizes
 - **Soft constraints** - Configure feasibility rules (e.g., Total Trades >= 30). Results show feasible/infeasible indicators; infeasible trials are deprioritized, not discarded. Shared by Optuna and Grid.
 - **Bool group rules** - Declare invalid boolean parameter combinations (e.g., `at_least_one_true`) in strategy `config.json` to reduce wasted trials
@@ -41,10 +41,13 @@ python server.py
 
 Open http://127.0.0.1:5000 in your browser.
 
-S06 R-Trend v02 supports Reversal/Trend entries and Bracket/MA-Trail
-execution through Backtest, standard Optuna, and WFA. Its fast Numba Grid
-backend is intentionally not available yet. Disable `stopRR` optimization
-manually for Trail-only Optuna/WFA studies because it is inactive in Trail mode.
+S06 R-Trend v02 supports Backtest, Optuna, fixed/adaptive WFA, and Fast Grid.
+Its Grid profile enumerates every selected Bracket/Trail combination: 48,480
+by default, or up to 436,320 when both optional Threshold OS/OB axes are
+enabled (`20, 30, 40`). Entry Mode and Long/Short controls remain fixed per
+run. Selected IS candidates are always slow-validated, and WFA OOS remains
+authoritative slow execution. Disable `stopRR` optimization manually for
+Trail-only Optuna/WFA studies because it is inactive in Trail mode.
 
 ## Project Structure
 
@@ -53,7 +56,7 @@ project-root/
 |-- src/
 |   |-- core/           # Backtest, Optuna, Grid, WFA engines + metrics + analytics + storage + export + bundle_export + param_identity + post-process + testing
 |   |-- indicators/     # MA (11 types), ATR, RSI, StochRSI
-|   |-- strategies/     # S01, S03 (+ fast_grid.py), S04, and S06 strategy packages
+|   |-- strategies/     # S01, S03/S06 (+ strategy-owned fast_grid.py), and S04 packages
 |   |-- storage/        # SQLite databases (multiple .db files) + queue state
 |   `-- ui/             # Flask server + three-page frontend (Start/Results/Analytics)
 |-- data/               # OHLCV CSVs and regression baselines
@@ -73,7 +76,7 @@ project-root/
 1. Browse and select OHLCV CSV data (or use included `data/raw/OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv`)
 2. Select strategy from dropdown
 3. Configure parameters via dynamic form
-4. Pick optimizer mode (Optuna or Grid) and configure objectives / constraints / sampler / budget
+4. Pick optimizer mode (Optuna or Grid) and configure strategy-appropriate Grid modes or sampling controls
 5. Enable Initial Search Coverage mode (Optuna) for systematic parameter space exploration
 6. Preview Grid parameter space (mode allocation, coverage) before running
 7. Toggle trial-level logging on/off

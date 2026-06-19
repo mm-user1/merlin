@@ -65,7 +65,7 @@ def test_grid_start_page_label_and_marker_are_compact():
     queue_js = (repo_root / "src" / "ui" / "static" / "js" / "queue.js").read_text(encoding="utf-8")
 
     assert "Grid v1 is supported only for S03 Reversal v10." not in ui_handlers_js
-    assert "S03 Reversal v10 only" in ui_handlers_js
+    assert "No fast Grid backend is available." in ui_handlers_js
     assert "в–ѕ" not in index_html
     assert "&#9660;" in index_html
     assert "GRID SETTINGS" in index_html
@@ -74,6 +74,8 @@ def test_grid_start_page_label_and_marker_are_compact():
     assert 'class="grid-fast-objective-checkbox"' in index_html
     assert 'id="gridSlowRefinementEnabled"' in index_html
     assert 'class="grid-slow-objective-checkbox"' in index_html
+    assert 'id="gridProfileModesSection"' in index_html
+    assert "grid_enabled_modes" in ui_handlers_js
     assert "collectGridObjectiveSelection('fast')" in ui_handlers_js
     assert "grid_fast_objectives" in ui_handlers_js
     assert "applyQueueGridConfig" in queue_js
@@ -539,12 +541,14 @@ def test_csv_import_fails_when_strategy_config_unloadable(monkeypatch, client):
     assert "parameter types are unavailable" in message
 
 
-def test_grid_availability_reason_uses_short_backend_label(client):
+def test_grid_availability_reason_uses_generic_backend_label(client):
     response = client.get("/api/strategy/s01_trailing_ma/config")
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["grid_optimizer"]["reason"] == "S03 Reversal v10 only"
+    assert payload["grid_optimizer"]["reason"] == (
+        "No fast Grid backend is available for this strategy."
+    )
 
 
 def test_csv_import_rejects_invalid_int(client):
