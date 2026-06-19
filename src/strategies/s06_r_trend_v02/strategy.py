@@ -504,6 +504,8 @@ class S06RTrendV02(BaseStrategy):
             high = float(high_values[i])
             low = float(low_values[i])
             close = float(close_values[i])
+            entry_filled_this_bar = False
+            had_position_this_bar = position != 0
 
             if pending_market_close and position != 0:
                 close_position(open_price, timestamp)
@@ -523,9 +525,11 @@ class S06RTrendV02(BaseStrategy):
                 initial_risk = order.risk
                 trail_stop = initial_stop
                 trail_active = False
+                entry_filled_this_bar = True
+                had_position_this_bar = True
                 if p.useTrailMA:
                     # Pine exposes confirmed historical-bar OHLC during the
-                    # calc_on_order_fills re-execution after the Open fill.
+                    # calc_on_order_fills entry-fill recalculation.
                     activation = anchor_price + position * initial_risk * p.trailRR
                     activation_reached = high >= activation if position > 0 else low <= activation
                     if activation_reached:
@@ -540,15 +544,17 @@ class S06RTrendV02(BaseStrategy):
                                 trail_stop = min(trail_stop, float(current_band))
 
             if position != 0:
-                active_stop = trail_stop if p.useTrailMA and trail_active else initial_stop
+                stop_active_for_this_bar = (
+                    trail_stop if p.useTrailMA and trail_active else initial_stop
+                )
                 gap_exit: Optional[float] = None
                 if position > 0:
-                    if open_price <= active_stop:
+                    if open_price <= stop_active_for_this_bar:
                         gap_exit = open_price
                     elif not p.useTrailMA and open_price >= target_price:
                         gap_exit = open_price
                 else:
-                    if open_price >= active_stop:
+                    if open_price >= stop_active_for_this_bar:
                         gap_exit = open_price
                     elif not p.useTrailMA and open_price <= target_price:
                         gap_exit = open_price
@@ -558,13 +564,6 @@ class S06RTrendV02(BaseStrategy):
             if position != 0:
                 path = _intrabar_path(open_price, high, low, close)
                 current = path[0]
-                trail_band = (
-                    arrays.trail_long[i]
-                    if position > 0
-                    else arrays.trail_short[i]
-                    if position < 0
-                    else math.nan
-                )
                 for endpoint in path[1:]:
                     if position == 0:
                         break
@@ -581,45 +580,35 @@ class S06RTrendV02(BaseStrategy):
                                 exit_price = initial_stop
                             elif not rising and _between(current, endpoint, target_price):
                                 exit_price = target_price
-                    elif position > 0:
-                        if not trail_active:
-                            activation = anchor_price + initial_risk * p.trailRR
-                            if rising and _between(current, endpoint, activation):
-                                trail_active = True
-                                if math.isfinite(float(trail_band)):
-                                    trail_stop = max(trail_stop, float(trail_band))
-                                if trail_stop >= activation:
-                                    exit_price = activation
-                            elif not rising and _between(current, endpoint, initial_stop):
-                                exit_price = initial_stop
-                        elif not rising and _between(current, endpoint, trail_stop):
-                            exit_price = trail_stop
-                    else:
-                        if not trail_active:
-                            activation = anchor_price - initial_risk * p.trailRR
-                            if not rising and _between(current, endpoint, activation):
-                                trail_active = True
-                                if math.isfinite(float(trail_band)):
-                                    trail_stop = min(trail_stop, float(trail_band))
-                                if trail_stop <= activation:
-                                    exit_price = activation
-                            elif rising and _between(current, endpoint, initial_stop):
-                                exit_price = initial_stop
-                        elif rising and _between(current, endpoint, trail_stop):
-                            exit_price = trail_stop
+                    elif position > 0 and not rising and _between(
+                        current, endpoint, stop_active_for_this_bar
+                    ):
+                        exit_price = stop_active_for_this_bar
+                    elif position < 0 and rising and _between(
+                        current, endpoint, stop_active_for_this_bar
+                    ):
+                        exit_price = stop_active_for_this_bar
 
                     if exit_price is not None:
                         close_position(exit_price, timestamp)
                         break
                     current = endpoint
 
-            if position != 0 and p.useTrailMA and trail_active:
-                current_band = arrays.trail_long[i] if position > 0 else arrays.trail_short[i]
-                if math.isfinite(float(current_band)):
-                    if position > 0:
-                        trail_stop = max(initial_stop, trail_stop, float(current_band))
-                    else:
-                        trail_stop = min(initial_stop, trail_stop, float(current_band))
+            if position != 0 and p.useTrailMA and not entry_filled_this_bar:
+                activation = anchor_price + position * initial_risk * p.trailRR
+                activation_reached = high >= activation if position > 0 else low <= activation
+                if trail_active or activation_reached:
+                    trail_active = True
+                    current_band = (
+                        arrays.trail_long[i] if position > 0 else arrays.trail_short[i]
+                    )
+                    if math.isfinite(float(current_band)):
+                        if position > 0:
+                            trail_stop = max(initial_stop, trail_stop, float(current_band))
+                        else:
+                            trail_stop = min(initial_stop, trail_stop, float(current_band))
+                # Normal historical-bar activation/ratchet is committed after
+                # path processing and becomes executable on the next tick.
 
             if position != 0 and entry_time is not None:
                 days_in_trade = (timestamp - entry_time).total_seconds() / 86400.0
@@ -656,6 +645,7 @@ class S06RTrendV02(BaseStrategy):
                 and in_date_range
                 and position == 0
                 and previous_close_position == 0
+                and not had_position_this_bar
                 and pending_entry is None
             ):
                 direction = 0

@@ -399,10 +399,11 @@ def test_short_fill_recalculation_activates_trail_from_confirmed_ohlc(monkeypatc
                 (100.0, 101.0, 99.0, 100.0),
                 (101.0, 101.5, 100.5, 101.0),
                 (101.0, 103.0, 100.5, 101.5),
+                (101.0, 102.0, 100.0, 101.0),
             ],
-            [98.0, 99.0, 101.5],
+            [98.0, 99.0, 101.5, 101.5],
             102.0,
-            101.5,
+            101.0,
         ),
         (
             -1,
@@ -410,14 +411,15 @@ def test_short_fill_recalculation_activates_trail_from_confirmed_ohlc(monkeypatc
                 (100.0, 101.0, 99.0, 100.0),
                 (99.0, 99.5, 98.5, 99.0),
                 (99.0, 99.5, 97.0, 98.5),
+                (99.0, 100.0, 98.0, 99.0),
             ],
             98.0,
-            [102.0, 101.0, 98.5],
-            98.5,
+            [102.0, 101.0, 98.5, 98.5],
+            99.0,
         ),
     ],
 )
-def test_later_bar_trail_activation_and_same_bar_cross(
+def test_later_bar_trail_activation_exits_on_next_open_gap(
     monkeypatch,
     direction,
     rows,
@@ -437,25 +439,88 @@ def test_later_bar_trail_activation_and_same_bar_cross(
         ),
         _base_params(useTrailMA=True),
     )
-    assert result.trades[0].exit_price == pytest.approx(expected_exit)
+    trade = result.trades[0]
+    assert trade.exit_time == _frame(rows).index[3]
+    assert trade.exit_price == pytest.approx(expected_exit)
 
 
-def test_trail_ratchets_only_favorably_and_never_beyond_initial_looseness(monkeypatch):
-    df = _frame(
-        [
-            (100.0, 101.0, 99.0, 100.0),
-            (101.0, 101.5, 100.5, 101.0),
-            (101.0, 103.0, 100.5, 103.0),
-            (103.0, 103.5, 101.0, 102.0),
-        ]
-    )
+@pytest.mark.parametrize(
+    ("direction", "rows", "trail_long", "trail_short", "expected_exit"),
+    [
+        (
+            1,
+            [
+                (100.0, 101.0, 99.0, 100.0),
+                (101.0, 101.5, 100.5, 101.0),
+                (101.0, 103.0, 100.5, 102.5),
+                (103.0, 104.0, 101.5, 102.5),
+                (101.0, 102.0, 100.0, 101.0),
+            ],
+            [90.0, 90.0, 100.0, 102.0, 102.0],
+            110.0,
+            101.0,
+        ),
+        (
+            -1,
+            [
+                (100.0, 101.0, 99.0, 100.0),
+                (99.0, 99.5, 98.5, 99.0),
+                (99.0, 99.5, 97.0, 97.5),
+                (97.0, 98.5, 96.0, 97.5),
+                (99.0, 100.0, 98.0, 99.0),
+            ],
+            90.0,
+            [110.0, 110.0, 100.0, 98.0, 98.0],
+            99.0,
+        ),
+    ],
+)
+def test_active_trail_uses_previous_committed_stop_before_current_ratchet(
+    monkeypatch,
+    direction,
+    rows,
+    trail_long,
+    trail_short,
+    expected_exit,
+):
+    signals = {"long_signals": (0,)} if direction > 0 else {"short_signals": (0,)}
     result = _run_patched(
         monkeypatch,
-        df,
-        _arrays(4, long_signals=(0,), trail_long=[90.0, 90.0, 102.0, 90.0]),
+        _frame(rows),
+        _arrays(
+            len(rows),
+            trail_long=trail_long,
+            trail_short=trail_short,
+            **signals,
+        ),
         _base_params(useTrailMA=True),
     )
-    assert result.trades[0].exit_price == pytest.approx(102.0)
+    trade = result.trades[0]
+    assert trade.exit_time == _frame(rows).index[4]
+    assert trade.exit_price == pytest.approx(expected_exit)
+
+
+def test_previously_active_trail_stop_has_priority_over_current_ratchet(monkeypatch):
+    rows = [
+        (100.0, 101.0, 99.0, 100.0),
+        (101.0, 101.5, 100.5, 101.0),
+        (101.0, 103.0, 100.5, 102.5),
+        (103.0, 104.0, 99.0, 103.0),
+        (103.0, 103.0, 103.0, 103.0),
+    ]
+    result = _run_patched(
+        monkeypatch,
+        _frame(rows),
+        _arrays(
+            len(rows),
+            long_signals=(0,),
+            trail_long=[90.0, 90.0, 100.0, 102.0, 102.0],
+        ),
+        _base_params(useTrailMA=True),
+    )
+    trade = result.trades[0]
+    assert trade.exit_time == _frame(rows).index[3]
+    assert trade.exit_price == pytest.approx(100.0)
 
 
 def test_max_days_closes_at_next_open_with_priority(monkeypatch):
@@ -534,13 +599,14 @@ def test_enable_gating_same_side_reentry_trade_start_and_call_isolation(monkeypa
         [
             (100.0, 101.0, 99.0, 100.0),
             (101.0, 105.0, 100.0, 104.0),
+            (100.0, 101.0, 99.0, 100.0),
             (101.0, 105.0, 100.0, 104.0),
             (104.0, 104.0, 104.0, 104.0),
         ]
     )
-    arrays = _arrays(len(df), long_signals=(0, 1))
+    arrays = _arrays(len(df), long_signals=(0, 2))
     disabled = _run_patched(monkeypatch, df, arrays, _base_params(enableLong=False))
-    before_start = _run_patched(monkeypatch, df, arrays, trade_start_idx=1)
+    before_start = _run_patched(monkeypatch, df, arrays, trade_start_idx=3)
     first = _run_patched(monkeypatch, df, arrays, _base_params(contractSize=0.1))
     second = _run_patched(monkeypatch, df, arrays, _base_params(contractSize=0.1))
 
@@ -549,6 +615,27 @@ def test_enable_gating_same_side_reentry_trade_start_and_call_isolation(monkeypa
     assert len(first.trades) == 2
     assert first.trades == second.trades
     assert first.balance_curve == pytest.approx(second.balance_curve)
+
+
+def test_fill_and_exit_bar_does_not_enqueue_stale_signal_reentry(monkeypatch):
+    df = _frame(
+        [
+            (100.0, 101.0, 99.0, 100.0),
+            (101.0, 105.0, 100.0, 104.0),
+            (101.0, 105.0, 100.0, 104.0),
+            (104.0, 104.0, 104.0, 104.0),
+        ]
+    )
+    result = _run_patched(
+        monkeypatch,
+        df,
+        _arrays(len(df), long_signals=(0, 1)),
+        _base_params(contractSize=0.1),
+    )
+
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_time == df.index[1]
+    assert result.last_position == {}
 
 
 def test_mode_inactive_parameters_do_not_change_results(reference_data):
@@ -638,13 +725,13 @@ def test_reference_a_reversal_trail_encodes_strict_boundary_result(reference_dat
     # TradingView: net 31.92%, DD 14.15%, 61 trades, 31 wins, PF 1.525.
     # Merlin closes the final short at 2025-12-01 00:00Z instead of consuming
     # TradingView's delayed 2025-12-01 01:00Z fill outside the requested period.
-    # That strict boundary costs 1.0504699725 percentage points versus the
+    # That strict boundary costs 1.0534874805 percentage points versus the
     # delayed Open and explains most of the remaining aggregate difference.
     assert basic.total_trades == 61
     assert basic.winning_trades == 31
-    assert basic.net_profit_pct == pytest.approx(30.5457029832, abs=1e-9)
-    assert advanced.profit_factor == pytest.approx(1.5027079613, abs=1e-9)
-    assert basic.max_drawdown_pct == pytest.approx(13.1467005832, abs=1e-9)
+    assert basic.net_profit_pct == pytest.approx(30.9420054193, abs=1e-9)
+    assert advanced.profit_factor == pytest.approx(1.5088788696, abs=1e-9)
+    assert basic.max_drawdown_pct == pytest.approx(13.4683032109, abs=1e-9)
     assert result.trades[-1].exit_time == TRADING_END
 
     last_trade = result.trades[-1]
@@ -656,8 +743,8 @@ def test_reference_a_reversal_trail_encodes_strict_boundary_result(reference_dat
         - delayed_tv_open * last_trade.size * commission_rate
     )
     boundary_delta = delayed_net_pnl - last_trade.net_pnl
-    assert boundary_delta == pytest.approx(1.0504699725, abs=1e-9)
-    assert basic.net_profit_pct + boundary_delta == pytest.approx(31.5961729557, abs=1e-9)
+    assert boundary_delta == pytest.approx(1.0534874805, abs=1e-9)
+    assert basic.net_profit_pct + boundary_delta == pytest.approx(31.9954928998, abs=1e-9)
 
 
 def test_result_serialization_preserves_timestamp_objects(reference_data):

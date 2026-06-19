@@ -43,7 +43,8 @@ Open http://127.0.0.1:5000 in your browser.
 
 S06 R-Trend v02 supports Reversal/Trend entries and Bracket/MA-Trail
 execution through Backtest, standard Optuna, and WFA. Its fast Numba Grid
-backend is intentionally not available yet.
+backend is intentionally not available yet. Disable `stopRR` optimization
+manually for Trail-only Optuna/WFA studies because it is inactive in Trail mode.
 
 ## Project Structure
 
