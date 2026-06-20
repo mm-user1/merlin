@@ -28,6 +28,7 @@ from core.export import export_trades_csv
 from core.grid_engine import (
     GRID_SUPPORTED_FAST_OBJECTIVES,
     GRID_SUPPORTED_SLOW_OBJECTIVES,
+    default_grid_enabled_modes,
     format_compact_count,
     format_coverage_pct,
     parse_grid_budget,
@@ -1079,6 +1080,87 @@ def _grid_objectives_label(values: List[str]) -> str:
     return ", ".join(OBJECTIVE_DISPLAY_NAMES.get(value, value) for value in values)
 
 
+# Constraint-only metrics that are not Optuna objectives lack an entry in
+# OBJECTIVE_DISPLAY_NAMES; supplement (do not replace) the shared display map.
+_CONSTRAINT_EXTRA_DISPLAY_NAMES: Dict[str, str] = {
+    "total_trades": "Total Trades",
+    "max_consecutive_losses": "Max Consecutive Losses",
+}
+
+_CONSTRAINT_OPERATOR_SYMBOLS: Dict[str, str] = {"gte": ">=", "lte": "<="}
+
+
+def _constraint_metric_label(metric: str) -> str:
+    return (
+        OBJECTIVE_DISPLAY_NAMES.get(metric)
+        or _CONSTRAINT_EXTRA_DISPLAY_NAMES.get(metric)
+        or metric
+    )
+
+
+def _format_constraint_threshold(value: Any) -> Optional[str]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if number == int(number):
+        return str(int(number))
+    return f"{number:.10f}".rstrip("0").rstrip(".")
+
+
+def _coerce_constraint_list(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _grid_constraint_sources(study: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Resolve persisted constraints across current and legacy study/config shapes.
+
+    Precedence mirrors other Results/Analytics settings reconstruction: prefer
+    study-level columns, then top-level config, then the nested optuna config.
+    The first source that carries any constraint entries (enabled or not) wins,
+    so a fully-disabled set is not silently overridden by another source.
+    """
+    for candidate in (
+        study.get("constraints"),
+        study.get("constraints_json"),
+        config.get("constraints"),
+        _parse_json_dict(config.get("optuna_config")).get("constraints"),
+    ):
+        parsed = _coerce_constraint_list(candidate)
+        if parsed:
+            return parsed
+    return []
+
+
+def _grid_constraints_label(constraints: List[Dict[str, Any]]) -> str:
+    """Format enabled constraints as e.g. ``Total Trades >= 30, Max DD % <= 30``."""
+    parts: List[str] = []
+    for spec in constraints:
+        if not isinstance(spec, dict):
+            continue
+        if not _grid_setting_bool(spec.get("enabled"), False):
+            continue
+        metric = str(spec.get("metric") or "").strip()
+        operator = CONSTRAINT_OPERATORS.get(metric)
+        if not operator:
+            continue
+        threshold = _format_constraint_threshold(spec.get("threshold"))
+        if threshold is None:
+            continue
+        symbol = _CONSTRAINT_OPERATOR_SYMBOLS.get(operator, operator)
+        parts.append(f"{_constraint_metric_label(metric)} {symbol} {threshold}")
+    return ", ".join(parts) if parts else "None"
+
+
 def _format_duration_seconds(seconds: Any) -> str:
     total = _grid_setting_number(seconds)
     if total is None or total < 0:
@@ -1248,6 +1330,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         or _grid_config_value(config, "primary_objective")
         or (slow_objectives[0] if slow_objectives else None)
     )
+    constraints_label = _grid_constraints_label(_grid_constraint_sources(study, config))
 
     mode_rows = []
     generations = set()
@@ -1355,6 +1438,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 },
             ]
         )
+    rows.append({"key": "Constraints", "val": constraints_label})
     if not is_wfa_grid:
         rows.append(
             {
@@ -2271,11 +2355,12 @@ def _build_optimization_config(
         )
     else:
         raise ValueError("Grid enabled modes must be an array.")
-    if (
-        not enabled_modes_present
-        and str(strategy_id).strip().lower() == "s06_r_trend_v02"
-    ):
-        grid_enabled_modes = ["bracket", "trail"]
+    if not enabled_modes_present:
+        # Derive defaults from the registered fast backend contract instead of a
+        # per-strategy hardcode.  Full-enumeration backends (e.g. S06) expose
+        # default-enabled modes; sampled backends (e.g. S03) expose none and keep
+        # their existing cc/tbands/both allocation defaulting untouched.
+        grid_enabled_modes = default_grid_enabled_modes(strategy_id)
     grid_allocation_method = str(
         payload.get("grid_allocation_method", payload.get("gridAllocationMethod", "auto_sqrt_space"))
     ).strip().lower()

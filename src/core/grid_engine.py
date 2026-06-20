@@ -428,6 +428,62 @@ def get_fast_grid_backend_metadata(strategy_id: str) -> Dict[str, Any]:
     return normalized
 
 
+def default_grid_enabled_modes(strategy_id: str) -> List[str]:
+    """Return ordered backend modes whose metadata marks them default-enabled.
+
+    Used to default a missing ``grid_enabled_modes`` field without a per-strategy
+    hardcode.  Strategies whose backend declares no explicit modes (e.g. S03,
+    which allocates by cc/tbands/both rather than enabled modes) yield an empty
+    list, leaving their existing defaulting untouched.  Backend order is
+    preserved and malformed metadata is rejected clearly.
+    """
+    if not supports_fast_grid(strategy_id):
+        return []
+    metadata = get_fast_grid_backend_metadata(strategy_id)
+    modes = metadata.get("modes")
+    if not modes:
+        return []
+    if not isinstance(modes, (list, tuple)):
+        raise ValueError("Malformed Grid backend metadata: 'modes' must be a list.")
+    enabled: List[str] = []
+    for mode in modes:
+        if not isinstance(mode, Mapping):
+            raise ValueError("Malformed Grid backend metadata: each mode must be a mapping.")
+        mode_id = str(mode.get("id") or "").strip().lower()
+        if not mode_id:
+            raise ValueError("Malformed Grid backend metadata: mode is missing an 'id'.")
+        if mode.get("default_enabled", True) is not False:
+            enabled.append(mode_id)
+    return list(dict.fromkeys(enabled))
+
+
+def normalize_diversity_group_fields(value: Any) -> Any:
+    """Return a JSON-safe defensive copy of backend diversity metadata.
+
+    The generic contract preserves the backend-provided shape so that flat
+    backends (e.g. S03) keep their ``list[str]`` field list while mode-specific
+    backends (e.g. S06) keep their ``dict[str, list[str]]`` mapping.  Malformed
+    metadata is rejected clearly rather than silently corrupted (the historical
+    ``list(...)`` coercion reduced a mapping to its mode names).
+    """
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        normalized: Dict[str, List[str]] = {}
+        for key, fields in value.items():
+            if not isinstance(fields, (list, tuple)):
+                raise ValueError(
+                    "Malformed diversity_group_fields: mapping values must be lists of field names."
+                )
+            normalized[str(key)] = [str(field) for field in fields]
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [str(field) for field in value]
+    raise ValueError(
+        "Malformed diversity_group_fields: expected a list or a mapping of mode -> field list."
+    )
+
+
 def _build_backend_allocation(
     backend: Any,
     config: OptimizationConfig,
@@ -1142,8 +1198,8 @@ def run_grid_optimization(
         enabled=settings.diversity_enabled,
         max_per_group=settings.diversity_max_per_group,
     )
-    diversity_metadata["diversity_group_fields"] = list(
-        backend_metadata.get("diversity_group_fields") or []
+    diversity_metadata["diversity_group_fields"] = normalize_diversity_group_fields(
+        backend_metadata.get("diversity_group_fields")
     )
     objective_selected_count = len(selected_fast)
 

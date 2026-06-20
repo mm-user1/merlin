@@ -406,6 +406,12 @@ enumeration. A fast backend typically provides:
 - Optional `get_backend_metadata()` and `build_allocation(...)` hooks for
   strategy-specific mode labels and generation profiles. Full-enumeration
   backends can declare that budget, seed, and allocation controls do not apply.
+  `get_backend_metadata()` also drives generic behavior with no shared-code edits:
+  ordered `modes` with `default_enabled` flags supply the default
+  `grid_enabled_modes` (via `default_grid_enabled_modes`), and
+  `diversity_group_fields` (a `list[str]` or a `dict[str, list[str]]` mode map) is
+  preserved as-is through summaries and storage by
+  `normalize_diversity_group_fields`.
 - A Numba inner loop that evaluates the restricted fast objective set
   (`net_profit_pct`, `max_drawdown_pct`, `romad`, `profit_factor`, `win_rate`)
   cheaply per candidate.

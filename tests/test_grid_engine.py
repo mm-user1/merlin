@@ -1,7 +1,4 @@
 import math
-import shutil
-import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,7 +12,10 @@ from core.grid_engine import (
     build_grid_dsr_results,
     calculate_grid_display_scores,
     compute_grid_dsr_benchmark,
+    default_grid_enabled_modes,
     format_compact_count,
+    get_fast_grid_backend_metadata,
+    normalize_diversity_group_fields,
     parse_grid_budget,
     rank_grid_candidates_by_dsr,
     rank_grid_results,
@@ -943,10 +943,8 @@ def test_fast_grid_dsr_sharpe_matches_slow_path():
     assert fast_result.sharpe_ratio == pytest.approx(slow_result.sharpe_ratio, abs=1e-9)
 
 
-def test_save_and_load_grid_study_roundtrip():
-    temp_dir = Path("tests/.tmp_grid_files") / uuid.uuid4().hex
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = temp_dir / "data.csv"
+def test_save_and_load_grid_study_roundtrip(tmp_path):
+    csv_path = tmp_path / "data.csv"
     csv_path.write_text("time,open,high,low,close,Volume\n", encoding="utf-8")
 
     result = OptimizationResult(
@@ -1004,18 +1002,15 @@ def test_save_and_load_grid_study_roundtrip():
         },
     }
 
-    try:
-        study_id = save_grid_study_to_db(
-            config=config,
-            grid_settings=GridSettings(requested_budget=10, top_candidates=1),
-            grid_summary=summary,
-            trial_results=[result],
-            csv_file_path=str(csv_path),
-            start_time=0,
-        )
-        loaded = load_study_from_db(study_id)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    study_id = save_grid_study_to_db(
+        config=config,
+        grid_settings=GridSettings(requested_budget=10, top_candidates=1),
+        grid_summary=summary,
+        trial_results=[result],
+        csv_file_path=str(csv_path),
+        start_time=0,
+    )
+    loaded = load_study_from_db(study_id)
 
     assert loaded["study"]["optimization_mode"] == "grid"
     assert loaded["study"]["optimizer_mode"] == "grid"
@@ -1025,3 +1020,142 @@ def test_save_and_load_grid_study_roundtrip():
     assert loaded["study"]["dsr_n_trials"] == 9
     assert loaded["trials"][0]["dsr_probability"] == pytest.approx(0.91)
     assert loaded["trials"][0]["selection_sources"] == ["objective", "dsr"]
+
+
+# ---------------------------------------------------------------------------
+# Backend metadata: diversity-field shape preservation + default-mode contract
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_diversity_group_fields_preserves_shape_and_rejects_malformed():
+    # Flat backends (S03) keep their list[str] field list.
+    assert normalize_diversity_group_fields(["mode", "maType3", "maLength3"]) == [
+        "mode",
+        "maType3",
+        "maLength3",
+    ]
+    # Mode-specific backends (S06) keep their dict[str, list[str]] mapping.
+    mapping = {
+        "bracket": ["mode", "stopX", "stopRR"],
+        "trail": ["mode", "trailMAType", "trailMALength"],
+    }
+    normalized = normalize_diversity_group_fields(mapping)
+    assert normalized == mapping
+    # Defensive copy: mutating the result must not touch the source.
+    normalized["bracket"].append("injected")
+    assert mapping["bracket"] == ["mode", "stopX", "stopRR"]
+    # None collapses to an empty list, not an error.
+    assert normalize_diversity_group_fields(None) == []
+    # Malformed shapes are rejected clearly rather than silently corrupted.
+    with pytest.raises(ValueError, match="Malformed diversity_group_fields"):
+        normalize_diversity_group_fields({"bracket": "mode,stopX"})
+    with pytest.raises(ValueError, match="Malformed diversity_group_fields"):
+        normalize_diversity_group_fields(42)
+
+
+def test_backend_metadata_diversity_group_fields_shapes():
+    s03 = get_fast_grid_backend_metadata("s03_reversal_v10")["diversity_group_fields"]
+    assert s03 == ["mode", "maType3", "maLength3"]
+
+    s06 = get_fast_grid_backend_metadata("s06_r_trend_v02")["diversity_group_fields"]
+    assert s06 == {
+        "bracket": ["mode", "stopX", "stopRR"],
+        "trail": ["mode", "trailMAType", "trailMALength"],
+    }
+
+
+def test_default_grid_enabled_modes_from_backend_metadata(monkeypatch):
+    # S06 (full enumeration) derives ordered default-enabled modes from metadata.
+    assert default_grid_enabled_modes("s06_r_trend_v02") == ["bracket", "trail"]
+    # S03 declares no explicit modes -> empty (cc/tbands/both allocation untouched).
+    assert default_grid_enabled_modes("s03_reversal_v10") == []
+    # Unsupported strategies are unaffected.
+    assert default_grid_enabled_modes("s04_stochrsi") == []
+
+    # A backend-defined default-disabled mode is excluded while order is preserved.
+    import core.grid_engine as grid_engine
+
+    def _fake_metadata(_strategy_id):
+        return {
+            "modes": [
+                {"id": "bracket", "default_enabled": True},
+                {"id": "trail", "default_enabled": True},
+                {"id": "experimental", "default_enabled": False},
+            ]
+        }
+
+    monkeypatch.setattr(grid_engine, "get_fast_grid_backend_metadata", _fake_metadata)
+    assert grid_engine.default_grid_enabled_modes("s06_r_trend_v02") == ["bracket", "trail"]
+
+
+def test_default_grid_enabled_modes_rejects_malformed_metadata(monkeypatch):
+    import core.grid_engine as grid_engine
+
+    monkeypatch.setattr(
+        grid_engine,
+        "get_fast_grid_backend_metadata",
+        lambda _strategy_id: {"modes": [{"label": "no id"}]},
+    )
+    with pytest.raises(ValueError, match="missing an 'id'"):
+        grid_engine.default_grid_enabled_modes("s06_r_trend_v02")
+
+
+def _s06_server_payload(**overrides):
+    payload = {
+        "optimization_mode": "grid",
+        "enabled_params": {"stopX": True},
+        "param_ranges": {"stopX": [1.0, 2.0, 1.0]},
+        "param_types": {"stopX": "float"},
+        "fixed_params": {
+            "dateFilter": False,
+            "contractSize": 0.01,
+            "initialCapital": 100.0,
+            "commissionPct": 0.05,
+        },
+        "objectives": ["net_profit_pct"],
+        "grid_fast_objectives": ["net_profit_pct"],
+        "grid_budget": 10,
+        "grid_seed": 42,
+        "grid_top_candidates": 5,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _build_server_config(strategy_id, **payload_overrides):
+    return _build_optimization_config(
+        "dummy.csv",
+        _s06_server_payload(**payload_overrides),
+        worker_processes=1,
+        strategy_id=strategy_id,
+        warmup_bars=1000,
+    )
+
+
+def test_server_default_modes_use_backend_contract_not_strategy_hardcode():
+    # Absent mode field -> backend default-enabled modes, in backend order.
+    assert _build_server_config("s06_r_trend_v02").grid_enabled_modes == ["bracket", "trail"]
+    # Explicit selections are honored verbatim.
+    assert _build_server_config(
+        "s06_r_trend_v02", grid_enabled_modes=["bracket"]
+    ).grid_enabled_modes == ["bracket"]
+    assert _build_server_config(
+        "s06_r_trend_v02", grid_enabled_modes=["trail"]
+    ).grid_enabled_modes == ["trail"]
+    assert _build_server_config(
+        "s06_r_trend_v02", grid_enabled_modes=["bracket", "trail"]
+    ).grid_enabled_modes == ["bracket", "trail"]
+    # Unsupported strategy and S03 keep their existing empty defaulting.
+    assert _build_server_config("s04_stochrsi").grid_enabled_modes == []
+    assert _build_server_config("s03_reversal_v10").grid_enabled_modes == []
+
+
+def test_server_explicit_empty_modes_stay_empty_and_backend_rejects_them():
+    config = _build_server_config("s06_r_trend_v02", grid_enabled_modes=[])
+    # The server does not silently substitute defaults for an explicit empty set.
+    assert config.grid_enabled_modes == []
+    # Backend validation remains authoritative even if the UI is bypassed.
+    from strategies.s06_r_trend_v02 import fast_grid as s06_fast_grid
+
+    with pytest.raises(ValueError, match="at least one"):
+        s06_fast_grid.build_parameter_space(config)

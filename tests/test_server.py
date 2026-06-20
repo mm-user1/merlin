@@ -728,24 +728,10 @@ def test_optuna_score_config_migrates_legacy_consistency_bounds():
     assert config.score_config["metric_bounds"]["consistency"] == {"min": -1.0, "max": 1.0}
 
 
-def _ensure_local_test_tmp_dir() -> Path:
-    path = Path(__file__).parent / ".tmp_server_cancel"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _ensure_local_queue_tmp_dir() -> Path:
-    path = Path(__file__).parent / ".tmp_server_queue"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _patch_queue_storage_path(monkeypatch, filename: str) -> Path:
+def _patch_queue_storage_path(monkeypatch, tmp_path: Path, filename: str) -> Path:
     from ui import server_services
 
-    queue_file = _ensure_local_queue_tmp_dir() / filename
-    if queue_file.exists():
-        queue_file.unlink()
+    queue_file = tmp_path / filename
 
     monkeypatch.setattr(
         server_services,
@@ -755,8 +741,8 @@ def _patch_queue_storage_path(monkeypatch, filename: str) -> Path:
     return queue_file
 
 
-def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_roundtrip.json")
+def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_roundtrip.json")
 
     payload = {
         "items": [
@@ -797,8 +783,8 @@ def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch):
     assert not queue_file.exists()
 
 
-def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_empty_cleanup.json")
+def test_queue_api_empty_items_removes_queue_file(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_empty_cleanup.json")
 
     seed_payload = {
         "items": [
@@ -834,8 +820,8 @@ def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
     assert not queue_file.exists()
 
 
-def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_extended_metadata.json")
+def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_extended_metadata.json")
 
     payload = {
         "items": [
@@ -918,10 +904,10 @@ def test_queue_api_rejects_non_object_payload(client):
     assert "json object" in payload["error"].lower()
 
 
-def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch):
+def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch, tmp_path):
     from ui import server_routes_run
 
-    csv_path = _ensure_local_test_tmp_dir() / "opt_cancel.csv"
+    csv_path = tmp_path / "opt_cancel.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n",
@@ -960,11 +946,11 @@ def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert deleted_studies == ["study_cancel_opt"]
 
 
-def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
+def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_cancel.csv"
+    csv_path = tmp_path / "wfa_cancel.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n",
@@ -1024,11 +1010,11 @@ def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert deleted_studies == ["study_cancel_wfa"]
 
 
-def test_walkforward_route_logs_value_error_details(client, monkeypatch, caplog):
+def test_walkforward_route_logs_value_error_details(client, monkeypatch, caplog, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_value_error.csv"
+    csv_path = tmp_path / "wfa_value_error.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n",
@@ -1078,11 +1064,11 @@ def test_walkforward_route_logs_value_error_details(client, monkeypatch, caplog)
     assert any(error_text in record.getMessage() for record in caplog.records)
 
 
-def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
+def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_cooldown_route.csv"
+    csv_path = tmp_path / "wfa_cooldown_route.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n"
@@ -1158,11 +1144,11 @@ def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
     assert captured["base_template"]["wfa"]["cooldown_days"] == 21
 
 
-def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch):
+def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_ft_reject_route.csv"
+    csv_path = tmp_path / "wfa_ft_reject_route.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n"
@@ -1389,10 +1375,10 @@ def test_resolve_wfa_period_oos_prefers_precise_timestamp():
     assert legacy_end == "2025-01-02"
 
 
-def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monkeypatch):
+def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monkeypatch, tmp_path):
     import ui.server_routes_data as routes_data
 
-    csv_path = Path(__file__).parent / "_tmp_wfa_window_trades.csv"
+    csv_path = tmp_path / "_tmp_wfa_window_trades.csv"
     csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
 
     try:
@@ -1468,11 +1454,11 @@ def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monk
             csv_path.unlink()
 
 
-def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
+def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch, tmp_path):
     import strategies
     import ui.server_routes_data as routes_data
 
-    csv_path = Path(__file__).parent / "_tmp_wfa_precise_bounds.csv"
+    csv_path = tmp_path / "_tmp_wfa_precise_bounds.csv"
     csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
 
     try:
@@ -1563,8 +1549,8 @@ def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_optuna_trial(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_optuna.csv"
+def test_export_lancelot_bundle_from_optuna_trial(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_optuna.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1615,8 +1601,8 @@ def test_export_lancelot_bundle_from_optuna_trial(client):
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_grid_candidate(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_grid.csv"
+def test_export_lancelot_bundle_from_grid_candidate(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_grid.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1743,8 +1729,8 @@ def test_study_endpoint_includes_single_grid_settings(client):
         assert allocation["CC only"] == "4 / 8 | 50.0% | LHS"
 
 
-def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa.csv"
+def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_wfa.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1785,8 +1771,8 @@ def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client)
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa_selected.csv"
+def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_wfa_selected.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1833,8 +1819,8 @@ def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_tr
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_requires_selection_payload(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_missing.csv"
+def test_export_lancelot_bundle_requires_selection_payload(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_missing.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -3058,3 +3044,98 @@ def test_optuna_sanitize_threshold_validation(threshold):
             strategy_id="s01_trailing_ma",
             warmup_bars=1000,
         )
+
+
+# ---------------------------------------------------------------------------
+# Workstream D: Constraints row in the shared Grid Settings sidebar
+# ---------------------------------------------------------------------------
+
+from ui.server_services import build_grid_settings_view
+
+
+_TWO_ENABLED_CONSTRAINTS = [
+    {"metric": "total_trades", "threshold": 30, "enabled": True},
+    {"metric": "max_drawdown_pct", "threshold": 30.0, "enabled": True},
+    {"metric": "net_profit_pct", "threshold": 5.0, "enabled": False},
+]
+_EXPECTED_CONSTRAINTS_TEXT = "Total Trades >= 30, Min Drawdown % <= 30"
+
+
+def _constraints_row(view):
+    assert view is not None
+    return next((row["val"] for row in view["rows"] if row["key"] == "Constraints"), None)
+
+
+def _standalone_grid_study(**overrides):
+    study = {
+        "optimization_mode": "grid",
+        "config_json": {
+            "grid_budget": 10,
+            "grid_seed": 42,
+            "grid_top_candidates": 5,
+            "grid_fast_objectives": ["net_profit_pct"],
+        },
+    }
+    study.update(overrides)
+    return study
+
+
+def test_grid_settings_constraints_standalone_two_enabled():
+    study = _standalone_grid_study(constraints=list(_TWO_ENABLED_CONSTRAINTS))
+    assert _constraints_row(build_grid_settings_view(study)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_wfa_grid_two_enabled():
+    study = {
+        "optimization_mode": "wfa",
+        "optimizer_mode": "grid",
+        "config_json": {"optimization_mode": "grid", "grid_budget": 10},
+        "constraints_json": json.dumps(_TWO_ENABLED_CONSTRAINTS),
+    }
+    view = build_grid_settings_view(study)
+    assert view["is_wfa_grid"] is True
+    assert _constraints_row(view) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_none_when_absent():
+    assert _constraints_row(build_grid_settings_view(_standalone_grid_study())) == "None"
+
+
+def test_grid_settings_constraints_excludes_disabled():
+    disabled = [
+        {"metric": "total_trades", "threshold": 30, "enabled": False},
+        {"metric": "max_drawdown_pct", "threshold": 30.0, "enabled": False},
+    ]
+    study = _standalone_grid_study(constraints=disabled)
+    assert _constraints_row(build_grid_settings_view(study)) == "None"
+
+
+def test_grid_settings_constraints_from_constraints_json_string():
+    # Analytics passes the raw constraints_json column (a JSON string).
+    study = _standalone_grid_study(constraints_json=json.dumps(_TWO_ENABLED_CONSTRAINTS))
+    assert _constraints_row(build_grid_settings_view(study)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_config_fallback_shapes():
+    top_level = _standalone_grid_study()
+    top_level["config_json"]["constraints"] = list(_TWO_ENABLED_CONSTRAINTS)
+    assert _constraints_row(build_grid_settings_view(top_level)) == _EXPECTED_CONSTRAINTS_TEXT
+
+    nested = _standalone_grid_study()
+    nested["config_json"]["optuna_config"] = {"constraints": list(_TWO_ENABLED_CONSTRAINTS)}
+    assert _constraints_row(build_grid_settings_view(nested)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_results_and_analytics_row_identical():
+    # Results loads constraints into a parsed list; Analytics keeps the raw JSON
+    # string column.  Both must yield an identical Constraints row.
+    results_shape = _standalone_grid_study(
+        constraints=list(_TWO_ENABLED_CONSTRAINTS),
+        constraints_json=list(_TWO_ENABLED_CONSTRAINTS),
+    )
+    analytics_shape = _standalone_grid_study(
+        constraints_json=json.dumps(_TWO_ENABLED_CONSTRAINTS),
+    )
+    assert _constraints_row(build_grid_settings_view(results_shape)) == _constraints_row(
+        build_grid_settings_view(analytics_shape)
+    )

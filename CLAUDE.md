@@ -38,8 +38,8 @@ Key: Flask, pandas, numpy, matplotlib, optuna==4.6.0
 
 1. **Config-driven design** - Parameter schemas in `config.json`, UI renders dynamically
 2. **camelCase naming** - End-to-end: Pine Script -> config.json -> Python -> CSV
-3. **Dual optimizer modes** - Optuna (Bayesian/evolutionary) and Grid (deterministic LHS by mode); both share constraints/objectives/storage. Optuna offers optional Initial Search Coverage for systematic parameter exploration.
-4. **Strategy isolation** - Each strategy owns its params dataclass; optional fast Grid backend per strategy (e.g. `s03_reversal_v10/fast_grid.py`, Numba-accelerated)
+3. **Dual optimizer modes** - Optuna (Bayesian/evolutionary) and Grid (deterministic; per-strategy backend chooses generation: S03 = LHS/full by mode, S06 = complete enumeration); both share constraints/objectives/storage. Optuna offers optional Initial Search Coverage for systematic parameter exploration.
+4. **Strategy isolation** - Each strategy owns its params dataclass; optional Numba-accelerated fast Grid backend per strategy (`s03_reversal_v10/fast_grid.py`, `s06_r_trend_v02/fast_grid.py`)
 5. **Rolling WFA** - Calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers, optional cooldown after triggers, per-module top-N trial retention
 6. **In-memory backend** - RAM-based Optuna journal storage for faster multiprocess optimization
 7. **Trial deduplication** - Automatic detection/skipping of duplicate parameter sets with search space exhaustion early stopping
@@ -54,7 +54,7 @@ src/
 |-- core/                     # Engines + utilities
 |   |-- backtest_engine.py    # Trade simulation, TradeRecord, StrategyResult
 |   |-- optuna_engine.py      # Optimization, OptimizationResult, OptunaConfig, InMemoryJournalBackend, coverage, dedup
-|   |-- grid_engine.py        # Deterministic Grid optimizer: mode allocation, LHS sampling, fast/slow refinement, ranking, validation
+|   |-- grid_engine.py        # Deterministic Grid optimizer: backend dispatch/metadata, mode allocation, LHS/full generation, fast/slow refinement, ranking, validation
 |   |-- walkforward_engine.py # WFA orchestration (fixed + adaptive + cooldown)
 |   |-- metrics.py            # BasicMetrics, AdvancedMetrics, WFAMetrics (incl. Consistency R²)
 |   |-- analytics.py          # Portfolio equity aggregation for Analytics page
@@ -71,8 +71,9 @@ src/
 |-- strategies/               # Trading strategies
 |   |-- base.py               # BaseStrategy class
 |   |-- s01_trailing_ma/
-|   |-- s03_reversal_v10/     # Includes fast_grid.py (Numba-accelerated Grid backend)
-|   `-- s04_stochrsi/
+|   |-- s03_reversal_v10/     # Includes fast_grid.py (LHS/full by-mode Numba Grid backend)
+|   |-- s04_stochrsi/
+|   `-- s06_r_trend_v02/      # Includes fast_grid.py (full-enumeration Numba Grid backend)
 |-- storage/                  # Database storage (gitignored)
 |   |-- *.db                  # SQLite database files (WAL mode, multiple supported)
 |   |-- journals/             # SQLite journal files
@@ -123,8 +124,9 @@ src/
 | `TradeRecord`, `StrategyResult` | `backtest_engine.py` |
 | `BasicMetrics`, `AdvancedMetrics` | `metrics.py` |
 | `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` | `optuna_engine.py` |
-| `GridSelectionConfig`, `GridAllocation`, grid preview/dispatch | `grid_engine.py` |
-| `GridParameterSpace`, `GridCandidate`, `FastGridData` (S03 fast backend) | `strategies/s03_reversal_v10/fast_grid.py` |
+| `GridSelectionConfig`, `GridAllocation`, grid preview/dispatch, backend metadata normalization | `grid_engine.py` |
+| `GridParameterSpace`, `GridCandidate`, `FastGridData` (S03 LHS/full fast backend) | `strategies/s03_reversal_v10/fast_grid.py` |
+| `GridParameterSpace`, `GridCandidate`, `CandidateSequence`, `FastGridData` (S06 full-enumeration fast backend) | `strategies/s06_r_trend_v02/fast_grid.py` |
 | `WFConfig`, `WFResult`, `WindowResult`, `WindowSplit`, `StitchWindow`, `TriggerResult`, `ISPipelineResult`, `WindowExecutionPlan`, `OOSStitchedResult` | `walkforward_engine.py` |
 | Lancelot partial bundle builder | `bundle_export.py` |
 | Display-identity canonicalization / param hashing | `param_identity.py` |
@@ -258,14 +260,16 @@ rsi_values = rsi(df["Close"], 14)
 pytest tests/ -v
 
 ### Key Test Files
-- `conftest.py` - Shared fixtures (isolated storage, Flask test client)
+- `conftest.py` - Shared fixtures (storage isolated under pytest temp roots outside the repo, Flask test client)
 - `test_sanity.py` - Infrastructure checks
 - `test_regression_s01.py` - S01 baseline regression
 - `test_s03_reversal_v10.py` - S03 strategy tests
 - `test_s04_stochrsi.py` - S04 strategy tests
+- `test_s06_r_trend_v02.py` - S06 strategy tests (slow execution contract, baselines)
+- `test_s06_fast_grid.py` - S06 fast Numba Grid tests (full enumeration, fast-vs-slow execution parity, determinism)
 - `test_naming_consistency.py` - camelCase guardrails
 - `test_storage.py` - Database storage tests
-- `test_server.py` - HTTP API endpoint tests
+- `test_server.py` - HTTP API endpoint tests (incl. Grid Settings sidebar Constraints row)
 - `test_post_process.py` - Post-process module tests
 - `test_dsr.py` - Deflated Sharpe Ratio tests
 - `test_oos_selection.py` - OOS selection tests
@@ -275,7 +279,12 @@ pytest tests/ -v
 - `test_db_management.py` - Multi-database management tests
 - `test_coverage_startup.py` - Initial Search Coverage mode tests
 - `test_strategy_loop_regression.py` - Strategy loop performance regression tests
-- `test_grid_engine.py` - Grid optimizer tests (allocation, LHS, validation, fast/slow refinement)
+- `test_grid_engine.py` - Grid optimizer tests (allocation, LHS/full, validation, fast/slow refinement, backend metadata + default modes, diversity-field shape)
+- `test_multiprocess_score.py` - Multi-process composite-score optimization tests
+
+Tests never write generated files under `tests/`: storage/journal/CSV/queue/export
+artifacts use pytest `tmp_path` / `tmp_path_factory` (or a session temp root)
+outside the repository, and CWD changes are restored via `monkeypatch`.
 
 ### Regenerate S01 Baseline
 ```bash
@@ -329,27 +338,63 @@ python tools/generate_baseline_s01.py
 
 ## Grid: Deterministic optimizer (parallel to Optuna)
 
+Grid is generic in `grid_engine.py` (discovery, ranking, validation, storage,
+DSR, diversity) and dispatches to a strategy-owned `fast_grid.py` backend. Each
+backend advertises capability via `get_backend_metadata()` (normalized by
+`get_fast_grid_backend_metadata`): `profile`, ordered `modes` (with
+`default_enabled`), seed/allocation support, and `diversity_group_fields`.
+
 **Key behavioral rules:**
 
-- **Mode-aware parameter space**
-  - Grid runs split the search into modes (`cc_only`, `tbands_only`, `both`) and allocate candidates across them deterministically.
-  - Allocation, mode budgets, and coverage % are surfaced through the Start page Grid preview (`POST /api/grid/preview`).
+- **Mode-aware parameter space (per backend profile)**
+  - S03 (`sampled_by_mode`): splits the search into `cc_only` / `tbands_only` /
+    `both` and allocates a budget across them; default generation is "LHS by
+    mode" (seeded by `gridSeed`), falling back to full enumeration when a mode
+    fits its budget.
+  - S06 (`full_enumeration`): deterministically enumerates every selected
+    `bracket` / `trail` combination — 48,480 by default, up to 436,320 when both
+    optional Threshold OS/OB axes (`20, 30, 40`) are enabled. No seed/budget
+    sampling; an explicitly empty mode selection is an error.
+  - Missing `grid_enabled_modes` defaults to the backend's `default_enabled`
+    modes (`default_grid_enabled_modes`) — no per-strategy server hardcode.
+  - Allocation, mode budgets, and coverage % are surfaced through the Start page
+    Grid preview (`POST /api/grid/preview`).
 
 - **Fast / slow refinement**
-  - Fast pass uses a strategy-supplied numeric backend (e.g. S03 `fast_grid.py`, Numba-accelerated) to screen many candidates against a restricted "fast" objective set (`net_profit_pct`, `max_drawdown_pct`, `romad`, `profit_factor`, `win_rate`).
-  - Optional slow refinement re-runs the top-N fast candidates through the full Python strategy with the broader slow objective set (adds `sharpe_ratio`, `sortino_ratio`, `sqn`, `ulcer_index`, `consistency_score`).
-  - Final objectives, primary objective, and constraint feasibility are stored on each trial; UI sorts feasible Pareto → feasible non-Pareto → infeasible.
+  - Fast pass uses the strategy's Numba backend to screen candidates against a
+    restricted "fast" objective set (`net_profit_pct`, `max_drawdown_pct`,
+    `romad`, `profit_factor`, `win_rate`).
+  - Optional slow refinement re-runs the top-N fast candidates through the full
+    Python strategy with the broader slow objective set (adds `sharpe_ratio`,
+    `sortino_ratio`, `sqn`, `ulcer_index`, `consistency_score`). Slow Objectives
+    operate only on the selected slow-validated top candidates.
+  - Selected fast candidates are always slow-validated against the real strategy
+    (`validate_selected_candidates`); WFA OOS is also slow-authoritative.
+  - Final objectives, primary objective, and constraint feasibility are stored on
+    each trial; UI sorts feasible Pareto → feasible non-Pareto → infeasible. The
+    multi-objective/Pareto path is supported but can be substantially more
+    expensive than single-objective ranking (not optimized here).
 
-- **Sampling**
-  - Default sampling is "LHS by mode": Latin Hypercube within each mode, seeded for reproducibility (`gridSeed`).
-  - Budget is parsed from compact strings (e.g. `200k`) on the UI side; backend uses canonical integer counts.
+- **Constraints & diversity**
+  - Constraints are soft feasibility/ranking rules (not candidate pruning),
+    shared with Optuna, and are surfaced in the Grid Settings sidebar on both
+    Results and Analytics (`build_grid_settings_view`).
+  - Diversity capping groups candidates by the backend's `diversity_group_fields`,
+    whose JSON-safe shape (S03 `list[str]`, S06 `dict[str, list[str]]`) is
+    preserved end-to-end by `normalize_diversity_group_fields`.
 
 - **Validation & ranking**
-  - Constraints, score formula, and Pareto evaluation use the shared `optuna_engine` helpers — Grid results are interoperable with Optuna results (same `trials` table, same display schema).
-  - DSR results for Grid use `build_grid_dsr_results`.
+  - Constraints, score formula, and Pareto evaluation use the shared
+    `optuna_engine` helpers — Grid results are interoperable with Optuna results
+    (same `trials` table, same display schema). DSR for Grid uses
+    `build_grid_dsr_results`.
+  - Budget is parsed from compact strings (e.g. `200k`) on the UI side; backends
+    use canonical integer counts.
 
 - **Strategy coverage**
-  - Currently Grid is enabled for `s03_reversal_v10`. New strategies require a dedicated fast backend module to participate in Grid mode.
+  - Grid is enabled for `s03_reversal_v10` and `s06_r_trend_v02`. A new strategy
+    participates by adding its own `fast_grid.py` backend (and metadata); no
+    shared-code or server changes are required.
 
 ## Lancelot Bundle Export
 
@@ -385,6 +430,7 @@ python tools/generate_baseline_s01.py
 - Database switching (multi-database support)
 - Study details: View trials (Optuna) or windows (WFA)
 - Pareto badge + constraint feasibility indicators for Optuna trials
+- Grid Settings sidebar (shared with Analytics) including an enabled-Constraints row (`None` when none enabled)
 - Equity curve visualization
 - Parameter comparison tables
 - Download trades CSV for IS/FT/OOS/Manual/WFA results (on-demand generation)
@@ -396,6 +442,7 @@ python tools/generate_baseline_s01.py
 - Multi-study equity curve comparison
 - Aggregated (portfolio) equity curve with annualized profit and max drawdown
 - Focused study mode with WFA window boundary overlays on equity chart
+- Same shared Grid Settings sidebar as Results (identical enabled-Constraints row for Grid/WFA-Grid studies)
 - Study sets: save/load/reorder named collections of studies (persisted in DB)
 - Study summary table with sorting and filtering
 - Filter by strategy, symbol, timeframe, WFA mode, IS/OOS periods
@@ -533,8 +580,9 @@ python tools/generate_baseline_s01.py
 | ID | Name | Description |
 |----|------|-------------|
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA with 11 MA types, close counts, ATR stops |
-| `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis |
+| `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis (LHS/full Grid backend) |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
+| `s06_r_trend_v02` | S06 R-Trend | Williams %R trend/reversal entries with Bracket or Trail exits (full-enumeration Grid backend) |
 
 ## Key Files for Reference
 
@@ -557,5 +605,7 @@ python tools/generate_baseline_s01.py
 | Flask analytics routes | `src/ui/server_routes_analytics.py` |
 | S03 example | `src/strategies/s03_reversal_v10/strategy.py` |
 | S04 example | `src/strategies/s04_stochrsi/strategy.py` |
+| S03 Grid backend (LHS/full) | `src/strategies/s03_reversal_v10/fast_grid.py` |
+| S06 Grid backend (full enumeration) | `src/strategies/s06_r_trend_v02/fast_grid.py` |
 | config.json example | `src/strategies/s04_stochrsi/config.json` |
 | Test baseline | `data/baseline/` |

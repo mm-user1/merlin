@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import shutil
 import sys
 import time
 import uuid
@@ -474,93 +473,88 @@ def test_legacy_wfa_windows_schema_migrates_grid_dsr_columns():
     assert "grid_selected_candidate_count" in columns
 
 
-def test_save_dsr_results_preserves_grid_precomputed_fields_when_not_clearing():
-    temp_dir = Path("tests/.tmp_storage_files") / uuid.uuid4().hex
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = temp_dir / "BTCUSDT_2025.01.01_data.csv"
+def test_save_dsr_results_preserves_grid_precomputed_fields_when_not_clearing(tmp_path):
+    csv_path = tmp_path / "BTCUSDT_2025.01.01_data.csv"
     csv_path.write_text("time,open,high,low,close,Volume\n", encoding="utf-8")
 
-    try:
-        objective = _build_grid_storage_result(
-            1,
-            grid_rank=1,
-            net_profit_pct=12.0,
-            selection_sources=["objective"],
-        )
-        objective.dsr_probability = 0.42
-        objective.dsr_skewness = 0.11
-        objective.dsr_kurtosis = 3.11
-        objective.dsr_track_length = 12
-        objective.dsr_luck_share_pct = 14.0
+    objective = _build_grid_storage_result(
+        1,
+        grid_rank=1,
+        net_profit_pct=12.0,
+        selection_sources=["objective"],
+    )
+    objective.dsr_probability = 0.42
+    objective.dsr_skewness = 0.11
+    objective.dsr_kurtosis = 3.11
+    objective.dsr_track_length = 12
+    objective.dsr_luck_share_pct = 14.0
 
-        dsr_candidate = _build_grid_storage_result(
-            2,
-            grid_rank=4,
-            net_profit_pct=5.0,
-            selection_sources=["dsr"],
-        )
-        dsr_candidate.dsr_probability = 0.91
-        dsr_candidate.dsr_rank = 1
-        dsr_candidate.dsr_skewness = 0.21
-        dsr_candidate.dsr_kurtosis = 3.21
-        dsr_candidate.dsr_track_length = 12
-        dsr_candidate.dsr_luck_share_pct = 7.0
+    dsr_candidate = _build_grid_storage_result(
+        2,
+        grid_rank=4,
+        net_profit_pct=5.0,
+        selection_sources=["dsr"],
+    )
+    dsr_candidate.dsr_probability = 0.91
+    dsr_candidate.dsr_rank = 1
+    dsr_candidate.dsr_skewness = 0.21
+    dsr_candidate.dsr_kurtosis = 3.21
+    dsr_candidate.dsr_track_length = 12
+    dsr_candidate.dsr_luck_share_pct = 7.0
 
-        config = _build_grid_storage_config(csv_path)
-        summary = {
-            "requested_budget": 10,
-            "actual_budget": 10,
-            "completed_trials": 2,
-            "pareto_front_size": None,
-            "grid": {
-                "preview": {"coverage_pct": 100.0},
-                "dsr": {
-                    "enabled": True,
-                    "top_k": 1,
-                    "dsr_n_trials": 10,
-                    "dsr_mean_sharpe": 0.2,
-                    "dsr_var_sharpe": 0.03,
-                },
+    config = _build_grid_storage_config(csv_path)
+    summary = {
+        "requested_budget": 10,
+        "actual_budget": 10,
+        "completed_trials": 2,
+        "pareto_front_size": None,
+        "grid": {
+            "preview": {"coverage_pct": 100.0},
+            "dsr": {
+                "enabled": True,
+                "top_k": 1,
+                "dsr_n_trials": 10,
+                "dsr_mean_sharpe": 0.2,
+                "dsr_var_sharpe": 0.03,
             },
-        }
+        },
+    }
 
-        with _temporary_active_db("grid_dsr_preserve_fields"):
-            study_id = save_grid_study_to_db(
-                config=config,
-                grid_settings=GridSettings(requested_budget=10, top_candidates=2),
-                grid_summary=summary,
-                trial_results=[objective, dsr_candidate],
-                csv_file_path=str(csv_path),
-                start_time=0.0,
-            )
+    with _temporary_active_db("grid_dsr_preserve_fields"):
+        study_id = save_grid_study_to_db(
+            config=config,
+            grid_settings=GridSettings(requested_budget=10, top_candidates=2),
+            grid_summary=summary,
+            trial_results=[objective, dsr_candidate],
+            csv_file_path=str(csv_path),
+            start_time=0.0,
+        )
 
-            save_dsr_results(
-                study_id,
-                [
-                    DSRResult(
-                        trial_number=2,
-                        optuna_rank=4,
-                        params=dsr_candidate.params,
-                        original_result=dsr_candidate,
-                        dsr_probability=0.95,
-                        dsr_rank=1,
-                        dsr_skewness=0.25,
-                        dsr_kurtosis=3.25,
-                        dsr_track_length=14,
-                        dsr_luck_share_pct=5.0,
-                    )
-                ],
-                dsr_enabled=True,
-                dsr_top_k=1,
-                dsr_n_trials=20,
-                dsr_mean_sharpe=0.33,
-                dsr_var_sharpe=0.044,
-                clear_existing=False,
-            )
+        save_dsr_results(
+            study_id,
+            [
+                DSRResult(
+                    trial_number=2,
+                    optuna_rank=4,
+                    params=dsr_candidate.params,
+                    original_result=dsr_candidate,
+                    dsr_probability=0.95,
+                    dsr_rank=1,
+                    dsr_skewness=0.25,
+                    dsr_kurtosis=3.25,
+                    dsr_track_length=14,
+                    dsr_luck_share_pct=5.0,
+                )
+            ],
+            dsr_enabled=True,
+            dsr_top_k=1,
+            dsr_n_trials=20,
+            dsr_mean_sharpe=0.33,
+            dsr_var_sharpe=0.044,
+            clear_existing=False,
+        )
 
-            loaded = load_study_from_db(study_id)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        loaded = load_study_from_db(study_id)
 
     trials = {trial["trial_number"]: trial for trial in loaded["trials"]}
     preserved = trials[1]
