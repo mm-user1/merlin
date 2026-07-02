@@ -33,6 +33,10 @@ def compute_drawdown_duration_peaks_reference(
     ``core.metrics.calculate_basic``. One important convention is that a
     trailing unrecovered drawdown with only one drawdown sample is not emitted
     as a separate recovered episode when earlier episodes exist.
+
+    Empty input intentionally returns empty series. The upstream helper raises
+    on empty input, but Merlin's metrics path guards empty balance curves before
+    calling it.
     """
 
     if drawdown.empty:

@@ -18,6 +18,8 @@ def williams_r(
     when the high/low range is zero.
     """
 
+    if not (len(high) == len(low) == len(close)):
+        raise ValueError("high, low, and close must have equal length.")
     normalized_length = int(length)
     if normalized_length <= 0:
         raise ValueError("length must be greater than zero.")

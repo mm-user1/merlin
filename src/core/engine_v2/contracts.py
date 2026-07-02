@@ -127,6 +127,7 @@ class ExecutionProfile:
     variants: Mapping[str, VariantSpec]
     variant_selector: Optional[VariantSelector] = None
     parameter_defaults: Mapping[str, Any] = field(default_factory=dict)
+    parameter_names: tuple[str, ...] = ()
     parameter_roles: Mapping[str, str] = field(default_factory=dict)
     variant_independent_params: tuple[str, ...] = ()
     validation_warnings: tuple[str, ...] = ()

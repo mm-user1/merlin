@@ -43,3 +43,13 @@ def test_williams_r_matches_existing_s06_helper():
 def test_williams_r_rejects_non_positive_length():
     with pytest.raises(ValueError, match="length"):
         williams_r(pd.Series([1.0]), pd.Series([1.0]), pd.Series([1.0]), 0)
+
+
+def test_williams_r_rejects_input_length_mismatch():
+    with pytest.raises(ValueError, match="equal length"):
+        williams_r(
+            pd.Series([1.0, 2.0]),
+            pd.Series([1.0]),
+            pd.Series([1.5, 1.8]),
+            2,
+        )

@@ -116,6 +116,41 @@ def test_numeric_mapping_keys_are_canonicalized():
     assert resolve_variant(profile, {}).name == "mode_a"
 
 
+def test_json_round_trip_numeric_mapping_keys_are_canonicalized():
+    config = _variant_config()
+    config["execution"]["variantSelector"] = {
+        "param": "selector",
+        "mapping": {"1.0": "mode_a", "0.10": "mode_b"},
+    }
+    config["parameters"]["selector"] = _param("execution", 1.0)
+    loaded = json.loads(json.dumps(config))
+
+    profile = parse_execution_profile(loaded)
+
+    assert profile.variant_selector.mapping == {"1": "mode_a", "0.1": "mode_b"}
+    assert resolve_variant(profile, {}).name == "mode_a"
+    assert resolve_variant(profile, {"selector": 0.1}).name == "mode_b"
+
+
+def test_string_selector_mapping_still_resolves():
+    config = _variant_config()
+    config["execution"]["variantSelector"] = {
+        "param": "selector",
+        "mapping": {"reversal": "mode_a", "trend": "mode_b"},
+    }
+    config["parameters"]["selector"] = {
+        "type": "select",
+        "default": "reversal",
+        "role": "execution",
+        "optimize": {"enabled": True},
+    }
+
+    profile = parse_execution_profile(json.loads(json.dumps(config)))
+
+    assert resolve_variant(profile, {}).name == "mode_a"
+    assert resolve_variant(profile, {"selector": "trend"}).name == "mode_b"
+
+
 def test_active_and_inactive_params_come_from_mode_bindings():
     profile = parse_execution_profile(_variant_config())
 
@@ -130,6 +165,7 @@ def test_active_and_inactive_params_come_from_mode_bindings():
     assert "stopRR" in mode_b_inactive
     assert "signalLen" in mode_a_active
     assert "runtimeOnly" not in mode_a_active
+    assert "runtimeOnly" not in mode_a_inactive
 
 
 def test_binding_table_exposes_expected_phase_1_modes():
@@ -164,6 +200,59 @@ def test_selector_missing_without_default_raises():
 
     with pytest.raises(ProfileValidationError, match="selector parameter 'selector' missing"):
         resolve_variant(profile, {})
+
+
+def test_selector_param_typo_fails_at_parse_time():
+    config = _variant_config()
+    config["execution"]["variantSelector"]["param"] = "missingSelector"
+
+    with pytest.raises(
+        ProfileValidationError,
+        match="generic_variant_fixture: variantSelector parameter 'missingSelector' is not declared",
+    ):
+        parse_execution_profile(config)
+
+
+def test_active_params_do_not_include_undeclared_binding_names_without_roles():
+    config = {
+        "id": "no_role_fixture",
+        "engine": "v2",
+        "execution": {
+            "variantSelector": {
+                "param": "selector",
+                "mapping": {False: "mode_a", True: "mode_b"},
+            },
+            "variants": {
+                "mode_a": {"target": "rr", "trail": "none"},
+                "mode_b": {"target": "none", "trail": "ma"},
+            },
+        },
+        "parameters": {
+            "selector": {"type": "bool", "default": False, "optimize": {"enabled": False}},
+        },
+    }
+
+    profile = parse_execution_profile(config)
+
+    assert active_parameter_names(profile, {}) == {"selector"}
+    assert "stopRR" not in active_parameter_names(profile, {})
+    assert "trailMAType" not in active_parameter_names(profile, {"selector": True})
+
+
+def test_bound_roleless_declared_param_is_active_when_consumed():
+    config = {
+        "id": "roleless_bound_fixture",
+        "engine": "v2",
+        "execution": {"target": "rr"},
+        "parameters": {
+            "stopRR": {"type": "float", "default": 2.0, "optimize": {"enabled": False}},
+        },
+    }
+
+    profile = parse_execution_profile(config)
+
+    assert active_parameter_names(profile, {}) == {"stopRR"}
+    assert inactive_parameter_names(profile, {}) == set()
 
 
 def test_optimized_parameter_without_role_fails_for_v2():

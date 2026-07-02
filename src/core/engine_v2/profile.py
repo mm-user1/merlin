@@ -81,6 +81,35 @@ def canonical_selector_key(value: Any) -> str:
     return str(value)
 
 
+def _canonical_mapping_key(value: Any) -> str:
+    """Canonical selector mapping key, including JSON object-key strings."""
+
+    if not isinstance(value, str):
+        return canonical_selector_key(value)
+
+    raw = value.strip()
+    lower = raw.lower()
+    if lower in {"true", "false"}:
+        return lower
+
+    try:
+        parsed_int = int(raw, 10)
+    except ValueError:
+        parsed_int = None
+    else:
+        return str(parsed_int)
+
+    try:
+        parsed_float = float(raw)
+    except ValueError:
+        return value
+    if not math.isfinite(parsed_float):
+        return value
+    if parsed_float.is_integer():
+        return str(int(parsed_float))
+    return repr(parsed_float)
+
+
 def _strategy_label(config: Mapping[str, Any]) -> str:
     return str(config.get("id") or "<unknown strategy>")
 
@@ -218,6 +247,8 @@ def _parse_variants(execution: Mapping[str, Any], base_modes: Mapping[str, str])
 def _parse_selector(
     execution: Mapping[str, Any],
     variants: Mapping[str, VariantSpec],
+    parameter_names: Iterable[str],
+    strategy_id: str,
 ) -> Optional[VariantSelector]:
     raw_selector = execution.get("variantSelector")
     if raw_selector is None:
@@ -229,13 +260,19 @@ def _parse_selector(
     selector_param = raw_selector.get("param")
     if not selector_param:
         raise ProfileValidationError("execution.variantSelector.param is required.")
+    declared_params = set(parameter_names)
+    if declared_params and str(selector_param) not in declared_params:
+        raise ProfileValidationError(
+            f"{strategy_id}: variantSelector parameter '{selector_param}' is not "
+            "declared in parameters."
+        )
     raw_mapping = raw_selector.get("mapping")
     if not isinstance(raw_mapping, Mapping) or not raw_mapping:
         raise ProfileValidationError("execution.variantSelector.mapping must be a non-empty mapping.")
 
     mapping: dict[str, str] = {}
     for raw_key, raw_variant_name in raw_mapping.items():
-        key = canonical_selector_key(raw_key)
+        key = _canonical_mapping_key(raw_key)
         variant_name = str(raw_variant_name)
         if variant_name not in variants:
             raise ProfileValidationError(
@@ -311,11 +348,12 @@ def parse_execution_profile(config: Mapping[str, Any]) -> ExecutionProfile:
         raise ProfileValidationError(f"{strategy_id}: execution must be a mapping.")
 
     params = _parameters(config)
+    parameter_names = tuple(str(name) for name in params)
     defaults = _parameter_defaults(params)
     roles = _parameter_roles(config)
     base_modes = _base_modes(execution)
     variants = _parse_variants(execution, base_modes)
-    selector = _parse_selector(execution, variants)
+    selector = _parse_selector(execution, variants, parameter_names, strategy_id)
     independent, warnings = _variant_independent_params(
         roles=roles,
         variants=variants,
@@ -328,6 +366,7 @@ def parse_execution_profile(config: Mapping[str, Any]) -> ExecutionProfile:
         variants=variants,
         variant_selector=selector,
         parameter_defaults=defaults,
+        parameter_names=parameter_names,
         parameter_roles=roles,
         variant_independent_params=independent,
         validation_warnings=warnings,
@@ -376,9 +415,9 @@ def active_parameter_names(profile: ExecutionProfile, params: Mapping[str, Any])
 
     active = set(profile.variant_independent_params)
     modes = active_mode_values(profile, params)
-    configured = set(profile.parameter_roles)
+    declared = set(profile.parameter_names)
     for consumed in _consumed_params_for_modes(modes):
-        if not configured or consumed in configured:
+        if consumed in declared:
             active.add(consumed)
     return {
         name
@@ -392,8 +431,8 @@ def inactive_parameter_names(profile: ExecutionProfile, params: Mapping[str, Any
 
     candidates = {
         name
-        for name, role in profile.parameter_roles.items()
-        if role != "runtime"
+        for name in profile.parameter_names
+        if profile.parameter_roles.get(name) != "runtime"
     }
     return candidates - active_parameter_names(profile, params)
 

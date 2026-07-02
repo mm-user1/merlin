@@ -10,7 +10,7 @@
     "quote_currency": "USDT",
     "timeframe": "30m",
     "path": "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv",
-    "sha256": "c9a4e1854c613748724a87d71ad6c5d298abec8c685b50f00d05fd44c66702e0",
+    "sha256": "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae",
     "timezone": "UTC"
   },
   "canonical_period": {
@@ -68,6 +68,24 @@
       "use_trail_ma": false,
       "total_trades": 48,
       "role": "primary_parity_target_bracket"
+    }
+  ],
+  "asset_hashes": [
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_a_reversal_trail/tradingview_trades.csv",
+      "sha256": "b5b6e4f6b6f836e3ddacbf40bfe4d7fe4bf8a30fd36b498b47780d7bdb0b84f5"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_a_reversal_trail/trades_normalized_utc.csv",
+      "sha256": "f03584f643200cf0758adc0bcaa486fb7ec9f0495438aef2131198b8f24e3c78"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_b_trend_bracket/tradingview_trades.csv",
+      "sha256": "aade17b7c06828009b4f30b3972c4615a479c8c7ad5d334a7895969287977a4e"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_b_trend_bracket/trades_normalized_utc.csv",
+      "sha256": "882ca475e51468f101060c28a49b263d8b3295b7f245517b0e070e99b9a95588"
     }
   ]
 }

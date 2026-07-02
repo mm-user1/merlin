@@ -33,9 +33,35 @@ def test_dataset_json_parses_and_matches_expected_market_data_hash():
 
     assert dataset["strategy_id"] == "s06_r_trend_v02"
     assert market_data["path"] == "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv"
-    assert market_data["sha256"] == "c9a4e1854c613748724a87d71ad6c5d298abec8c685b50f00d05fd44c66702e0"
+    assert market_data["sha256"] == "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae"
     assert data_path.exists()
     assert _sha256(data_path) == market_data["sha256"]
+
+
+def test_dataset_json_pins_pine_source_hash():
+    dataset = _load_json(BASELINE_ROOT / "dataset.json")
+    pine_source = dataset["pine_source"]
+    pine_path = REPO_ROOT / pine_source["path"]
+
+    assert pine_path.exists()
+    assert _sha256(pine_path) == pine_source["sha256"]
+
+
+def test_dataset_json_pins_reference_trade_csv_hashes():
+    dataset = _load_json(BASELINE_ROOT / "dataset.json")
+    asset_hashes = dataset["asset_hashes"]
+    expected_paths = {
+        "data/baseline_v2/s06_r_trend_v02/reference_a_reversal_trail/tradingview_trades.csv",
+        "data/baseline_v2/s06_r_trend_v02/reference_a_reversal_trail/trades_normalized_utc.csv",
+        "data/baseline_v2/s06_r_trend_v02/reference_b_trend_bracket/tradingview_trades.csv",
+        "data/baseline_v2/s06_r_trend_v02/reference_b_trend_bracket/trades_normalized_utc.csv",
+    }
+
+    assert {item["path"] for item in asset_hashes} == expected_paths
+    for item in asset_hashes:
+        asset_path = REPO_ROOT / item["path"]
+        assert asset_path.exists()
+        assert _sha256(asset_path) == item["sha256"]
 
 
 def test_reference_json_files_parse():
