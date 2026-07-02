@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "strategy_id": "s06_r_trend_v02",
+  "strategy_name": "S_06 R-Trend v02",
+  "purpose": "Merlin Backtester V2 TradingView parity baseline for S06 R-Trend v02.",
+  "market_data": {
+    "symbol": "SUIUSDT.P",
+    "exchange": "OKX",
+    "instrument": "perpetual_swap_contract",
+    "quote_currency": "USDT",
+    "timeframe": "30m",
+    "path": "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv",
+    "sha256": "c9a4e1854c613748724a87d71ad6c5d298abec8c685b50f00d05fd44c66702e0",
+    "timezone": "UTC"
+  },
+  "canonical_period": {
+    "start_utc": "2025-08-01T00:00:00Z",
+    "end_utc": "2025-12-01T00:00:00Z",
+    "tradingview_timezone": "UTC+8",
+    "tradingview_start": "2025-08-01 08:00",
+    "tradingview_end": "2025-12-01 08:00"
+  },
+  "pine_source": {
+    "path": "data/baseline_v2/s06_r_trend_v02/pine/S_06-R-Trend_v02_end-close.pine",
+    "sha256": "05e787b281d10629e099ffd97ba7f593850e7454724f1033435a21c0092d9702",
+    "force_end_date_close": true,
+    "process_orders_on_close": false,
+    "notes": [
+      "The strategy creates normal market orders for next-tick execution.",
+      "The end-date boundary uses an explicit immediate close to match Merlin strict final-bar close behavior."
+    ]
+  },
+  "tradingview_execution_profile": {
+    "initial_capital": 100.0,
+    "currency": "USDT",
+    "default_order_size": 100.0,
+    "default_order_size_type": "cash",
+    "pyramiding": 0,
+    "bar_detailization": "default_4_ticks_per_bar",
+    "script_execution": {
+      "on_bar_close": true,
+      "on_order_fill": true,
+      "on_realtime_bar_tick": true
+    },
+    "commission": {
+      "value": 0.05,
+      "type": "percent"
+    },
+    "long_leverage": "Infinity",
+    "short_leverage": "Infinity",
+    "slippage_ticks": 0,
+    "limit_order_execution": "requested_price",
+    "order_execution_delay": "one_tick"
+  },
+  "references": [
+    {
+      "reference_id": "reference_a_reversal_trail",
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_a_reversal_trail",
+      "entry_mode": "Reversal @ Triangle",
+      "use_trail_ma": true,
+      "total_trades": 61,
+      "role": "secondary_parity_target_trail_and_end_close"
+    },
+    {
+      "reference_id": "reference_b_trend_bracket",
+      "path": "data/baseline_v2/s06_r_trend_v02/reference_b_trend_bracket",
+      "entry_mode": "Trend @ Square",
+      "use_trail_ma": false,
+      "total_trades": 48,
+      "role": "primary_parity_target_bracket"
+    }
+  ]
+}

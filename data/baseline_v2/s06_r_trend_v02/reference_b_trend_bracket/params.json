@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "reference_id": "reference_b_trend_bracket",
+  "description": "S06 R-Trend v02 Trend + Bracket TradingView reference.",
+  "source_files": {
+    "raw_tradingview_trades": {
+      "path": "tradingview_trades.csv",
+      "sha256": "aade17b7c06828009b4f30b3972c4615a479c8c7ad5d334a7895969287977a4e",
+      "timezone": "UTC+8"
+    },
+    "normalized_trades": {
+      "path": "trades_normalized_utc.csv",
+      "timezone": "UTC"
+    },
+    "inputs_screenshot": "tradingview_inputs.PNG",
+    "properties_screenshot": "tradingview_properties.PNG",
+    "metrics_screenshot": "tradingview_metrics.PNG"
+  },
+  "time_filter": {
+    "dateFilter": true,
+    "forceCloseOnEndDate": true,
+    "backtester": true,
+    "start_utc": "2025-08-01T00:00:00Z",
+    "end_utc": "2025-12-01T00:00:00Z",
+    "tradingview_timezone": "UTC+8",
+    "tradingview_start": "2025-08-01 08:00",
+    "tradingview_end": "2025-12-01 08:00"
+  },
+  "strategy_inputs": {
+    "entryMode": "Trend @ Square",
+    "enableLong": true,
+    "enableShort": true,
+    "fastLength": 21,
+    "fastSmooth": 7,
+    "slowLength": 112,
+    "slowSmooth": 3,
+    "thresholdOS": 20,
+    "thresholdOB": 20,
+    "stopX": 2.0,
+    "stopRR": 2.0,
+    "stopLP": 2.0,
+    "stopMaxPct": 6.0,
+    "stopMaxDays": 6,
+    "riskPerTrade": 2.0,
+    "contractSize": 0.01,
+    "useTrailMA": false,
+    "trailRR": 1.0,
+    "trailMAType": "SMA",
+    "trailMALength": 150,
+    "trailMAOffsetPct": 0.0
+  },
+  "execution_semantics": {
+    "normal_market_orders": "next_tick_open",
+    "final_boundary": "strict_final_bar_close",
+    "stopRR_role": "active_when_useTrailMA_false",
+    "trail_params_role": "inactive_when_useTrailMA_false"
+  }
+}

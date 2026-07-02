@@ -1,0 +1,422 @@
+// S_06 R-Trend v02 — Simplified MA Trail
+// %R Trend Exhaustion entries on a unified, symmetric risk engine.
+//
+// Signal layer (UNCHANGED from v01): dual Williams %R confluence.
+//   Reversal @ Triangle - long on OS zone exit, short on OB zone exit
+//   Trend @ Square      - long on OB zone entry, short on OS zone entry
+//
+// Risk engine (v02 rewrite):
+//   - One shared parameter set for long and short (formulas stay mirrored).
+//   - ATR trailing removed. MA trailing is the only optional trailing mode.
+//   - Bracket mode  (Use Trail MA = false): initial ATR stop + fixed RR target + max-days.
+//   - Trail mode    (Use Trail MA = true) : initial ATR stop (NO fixed target);
+//                    after price reaches Trail RR, manage with a ratcheting MA stop + max-days.
+//   - Stop RR is used ONLY in bracket mode. In trail mode it has no effect.
+//
+// One-pass optimization grid:
+//   Bracket mode : Stop X(5) x Stop RR(4) x Stop LP(2) x Stop Max %(4) x Stop Max Days(3) = 480
+//   Trail mode   : Stop X(5) x Stop LP(2) x Stop Max %(4) x Stop Max Days(3)              = 120 risk
+//                  x Trail MA Type(4) x Trail MA Length(4) x Trail MA Offset(5) x Trail RR(5) = 400 trail
+//                  = 48,000
+//   ROBUSTNESS: a clean grid is necessary but NOT sufficient. Confirm any optimized
+//   parameter set on a held-out / out-of-sample window before trusting it. See README.
+//@version=5
+strategy(title="S_06 R-Trend v02",
+	 overlay=true,
+	 initial_capital=100,
+	 currency="USDT",
+     pyramiding=0,
+	 calc_on_order_fills=true,
+	 calc_on_every_tick=true,
+	 use_bar_magnifier=true,
+	 fill_orders_on_standard_ohlc=true,
+	 process_orders_on_close=false,
+	 default_qty_type=strategy.cash,
+	 default_qty_value=100,
+	 commission_type=strategy.commission.percent,
+	 commission_value=0.05)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Backtesting range Date Filter
+useDateFilter     = input.bool(true, "Date Filter", inline="Use Date Filter")
+startDate         = input.time(timestamp('2025-04-01'), title="Start Date")
+endDate           = input.time(timestamp('2025-09-01'), title="End Date")
+forceEndDateClose = input.bool(true, "Force Close On End Date", inline="Use Date Filter")
+
+drawTester        = input.bool(title="Backtester", defval=true, inline="Use Date Filter") // Drawing mini table with stats
+
+// ──────────────────────────────────────────────────────────────────────────────
+// %R Trend Exhaustion signal settings (UNCHANGED from v01)
+// ──────────────────────────────────────────────────────────────────────────────
+var g_rte  = "%R Trend Exhaustion"
+modeReversal      = "Reversal @ Triangle"
+modeTrend         = "Trend @ Square"
+entryMode         = input.string(modeReversal, title="Entry Mode", options=["Reversal @ Triangle", "Trend @ Square"], group=g_rte)
+
+enableLong        = input.bool(true, title="Enable Long", inline="Enable Sides", group=g_rte)
+enableShort       = input.bool(true, title="Enable Short", inline="Enable Sides", group=g_rte)
+
+fastLength        = input.int(title="Fast Length", defval=21, minval=2, step=1, inline="Fast", group=g_rte)
+fastSmoothing     = input.int(title="Smooth", defval=7, minval=1, step=1, inline="Fast", group=g_rte)
+slowLength        = input.int(title="Slow Length", defval=112, minval=2, step=1, inline="Slow", group=g_rte, tooltip="112 is the indicator author's key finding for crypto. Keep fixed during optimization.")
+slowSmoothing     = input.int(title="Smooth", defval=3, minval=1, step=1, inline="Slow", group=g_rte)
+
+thresholdOS       = input.int(title="Threshold OS", defval=20, minval=1, maxval=50, step=1, inline="Threshold", group=g_rte, tooltip="Oversold zone size: both %R lines <= -100+threshold.")
+thresholdOB       = input.int(title="OB", defval=20, minval=1, maxval=50, step=1, inline="Threshold", group=g_rte, tooltip="Overbought zone size: both %R lines >= -threshold.")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Risk parameters (UNIFIED long/short)
+// ──────────────────────────────────────────────────────────────────────────────
+var g_risk = "Risk (shared long/short)"
+stopX             = input.float(2.0, "Stop X", minval=1.0, maxval=3.0, step=0.5, group=g_risk, tooltip="ATR multiplier for the initial stop. Grid: 1.0,1.5,2.0,2.5,3.0")
+stopRR            = input.float(3.0, "Stop RR — bracket mode only", minval=1.5, maxval=3.0, step=0.5, group=g_risk, tooltip="Fixed risk:reward target. USED ONLY when Use Trail MA = false. Has no effect in trail mode. Grid: 1.5,2.0,2.5,3.0")
+stopLP            = input.int(2, "Stop LP", minval=2, maxval=4, step=2, group=g_risk, tooltip="Lookback for the stop anchor (lowest low / highest high). Grid: 2,4")
+stopMaxPct        = input.float(4.0, "Stop Max %", minval=2.0, maxval=8.0, step=2.0, group=g_risk, tooltip="Skip entries whose stop distance exceeds this %% of price. Grid: 2,4,6,8")
+stopMaxDays       = input.int(4, "Stop Max Days", minval=2, maxval=6, step=2, group=g_risk, tooltip="Force-close a trade after this many days. Grid: 2,4,6")
+
+riskPerTrade      = input.float(title="Risk Per Trade", defval=2, step=0.5, group=g_risk)
+contractSize      = input.float(title="Contract Size", defval=0.01, options=[0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000], group=g_risk)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Trailing stop (single MA trail, UNIFIED long/short)
+// ──────────────────────────────────────────────────────────────────────────────
+var g_trail = "Trailing (MA only)"
+useTrailMA        = input.bool(true, "Use Trail MA", group=g_trail, tooltip="false = bracket mode (fixed stop + RR target). true = trail mode (fixed stop, no target, MA trail after Trail RR).")
+trailRR           = input.float(1.0, "Trail RR", minval=1.0, maxval=3.0, step=0.5, group=g_trail, tooltip="Unrealized profit (in R) at which MA trailing activates. Trail mode only. Grid: 1.0,1.5,2.0,2.5,3.0")
+trailMAType       = input.string("SMA", "Trail MA Type", options=["SMA", "HMA", "KAMA", "T3"], group=g_trail, tooltip="Grid: SMA,HMA,KAMA,T3")
+trailMALength     = input.int(150, "Trail MA Length", minval=50, maxval=200, step=50, group=g_trail, tooltip="Grid: 50,100,150,200")
+trailMAOffsetEx   = input.float(0.0, "Trail MA Offset %", minval=0.0, maxval=2.0, step=0.5, group=g_trail, tooltip="EXTRA offset on top of a mandatory 1%% base. Effective offset = 1.0 + this. Grid: 0,0.5,1.0,1.5,2.0")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ CONSTANTS & FUNCTIONS (Trading Logic)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Values for KAMA and T3 calculations
+float fastKama = 2
+float slowKama = 30
+float factorT3 = 0.7
+
+// gd function for T3 Moving Average calculation
+gd(_maSource, _maLength) =>
+    ta.ema(_maSource, _maLength) * (1 + factorT3) - ta.ema(ta.ema(_maSource, _maLength), _maLength) * factorT3
+
+// Moving Average selector (restricted to the Trail MA options: SMA, HMA, KAMA, T3)
+getMA(_maSource, _maType, _maLength) =>
+    if _maLength == 0
+        na
+    else
+        switch _maType
+            "SMA" => ta.sma(_maSource, _maLength)
+            "HMA" => ta.hma(_maSource, _maLength)
+            "KAMA" =>
+                mom = math.abs(ta.change(_maSource, _maLength))
+                volatility = math.sum(math.abs(ta.change(_maSource)), _maLength)
+                er = volatility != 0 ? mom / volatility : 0
+                fastAlpha = 2 / (fastKama + 1)
+                slowAlpha = 2 / (slowKama + 1)
+                alpha = math.pow(er * (fastAlpha - slowAlpha) + slowAlpha, 2)
+                kama = 0.0
+                kama := alpha * _maSource + (1 - alpha) * nz(kama[1], _maSource)
+                kama
+            "T3" =>
+                t3 = gd(gd(gd(_maSource, _maLength), _maLength), _maLength)
+            => ta.sma(_maSource, _maLength)
+
+// Williams %R: 0 (at highest high) to -100 (at lowest low) over the lookback
+_pr(_length) =>
+    float _max = ta.highest(_length)
+    float _min = ta.lowest(_length)
+    100 * (close - _max) / (_max - _min)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Get ATR value
+atr             = ta.atr(14)
+
+// Trail MA and its direction-specific offset bands
+// Effective offset has a mandatory 1% floor so the trail is never glued to price.
+effectiveTrailOffsetPct = 1.0 + trailMAOffsetEx
+trailMA         = getMA(close, trailMAType, trailMALength)
+trailMALongRaw  = trailMA * (1.0 - effectiveTrailOffsetPct / 100.0)
+trailMAShortRaw = trailMA * (1.0 + effectiveTrailOffsetPct / 100.0)
+
+// Dual %R, EMA smoothed (EMA length 1 = no smoothing)
+s_percentR      = ta.ema(_pr(fastLength), fastSmoothing)
+l_percentR      = ta.ema(_pr(slowLength), slowSmoothing)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ SIGNAL LOGIC (UNCHANGED from v01)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Zone states: both %R lines must be in the zone simultaneously (confluence)
+overbought      = s_percentR >= -thresholdOB and l_percentR >= -thresholdOB
+oversold        = s_percentR <= -100 + thresholdOS and l_percentR <= -100 + thresholdOS
+
+// One-bar event signals
+obTrendStart    = overbought and not overbought[1]   // square: entered OB zone
+osTrendStart    = oversold and not oversold[1]       // square: entered OS zone
+obReversal      = not overbought and overbought[1]   // triangle: exited OB zone
+osReversal      = not oversold and oversold[1]        // triangle: exited OS zone
+
+// Mode selects which signal enters which side
+longSignal      = entryMode == modeReversal ? osReversal : obTrendStart
+shortSignal     = entryMode == modeReversal ? obReversal : osTrendStart
+
+// Check Dates Range
+// `timeInRange` remains inclusive for statistics/plots.
+// `entryTimeInRange` excludes the final end-date bar so strict end-close
+// does not create a new next-open entry from the same boundary bar.
+// `endCloseBar` is the first bar whose open is at/after endDate.
+timeInRange = not useDateFilter or time >= startDate and time <= endDate
+entryTimeInRange = not useDateFilter or time >= startDate and time < endDate
+endCloseBar = useDateFilter and forceEndDateClose and time >= endDate and (na(time[1]) or time[1] < endDate)
+
+// Check long/short conditions (no alternation constraint - same-side re-entry allowed)
+longConditions  = enableLong and longSignal and entryTimeInRange and strategy.position_size == 0 and strategy.position_size[1] == 0 and barstate.isconfirmed
+shortConditions = enableShort and shortSignal and entryTimeInRange and strategy.position_size == 0 and strategy.position_size[1] == 0 and barstate.isconfirmed
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Initial stop / risk / target (mirrored formulas, shared inputs)
+longStop          = ta.lowest(low, stopLP) - stopX * atr
+longRisk          = close - longStop
+longStopPct       = 100.0 * longRisk / close
+longAllowed       = longStopPct <= stopMaxPct
+
+shortStop         = ta.highest(high, stopLP) + stopX * atr
+shortRisk         = shortStop - close
+shortStopPct      = 100.0 * shortRisk / close
+shortAllowed      = shortStopPct <= stopMaxPct
+
+// Per-trade state
+var float t_entry      = na
+var float t_stop       = na   // initial stop
+var float t_target     = na   // fixed RR target (bracket mode only)
+var float t_risk       = na   // initial risk distance
+var float t_trail      = na   // current trail stop (ratchets favorably)
+var float positionSize = 0.0
+var bool  trailActive  = false
+var int   entryTime    = na
+
+// Entries (only when flat, and only if the stop-distance filter passes)
+if longConditions and longAllowed
+    t_entry := close
+    t_stop := longStop
+    t_risk := longRisk
+    t_target := t_entry + stopRR * t_risk
+    t_trail := longStop          // ratchet baseline = initial stop (never looser)
+    trailActive := false
+    positionSize := math.floor(((strategy.equity * (riskPerTrade/100)) / t_risk) / contractSize) * contractSize
+    strategy.entry(id="Long", direction=strategy.long, qty=positionSize)
+
+if shortConditions and shortAllowed
+    t_entry := close
+    t_stop := shortStop
+    t_risk := shortRisk
+    t_target := t_entry - stopRR * t_risk
+    t_trail := shortStop         // ratchet baseline = initial stop (never looser)
+    trailActive := false
+    positionSize := math.floor(((strategy.equity * (riskPerTrade/100)) / t_risk) / contractSize) * contractSize
+    strategy.entry(id="Short", direction=strategy.short, qty=positionSize)
+
+// Track entry time on the bar a position opens (for max-days)
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entryTime := time
+
+// Trail management (trail mode only): activate at Trail RR, then ratchet the MA stop
+if useTrailMA and strategy.position_size > 0
+    if not trailActive and high >= t_entry + t_risk * trailRR
+        trailActive := true
+    if trailActive
+        t_trail := math.max(t_trail, trailMALongRaw)   // long stop only moves up
+
+if useTrailMA and strategy.position_size < 0
+    if not trailActive and low <= t_entry - t_risk * trailRR
+        trailActive := true
+    if trailActive
+        t_trail := math.min(t_trail, trailMAShortRaw)  // short stop only moves down
+
+// Exits
+if strategy.position_size > 0
+    if useTrailMA
+        if trailActive
+            strategy.exit(id="Long Exit", from_entry="Long", stop=t_trail)          // trailing, no target
+        else
+            strategy.exit(id="Long Exit", from_entry="Long", stop=t_stop)           // pre-activation: stop only, no target
+    else
+        strategy.exit(id="Long Exit", from_entry="Long", stop=t_stop, limit=t_target) // bracket: stop + RR target
+
+if strategy.position_size < 0
+    if useTrailMA
+        if trailActive
+            strategy.exit(id="Short Exit", from_entry="Short", stop=t_trail)
+        else
+            strategy.exit(id="Short Exit", from_entry="Short", stop=t_stop)
+    else
+        strategy.exit(id="Short Exit", from_entry="Short", stop=t_stop, limit=t_target)
+
+// Max-days force close (shared)
+daysInTrade = na(entryTime) ? 0.0 : (time - entryTime) / 86400000.0
+if strategy.position_size > 0 and daysInTrade >= stopMaxDays
+    strategy.close("Long")
+if strategy.position_size < 0 and daysInTrade >= stopMaxDays
+    strategy.close("Short")
+
+// Strict end-date close for Merlin parity references.
+// Uses `immediately=true` so only this boundary market close is filled on the
+// same tick where it is created, without enabling process_orders_on_close for
+// all strategy orders.
+if endCloseBar and strategy.position_size != 0
+    strategy.close_all(comment="End Date Close", immediately=true)
+
+// Legacy safety net: if strict end-close is disabled, keep the original behavior
+// and close after leaving the date filter range.
+if not forceEndDateClose and not timeInRange
+    strategy.close_all("Close")
+
+// Reset per-trade state when flat
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    t_entry := na
+    t_stop := na
+    t_target := na
+    t_risk := na
+    t_trail := na
+    trailActive := false
+    entryTime := na
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███ STATISTICS, COUNTERS & VISUALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Trade-close detection and last-trade outcome (mode-agnostic, via realized P&L)
+tradeClosed       = strategy.position_size == 0 and strategy.position_size[1] != 0
+lastTradeProfit   = strategy.closedtrades > 0 ? strategy.closedtrades.profit(strategy.closedtrades - 1) : na
+tradeWin          = tradeClosed and not na(lastTradeProfit) and lastTradeProfit >= 0
+tradeLoss         = tradeClosed and not na(lastTradeProfit) and lastTradeProfit < 0
+
+entryBarLong      = strategy.position_size > 0 and strategy.position_size[1] == 0
+entryBarShort     = strategy.position_size < 0 and strategy.position_size[1] == 0
+
+// Consecutive losers (proxy for consecutive stop-outs)
+var int consecutiveStops    = 0
+var int maxConsecutiveStops = 0
+if tradeLoss
+    consecutiveStops += 1
+    maxConsecutiveStops := math.max(maxConsecutiveStops, consecutiveStops)
+if tradeWin
+    consecutiveStops := 0
+
+// Largest stop distance % among taken entries
+var float maxStopLossPctSet = 0.0
+if longConditions and longAllowed
+    maxStopLossPctSet := math.max(maxStopLossPctSet, longStopPct)
+if shortConditions and shortAllowed
+    maxStopLossPctSet := math.max(maxStopLossPctSet, shortStopPct)
+
+// Longest time held in any trade (days)
+var float maxDaysInTrade = 0.0
+if strategy.position_size != 0
+    maxDaysInTrade := math.max(maxDaysInTrade, daysInTrade)
+
+// Drawing and plotting
+plotshape(longSignal and barstate.isconfirmed, style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 30), size=size.tiny, title="%RTE Long Signal")
+plotshape(shortSignal and barstate.isconfirmed, style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 30), size=size.tiny, title="%RTE Short Signal")
+
+// Active stop: trail stop once activated, otherwise the initial stop
+activeStop        = strategy.position_size != 0 ? (trailActive ? t_trail : t_stop) : na
+// Active target: only in bracket mode (trail mode has no fixed target)
+activeTarget      = (strategy.position_size != 0 and not useTrailMA) ? t_target : na
+
+plot(strategy.position_size != 0 ? t_entry : na, title="Entry Price", color=color.blue, style=plot.style_linebr)
+plot(activeStop, title="Active Stop", color=color.red, style=plot.style_linebr)
+plot(activeTarget, title="Target (bracket)", color=color.green, style=plot.style_linebr)
+plot(useTrailMA and strategy.position_size != 0 ? trailMA : na, title="Trail MA", color=color.new(color.gray, 40), style=plot.style_linebr)
+
+plotshape(entryBarLong or entryBarShort, style=shape.circle, location=location.top, color=color.gray, size=size.tiny, title="Entry")
+plotshape(tradeWin, style=shape.circle, location=location.top, color=color.green, size=size.tiny, title="Win")
+plotshape(tradeLoss, style=shape.circle, location=location.top, color=color.red, size=size.tiny, title="Loss")
+
+
+// Sharpe Ratio Calculations v4 - from Python script S_03_Light+Grid_v03 Sharpe+Filter Netprofit.py
+var float   _sr_monthStartEq = na
+var array<float> _sr_mR      = array.new_float()
+var bool    _sr_prevInRange  = false
+var bool    _sr_dirty        = false
+
+_sr_entered = not _sr_prevInRange and timeInRange
+_sr_left    = _sr_prevInRange and not timeInRange
+_sr_prevInRange := timeInRange
+
+if _sr_entered
+    _sr_monthStartEq := strategy.initial_capital
+    array.clear(_sr_mR)
+    _sr_dirty := true
+
+if timeInRange and bar_index > 0 and month(time) != month(time[1])
+    float _sr_lastEqPrevMonth = strategy.equity[1]  // equity at last bar of previous month
+    if _sr_monthStartEq > 0
+        array.push(_sr_mR, ((_sr_lastEqPrevMonth / _sr_monthStartEq) - 1.0) * 100.0)
+        _sr_dirty := true
+    _sr_monthStartEq := _sr_lastEqPrevMonth
+
+f_pop_stdev(arr) =>
+    int _n = array.size(arr)
+    if _n == 0
+        na
+    else
+        float _mean = array.avg(arr)
+        float _s = 0.0
+        for i = 0 to _n - 1
+            float _d = array.get(arr, i) - _mean
+            _s += _d * _d
+        math.sqrt(_s / _n)
+
+var float _sharpe = na
+if _sr_dirty
+    int _sr_n = array.size(_sr_mR)
+    if _sr_n >= 2
+        float _avg  = array.avg(_sr_mR)
+        float _sd   = f_pop_stdev(_sr_mR)                 // population stdev (ddof=0)
+        float _rfrm = (0.02 * 100.0) / 12.0              // 2% annual -> monthly percent
+        if not na(_sd) and _sd != 0
+            _sharpe := (_avg - _rfrm) / _sd
+        else
+            _sharpe := na
+    else
+        _sharpe := na
+    _sr_dirty := false
+
+
+
+// Prepare stats mini table
+var table testTable = table.new(position.bottom_left, 2, 5, border_width=1, border_color=color.black, frame_color=color.black, frame_width=1)
+f_fillCell(_table, _column, _row, _title, _value, _bgcolor, _txtcolor) =>
+    _cellText = _title + "\n" + _value
+    table.cell(_table, _column, _row, _cellText, bgcolor=_bgcolor, text_color=_txtcolor)
+
+
+// Draw stats table
+var bgcolor = #f3f3f3
+if drawTester
+    f_fillCell(testTable, 0, 0, "WR:", str.tostring(math.floor(strategy.wintrades / strategy.closedtrades * 100)) + "%", bgcolor, (math.floor(strategy.wintrades / strategy.closedtrades * 100)) > 45 ? #6caf5d : color.black)
+    f_fillCell(testTable, 1, 0, "PnL:", str.tostring(math.floor(strategy.netprofit_percent)) + "%", bgcolor, (math.floor(strategy.netprofit_percent)) <= 0 ? #a73302 : color.black)
+    f_fillCell(testTable, 0, 1, "DD:", str.tostring(math.ceil(strategy.max_drawdown_percent)) + "%", bgcolor, (math.ceil(strategy.max_drawdown_percent)) > 20 ? #a73302 : color.black)
+    f_fillCell(testTable, 1, 1, "Trades:", str.tostring(strategy.closedtrades), bgcolor, color.black)
+    f_fillCell(testTable, 1, 2, "SL:", str.tostring(consecutiveStops), bgcolor, consecutiveStops >= 3 ? #a73302 : color.black)
+    f_fillCell(testTable, 0, 2, "Max SL:", str.tostring(maxConsecutiveStops), bgcolor, maxConsecutiveStops > 5 ? #a73302 : color.black)
+    f_fillCell(testTable, 0, 3, "Max SL:", str.tostring(math.ceil(maxStopLossPctSet)) + "%", bgcolor, maxStopLossPctSet >= 10 ? #a73302 : color.black)
+    f_fillCell(testTable, 0, 4, "Max D:", str.tostring(math.ceil(maxDaysInTrade)), bgcolor, color.black)
+    f_fillCell(testTable, 1, 4, "Sharpe:", na(_sharpe) ? "" : str.tostring(math.floor(_sharpe * 100) / 100.0), bgcolor, color.black)

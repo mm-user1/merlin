@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "reference_id": "reference_a_reversal_trail",
+  "source": "TradingView Strategy Tester metrics screenshot and raw trades export.",
+  "timezone_note": "TradingView UI/export timestamps use UTC+8. Normalized machine-readable trades use UTC.",
+  "metrics": {
+    "net_profit_usdt": 30.87,
+    "net_profit_pct": 30.87,
+    "max_drawdown_usdt": 14.92,
+    "max_drawdown_pct": 14.15,
+    "profitable_trades": 31,
+    "total_trades": 61,
+    "win_rate_pct": 50.82,
+    "profit_factor": 1.507
+  },
+  "raw_export": {
+    "rows": 122,
+    "closed_trades": 61,
+    "last_trade_number": 61,
+    "last_exit_signal": "End Date Close",
+    "last_exit_time_tradingview": "2025-12-01 08:00",
+    "last_exit_time_utc": "2025-12-01T00:00:00Z",
+    "last_exit_price_usdt": 1.423
+  }
+}
