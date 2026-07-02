@@ -32,10 +32,15 @@
     return num.toFixed(digits);
   }
 
-  function buildTrialTableHeaders(objectives, hasConstraints) {
+  function isGridMode(flags) {
+    return Boolean((flags && flags.mode === 'grid') || window.ResultsState?.mode === 'grid');
+  }
+
+  function buildTrialTableHeaders(objectives, hasConstraints, flags = {}) {
+    const gridMode = isGridMode(flags);
     const columns = [];
-    columns.push('<th>#</th>');
-    columns.push('<th>Param ID</th>');
+    columns.push(`<th>${gridMode ? 'Grid Rank' : '#'}</th>`);
+    columns.push(`<th>${gridMode ? 'Candidate / Param Key' : 'Param ID'}</th>`);
     columns.push('<th>P</th>');
     if (hasConstraints) {
       columns.push('<th>C</th>');
@@ -138,9 +143,13 @@
     const ulcer = trial.ulcer_index;
     const sqn = trial.sqn;
     const consistency = trial.consistency_score;
+    const gridMode = isGridMode(flags) || trial.optimizer_mode === 'grid' || trial.candidate_id !== undefined;
+    const rowTrialNumber = gridMode
+      ? (trial.candidate_id ?? trial.trial_number ?? '')
+      : (trial.trial_number ?? '');
 
     return `
-      <tr class="clickable" data-trial-number="${trial.trial_number ?? ''}">
+      <tr class="clickable" data-trial-number="${rowTrialNumber}">
         <td class="rank"></td>
         <td class="param-hash"></td>
         <td>${paretoBadge}</td>

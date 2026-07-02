@@ -8,6 +8,14 @@
   const RETURN_PROFILE_STEM_WIDTH = 3;
   const RETURN_PROFILE_STEM_GAP = 4;
   const RETURN_PROFILE_LOSS_CAP = 100;
+  const DEFAULT_FOCUSED_STROKE_WIDTH = 2;
+  const Y_AXIS_LABEL_TARGET_COUNT = 5;
+  const Y_AXIS_LABEL_MIN_COUNT = 4;
+  const Y_AXIS_LABEL_MAX_COUNT = 6;
+  const Y_AXIS_LABEL_RIGHT_PADDING = 4;
+  const Y_AXIS_LABEL_FONT_SIZE = 10;
+  const Y_AXIS_LABEL_COLOR = '#888';
+  const PERCENT_TICK_MULTIPLIERS = [1, 2, 2.5, 5, 10];
 
   function toFiniteNumber(value) {
     const parsed = Number(value);
@@ -17,6 +25,167 @@
   function parseTimestamp(value) {
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function roundToDecimals(value, decimals) {
+    const precision = Math.max(0, Math.min(6, Math.round(Number(decimals) || 0)));
+    const factor = 10 ** precision;
+    return Math.round(value * factor) / factor;
+  }
+
+  function getNiceTickStep(rawStep) {
+    const normalizedRawStep = toFiniteNumber(rawStep);
+    if (normalizedRawStep === null || normalizedRawStep <= 0) return 1;
+
+    const exponent = Math.floor(Math.log10(normalizedRawStep));
+    const magnitude = 10 ** exponent;
+    const normalized = normalizedRawStep / magnitude;
+
+    for (const multiplier of PERCENT_TICK_MULTIPLIERS) {
+      if (normalized <= multiplier) {
+        return multiplier * magnitude;
+      }
+    }
+
+    return 10 * magnitude;
+  }
+
+  function getTickStepDecimals(step) {
+    const normalizedStep = toFiniteNumber(step);
+    if (normalizedStep === null || normalizedStep <= 0) return 0;
+
+    const exponent = Math.floor(Math.log10(normalizedStep));
+    const magnitude = 10 ** exponent;
+    const normalized = normalizedStep / magnitude;
+    const hasFractionalMultiplier = Math.abs(normalized - Math.round(normalized)) > 1e-9;
+    return Math.max(0, -exponent + (hasFractionalMultiplier ? 1 : 0));
+  }
+
+  function buildTickValuesWithinRange(minValue, maxValue, step) {
+    const low = toFiniteNumber(minValue);
+    const high = toFiniteNumber(maxValue);
+    const normalizedStep = toFiniteNumber(step);
+    if (low === null || high === null || normalizedStep === null || normalizedStep <= 0) {
+      return [];
+    }
+
+    const min = Math.min(low, high);
+    const max = Math.max(low, high);
+    const epsilon = normalizedStep * 1e-6;
+    const decimals = getTickStepDecimals(normalizedStep);
+    const start = roundToDecimals(
+      Math.ceil((min - epsilon) / normalizedStep) * normalizedStep,
+      decimals + 2
+    );
+    const end = roundToDecimals(
+      Math.floor((max + epsilon) / normalizedStep) * normalizedStep,
+      decimals + 2
+    );
+
+    if (start > end + epsilon) {
+      return [];
+    }
+
+    const rawCount = ((end - start) / normalizedStep) + epsilon;
+    const tickCount = Math.max(1, Math.floor(rawCount) + 1);
+    return Array.from({ length: tickCount }, (_, index) => (
+      roundToDecimals(start + (normalizedStep * index), decimals + 2)
+    )).filter((value, index, values) => (
+      value >= min - epsilon
+      && value <= max + epsilon
+      && (index === 0 || Math.abs(value - values[index - 1]) > epsilon)
+    ));
+  }
+
+  function buildPercentTicks(minPercent, maxPercent) {
+    const low = toFiniteNumber(minPercent);
+    const high = toFiniteNumber(maxPercent);
+    if (low === null || high === null) {
+      return { step: 1, decimals: 0, values: [] };
+    }
+
+    const min = Math.min(low, high);
+    const max = Math.max(low, high);
+    const range = max - min;
+    if (range <= 1e-9) {
+      return {
+        step: 1,
+        decimals: 0,
+        values: [roundToDecimals(min, 2)],
+      };
+    }
+
+    const rawTargetStep = range / Math.max(1, Y_AXIS_LABEL_TARGET_COUNT - 1);
+    const baselineStep = getNiceTickStep(rawTargetStep);
+    const candidateSteps = new Set();
+
+    for (let exponentOffset = -2; exponentOffset <= 2; exponentOffset += 1) {
+      const step = baselineStep * (10 ** exponentOffset);
+      if (step <= 0) continue;
+      candidateSteps.add(step);
+      candidateSteps.add(step / 2);
+      candidateSteps.add(step * 2);
+    }
+
+    let bestCandidate = null;
+    Array.from(candidateSteps)
+      .filter((step) => Number.isFinite(step) && step > 0)
+      .sort((left, right) => left - right)
+      .forEach((step) => {
+        const values = buildTickValuesWithinRange(min, max, step);
+        if (!values.length) return;
+
+        const tickCount = values.length;
+        const isPreferredCount = tickCount >= Y_AXIS_LABEL_MIN_COUNT && tickCount <= Y_AXIS_LABEL_MAX_COUNT;
+        const score = (isPreferredCount ? 0 : 100)
+          + (Math.abs(tickCount - Y_AXIS_LABEL_TARGET_COUNT) * 10)
+          + Math.abs(Math.log(step / rawTargetStep));
+
+        if (!bestCandidate || score < bestCandidate.score) {
+          bestCandidate = {
+            step,
+            score,
+            values,
+          };
+        }
+      });
+
+    const step = bestCandidate?.step || baselineStep;
+    return {
+      step,
+      decimals: getTickStepDecimals(step),
+      values: bestCandidate?.values || buildTickValuesWithinRange(min, max, step),
+    };
+  }
+
+  function formatPercentTickLabel(value, decimals) {
+    const normalizedValue = Math.abs(Number(value) || 0) < 1e-9 ? 0 : Number(value);
+    const safeDecimals = Math.max(0, Math.min(3, Math.round(Number(decimals) || 0)));
+    return `${normalizedValue.toFixed(safeDecimals)}%`;
+  }
+
+  function renderPercentAxisLabels(svg, toY, minValue, maxValue) {
+    if (!svg || typeof toY !== 'function') return;
+
+    const minPercent = minValue - 100;
+    const maxPercent = maxValue - 100;
+    const ticks = buildPercentTicks(minPercent, maxPercent);
+    if (!Array.isArray(ticks.values) || !ticks.values.length) return;
+
+    ticks.values.forEach((percentValue) => {
+      const value = 100 + percentValue;
+      const y = toY(value);
+
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.setAttribute('x', String(CHART_VIEWBOX_WIDTH - Y_AXIS_LABEL_RIGHT_PADDING));
+      label.setAttribute('y', String(y));
+      label.setAttribute('font-size', String(Y_AXIS_LABEL_FONT_SIZE));
+      label.setAttribute('fill', Y_AXIS_LABEL_COLOR);
+      label.setAttribute('text-anchor', 'end');
+      label.setAttribute('dominant-baseline', 'middle');
+      label.textContent = formatPercentTickLabel(percentValue, ticks.decimals);
+      svg.appendChild(label);
+    });
   }
 
   function normalizeReturnProfile(profile) {
@@ -204,51 +373,90 @@
     }
   }
 
-  function renderChart(equityCurve, timestamps, options = null) {
+  function normalizeSeriesList(seriesList) {
+    if (!Array.isArray(seriesList)) return [];
+
+    return seriesList
+      .map((series) => {
+        const curve = Array.isArray(series?.curve)
+          ? series.curve.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+          : [];
+        if (!curve.length) return null;
+
+        const timestamps = Array.isArray(series?.timestamps) ? series.timestamps.slice() : [];
+        const hasMatchingTimestamps = timestamps.length === curve.length;
+        const parsedTimestamps = hasMatchingTimestamps
+          ? timestamps.map((value) => parseTimestamp(value))
+          : [];
+
+        const color = String(series?.color || '').trim() || '#4a90e2';
+        const strokeWidth = Number(series?.strokeWidth);
+        return {
+          curve,
+          timestamps: hasMatchingTimestamps ? timestamps : [],
+          parsedTimestamps: hasMatchingTimestamps ? parsedTimestamps : [],
+          hasTimestamps: hasMatchingTimestamps,
+          color,
+          strokeWidth: Number.isFinite(strokeWidth) && strokeWidth > 0 ? strokeWidth : 1.5,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function renderSeriesChart(seriesList, options = null) {
     const svg = document.getElementById('analyticsChartSvg');
     const axis = document.getElementById('analyticsEquityAxis');
     if (!svg) return;
 
-    const curve = Array.isArray(equityCurve)
-      ? equityCurve.map((value) => Number(value)).filter((value) => Number.isFinite(value))
-      : [];
-
-    if (!curve.length) {
+    const normalizedSeries = normalizeSeriesList(seriesList);
+    if (!normalizedSeries.length) {
       renderEmpty('No data to display');
       return;
     }
 
+    const primarySeries = normalizedSeries[normalizedSeries.length - 1];
     const width = CHART_VIEWBOX_WIDTH;
     const height = CHART_VIEWBOX_HEIGHT;
     const padding = 20;
-    const hasTimestamps = Array.isArray(timestamps) && timestamps.length === curve.length;
+    const fallbackLength = normalizedSeries.reduce(
+      (maxLength, series) => Math.max(maxLength, series.curve.length),
+      0
+    );
 
-    let useTimeScale = false;
     let tStart = null;
     let tEnd = null;
-    if (hasTimestamps) {
-      const start = parseTimestamp(timestamps[0]);
-      const end = parseTimestamp(timestamps[timestamps.length - 1]);
-      if (start !== null && end !== null && end > start) {
-        useTimeScale = true;
-        tStart = start;
-        tEnd = end;
-      }
-    }
+    normalizedSeries.forEach((series) => {
+      if (!series.hasTimestamps) return;
+      const firstValid = series.parsedTimestamps.find((value) => value !== null);
+      const lastValid = series.parsedTimestamps.length
+        ? series.parsedTimestamps[series.parsedTimestamps.length - 1]
+        : null;
+      if (firstValid === null || lastValid === null || lastValid <= firstValid) return;
+      tStart = tStart === null ? firstValid : Math.min(tStart, firstValid);
+      tEnd = tEnd === null ? lastValid : Math.max(tEnd, lastValid);
+    });
 
-    const toXRatioByIndex = (index) => {
-      if (!useTimeScale) {
-        const denom = Math.max(1, curve.length - 1);
-        return index / denom;
+    const useTimeScale = tStart !== null && tEnd !== null && tEnd > tStart;
+
+    const toXRatioByIndex = (index, length) => {
+      const seriesLength = Math.max(1, Number(length) || fallbackLength || 1);
+      const denom = Math.max(1, seriesLength - 1);
+      return index / denom;
+    };
+
+    const toSeriesXRatio = (series, index) => {
+      if (!useTimeScale || !series?.hasTimestamps) {
+        return toXRatioByIndex(index, series?.curve?.length || fallbackLength);
       }
-      const ts = parseTimestamp(timestamps[index]);
+
+      const ts = series.parsedTimestamps[index];
       if (ts === null) {
-        const denom = Math.max(1, curve.length - 1);
-        return index / denom;
+        return toXRatioByIndex(index, series.curve.length);
       }
       const ratio = (ts - tStart) / (tEnd - tStart);
       return Math.min(1, Math.max(0, ratio));
     };
+
     const toXRatioByBoundary = (boundary) => {
       if (!boundary || typeof boundary !== 'object') return null;
       if (useTimeScale) {
@@ -260,13 +468,17 @@
       }
       const boundaryIndex = Number(boundary.index);
       if (!Number.isFinite(boundaryIndex)) return null;
-      const normalizedIndex = Math.max(0, Math.min(curve.length - 1, Math.round(boundaryIndex)));
-      return toXRatioByIndex(normalizedIndex);
+      const normalizedIndex = Math.max(
+        0,
+        Math.min((primarySeries?.curve?.length || fallbackLength || 1) - 1, Math.round(boundaryIndex))
+      );
+      return toXRatioByIndex(normalizedIndex, primarySeries?.curve?.length || fallbackLength);
     };
 
     const baseValue = 100.0;
-    const minValue = Math.min(baseValue, ...curve);
-    const maxValue = Math.max(baseValue, ...curve);
+    const allValues = normalizedSeries.flatMap((series) => series.curve);
+    const minValue = Math.min(baseValue, ...allValues);
+    const maxValue = Math.max(baseValue, ...allValues);
     const valueRange = maxValue - minValue || 1;
     const toY = (value) => {
       return height - padding - ((value - minValue) / valueRange) * (height - padding * 2);
@@ -333,8 +545,8 @@
       });
     }
 
-    if (hasTimestamps && axis) {
-      const tickCount = Math.min(5, curve.length);
+    if ((useTimeScale || primarySeries.hasTimestamps) && axis) {
+      const tickCount = Math.min(5, Math.max(primarySeries.curve.length, 2));
       for (let i = 0; i < tickCount; i += 1) {
         const ratio = tickCount === 1 ? 0 : i / (tickCount - 1);
         const x = ratio * width;
@@ -353,8 +565,8 @@
         if (useTimeScale) {
           labelDate = new Date(tStart + ratio * (tEnd - tStart));
         } else {
-          const index = Math.round(ratio * (curve.length - 1));
-          labelDate = new Date(timestamps[index]);
+          const index = Math.round(ratio * (primarySeries.timestamps.length - 1));
+          labelDate = new Date(primarySeries.timestamps[index]);
         }
         if (Number.isNaN(labelDate.getTime())) continue;
 
@@ -371,26 +583,51 @@
       }
     }
 
-    const points = curve
-      .map((value, index) => {
-        const x = toXRatioByIndex(index) * width;
-        const y = toY(value);
-        return `${x},${y}`;
-      })
-      .join(' ');
+    normalizedSeries.forEach((series) => {
+      const points = series.curve
+        .map((value, index) => {
+          const x = toSeriesXRatio(series, index) * width;
+          const y = toY(value);
+          return `${x},${y}`;
+        })
+        .join(' ');
 
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-    line.setAttribute('points', points);
-    line.setAttribute('fill', 'none');
-    line.setAttribute('stroke', '#4a90e2');
-    line.setAttribute('stroke-width', '1.5');
-    svg.appendChild(line);
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      line.setAttribute('points', points);
+      line.setAttribute('fill', 'none');
+      line.setAttribute('stroke', series.color);
+      line.setAttribute('stroke-width', String(series.strokeWidth));
+      line.setAttribute('vector-effect', 'non-scaling-stroke');
+      line.setAttribute('stroke-linejoin', 'round');
+      line.setAttribute('stroke-linecap', 'round');
+      svg.appendChild(line);
+    });
 
+    renderPercentAxisLabels(svg, toY, minValue, maxValue);
     renderReturnProfile(svg, options?.returnProfile || null);
+  }
+
+  function renderChart(equityCurve, timestamps, options = null) {
+    renderSeriesChart(
+      [
+        {
+          curve: equityCurve,
+          timestamps,
+          color: '#4a90e2',
+          strokeWidth: DEFAULT_FOCUSED_STROKE_WIDTH,
+        },
+      ],
+      options
+    );
+  }
+
+  function renderMultiChart(seriesList, options = null) {
+    renderSeriesChart(seriesList, options);
   }
 
   window.AnalyticsEquity = {
     renderChart,
+    renderMultiChart,
     renderEmpty,
   };
 })();

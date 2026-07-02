@@ -86,7 +86,9 @@
     tableHeightLevel: TABLE_HEIGHT_MIN,
     updateMenuOpen: false,
     colorMenuOpen: false,
+    compareMarkers: new Map(),
     onStateChange: null,
+    onCompareToggle: null,
     bound: false,
   };
 
@@ -136,6 +138,29 @@
 
   function cloneBatchSelectedSetIds() {
     return new Set(Array.from(state.batchSelectedSetIds));
+  }
+
+  function cloneCompareMarkers(compareMarkers) {
+    const next = new Map();
+    if (!(compareMarkers instanceof Map)) return next;
+
+    compareMarkers.forEach((marker, rawSetId) => {
+      const setId = normalizeSetId(rawSetId);
+      if (setId === null || !marker || typeof marker !== 'object') return;
+
+      const color = String(marker.color || '').trim();
+      if (!color) return;
+
+      const slotIndex = Number.isInteger(marker.slotIndex)
+        ? marker.slotIndex
+        : Number.parseInt(marker.slotIndex, 10);
+      next.set(setId, {
+        color,
+        slotIndex: Number.isInteger(slotIndex) ? slotIndex : null,
+      });
+    });
+
+    return next;
   }
 
   function cloneMetrics(rawMetrics) {
@@ -379,6 +404,31 @@
         && !row.classList.contains('analytics-set-batch-selected')
         && !row.classList.contains('analytics-set-moving');
       row.classList.toggle('analytics-set-study-match', shouldHighlight);
+    });
+  }
+
+  function applyCompareMarkers() {
+    const { tableWrap } = getDom();
+    if (!tableWrap) return;
+
+    tableWrap.querySelectorAll('tr.analytics-set-row').forEach((row) => {
+      const setId = normalizeSetId(row.dataset.setId || '');
+      const marker = setId === null ? null : (state.compareMarkers.get(setId) || null);
+      const isFocused = setId !== null && state.focusedSetId === setId;
+
+      row.classList.toggle('analytics-set-compare', !isFocused && Boolean(marker));
+
+      if (!isFocused && marker?.color) {
+        row.style.setProperty('--analytics-compare-marker-color', marker.color);
+      } else {
+        row.style.removeProperty('--analytics-compare-marker-color');
+      }
+
+      if (!isFocused && Number.isInteger(marker?.slotIndex)) {
+        row.setAttribute('data-compare-slot', String(marker.slotIndex + 1));
+      } else {
+        row.removeAttribute('data-compare-slot');
+      }
     });
   }
 
@@ -1613,6 +1663,13 @@
         checkbox.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
+          const isCompareShortcut = event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey;
+          if (isCompareShortcut) {
+            if (typeof state.onCompareToggle === 'function') {
+              state.onCompareToggle(setId);
+            }
+            return;
+          }
           if (event.altKey) {
             toggleFocus(setId);
             return;
@@ -1628,6 +1685,13 @@
           handleBatchSelection(setId, event);
           return;
         }
+        const isCompareShortcut = event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey;
+        if (isCompareShortcut) {
+          if (typeof state.onCompareToggle === 'function') {
+            state.onCompareToggle(setId);
+          }
+          return;
+        }
         if (event.altKey) {
           toggleFocus(setId);
           return;
@@ -1637,6 +1701,7 @@
     });
 
     applyFocusedStudyMembershipClasses();
+    applyCompareMarkers();
   }
 
   function renderHeader() {
@@ -1898,6 +1963,7 @@
 
   function init(options = {}) {
     state.onStateChange = typeof options.onStateChange === 'function' ? options.onStateChange : null;
+    state.onCompareToggle = typeof options.onCompareToggle === 'function' ? options.onCompareToggle : null;
     state.checkedStudyIds = new Set(Array.from(options.checkedStudyIds || []));
     state.forceAllStudies = false;
     state.panelTouched = false;
@@ -1905,6 +1971,7 @@
     state.tableHeightLevel = TABLE_HEIGHT_MIN;
     state.updateMenuOpen = false;
     state.colorMenuOpen = false;
+    state.compareMarkers = new Map();
     state.batchMode = false;
     clearBatchSelection();
     clearMoveState();
@@ -2021,6 +2088,11 @@
     }
   }
 
+  function setCompareMarkers(compareMarkers) {
+    state.compareMarkers = cloneCompareMarkers(compareMarkers);
+    applyCompareMarkers();
+  }
+
   window.AnalyticsSets = {
     init,
     updateStudies,
@@ -2040,5 +2112,6 @@
     getVisibleSetIds,
     getAllMetrics,
     scrollSetIntoView,
+    setCompareMarkers,
   };
 })();

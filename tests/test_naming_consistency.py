@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from strategies import get_strategy_config
 from strategies.s01_trailing_ma.strategy import S01Params
 from strategies.s04_stochrsi.strategy import S04Params
+from strategies.s06_r_trend_v02.strategy import S06Params
 
 
 class TestParameterNaming:
@@ -51,6 +52,17 @@ class TestParameterNaming:
 
             assert "_" not in field.name, (
                 f"S04Params field '{field.name}' uses snake_case. "
+                f"All strategy parameters must use camelCase."
+            )
+
+    def test_s06_params_use_camelCase(self):
+        internal_params = {"use_date_filter", "start", "end"}
+
+        for field in fields(S06Params):
+            if field.name in internal_params:
+                continue
+            assert "_" not in field.name, (
+                f"S06Params field '{field.name}' uses snake_case. "
                 f"All strategy parameters must use camelCase."
             )
 
@@ -101,6 +113,14 @@ class TestConfigParameterConsistency:
                 f"Dataclass param '{param_name}' not found in S04 config.json"
             )
 
+    def test_s06_config_matches_params(self):
+        config = get_strategy_config("s06_r_trend_v02")
+        config_params = set(config["parameters"].keys())
+        internal_params = {"use_date_filter", "start", "end"}
+        dataclass_params = {f.name for f in fields(S06Params) if f.name not in internal_params}
+
+        assert config_params == dataclass_params
+
 
 class TestNoConversionCode:
     """Test that no snake_case ↔ camelCase conversion exists."""
@@ -112,6 +132,9 @@ class TestNoConversionCode:
         )
         assert not hasattr(S04Params, "to_dict"), (
             "S04Params should not have to_dict() method. Use asdict() instead."
+        )
+        assert not hasattr(S06Params, "to_dict"), (
+            "S06Params should not have to_dict() method. Use asdict() instead."
         )
 
     def test_from_dict_no_conversion(self):
@@ -156,7 +179,7 @@ class TestParameterTypes:
 
     def test_select_types_have_options(self):
         """Verify 'select' type parameters have 'options' field."""
-        for strategy_id in ["s01_trailing_ma", "s04_stochrsi"]:
+        for strategy_id in ["s01_trailing_ma", "s04_stochrsi", "s06_r_trend_v02"]:
             config = get_strategy_config(strategy_id)
             parameters: Dict[str, Dict[str, Any]] = config.get("parameters", {})
 
@@ -193,6 +216,10 @@ class TestNoFeatureFlags:
         assert "features" not in config, (
             "S04 config.json should not have 'features' section."
         )
+
+    def test_s06_no_features_section(self):
+        config = get_strategy_config("s06_r_trend_v02")
+        assert "features" not in config
 
 
 class TestOptimizationResultStructure:

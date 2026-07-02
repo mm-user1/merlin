@@ -100,6 +100,24 @@ async function runWalkForwardRequest(formData, signal = null) {
   return data;
 }
 
+async function fetchGridPreviewRequest(config, strategyId, warmupBars) {
+  const response = await fetch('/api/grid/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      config,
+      strategyId,
+      warmupBars
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || 'Grid preview failed.');
+  }
+  return data.preview || data;
+}
+
 async function fetchOptimizationStatus() {
   const response = await fetch('/api/optimization/status');
   if (!response.ok) {

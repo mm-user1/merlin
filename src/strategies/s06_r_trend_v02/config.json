@@ -1,0 +1,228 @@
+{
+  "id": "s06_r_trend_v02",
+  "name": "S06 R-Trend",
+  "version": "v02",
+  "description": "Dual Williams %R trend-exhaustion entries with bracket or ratcheting MA-trail risk management",
+  "author": "",
+  "parameters": {
+    "entryMode": {
+      "type": "select",
+      "label": "Entry Mode",
+      "default": "Reversal @ Triangle",
+      "options": ["Reversal @ Triangle", "Trend @ Square"],
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "enableLong": {
+      "type": "bool",
+      "label": "Enable Long",
+      "default": true,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "enableShort": {
+      "type": "bool",
+      "label": "Enable Short",
+      "default": true,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "fastLength": {
+      "type": "int",
+      "label": "Fast Length",
+      "default": 21,
+      "min": 2,
+      "max": 500,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "fastSmoothing": {
+      "type": "int",
+      "label": "Fast Smoothing",
+      "default": 7,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "slowLength": {
+      "type": "int",
+      "label": "Slow Length",
+      "default": 112,
+      "min": 2,
+      "max": 500,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "slowSmoothing": {
+      "type": "int",
+      "label": "Slow Smoothing",
+      "default": 3,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": false }
+    },
+    "thresholdOS": {
+      "type": "int",
+      "label": "Threshold OS",
+      "default": 20,
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
+    },
+    "thresholdOB": {
+      "type": "int",
+      "label": "Threshold OB",
+      "default": 20,
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
+    },
+    "stopX": {
+      "type": "float",
+      "label": "Stop X",
+      "default": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": true, "min": 1.0, "max": 3.0, "step": 0.5 }
+    },
+    "stopRR": {
+      "type": "float",
+      "label": "Stop RR — bracket mode only",
+      "default": 3.0,
+      "min": 1.5,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": true, "min": 1.5, "max": 3.0, "step": 0.5 }
+    },
+    "stopLP": {
+      "type": "int",
+      "label": "Stop LP",
+      "default": 2,
+      "min": 2,
+      "max": 4,
+      "step": 2,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": true, "min": 2, "max": 4, "step": 2 }
+    },
+    "stopMaxPct": {
+      "type": "float",
+      "label": "Stop Max %",
+      "default": 4.0,
+      "min": 2.0,
+      "max": 8.0,
+      "step": 2.0,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": true, "min": 2.0, "max": 8.0, "step": 2.0 }
+    },
+    "stopMaxDays": {
+      "type": "int",
+      "label": "Stop Max Days",
+      "default": 4,
+      "min": 2,
+      "max": 6,
+      "step": 2,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": true, "min": 2, "max": 6, "step": 2 }
+    },
+    "riskPerTrade": {
+      "type": "float",
+      "label": "Risk Per Trade (%)",
+      "default": 2.0,
+      "min": 0.1,
+      "max": 100.0,
+      "step": 0.5,
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": false }
+    },
+    "contractSize": {
+      "type": "select",
+      "label": "Contract Size",
+      "default": 0.01,
+      "options": [0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000],
+      "group": "Risk (shared long/short)",
+      "optimize": { "enabled": false }
+    },
+    "useTrailMA": {
+      "type": "bool",
+      "label": "Use Trail MA",
+      "default": true,
+      "group": "Trailing (MA only)",
+      "optimize": { "enabled": false }
+    },
+    "trailRR": {
+      "type": "float",
+      "label": "Trail RR",
+      "default": 1.0,
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Trailing (MA only)",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 1.0, "max": 3.0, "step": 0.5 }
+    },
+    "trailMAType": {
+      "type": "select",
+      "label": "Trail MA Type",
+      "default": "SMA",
+      "options": ["SMA", "HMA", "KAMA", "T3"],
+      "group": "Trailing (MA only)",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true }
+    },
+    "trailMALength": {
+      "type": "int",
+      "label": "Trail MA Length",
+      "default": 150,
+      "min": 50,
+      "max": 200,
+      "step": 50,
+      "group": "Trailing (MA only)",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 50, "max": 200, "step": 50 }
+    },
+    "trailMAOffsetEx": {
+      "type": "float",
+      "label": "Trail MA Offset %",
+      "default": 0.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.5,
+      "group": "Trailing (MA only)",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 0.0, "max": 2.0, "step": 0.5 }
+    },
+    "initialCapital": {
+      "type": "float",
+      "label": "Initial Capital",
+      "default": 100.0,
+      "min": 0.01,
+      "max": 1000000.0,
+      "step": 1.0,
+      "group": "Backtest Settings",
+      "optimize": { "enabled": false }
+    },
+    "commissionPct": {
+      "type": "float",
+      "label": "Commission (%)",
+      "default": 0.05,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "group": "Backtest Settings",
+      "optimize": { "enabled": false }
+    }
+  }
+}

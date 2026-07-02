@@ -313,6 +313,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             dsr_kurtosis REAL,
             dsr_track_length INTEGER,
             dsr_luck_share_pct REAL,
+            selection_sources_json TEXT,
 
             st_rank INTEGER,
             st_status TEXT,
@@ -432,6 +433,14 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             no_trade_reason TEXT,
 
             wfe REAL,
+            grid_dsr_enabled INTEGER,
+            grid_dsr_top_k INTEGER,
+            grid_dsr_n_trials INTEGER,
+            grid_dsr_mean_sharpe REAL,
+            grid_dsr_var_sharpe REAL,
+            grid_dsr_sr0 REAL,
+            grid_valid_candidate_count INTEGER,
+            grid_selected_candidate_count INTEGER,
 
             FOREIGN KEY (study_id) REFERENCES studies(study_id) ON DELETE CASCADE,
             UNIQUE(study_id, window_number)
@@ -510,6 +519,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "ft_reject_cooldown_days", "INTEGER")
     ensure("studies", "ft_reject_max_attempts", "INTEGER")
     ensure("studies", "ft_reject_min_remaining_oos_days", "INTEGER")
+    ensure("studies", "optimizer_mode", "TEXT")
+    ensure("studies", "grid_requested_budget", "INTEGER")
+    ensure("studies", "grid_actual_budget", "INTEGER")
+    ensure("studies", "grid_coverage_pct", "REAL")
+    ensure("studies", "grid_top_candidates", "INTEGER")
+    ensure("studies", "grid_summary_json", "TEXT")
 
     ensure("trials", "max_consecutive_losses", "INTEGER")
     ensure("trials", "ft_max_consecutive_losses", "INTEGER")
@@ -520,6 +535,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("trials", "dsr_kurtosis", "REAL")
     ensure("trials", "dsr_track_length", "INTEGER")
     ensure("trials", "dsr_luck_share_pct", "REAL")
+    ensure("trials", "selection_sources_json", "TEXT")
     ensure("trials", "st_rank", "INTEGER")
     ensure("trials", "st_status", "TEXT")
     ensure("trials", "profit_retention", "REAL")
@@ -555,6 +571,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("trials", "oos_test_profit_degradation", "REAL")
     ensure("trials", "oos_test_source", "TEXT")
     ensure("trials", "oos_test_source_rank", "INTEGER")
+    ensure("trials", "optimizer_mode", "TEXT")
+    ensure("trials", "candidate_id", "INTEGER")
+    ensure("trials", "semantic_key", "TEXT")
+    ensure("trials", "param_key", "TEXT")
+    ensure("trials", "grid_rank", "INTEGER")
+    ensure("trials", "grid_mode_name", "TEXT")
+    ensure("trials", "grid_generation_mode", "TEXT")
+    ensure("trials", "diversity_group", "TEXT")
+    ensure("trials", "validation_status", "TEXT")
+    ensure("trials", "validation_message", "TEXT")
+    ensure("trials", "fast_metrics_json", "TEXT")
+    ensure("trials", "validation_diffs_json", "TEXT")
 
 
 def _ensure_wfa_schema_updated(conn: sqlite3.Connection) -> None:
@@ -679,6 +707,17 @@ def _ensure_wfa_schema_updated(conn: sqlite3.Connection) -> None:
     )
     add_col("ALTER TABLE wfa_windows ADD COLUMN window_status TEXT;", "window_status")
     add_col("ALTER TABLE wfa_windows ADD COLUMN no_trade_reason TEXT;", "no_trade_reason")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_enabled INTEGER;", "grid_dsr_enabled")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_top_k INTEGER;", "grid_dsr_top_k")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_n_trials INTEGER;", "grid_dsr_n_trials")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_mean_sharpe REAL;", "grid_dsr_mean_sharpe")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_var_sharpe REAL;", "grid_dsr_var_sharpe")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_dsr_sr0 REAL;", "grid_dsr_sr0")
+    add_col("ALTER TABLE wfa_windows ADD COLUMN grid_valid_candidate_count INTEGER;", "grid_valid_candidate_count")
+    add_col(
+        "ALTER TABLE wfa_windows ADD COLUMN grid_selected_candidate_count INTEGER;",
+        "grid_selected_candidate_count",
+    )
 
     conn.commit()
 
@@ -2085,7 +2124,13 @@ def generate_study_name(
     else:
         end_str = str(end_date)[:10].replace("-", ".") if end_date else "0000.00.00"
 
-    mode_suffix = "WFA" if str(mode).lower() == "wfa" else "OPT"
+    mode_key = str(mode).lower()
+    if mode_key == "wfa":
+        mode_suffix = "WFA"
+    elif mode_key == "grid":
+        mode_suffix = "GRID"
+    else:
+        mode_suffix = "OPT"
     base_name = f"{prefix}_{ticker_tf} {start_str}-{end_str}_{mode_suffix}"
 
     with get_db_connection() as conn:
@@ -2449,6 +2494,269 @@ def save_optuna_study_to_db(
         except Exception as exc:
             conn.execute("ROLLBACK")
             raise RuntimeError(f"Failed to save study to database: {exc}")
+
+    return study_id
+
+
+def save_grid_study_to_db(
+    *,
+    config,
+    grid_settings,
+    grid_summary: Dict[str, Any],
+    trial_results: List,
+    csv_file_path: str,
+    start_time: float,
+    score_config: Optional[Dict] = None,
+) -> str:
+    """Persist selected slow-validated Grid candidates.
+
+    The full screened candidate set intentionally remains in RAM.  Only the
+    selected, slow-validated candidates are saved to the shared studies/trials
+    model for Results, Post Process, and trade export compatibility.
+    """
+
+    def json_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(k): json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_safe(v) for v in value]
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, (str, int, bool)) or value is None:
+            return value
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def dumps(value: Any) -> str:
+        return json.dumps(json_safe(value), separators=(",", ":"), sort_keys=True)
+
+    init_database()
+
+    study_id = generate_study_id()
+    fixed = getattr(config, "fixed_params", {}) or {}
+    start_date = fixed.get("start") or datetime.now(timezone.utc)
+    end_date = fixed.get("end") or datetime.now(timezone.utc)
+    csv_display_name = _get_csv_display_name(config, csv_file_path)
+
+    study_name = generate_study_name(
+        strategy_id=config.strategy_id,
+        csv_filename=csv_display_name,
+        start_date=start_date,
+        end_date=end_date,
+        mode="grid",
+    )
+
+    strategy_version = None
+    try:
+        from strategies import get_strategy
+
+        strategy_class = get_strategy(config.strategy_id)
+        strategy_version = getattr(strategy_class, "STRATEGY_VERSION", None)
+    except Exception:
+        pass
+
+    objectives = list(
+        grid_summary.get("selection_objectives")
+        or grid_summary.get("objectives")
+        or getattr(config, "objectives", None)
+        or ["net_profit_pct"]
+    )
+    primary_objective = (
+        grid_summary.get("selection_primary_objective")
+        or grid_summary.get("primary_objective")
+        or getattr(config, "primary_objective", None)
+    )
+    directions = [OBJECTIVE_DIRECTIONS.get(obj, "maximize") for obj in objectives]
+    constraints_payload = list(getattr(config, "constraints", []) or [])
+    resolved_score_config = score_config or getattr(config, "score_config", None) or {}
+
+    best_result = trial_results[0] if trial_results else None
+    best_value = None
+    best_values_json = None
+    if best_result is not None and getattr(best_result, "objective_values", None):
+        if len(objectives) > 1:
+            best_values_json = dumps(dict(zip(objectives, list(best_result.objective_values))))
+        else:
+            best_value = float(best_result.objective_values[0])
+
+    optimization_time_seconds = grid_summary.get("optimization_time_seconds")
+    if optimization_time_seconds is None and start_time:
+        optimization_time_seconds = max(0, time.time() - float(start_time))
+    try:
+        optimization_time_seconds = int(round(float(optimization_time_seconds))) if optimization_time_seconds is not None else None
+    except (TypeError, ValueError):
+        optimization_time_seconds = None
+
+    config_payload = _safe_dict(config)
+    config_payload["grid_settings"] = _safe_dict(grid_settings)
+    config_payload["grid_summary"] = json_safe(grid_summary)
+
+    grid_section = (grid_summary.get("grid") or {}) if isinstance(grid_summary, dict) else {}
+    grid_preview = (grid_section.get("preview") or {}) if isinstance(grid_section, dict) else {}
+    dsr_section = (grid_section.get("dsr") or {}) if isinstance(grid_section, dict) else {}
+    requested_budget = int(grid_summary.get("requested_budget") or getattr(grid_settings, "requested_budget", 0) or 0)
+    actual_budget = int(grid_summary.get("actual_budget") or 0)
+    coverage_pct = grid_preview.get("coverage_pct")
+    try:
+        coverage_pct = float(coverage_pct) if coverage_pct is not None else None
+    except (TypeError, ValueError):
+        coverage_pct = None
+
+    with get_db_connection() as conn:
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            _ensure_columns(conn)
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id, study_name, strategy_id, strategy_version,
+                    optimization_mode, optimizer_mode,
+                    objectives_json, n_objectives, directions_json, primary_objective,
+                    constraints_json,
+                    sampler_type, budget_mode, n_trials,
+                    total_trials, completed_trials, pruned_trials, pareto_front_size,
+                    best_value, best_values_json,
+                    score_config_json, config_json,
+                    csv_file_path, csv_file_name,
+                    dataset_start_date, dataset_end_date, warmup_bars,
+                    optimization_time_seconds, completed_at,
+                    filter_min_profit, min_profit_threshold,
+                    sanitize_enabled, sanitize_trades_threshold,
+                    dsr_enabled, dsr_top_k, dsr_n_trials, dsr_mean_sharpe, dsr_var_sharpe,
+                    grid_requested_budget, grid_actual_budget, grid_coverage_pct,
+                    grid_top_candidates, grid_summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    study_id,
+                    study_name,
+                    config.strategy_id,
+                    strategy_version,
+                    "grid",
+                    "grid",
+                    dumps(objectives),
+                    len(objectives),
+                    dumps(directions),
+                    primary_objective,
+                    dumps(constraints_payload) if constraints_payload else None,
+                    "grid",
+                    "candidates",
+                    requested_budget,
+                    actual_budget,
+                    int(grid_summary.get("completed_trials") or len(trial_results or [])),
+                    0,
+                    grid_summary.get("pareto_front_size"),
+                    best_value,
+                    best_values_json,
+                    dumps(resolved_score_config) if resolved_score_config else None,
+                    dumps(config_payload),
+                    str(Path(csv_file_path).resolve()) if csv_file_path else "",
+                    csv_display_name,
+                    _format_date(start_date),
+                    _format_date(end_date),
+                    getattr(config, "warmup_bars", None),
+                    optimization_time_seconds,
+                    _utc_now_iso(),
+                    1 if getattr(config, "filter_min_profit", False) else 0,
+                    getattr(config, "min_profit_threshold", None)
+                    if getattr(config, "filter_min_profit", False)
+                    else None,
+                    1 if getattr(config, "sanitize_enabled", True) else 0,
+                    int(getattr(config, "sanitize_trades_threshold", 0) or 0),
+                    1 if bool(dsr_section.get("enabled")) else 0,
+                    dsr_section.get("top_k"),
+                    dsr_section.get("dsr_n_trials"),
+                    dsr_section.get("dsr_mean_sharpe"),
+                    dsr_section.get("dsr_var_sharpe"),
+                    requested_budget,
+                    actual_budget,
+                    coverage_pct,
+                    int(getattr(grid_settings, "top_candidates", len(trial_results or [])) or 0),
+                    dumps(grid_summary),
+                ),
+            )
+
+            rows = []
+            for index, result in enumerate(trial_results or [], 1):
+                candidate_id = int(getattr(result, "candidate_id", None) or getattr(result, "optuna_trial_number", None) or index)
+                selection_sources = getattr(result, "selection_sources", None)
+                selection_sources_json = dumps(list(selection_sources)) if isinstance(selection_sources, (list, tuple)) else None
+                rows.append(
+                    (
+                        study_id,
+                        candidate_id,
+                        dumps(result.params),
+                        dumps(list(getattr(result, "objective_values", []) or [])),
+                        1 if getattr(result, "is_pareto_optimal", False) else 0,
+                        getattr(result, "dominance_rank", None),
+                        1 if getattr(result, "constraints_satisfied", True) else 0,
+                        dumps(list(getattr(result, "constraint_values", []) or []))
+                        if getattr(result, "constraint_values", None)
+                        else None,
+                        result.net_profit_pct,
+                        result.max_drawdown_pct,
+                        result.total_trades,
+                        result.win_rate,
+                        result.max_consecutive_losses,
+                        result.avg_win,
+                        result.avg_loss,
+                        result.gross_profit,
+                        result.gross_loss,
+                        result.romad,
+                        result.sharpe_ratio,
+                        result.sortino_ratio,
+                        result.profit_factor,
+                        result.ulcer_index,
+                        result.sqn,
+                        result.consistency_score,
+                        result.score,
+                        getattr(result, "dsr_probability", None),
+                        getattr(result, "dsr_rank", None),
+                        getattr(result, "dsr_skewness", None),
+                        getattr(result, "dsr_kurtosis", None),
+                        getattr(result, "dsr_track_length", None),
+                        getattr(result, "dsr_luck_share_pct", None),
+                        selection_sources_json,
+                        "grid",
+                        candidate_id,
+                        getattr(result, "semantic_key", None),
+                        getattr(result, "param_key", None) or getattr(result, "semantic_key", None),
+                        getattr(result, "grid_rank", index),
+                        getattr(result, "grid_mode_name", None),
+                        getattr(result, "grid_generation_mode", None),
+                        getattr(result, "diversity_group", None),
+                        getattr(result, "validation_status", None),
+                        dumps(getattr(result, "fast_metrics", None)) if getattr(result, "fast_metrics", None) else None,
+                        dumps(getattr(result, "validation_diffs", None)) if getattr(result, "validation_diffs", None) else None,
+                    )
+                )
+
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO trials (
+                        study_id, trial_number,
+                        params_json, objective_values_json, is_pareto_optimal, dominance_rank,
+                        constraints_satisfied, constraint_values_json,
+                        net_profit_pct, max_drawdown_pct, total_trades, win_rate, max_consecutive_losses,
+                        avg_win, avg_loss, gross_profit, gross_loss,
+                        romad, sharpe_ratio, sortino_ratio, profit_factor, ulcer_index, sqn,
+                        consistency_score, composite_score,
+                        dsr_probability, dsr_rank, dsr_skewness, dsr_kurtosis, dsr_track_length,
+                        dsr_luck_share_pct, selection_sources_json,
+                        optimizer_mode, candidate_id, semantic_key, param_key, grid_rank,
+                        grid_mode_name, grid_generation_mode, diversity_group, validation_status,
+                        fast_metrics_json, validation_diffs_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+
+            conn.execute("COMMIT")
+        except Exception as exc:
+            conn.execute("ROLLBACK")
+            raise RuntimeError(f"Failed to save Grid study to database: {exc}")
 
     return study_id
 
@@ -2867,6 +3175,14 @@ def save_wfa_study_to_db(
                         _tri_state(getattr(window, "constraints_satisfied", None)),
                         json.dumps(available_modules) if available_modules is not None else None,
                         getattr(wf_result.config, "store_top_n_trials", None),
+                        _tri_state(getattr(window, "grid_dsr_enabled", None)),
+                        getattr(window, "grid_dsr_top_k", None),
+                        getattr(window, "grid_dsr_n_trials", None),
+                        getattr(window, "grid_dsr_mean_sharpe", None),
+                        getattr(window, "grid_dsr_var_sharpe", None),
+                        getattr(window, "grid_dsr_sr0", None),
+                        getattr(window, "grid_valid_candidate_count", None),
+                        getattr(window, "grid_selected_candidate_count", None),
                         json.dumps(getattr(window, "module_status", None))
                         if getattr(window, "module_status", None) is not None
                         else None,
@@ -2944,6 +3260,9 @@ def save_wfa_study_to_db(
                     "best_params_json", "param_id", "best_params_source",
                     "is_pareto_optimal", "constraints_satisfied",
                     "available_modules", "store_top_n_trials",
+                    "grid_dsr_enabled", "grid_dsr_top_k", "grid_dsr_n_trials",
+                    "grid_dsr_mean_sharpe", "grid_dsr_var_sharpe", "grid_dsr_sr0",
+                    "grid_valid_candidate_count", "grid_selected_candidate_count",
                     "module_status_json", "selection_chain_json",
                     "optimization_start_date", "optimization_end_date",
                     "optimization_start_ts", "optimization_end_ts",
@@ -3229,7 +3548,7 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
         windows: List[Dict] = []
         manual_tests: List[Dict] = []
 
-        if study.get("optimization_mode") == "optuna":
+        if study.get("optimization_mode") in {"optuna", "grid"}:
             cursor = conn.execute(
                 "SELECT * FROM trials WHERE study_id = ?",
                 (study_id,),
@@ -3248,9 +3567,63 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
                         trial["param_worst_ratios"] = json.loads(trial["param_worst_ratios"])
                     except json.JSONDecodeError:
                         pass
+                if trial.get("fast_metrics_json"):
+                    try:
+                        trial["fast_metrics"] = json.loads(trial["fast_metrics_json"])
+                    except json.JSONDecodeError:
+                        pass
+                if trial.get("validation_diffs_json"):
+                    try:
+                        trial["validation_diffs"] = json.loads(trial["validation_diffs_json"])
+                    except json.JSONDecodeError:
+                        pass
+                if trial.get("selection_sources_json"):
+                    try:
+                        trial["selection_sources"] = json.loads(trial["selection_sources_json"])
+                    except json.JSONDecodeError:
+                        pass
+                if isinstance(trial.get("selection_sources"), list):
+                    trial["is_dsr_selected"] = "dsr" in trial["selection_sources"]
+                    trial["is_objective_selected"] = "objective" in trial["selection_sources"]
+                if trial.get("candidate_id") is not None:
+                    trial["candidate_id"] = int(trial["candidate_id"])
                 if trial.get("composite_score") is not None:
                     trial["score"] = trial.get("composite_score")
                 trials.append(trial)
+            if study.get("optimization_mode") == "grid":
+                trials.sort(
+                    key=lambda t: (
+                        int(t.get("grid_rank") or t.get("trial_number") or 0),
+                        int(t.get("candidate_id") or t.get("trial_number") or 0),
+                    )
+                )
+                if study.get("grid_summary_json"):
+                    try:
+                        study["grid_summary"] = json.loads(study["grid_summary_json"])
+                    except json.JSONDecodeError:
+                        pass
+                study["optimizer_mode"] = study.get("optimizer_mode") or "grid"
+                cursor = conn.execute(
+                    """
+                    SELECT
+                        id, study_id, created_at, test_name, data_source, csv_path,
+                        start_date, end_date, source_tab, trials_count, trials_tested_csv,
+                        best_profit_degradation, worst_profit_degradation
+                    FROM manual_tests
+                    WHERE study_id = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (study_id,),
+                )
+                manual_tests = [dict(row) for row in cursor.fetchall()]
+                return {
+                    "study": study,
+                    "trials": trials,
+                    "windows": windows,
+                    "manual_tests": manual_tests,
+                    "csv_exists": csv_exists,
+                    "stitched_oos": stitched_oos,
+                }
             objectives = study.get("objectives_json") or []
             if isinstance(objectives, list) and objectives:
                 directions = study.get("directions_json") or []
@@ -3386,6 +3759,11 @@ def get_study_trial(study_id: str, trial_number: int) -> Optional[Dict]:
             return None
         trial = dict(row)
         trial["params"] = json.loads(trial["params_json"])
+        if trial.get("selection_sources_json"):
+            try:
+                trial["selection_sources"] = json.loads(trial["selection_sources_json"])
+            except json.JSONDecodeError:
+                pass
         if trial.get("ft_passes_threshold") is not None:
             trial["ft_passes_threshold"] = bool(trial.get("ft_passes_threshold"))
         return trial
@@ -3553,6 +3931,7 @@ def save_dsr_results(
     dsr_n_trials: Optional[int],
     dsr_mean_sharpe: Optional[float],
     dsr_var_sharpe: Optional[float],
+    clear_existing: bool = True,
 ) -> bool:
     if not study_id:
         return False
@@ -3581,20 +3960,21 @@ def save_dsr_results(
                 ),
             )
 
-            conn.execute(
-                """
-                UPDATE trials
-                SET
-                    dsr_probability = NULL,
-                    dsr_rank = NULL,
-                    dsr_skewness = NULL,
-                    dsr_kurtosis = NULL,
-                    dsr_track_length = NULL,
-                    dsr_luck_share_pct = NULL
-                WHERE study_id = ?
-                """,
-                (study_id,),
-            )
+            if clear_existing:
+                conn.execute(
+                    """
+                    UPDATE trials
+                    SET
+                        dsr_probability = NULL,
+                        dsr_rank = NULL,
+                        dsr_skewness = NULL,
+                        dsr_kurtosis = NULL,
+                        dsr_track_length = NULL,
+                        dsr_luck_share_pct = NULL
+                    WHERE study_id = ?
+                    """,
+                    (study_id,),
+                )
 
             if dsr_results:
                 rows = []

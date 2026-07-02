@@ -32,6 +32,44 @@ const SCORE_DEFAULT_BOUNDS = {
   sqn: { min: -2, max: 7 },
   consistency: { min: -1, max: 1 }
 };
+const GRID_SUPPORTED_OBJECTIVES = new Set([
+  'net_profit_pct',
+  'max_drawdown_pct',
+  'romad',
+  'profit_factor',
+  'win_rate'
+]);
+const GRID_SUPPORTED_SLOW_OBJECTIVES = new Set([
+  ...GRID_SUPPORTED_OBJECTIVES,
+  'sharpe_ratio',
+  'sortino_ratio',
+  'sqn',
+  'ulcer_index',
+  'consistency_score'
+]);
+const GRID_OBJECTIVE_LABELS = {
+  net_profit_pct: 'Net Profit %',
+  max_drawdown_pct: 'Max DD %',
+  sharpe_ratio: 'Sharpe Ratio',
+  sortino_ratio: 'Sortino Ratio',
+  romad: 'RoMaD',
+  profit_factor: 'Profit Factor',
+  win_rate: 'Win Rate %',
+  sqn: 'SQN',
+  ulcer_index: 'Ulcer Index',
+  consistency_score: 'Consistency'
+};
+const GRID_SUPPORTED_CONSTRAINTS = new Set([
+  'total_trades',
+  'net_profit_pct',
+  'max_drawdown_pct',
+  'romad',
+  'profit_factor',
+  'win_rate',
+  'max_consecutive_losses'
+]);
+let gridPreviewTimer = null;
+let gridPreviewSeq = 0;
 
 function normalizeScoreBounds(rawBounds = {}) {
   const normalized = {};
@@ -878,6 +916,216 @@ function getWorkerProcessesValue() {
   return Math.round(Math.min(32, Math.max(1, workerProcesses)));
 }
 
+function getOptimizerMode() {
+  const selected = document.querySelector('input[name="optimizerMode"]:checked');
+  return selected && selected.value === 'grid' ? 'grid' : 'optuna';
+}
+
+function parseCompactCount(rawValue) {
+  const text = String(rawValue ?? '').trim();
+  const match = text.match(/^(\d+(?:\.\d+)?)([kKmMbB]?)$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number)) return null;
+  const suffix = match[2].toLowerCase();
+  const multiplier = suffix === 'k' ? 1000 : (suffix === 'm' ? 1000000 : (suffix === 'b' ? 1000000000 : 1));
+  const value = Math.round(number * multiplier);
+  return value > 0 ? value : null;
+}
+
+function formatCompactCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  const absValue = Math.abs(number);
+  const units = [
+    ['B', 1000000000],
+    ['M', 1000000],
+    ['k', 1000]
+  ];
+  for (const [suffix, scale] of units) {
+    if (absValue >= scale) {
+      const scaled = number / scale;
+      if (Math.abs(scaled) >= 100) return `${scaled.toFixed(0)}${suffix}`;
+      if (Math.abs(scaled) >= 10) return `${scaled.toFixed(1).replace(/\.0$/, '')}${suffix}`;
+      return `${scaled.toFixed(2).replace(/\.?0+$/, '')}${suffix}`;
+    }
+  }
+  return String(Math.round(number));
+}
+
+function getGridBudgetValue() {
+  const input = document.getElementById('gridBudget');
+  return parseCompactCount(input?.value || '200k') || 200000;
+}
+
+function getSelectedObjectiveKeys() {
+  if (getOptimizerMode() === 'grid') {
+    return collectGridObjectiveSelection('fast').objectives;
+  }
+  if (window.OptunaUI && typeof window.OptunaUI.collectObjectives === 'function') {
+    return window.OptunaUI.collectObjectives().objectives || [];
+  }
+  return Array.from(document.querySelectorAll('.objective-checkbox'))
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.dataset.objective);
+}
+
+function getGridObjectiveElements(kind) {
+  const selector = kind === 'slow' ? '.grid-slow-objective-checkbox' : '.grid-fast-objective-checkbox';
+  return Array.from(document.querySelectorAll(selector));
+}
+
+function getGridPrimarySelect(kind) {
+  return document.getElementById(kind === 'slow' ? 'gridSlowPrimaryObjective' : 'gridFastPrimaryObjective');
+}
+
+function getGridPrimaryRow(kind) {
+  return document.getElementById(kind === 'slow' ? 'gridSlowPrimaryObjectiveRow' : 'gridFastPrimaryObjectiveRow');
+}
+
+function collectGridObjectiveSelection(kind = 'fast') {
+  const checkboxes = getGridObjectiveElements(kind);
+  const objectives = checkboxes
+    .filter((checkbox) => checkbox.checked && !checkbox.disabled)
+    .map((checkbox) => checkbox.dataset.objective)
+    .filter(Boolean);
+  const primarySelect = getGridPrimarySelect(kind);
+  const primary = objectives.length > 1 && primarySelect ? primarySelect.value : null;
+  return { objectives, primary_objective: primary };
+}
+
+function updateGridObjectiveSelection(kind = 'fast') {
+  const checkboxes = getGridObjectiveElements(kind);
+  if (!checkboxes.length) return;
+
+  const enabled = kind !== 'slow' || Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
+  const supported = kind === 'slow' ? GRID_SUPPORTED_SLOW_OBJECTIVES : GRID_SUPPORTED_OBJECTIVES;
+  const selected = [];
+
+  checkboxes.forEach((checkbox) => {
+    const objective = checkbox.dataset.objective;
+    const unsupported = !supported.has(objective);
+    checkbox.disabled = !enabled || unsupported;
+    if (unsupported || (!enabled && kind === 'slow')) {
+      checkbox.title = unsupported ? 'This objective is not supported for Grid.' : '';
+    } else {
+      checkbox.title = '';
+    }
+    if (checkbox.checked && !checkbox.disabled) {
+      selected.push(objective);
+    }
+    const item = checkbox.closest('.objective-item');
+    if (item) {
+      item.classList.toggle('disabled', checkbox.disabled);
+      item.title = checkbox.title || '';
+    }
+  });
+
+  if (!selected.length) {
+    const firstAvailable = checkboxes.find((checkbox) => !checkbox.disabled);
+    if (firstAvailable) {
+      firstAvailable.checked = true;
+      selected.push(firstAvailable.dataset.objective);
+    }
+  }
+
+  const row = getGridPrimaryRow(kind);
+  const select = getGridPrimarySelect(kind);
+  if (row && select) {
+    if (enabled && selected.length > 1) {
+      row.style.display = 'flex';
+      const previous = select.value;
+      select.innerHTML = '';
+      selected.forEach((objective) => {
+        const option = document.createElement('option');
+        option.value = objective;
+        option.textContent = GRID_OBJECTIVE_LABELS[objective] || objective;
+        select.appendChild(option);
+      });
+      select.value = selected.includes(previous) ? previous : selected[0];
+    } else {
+      row.style.display = 'none';
+      select.innerHTML = '';
+    }
+  }
+}
+
+function syncGridObjectiveUi() {
+  updateGridObjectiveSelection('fast');
+  updateGridObjectiveSelection('slow');
+}
+
+function getEnabledGridMetadata() {
+  const metadata = window.currentStrategyConfig?.grid_optimizer || {};
+  const supported = Boolean(metadata.supported);
+  const numbaAvailable = metadata.numba_available !== false;
+  return {
+    ...metadata,
+    profile: metadata.profile || 'sampled_by_mode',
+    modes: Array.isArray(metadata.modes) ? metadata.modes : [],
+    available: Boolean(metadata.available ?? (supported && numbaAvailable)),
+    reason: metadata.reason || (supported ? '' : 'No fast Grid backend is available.')
+  };
+}
+
+function getSelectedGridModes() {
+  return Array.from(document.querySelectorAll('input[name="gridEnabledMode"]'))
+    .filter((checkbox) => checkbox.checked)
+    .map((checkbox) => String(checkbox.value || '').trim())
+    .filter(Boolean);
+}
+
+function syncGridProfileUi() {
+  const metadata = getEnabledGridMetadata();
+  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const modeSection = document.getElementById('gridProfileModesSection');
+  const modeContainer = document.getElementById('gridEnabledModes');
+  const budgetRow = document.getElementById('gridBudgetRow');
+  const seedRow = document.getElementById('gridSeedRow');
+  const allocationSection = document.getElementById('gridAllocationSection');
+  const samplingInput = document.getElementById('gridSamplingMethod');
+  const diversityLabel = document.getElementById('gridDiversityMaxLabel');
+
+  if (budgetRow) budgetRow.style.display = fullEnumeration ? 'none' : 'flex';
+  if (seedRow) seedRow.style.display = fullEnumeration ? 'none' : 'flex';
+  if (allocationSection) allocationSection.style.display = fullEnumeration ? 'none' : 'block';
+  if (samplingInput) samplingInput.value = fullEnumeration ? 'Full enumeration' : 'LHS by mode';
+  if (diversityLabel) {
+    diversityLabel.textContent = fullEnumeration
+      ? 'Max per diversity group'
+      : 'Max per MA group';
+  }
+
+  if (modeSection) modeSection.style.display = fullEnumeration ? 'block' : 'none';
+  if (!modeContainer) return;
+  const profileKey = `${window.currentStrategyId || ''}:${metadata.profile}`;
+  if (modeContainer.dataset.profileKey === profileKey) return;
+  modeContainer.dataset.profileKey = profileKey;
+  modeContainer.innerHTML = '';
+  metadata.modes.forEach((mode) => {
+    const modeId = String(mode?.id || '').trim();
+    if (!modeId) return;
+    const label = document.createElement('label');
+    label.className = 'optimizer-mode-option';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.name = 'gridEnabledMode';
+    checkbox.id = `gridEnabledMode-${modeId}`;
+    checkbox.value = modeId;
+    checkbox.checked = mode.default_enabled !== false;
+    checkbox.addEventListener('change', () => {
+      if (!getSelectedGridModes().length) {
+        checkbox.checked = true;
+        setGridPreviewError('At least one Grid mode must remain enabled.');
+      }
+      scheduleGridPreviewUpdate();
+    });
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(` ${mode.label || modeId}`));
+    modeContainer.appendChild(label);
+  });
+}
+
 function readSelectedOptimizerOptionValues(paramName) {
   return Array.from(
     document.querySelectorAll(
@@ -904,6 +1152,7 @@ function validateOptimizerForm(config) {
   const params = config?.parameters || {};
   const errors = [];
   let enabledCount = 0;
+  const optimizerMode = getOptimizerMode();
 
   getOptimizerParamElements().forEach(({ name, checkbox, fromInput, toInput, stepInput, def }) => {
     const paramDef = def || params[name] || {};
@@ -940,8 +1189,8 @@ function validateOptimizerForm(config) {
     if (stepVal <= 0) {
       errors.push(`${label}: step must be greater than 0.`);
     }
-    if (fromVal >= toVal) {
-      errors.push(`${label}: from must be less than to.`);
+    if (fromVal > toVal || (optimizerMode !== 'grid' && fromVal === toVal)) {
+      errors.push(`${label}: from must be ${optimizerMode === 'grid' ? 'less than or equal to' : 'less than'} to.`);
     }
 
     const minBound = paramDef.optimize?.min ?? paramDef.min;
@@ -955,8 +1204,76 @@ function validateOptimizerForm(config) {
     }
   });
 
-  if (enabledCount === 0) {
+  const gridMetadata = getEnabledGridMetadata();
+  if (
+    enabledCount === 0
+    && !(optimizerMode === 'grid' && gridMetadata.profile === 'full_enumeration')
+  ) {
     errors.push('Enable at least one parameter to optimize.');
+  }
+
+  if (optimizerMode === 'grid') {
+    const gridMeta = getEnabledGridMetadata();
+    if (!gridMeta.available) {
+      errors.push(gridMeta.reason || 'Grid mode is unavailable for this strategy.');
+    }
+    if (gridMeta.profile === 'full_enumeration' && !getSelectedGridModes().length) {
+      errors.push('Enable at least one Grid mode.');
+    }
+
+    const fastSelection = collectGridObjectiveSelection('fast');
+    if (!fastSelection.objectives.length) {
+      errors.push('Select at least one Grid fast objective.');
+    }
+    fastSelection.objectives.forEach((objective) => {
+      if (!GRID_SUPPORTED_OBJECTIVES.has(objective)) {
+        errors.push(
+          objective === 'composite_score'
+            ? 'Composite Score is not supported in Grid v1.'
+            : `${objective}: objective is not supported in Grid v1.`
+        );
+      }
+    });
+    if (
+      fastSelection.objectives.length > 1
+      && !fastSelection.objectives.includes(fastSelection.primary_objective)
+    ) {
+      errors.push('Primary Grid fast objective must be selected.');
+    }
+
+    const slowEnabled = Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
+    const slowSelection = collectGridObjectiveSelection('slow');
+    if (slowEnabled) {
+      if (!slowSelection.objectives.length) {
+        errors.push('Select at least one Grid slow objective when slow refinement is enabled.');
+      }
+      slowSelection.objectives.forEach((objective) => {
+        if (!GRID_SUPPORTED_SLOW_OBJECTIVES.has(objective)) {
+          errors.push(`${objective}: objective is not supported for Grid slow refinement.`);
+        }
+      });
+      if (
+        slowSelection.objectives.length > 1
+        && !slowSelection.objectives.includes(slowSelection.primary_objective)
+      ) {
+        errors.push('Primary Grid slow objective must be selected.');
+      }
+    }
+
+    const constraints = window.OptunaUI ? window.OptunaUI.collectConstraints() : [];
+    constraints.filter((item) => item && item.enabled).forEach((item) => {
+      if (!GRID_SUPPORTED_CONSTRAINTS.has(item.metric)) {
+        errors.push(`${item.metric}: constraint is not supported in Grid v1.`);
+      }
+    });
+
+    if (window.currentStrategyId === 's03_reversal_v10') {
+      const maTypeOptions = readSelectedOptimizerOptionValues('maType3');
+      const selectedMaTypes = maTypeOptions.map((value) => String(value || '').trim().toUpperCase());
+      if (selectedMaTypes.includes('VWAP')) {
+        errors.push('VWAP is not supported in S03 Grid mode.');
+      }
+    }
   }
 
   return errors;
@@ -1034,7 +1351,7 @@ function collectOptimizerParams() {
   return ranges;
 }
 
-function buildOptimizationConfig(state) {
+function buildOptimizationConfig(state, optimizerMode = 'optuna') {
   const enabledParams = {};
   const paramRanges = {};
   const paramTypes = {};
@@ -1107,7 +1424,7 @@ function buildOptimizationConfig(state) {
           Number.isFinite(toValue) &&
           Number.isFinite(stepValue) &&
           stepValue > 0 &&
-          fromValue < toValue
+          (fromValue < toValue || (optimizerMode === 'grid' && fromValue === toValue))
         ) {
           paramRanges[name] = [fromValue, toValue, stepValue];
         }
@@ -1142,12 +1459,12 @@ function buildOptimizationConfig(state) {
     score_config: collectScoreConfig(),
     detailed_log: Boolean(document.getElementById('detailedLog')?.checked),
     trials_log: Boolean(document.getElementById('trialsLog')?.checked),
-    optimization_mode: 'optuna'
+    optimization_mode: optimizerMode === 'grid' ? 'grid' : 'optuna'
   };
 }
 
 function buildOptunaConfig(state) {
-  const baseConfig = buildOptimizationConfig(state);
+  const baseConfig = buildOptimizationConfig(state, 'optuna');
   const budgetModeRadios = document.querySelectorAll('input[name="budgetMode"]');
   const optunaTrials = document.getElementById('optunaTrials');
   const optunaTimeLimit = document.getElementById('optunaTimeLimit');
@@ -1241,6 +1558,61 @@ function buildOptunaConfig(state) {
     oosTest: oosTestConfig
   };
 }
+
+function buildGridConfig(state) {
+  const optunaCompatibleConfig = buildOptunaConfig(state);
+  const gridBaseConfig = buildOptimizationConfig(state, 'grid');
+  const metadata = getEnabledGridMetadata();
+  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const previewBudget = Number(window.lastGridPreview?.actual_budget);
+  const budget = fullEnumeration && Number.isFinite(previewBudget) && previewBudget > 0
+    ? previewBudget
+    : getGridBudgetValue();
+  const seedRaw = Number(document.getElementById('gridSeed')?.value);
+  const topRaw = Number(document.getElementById('gridTopCandidates')?.value);
+  const minQuotaRaw = Number(document.getElementById('gridMinQuota')?.value);
+  const diversityMaxRaw = Number(document.getElementById('gridDiversityMaxPerGroup')?.value);
+  const allocationMethod = Array.from(document.querySelectorAll('input[name="gridAllocationMethod"]'))
+    .find((radio) => radio.checked)?.value || 'auto_sqrt_space';
+  const fastObjectiveConfig = collectGridObjectiveSelection('fast');
+  const slowObjectiveConfig = collectGridObjectiveSelection('slow');
+  const slowRefinementEnabled = Boolean(document.getElementById('gridSlowRefinementEnabled')?.checked);
+
+  const config = {
+    ...optunaCompatibleConfig,
+    ...gridBaseConfig,
+    optimization_mode: 'grid',
+    objectives: fastObjectiveConfig.objectives,
+    primary_objective: fastObjectiveConfig.primary_objective,
+    grid_budget: budget,
+    grid_seed: Number.isFinite(seedRaw) ? Math.max(0, Math.round(seedRaw)) : 42,
+    grid_top_candidates: Number.isFinite(topRaw) ? Math.max(1, Math.min(500, Math.round(topRaw))) : 10,
+    grid_enabled_modes: fullEnumeration ? getSelectedGridModes() : [],
+    grid_allocation_method: allocationMethod,
+    grid_min_quota: Number.isFinite(minQuotaRaw) ? Math.max(0, Math.min(0.33, minQuotaRaw)) : 0.10,
+    grid_manual_percents: {
+      cc_only: Number(document.getElementById('gridManualCc')?.value) || 0,
+      tbands_only: Number(document.getElementById('gridManualTbands')?.value) || 0,
+      both: Number(document.getElementById('gridManualBoth')?.value) || 0
+    },
+    grid_diversity_enabled: Boolean(document.getElementById('gridDiversityEnabled')?.checked),
+    grid_diversity_max_per_group: Number.isFinite(diversityMaxRaw)
+      ? Math.max(1, Math.min(50, Math.round(diversityMaxRaw)))
+      : 2,
+    grid_strict_validation: Boolean(document.getElementById('gridStrictValidation')?.checked),
+    grid_fast_objectives: fastObjectiveConfig.objectives,
+    grid_fast_primary_objective: fastObjectiveConfig.primary_objective,
+    grid_slow_refinement_enabled: slowRefinementEnabled,
+    grid_slow_objectives: slowObjectiveConfig.objectives,
+    grid_slow_primary_objective: slowObjectiveConfig.primary_objective
+  };
+
+  return config;
+}
+
+function buildCurrentOptimizerConfig(state) {
+  return getOptimizerMode() === 'grid' ? buildGridConfig(state) : buildOptunaConfig(state);
+}
 function clearWFResults() {
   const wfStatusEl = document.getElementById('wfStatus');
   if (wfStatusEl) {
@@ -1296,7 +1668,8 @@ async function runWalkForward({ sources, state }) {
   }
 
   const totalSources = sources.length;
-  const config = buildOptunaConfig(state);
+  const config = buildCurrentOptimizerConfig(state);
+  const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
   if (!hasEnabledParams) {
     if (wfStatusEl) {
@@ -1345,6 +1718,17 @@ async function runWalkForward({ sources, state }) {
       pruner: config.optuna_pruner,
       workers: config.worker_processes
     },
+    grid: optimizerMode === 'grid' ? {
+      budget: config.grid_budget,
+      seed: config.grid_seed,
+      topCandidates: config.grid_top_candidates,
+      allocationMethod: config.grid_allocation_method,
+      fastObjectives: config.grid_fast_objectives,
+      fastPrimaryObjective: config.grid_fast_primary_objective,
+      slowRefinementEnabled: config.grid_slow_refinement_enabled,
+      slowObjectives: config.grid_slow_objectives,
+      slowPrimaryObjective: config.grid_slow_primary_objective
+    } : null,
     wfa: {
       isPeriodDays: Number(wfIsPeriodDays),
       oosPeriodDays: Number(wfOosPeriodDays),
@@ -1641,6 +2025,225 @@ async function runBacktestAndDownloadTrades(event) {
   await executeBacktestRun({ event, downloadTrades: true });
 }
 
+function syncGridBudgetHelp({ normalizeInput = false } = {}) {
+  const input = document.getElementById('gridBudget');
+  const help = document.getElementById('gridBudgetHelp');
+  if (!input || !help) return;
+  const parsed = parseCompactCount(input.value);
+  if (!parsed) {
+    help.textContent = 'Enter a positive count, for example 200k.';
+    return;
+  }
+  if (normalizeInput) {
+    input.value = formatCompactCount(parsed);
+  }
+  help.textContent = `${parsed.toLocaleString('en-US')} candidates`;
+}
+
+function syncGridAllocationUi() {
+  if (getEnabledGridMetadata().profile === 'full_enumeration') return;
+  const method = Array.from(document.querySelectorAll('input[name="gridAllocationMethod"]'))
+    .find((radio) => radio.checked)?.value || 'auto_sqrt_space';
+  const minQuotaRow = document.getElementById('gridMinQuotaRow');
+  const manual = document.getElementById('gridManualAllocation');
+  if (minQuotaRow) {
+    minQuotaRow.style.display = method === 'auto_sqrt_space' ? 'flex' : 'none';
+  }
+  if (manual) {
+    manual.style.display = method === 'manual' ? 'flex' : 'none';
+  }
+}
+
+function updateGridPreviewDom(preview) {
+  window.lastGridPreview = preview || null;
+  const summary = document.getElementById('gridPreviewSummary');
+  const rowsEl = document.getElementById('gridPreviewRows');
+  const errorEl = document.getElementById('gridPreviewError');
+  if (errorEl) {
+    errorEl.style.display = 'none';
+    errorEl.textContent = '';
+  }
+  if (summary) {
+    const total = preview?.total_space_label || '-';
+    const budget = preview?.actual_budget_label || preview?.requested_budget_label || '-';
+    const coverage = preview?.coverage_label || '-';
+    summary.textContent = preview?.profile === 'full_enumeration'
+      ? `Parameter space: ${total} semantic combinations. Coverage: ${coverage}. Method: Full enumeration.`
+      : `Parameter space: ${total} semantic combinations. Grid budget: ${budget} candidates, ${coverage} coverage.`;
+  }
+  if (!rowsEl) return;
+  rowsEl.innerHTML = '';
+  const modes = Array.isArray(preview?.modes) ? preview.modes : [];
+  if (!modes.length) {
+    rowsEl.innerHTML = '<tr><td colspan="5">No Grid preview available.</td></tr>';
+    return;
+  }
+  modes.forEach((mode) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${mode.label || mode.mode || '-'}</td>
+      <td>${mode.space_label || mode.space_size || '-'}</td>
+      <td>${mode.budget_label || mode.budget || '-'}</td>
+      <td>${mode.coverage_label || '-'}</td>
+      <td>${mode.generation || '-'}</td>
+    `;
+    rowsEl.appendChild(tr);
+  });
+}
+
+function setGridPreviewError(message) {
+  const errorEl = document.getElementById('gridPreviewError');
+  const summary = document.getElementById('gridPreviewSummary');
+  const rowsEl = document.getElementById('gridPreviewRows');
+  if (summary) summary.textContent = 'Parameter space: -';
+  if (rowsEl) rowsEl.innerHTML = '<tr><td colspan="5">Preview unavailable.</td></tr>';
+  if (errorEl) {
+    errorEl.textContent = message || 'Grid preview failed.';
+    errorEl.style.display = 'block';
+  }
+}
+
+function scheduleGridPreviewUpdate() {
+  if (getOptimizerMode() !== 'grid') return;
+  if (gridPreviewTimer) {
+    window.clearTimeout(gridPreviewTimer);
+  }
+  gridPreviewTimer = window.setTimeout(updateGridPreview, 250);
+}
+
+async function updateGridPreview() {
+  if (getOptimizerMode() !== 'grid') return;
+  if (typeof fetchGridPreviewRequest !== 'function') return;
+  const seq = ++gridPreviewSeq;
+  try {
+    const state = gatherFormState();
+    const config = buildGridConfig(state);
+    const warmupBars = Number(document.getElementById('warmupBars')?.value) || 1000;
+    const preview = await fetchGridPreviewRequest(config, window.currentStrategyId, warmupBars);
+    if (seq !== gridPreviewSeq) return;
+    updateGridPreviewDom(preview);
+  } catch (error) {
+    if (seq !== gridPreviewSeq) return;
+    setGridPreviewError(error?.message || 'Grid preview failed.');
+  }
+}
+
+function syncGridParameterOptions() {
+  const isGrid = getOptimizerMode() === 'grid';
+  const isS03Grid = isGrid && window.currentStrategyId === 's03_reversal_v10';
+  const vwapOptions = Array.from(
+    document.querySelectorAll('input.select-option-checkbox[data-param-name="maType3"][data-option-value="VWAP"]')
+  );
+  vwapOptions.forEach((checkbox) => {
+    if (isS03Grid) {
+      checkbox.checked = false;
+      checkbox.disabled = true;
+      checkbox.title = 'VWAP is not supported in S03 Grid mode.';
+      const wrapper = checkbox.closest('label');
+      if (wrapper) wrapper.title = checkbox.title;
+    } else {
+      checkbox.disabled = false;
+      checkbox.title = '';
+      const wrapper = checkbox.closest('label');
+      if (wrapper) wrapper.title = '';
+    }
+  });
+
+  const allMa = document.getElementById('opt-maType3-all');
+  if (allMa && isS03Grid && vwapOptions.length) {
+    const individual = Array.from(
+      document.querySelectorAll('input.select-option-checkbox[data-param-name="maType3"]:not([data-option-value="__ALL__"])')
+    ).filter((checkbox) => !checkbox.disabled);
+    allMa.checked = individual.length > 0 && individual.every((checkbox) => checkbox.checked);
+  }
+}
+
+function syncGridObjectiveAndConstraintUi() {
+  const isGrid = getOptimizerMode() === 'grid';
+  document.querySelectorAll('.objective-checkbox').forEach((checkbox) => {
+    const objective = checkbox.dataset.objective;
+    const unsupported = isGrid && !GRID_SUPPORTED_OBJECTIVES.has(objective);
+    if (unsupported) {
+      checkbox.checked = false;
+      checkbox.disabled = true;
+      checkbox.title = objective === 'composite_score'
+        ? 'Composite Score is not supported in Grid v1'
+        : 'This objective is not supported in Grid v1';
+    } else if (!isGrid) {
+      checkbox.disabled = false;
+      checkbox.title = '';
+    }
+    const item = checkbox.closest('.objective-item');
+    if (item) {
+      item.title = checkbox.title || '';
+      item.classList.toggle('disabled', unsupported);
+    }
+  });
+
+  document.querySelectorAll('.constraint-row').forEach((row) => {
+    const checkbox = row.querySelector('.constraint-checkbox');
+    const input = row.querySelector('.constraint-input');
+    const metric = checkbox ? checkbox.dataset.constraintMetric : '';
+    const unsupported = isGrid && !GRID_SUPPORTED_CONSTRAINTS.has(metric);
+    if (checkbox) {
+      if (unsupported) checkbox.checked = false;
+      checkbox.disabled = unsupported;
+      checkbox.title = unsupported ? 'This constraint is not supported in Grid v1' : '';
+    }
+    if (input) {
+      input.disabled = unsupported;
+    }
+    row.classList.toggle('disabled', unsupported);
+    row.title = unsupported ? 'This constraint is not supported in Grid v1' : '';
+  });
+}
+
+function syncOptimizerModeUI() {
+  const mode = getOptimizerMode();
+  const isGrid = mode === 'grid';
+  const gridSettings = document.getElementById('gridSettings');
+  const optunaSettings = document.getElementById('optunaSettings');
+  const gridRadio = document.getElementById('optimizerModeGrid');
+  const gridHelp = document.getElementById('gridModeHelp');
+  const gridMeta = getEnabledGridMetadata();
+
+  if (gridRadio) {
+    gridRadio.disabled = !gridMeta.available;
+    if (!gridMeta.available && gridRadio.checked) {
+      document.getElementById('optimizerModeOptuna').checked = true;
+    }
+  }
+
+  const effectiveGrid = getOptimizerMode() === 'grid';
+  if (gridHelp) {
+    gridHelp.textContent = gridMeta.available ? '' : gridMeta.reason;
+  }
+  if (gridSettings) {
+    gridSettings.style.display = effectiveGrid ? 'block' : 'none';
+    if (effectiveGrid) gridSettings.classList.add('open');
+  }
+  if (optunaSettings) {
+    optunaSettings.style.display = effectiveGrid ? 'none' : 'block';
+  }
+
+  syncGridBudgetHelp();
+  syncGridProfileUi();
+  syncGridAllocationUi();
+  syncGridParameterOptions();
+  syncGridObjectiveUi();
+  syncGridObjectiveAndConstraintUi();
+
+  if (window.OptunaUI && typeof window.OptunaUI.updateObjectiveSelection === 'function') {
+    window.OptunaUI.updateObjectiveSelection();
+    syncGridObjectiveUi();
+    syncGridObjectiveAndConstraintUi();
+  }
+
+  if (effectiveGrid) {
+    scheduleGridPreviewUpdate();
+  }
+}
+
 async function submitOptimization(event) {
 
   event.preventDefault();
@@ -1733,7 +2336,8 @@ async function submitOptimization(event) {
 
   renderSelectedFiles([]);
 
-  const config = buildOptunaConfig(state);
+  const config = buildCurrentOptimizerConfig(state);
+  const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
   if (!hasEnabledParams) {
     optimizerResultsEl.textContent = 'Please enable at least one parameter to optimize.';
@@ -1750,7 +2354,7 @@ async function submitOptimization(event) {
   window.optimizationAbortController = optimizationAbortController;
   saveOptimizationState({
     status: 'running',
-    mode: 'optuna',
+    mode: optimizerMode,
     run_id: '',
     strategy: strategySummary,
     dataset: {
@@ -1773,6 +2377,12 @@ async function submitOptimization(event) {
       sanitizeEnabled: config.sanitize_enabled,
       sanitizeTradesThreshold: config.sanitize_trades_threshold
     },
+    grid: optimizerMode === 'grid' ? {
+      budget: config.grid_budget,
+      seed: config.grid_seed,
+      topCandidates: config.grid_top_candidates,
+      allocationMethod: config.grid_allocation_method
+    } : null,
     fixedParams: clonePreset(config.fixed_params || {}),
     strategyConfig: clonePreset(window.currentStrategyConfig || {})
   });
@@ -1797,7 +2407,9 @@ async function submitOptimization(event) {
     optunaProgressFill.style.width = '0%';
   }
   if (optunaProgressText) {
-    if (config.optuna_budget_mode === 'trials') {
+    if (optimizerMode === 'grid') {
+      optunaProgressText.textContent = `Grid candidates: 0 / ${Number(config.grid_budget || 0).toLocaleString('en-US')}`;
+    } else if (config.optuna_budget_mode === 'trials') {
       optunaProgressText.textContent = `Trial: 0 / ${config.optuna_n_trials.toLocaleString('en-US')} (0%)`;
     } else if (config.optuna_budget_mode === 'time') {
       const minutes = Math.round(config.optuna_time_limit / 60);
@@ -1807,10 +2419,10 @@ async function submitOptimization(event) {
     }
   }
   if (optunaBestTrial) {
-    optunaBestTrial.textContent = 'Waiting for first trial...';
+    optunaBestTrial.textContent = optimizerMode === 'grid' ? 'Waiting for Grid candidates...' : 'Waiting for first trial...';
   }
   if (optunaCurrentTrial) {
-    optunaCurrentTrial.textContent = 'Current trial: -';
+    optunaCurrentTrial.textContent = optimizerMode === 'grid' ? 'Current candidate: -' : 'Current trial: -';
   }
   if (optunaEta) {
     optunaEta.textContent = 'Est. time remaining: -';
@@ -1824,6 +2436,7 @@ async function submitOptimization(event) {
   let inFlightRunId = '';
   const optunaBudgetMode = config.optuna_budget_mode;
   const plannedTrials = optunaBudgetMode === 'trials' ? config.optuna_n_trials : null;
+  const plannedGridCandidates = optimizerMode === 'grid' ? Number(config.grid_budget || 0) : null;
 
   for (let index = 0; index < totalSources; index += 1) {
     const source = sources[index];
@@ -1834,13 +2447,15 @@ async function submitOptimization(event) {
 
     updateStatus(index, `${fileLabel} - processing...`);
     if (optunaProgressText) {
-      if (plannedTrials) {
+      if (plannedGridCandidates) {
+        optunaProgressText.textContent = `Grid candidates: 0 / ${plannedGridCandidates.toLocaleString('en-US')} - running...`;
+      } else if (plannedTrials) {
         optunaProgressText.textContent = `Trial: 0 / ${plannedTrials.toLocaleString('en-US')} (0%)`;
       } else if (optunaBudgetMode === 'time') {
         const minutes = Math.round(config.optuna_time_limit / 60);
         optunaProgressText.textContent = `Time budget: ${minutes} min - running...`;
       } else {
-        optunaProgressText.textContent = 'Running Optuna optimization...';
+        optunaProgressText.textContent = `Running ${optimizerMode === 'grid' ? 'Grid' : 'Optuna'} optimization...`;
       }
     }
     if (optunaProgressFill) {
@@ -1873,10 +2488,12 @@ async function submitOptimization(event) {
         optunaProgressFill.style.width = '100%';
       }
       if (optunaProgressText) {
-        if (plannedTrials) {
+        if (plannedGridCandidates) {
+          optunaProgressText.textContent = `Grid candidates: ${plannedGridCandidates.toLocaleString('en-US')} / ${plannedGridCandidates.toLocaleString('en-US')} (100%)`;
+        } else if (plannedTrials) {
           optunaProgressText.textContent = `Trial: ${plannedTrials.toLocaleString('en-US')} / ${plannedTrials.toLocaleString('en-US')} (100%)`;
         } else {
-          optunaProgressText.textContent = 'Optuna optimization completed.';
+          optunaProgressText.textContent = `${optimizerMode === 'grid' ? 'Grid' : 'Optuna'} optimization completed.`;
         }
       }
       if (optunaBestTrial) {
@@ -1893,7 +2510,7 @@ async function submitOptimization(event) {
         inFlightRunId = '';
         setCurrentOptimizationRunId('');
         updateStatus(index, `Cancelled: Source ${sourceNumber} of ${totalSources} (${sourceName}).`);
-        updateOptimizationState({ status: 'cancelled', mode: 'optuna', run_id: '' });
+        updateOptimizationState({ status: 'cancelled', mode: optimizerMode, run_id: '' });
         break;
       }
       const message = err && err.message ? err.message : 'Optimization failed.';
@@ -1927,7 +2544,7 @@ async function submitOptimization(event) {
     if (!serverState) {
       updateOptimizationState({
         status: 'completed',
-        mode: 'optuna',
+        mode: optimizerMode,
         run_id: '',
         study_id: lastStudyId,
         summary: lastSummary || {},
@@ -1943,7 +2560,7 @@ async function submitOptimization(event) {
     if (!serverState) {
       updateOptimizationState({
         status: 'completed',
-        mode: 'optuna',
+        mode: optimizerMode,
         run_id: '',
         study_id: lastStudyId,
         summary: lastSummary || {},
@@ -1955,7 +2572,7 @@ async function submitOptimization(event) {
     summaryMessages.push('Optimization failed for all selected data sources. See error details above.');
     updateOptimizationState({
       status: 'error',
-      mode: 'optuna',
+      mode: optimizerMode,
       run_id: '',
       error: 'Optimization failed for all selected data sources.'
     });
@@ -1973,9 +2590,26 @@ function bindOptimizerInputs() {
     handleOptimizerCheckboxChange.call(checkbox);
   });
 
+  document.querySelectorAll('.select-option-checkbox').forEach((checkbox) => {
+    if (checkbox.dataset.gridPreviewBound === '1') return;
+    checkbox.dataset.gridPreviewBound = '1';
+    checkbox.addEventListener('change', () => {
+      syncGridParameterOptions();
+      scheduleGridPreviewUpdate();
+    });
+  });
+
+  document.querySelectorAll('input[id^="opt-"][id$="-from"], input[id^="opt-"][id$="-to"], input[id^="opt-"][id$="-step"]').forEach((input) => {
+    if (input.dataset.gridPreviewBound === '1') return;
+    input.dataset.gridPreviewBound = '1';
+    input.addEventListener('input', scheduleGridPreviewUpdate);
+    input.addEventListener('change', scheduleGridPreviewUpdate);
+  });
+
   if (window.OptunaUI && typeof window.OptunaUI.updateCoverageInfo === 'function') {
     window.OptunaUI.updateCoverageInfo();
   }
+  syncOptimizerModeUI();
 }
 
 function handleOptimizerCheckboxChange() {
@@ -2006,6 +2640,8 @@ function handleOptimizerCheckboxChange() {
       row.classList.remove('disabled');
     }
   }
+  syncGridParameterOptions();
+  scheduleGridPreviewUpdate();
 }
 
 function bindMinProfitFilterControl() {
@@ -2075,7 +2711,10 @@ function bindOptunaUiControls() {
   if (!window.OptunaUI) return;
   const checkboxes = document.querySelectorAll('.objective-checkbox');
   checkboxes.forEach((checkbox) => {
-    checkbox.addEventListener('change', window.OptunaUI.updateObjectiveSelection);
+    checkbox.addEventListener('change', () => {
+      window.OptunaUI.updateObjectiveSelection();
+      syncOptimizerModeUI();
+    });
   });
   const sampler = document.getElementById('optunaSampler');
   if (sampler) {
@@ -2090,6 +2729,86 @@ function bindOptunaUiControls() {
   }
   window.OptunaUI.updateObjectiveSelection();
   window.OptunaUI.toggleNsgaSettings();
+  bindGridControls();
+  syncOptimizerModeUI();
+}
+
+function bindGridControls() {
+  document.querySelectorAll('input[name="optimizerMode"]').forEach((radio) => {
+    if (radio.dataset.gridBound === '1') return;
+    radio.dataset.gridBound = '1';
+    radio.addEventListener('change', syncOptimizerModeUI);
+  });
+
+  document.querySelectorAll('input[name="gridAllocationMethod"]').forEach((radio) => {
+    if (radio.dataset.gridBound === '1') return;
+    radio.dataset.gridBound = '1';
+    radio.addEventListener('change', () => {
+      syncGridAllocationUi();
+      scheduleGridPreviewUpdate();
+    });
+  });
+
+  [
+    'gridSeed',
+    'gridTopCandidates',
+    'gridMinQuota',
+    'gridManualCc',
+    'gridManualTbands',
+    'gridManualBoth',
+    'gridDiversityEnabled',
+    'gridDiversityMaxPerGroup',
+    'gridStrictValidation',
+    'gridSlowRefinementEnabled'
+  ].forEach((id) => {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.gridBound === '1') return;
+    element.dataset.gridBound = '1';
+    element.addEventListener('input', scheduleGridPreviewUpdate);
+    element.addEventListener('change', scheduleGridPreviewUpdate);
+  });
+
+  const budgetInput = document.getElementById('gridBudget');
+  if (budgetInput && budgetInput.dataset.gridBound !== '1') {
+    budgetInput.dataset.gridBound = '1';
+    budgetInput.addEventListener('input', () => {
+      syncGridBudgetHelp();
+      scheduleGridPreviewUpdate();
+    });
+    budgetInput.addEventListener('blur', () => {
+      syncGridBudgetHelp({ normalizeInput: true });
+      scheduleGridPreviewUpdate();
+    });
+  }
+
+  const slowToggle = document.getElementById('gridSlowRefinementEnabled');
+  if (slowToggle && slowToggle.dataset.gridSlowToggleBound !== '1') {
+    slowToggle.dataset.gridSlowToggleBound = '1';
+    slowToggle.addEventListener('change', () => {
+      syncGridObjectiveUi();
+      scheduleGridPreviewUpdate();
+    });
+  }
+
+  document.querySelectorAll('.grid-fast-objective-checkbox, .grid-slow-objective-checkbox').forEach((checkbox) => {
+    if (!checkbox || checkbox.dataset.gridObjectiveBound === '1') return;
+    checkbox.dataset.gridObjectiveBound = '1';
+    checkbox.addEventListener('change', () => {
+      syncGridObjectiveUi();
+      scheduleGridPreviewUpdate();
+    });
+  });
+
+  ['gridFastPrimaryObjective', 'gridSlowPrimaryObjective'].forEach((id) => {
+    const select = document.getElementById(id);
+    if (!select || select.dataset.gridObjectiveBound === '1') return;
+    select.dataset.gridObjectiveBound = '1';
+    select.addEventListener('change', scheduleGridPreviewUpdate);
+  });
+
+  syncGridBudgetHelp();
+  syncGridAllocationUi();
+  syncGridObjectiveUi();
 }
 
 function setCheckboxGroup(group, selectedTypes) {

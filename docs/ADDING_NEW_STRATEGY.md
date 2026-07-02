@@ -89,6 +89,15 @@ Create parameter schema matching PineScript inputs:
 
 **Parameter types:** `int`, `float`, `bool`, `select` (with `options` array)
 
+An optimizable control can be visible but unchecked initially:
+
+```json
+"optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
+```
+
+Configs without `default_enabled` keep the historical behavior: `enabled: true`
+means checked by default.
+
 **Naming rules:**
 - Use camelCase: `rsiLen`, `closeCountLong`, `stopLongMaxPct`
 - Match PineScript input names exactly
@@ -376,6 +385,46 @@ Strategies are auto-discovered. Ensure:
 - `strategy.py` defines class with `STRATEGY_ID`, `STRATEGY_NAME`, `STRATEGY_VERSION`, and static `run()` method
 
 The strategy will appear in UI dropdown after server restart.
+
+## Optional: Add a Fast Grid Backend
+
+Merlin's Grid optimizer (`core/grid_engine.py`) supports deterministic, mode-aware
+parameter sweeps with optional Numba-accelerated fast screening. Optuna mode
+works for any strategy out of the box; Grid mode only becomes available for a
+strategy once it ships a dedicated fast backend module.
+
+See `src/strategies/s03_reversal_v10/fast_grid.py` for budgeted sampled Grid
+and `src/strategies/s06_r_trend_v02/fast_grid.py` for deterministic full
+enumeration. A fast backend typically provides:
+
+- `build_parameter_space(config)` — derive a `GridParameterSpace` from the
+  strategy's `config.json` (per-mode axes, bool group rules, fixed values).
+- `build_preview(space, allocation)` — describe the parameter space size, mode
+  allocation and coverage for the Start page Grid preview.
+- `generate_candidates(...)` — emit deterministic `GridCandidate` objects via
+  LHS-by-mode or full enumeration.
+- Optional `get_backend_metadata()` and `build_allocation(...)` hooks for
+  strategy-specific mode labels and generation profiles. Full-enumeration
+  backends can declare that budget, seed, and allocation controls do not apply.
+  `get_backend_metadata()` also drives generic behavior with no shared-code edits:
+  ordered `modes` with `default_enabled` flags supply the default
+  `grid_enabled_modes` (via `default_grid_enabled_modes`), and
+  `diversity_group_fields` (a `list[str]` or a `dict[str, list[str]]` mode map) is
+  preserved as-is through summaries and storage by
+  `normalize_diversity_group_fields`.
+- A Numba inner loop that evaluates the restricted fast objective set
+  (`net_profit_pct`, `max_drawdown_pct`, `romad`, `profit_factor`, `win_rate`)
+  cheaply per candidate.
+- A slow-path validator that re-runs the top-N candidates through the regular
+  Python strategy using `core.optuna_engine._run_single_combination` to keep
+  scoring/constraints consistent with Optuna.
+
+Keep trade kernels strategy-specific. Shared Grid core discovers, ranks,
+validates, stores, and dispatches; it must not absorb one strategy's execution
+semantics. WFA final OOS should remain on the slow strategy unless a separate
+reviewed contract changes that authority.
+
+If you only need Optuna optimization, you can skip this step.
 
 ## Reference: S04 StochRSI Example
 

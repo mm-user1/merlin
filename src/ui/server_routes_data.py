@@ -91,6 +91,7 @@ try:
         _validate_preset_name,
         _validate_strategy_params,
         _write_preset,
+        build_grid_settings_view,
         validate_constraints_config,
         validate_objectives_config,
         validate_sampler_config,
@@ -125,6 +126,7 @@ except ImportError:
         _validate_preset_name,
         _validate_strategy_params,
         _write_preset,
+        build_grid_settings_view,
         validate_constraints_config,
         validate_objectives_config,
         validate_sampler_config,
@@ -364,6 +366,9 @@ def register_routes(app):
         study_data = load_study_from_db(study_id)
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
+        grid_settings = build_grid_settings_view(study_data.get("study") or {})
+        if grid_settings:
+            study_data["study"]["grid_settings"] = grid_settings
         return jsonify(_json_safe(study_data))
 
 
@@ -440,8 +445,8 @@ def register_routes(app):
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
         study = study_data["study"]
-        if study.get("optimization_mode") != "optuna":
-            return jsonify({"error": "Manual tests are supported only for Optuna studies."}), HTTPStatus.BAD_REQUEST
+        if study.get("optimization_mode") not in {"optuna", "grid"}:
+            return jsonify({"error": "Manual tests are supported only for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
 
         if data_source == "original_csv":
             csv_path = study.get("csv_file_path")
@@ -639,8 +644,8 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
 
         study = study_data["study"]
-        if study.get("optimization_mode") != "optuna":
-            return jsonify({"error": "Trade export is only supported for Optuna studies."}), HTTPStatus.BAD_REQUEST
+        if study.get("optimization_mode") not in {"optuna", "grid"}:
+            return jsonify({"error": "Trade export is only supported for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
 
         csv_path = study.get("csv_file_path")
         csv_path, error_response = _resolve_csv_path_for_response(
@@ -687,8 +692,8 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
 
         study = study_data["study"]
-        if study.get("optimization_mode") != "optuna":
-            return jsonify({"error": "Trade export is only supported for Optuna studies."}), HTTPStatus.BAD_REQUEST
+        if study.get("optimization_mode") not in {"optuna", "grid"}:
+            return jsonify({"error": "Trade export is only supported for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
         if not study.get("ft_enabled"):
             return jsonify({"error": "Forward test is not enabled for this study."}), HTTPStatus.BAD_REQUEST
 
@@ -745,8 +750,8 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
 
         study = study_data["study"]
-        if study.get("optimization_mode") != "optuna":
-            return jsonify({"error": "Trade export is only supported for Optuna studies."}), HTTPStatus.BAD_REQUEST
+        if study.get("optimization_mode") not in {"optuna", "grid"}:
+            return jsonify({"error": "Trade export is only supported for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
         if not study.get("oos_test_enabled"):
             return jsonify({"error": "OOS Test is not enabled for this study."}), HTTPStatus.BAD_REQUEST
 
@@ -803,8 +808,8 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
 
         study = study_data["study"]
-        if study.get("optimization_mode") != "optuna":
-            return jsonify({"error": "Manual trade export is only supported for Optuna studies."}), HTTPStatus.BAD_REQUEST
+        if study.get("optimization_mode") not in {"optuna", "grid"}:
+            return jsonify({"error": "Manual trade export is only supported for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
 
         test = load_manual_test_results(study_id, test_id)
         if not test:
@@ -916,7 +921,7 @@ def register_routes(app):
                     selected_trial = module_trials[0]
                 if selected_trial:
                     source_trial_number = int(selected_trial.get("trial_number") or 0)
-        elif mode == "optuna":
+        elif mode in {"optuna", "grid"}:
             raw_trial_number = payload.get("trialNumber")
             if raw_trial_number in (None, ""):
                 return jsonify({"error": "trialNumber is required for bundle export."}), HTTPStatus.BAD_REQUEST
@@ -927,10 +932,10 @@ def register_routes(app):
 
             trial = get_study_trial(study_id, source_trial_number)
             if not trial:
-                return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
+                return jsonify({"error": "Trial/candidate not found."}), HTTPStatus.NOT_FOUND
             params = dict(trial.get("params") or {})
         else:
-            return jsonify({"error": "Bundle export is only supported for Optuna and WFA studies."}), HTTPStatus.BAD_REQUEST
+            return jsonify({"error": "Bundle export is only supported for Optuna, Grid, and WFA studies."}), HTTPStatus.BAD_REQUEST
 
         try:
             bundle = build_lancelot_partial_bundle(
@@ -1530,6 +1535,40 @@ def register_routes(app):
             payload = dict(config or {})
             payload["parameter_order"] = parameter_order
             payload["group_order"] = group_order
+            try:
+                from core.grid_engine import (
+                    get_fast_grid_backend_metadata,
+                    supports_fast_grid,
+                )
+                grid_strategy_supported = supports_fast_grid(strategy_id)
+                backend_metadata = (
+                    get_fast_grid_backend_metadata(strategy_id)
+                    if grid_strategy_supported
+                    else {}
+                )
+                grid_numba_available = bool(backend_metadata.get("numba_available", False))
+                grid_reason = ""
+                if not grid_strategy_supported:
+                    grid_reason = "No fast Grid backend is available for this strategy."
+                elif not grid_numba_available:
+                    grid_reason = (
+                        "Numba is unavailable: "
+                        f"{backend_metadata.get('numba_import_error') or 'import failed'}"
+                    )
+                payload["grid_optimizer"] = {
+                    **backend_metadata,
+                    "supported": grid_strategy_supported,
+                    "numba_available": grid_numba_available,
+                    "available": grid_strategy_supported and grid_numba_available,
+                    "reason": grid_reason,
+                }
+            except Exception as exc:  # pragma: no cover - defensive UI metadata only
+                payload["grid_optimizer"] = {
+                    "supported": False,
+                    "numba_available": False,
+                    "available": False,
+                    "reason": f"Grid availability check failed: {exc}",
+                }
             return jsonify(payload), HTTPStatus.OK
 
         except FileNotFoundError:

@@ -38,14 +38,15 @@ Key: Flask, pandas, numpy, matplotlib, optuna==4.6.0
 
 1. **Config-driven design** - Parameter schemas in `config.json`, UI renders dynamically
 2. **camelCase naming** - End-to-end: Pine Script -> config.json -> Python -> CSV
-3. **Optuna-only optimization** - Grid search removed; optional Initial Search Coverage mode for systematic parameter exploration
-4. **Strategy isolation** - Each strategy owns its params dataclass
-5. **Rolling WFA** - Calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers
+3. **Dual optimizer modes** - Optuna (Bayesian/evolutionary) and Grid (deterministic; per-strategy backend chooses generation: S03 = LHS/full by mode, S06 = complete enumeration); both share constraints/objectives/storage. Optuna offers optional Initial Search Coverage for systematic parameter exploration.
+4. **Strategy isolation** - Each strategy owns its params dataclass; optional Numba-accelerated fast Grid backend per strategy (`s03_reversal_v10/fast_grid.py`, `s06_r_trend_v02/fast_grid.py`)
+5. **Rolling WFA** - Calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers, optional cooldown after triggers, per-module top-N trial retention
 6. **In-memory backend** - RAM-based Optuna journal storage for faster multiprocess optimization
 7. **Trial deduplication** - Automatic detection/skipping of duplicate parameter sets with search space exhaustion early stopping
-8. **Database persistence** - All optimization results automatically saved to SQLite, browsable through web UI
+8. **Database persistence** - All optimization results automatically saved to SQLite, browsable through web UI; analytics group caches keep aggregated WFA equity computations warm
 9. **Multi-database support** - Multiple `.db` files with active DB switching
 10. **Three-page UI** - Start (configuration), Results (studies browser), Analytics (WFA research)
+11. **Bundle export** - Optuna/Grid trials and WFA windows can be exported as a Lancelot-compatible partial bundle for downstream execution
 
 ### Directory Structure
 ```
@@ -53,12 +54,15 @@ src/
 |-- core/                     # Engines + utilities
 |   |-- backtest_engine.py    # Trade simulation, TradeRecord, StrategyResult
 |   |-- optuna_engine.py      # Optimization, OptimizationResult, OptunaConfig, InMemoryJournalBackend, coverage, dedup
-|   |-- walkforward_engine.py # WFA orchestration
-|   |-- metrics.py            # BasicMetrics, AdvancedMetrics (incl. Consistency R²)
+|   |-- grid_engine.py        # Deterministic Grid optimizer: backend dispatch/metadata, mode allocation, LHS/full generation, fast/slow refinement, ranking, validation
+|   |-- walkforward_engine.py # WFA orchestration (fixed + adaptive + cooldown)
+|   |-- metrics.py            # BasicMetrics, AdvancedMetrics, WFAMetrics (incl. Consistency R²)
 |   |-- analytics.py          # Portfolio equity aggregation for Analytics page
-|   |-- storage.py            # SQLite database operations
+|   |-- storage.py            # SQLite database operations (studies/trials/wfa_windows/wfa_window_trials/study_sets/analytics_group_cache)
 |   |-- export.py             # Trade CSV export functions
-|   |-- post_process.py       # Forward Test and DSR validation
+|   |-- bundle_export.py      # Lancelot partial-bundle export
+|   |-- param_identity.py     # Display identity helpers (canonical params, hashed IDs)
+|   |-- post_process.py       # Forward Test, DSR, Stress Test validation
 |   `-- testing.py            # OOS selection and test utilities
 |-- indicators/               # Technical indicators
 |   |-- ma.py                 # 11 MA types via get_ma()
@@ -67,8 +71,9 @@ src/
 |-- strategies/               # Trading strategies
 |   |-- base.py               # BaseStrategy class
 |   |-- s01_trailing_ma/
-|   |-- s03_reversal_v10/
-|   `-- s04_stochrsi/
+|   |-- s03_reversal_v10/     # Includes fast_grid.py (LHS/full by-mode Numba Grid backend)
+|   |-- s04_stochrsi/
+|   `-- s06_r_trend_v02/      # Includes fast_grid.py (full-enumeration Numba Grid backend)
 |-- storage/                  # Database storage (gitignored)
 |   |-- *.db                  # SQLite database files (WAL mode, multiple supported)
 |   |-- journals/             # SQLite journal files
@@ -85,29 +90,30 @@ src/
     |   `-- analytics.html    # Analytics page (WFA research)
     `-- static/
         |-- js/
-        |   |-- main.js               # Start page logic
-        |   |-- results-state.js      # Results state + localStorage/sessionStorage + URL helpers
-        |   |-- results-format.js     # Results formatters + labels + MD5
-        |   |-- results-tables.js     # Results table/chart renderers + row selection
-        |   |-- results-controller.js # Results orchestration + API calls + event binding
-        |   |-- api.js                # API client
-        |   |-- strategy-config.js    # Dynamic form generation from config.json
-        |   |-- ui-handlers.js        # Shared UI event handlers
-        |   |-- optuna-ui.js          # Optuna Start-page UI helpers + coverage analysis
-        |   |-- optuna-results-ui.js  # Optuna Results-page UI helpers
-        |   |-- post-process-ui.js    # Post process UI helpers
-        |   |-- oos-test-ui.js        # OOS test UI helpers
-        |   |-- wfa-results-ui.js     # WFA Results-page UI helpers
-        |   |-- presets.js            # Preset management
-        |   |-- results.js            # Results page initialization
-        |   |-- queue.js              # Scheduled run queue management
-        |   |-- dataset-preview.js    # WFA window layout preview
-        |   |-- analytics.js          # Analytics page logic + state
-        |   |-- analytics-equity.js   # Analytics equity curve rendering
-        |   |-- analytics-filters.js  # Analytics filter panel management
-        |   |-- analytics-table.js    # Analytics study table rendering
-        |   |-- analytics-sets.js     # Analytics study sets management
-        |   `-- utils.js              # Shared utility functions
+        |   |-- main.js                  # Start page logic (Optuna + Grid + WFA launch)
+        |   |-- results-state.js         # Results state + localStorage/sessionStorage + URL helpers
+        |   |-- results-format.js        # Results formatters + labels + MD5
+        |   |-- results-tables.js        # Results table/chart renderers + row selection
+        |   |-- results-controller.js    # Results orchestration + API calls + event binding
+        |   |-- api.js                   # API client
+        |   |-- strategy-config.js       # Dynamic form generation from config.json
+        |   |-- ui-handlers.js           # Shared UI event handlers (incl. Grid settings panel)
+        |   |-- optuna-ui.js             # Optuna Start-page UI helpers + coverage analysis
+        |   |-- optuna-results-ui.js     # Optuna/Grid Results-page UI helpers
+        |   |-- post-process-ui.js       # Post process UI helpers
+        |   |-- oos-test-ui.js           # OOS test UI helpers
+        |   |-- wfa-results-ui.js        # WFA Results-page UI helpers
+        |   |-- presets.js               # Preset management
+        |   |-- results.js               # Results page initialization
+        |   |-- queue.js                 # Scheduled run queue management
+        |   |-- dataset-preview.js       # WFA window layout preview
+        |   |-- analytics.js             # Analytics page logic + state
+        |   |-- analytics-equity.js      # Analytics equity curve rendering
+        |   |-- analytics-filters.js     # Analytics filter panel management
+        |   |-- analytics-table.js       # Analytics study table rendering
+        |   |-- analytics-sets.js        # Analytics study sets management (CRUD, members)
+        |   |-- analytics-sets-view.js   # Analytics study sets view (sort/filter/bulk-color/bulk-delete)
+        |   `-- utils.js                 # Shared utility functions
         `-- css/
 ```
 
@@ -118,7 +124,12 @@ src/
 | `TradeRecord`, `StrategyResult` | `backtest_engine.py` |
 | `BasicMetrics`, `AdvancedMetrics` | `metrics.py` |
 | `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` | `optuna_engine.py` |
-| `WFConfig`, `WFResult`, `WindowResult` | `walkforward_engine.py` |
+| `GridSelectionConfig`, `GridAllocation`, grid preview/dispatch, backend metadata normalization | `grid_engine.py` |
+| `GridParameterSpace`, `GridCandidate`, `FastGridData` (S03 LHS/full fast backend) | `strategies/s03_reversal_v10/fast_grid.py` |
+| `GridParameterSpace`, `GridCandidate`, `CandidateSequence`, `FastGridData` (S06 full-enumeration fast backend) | `strategies/s06_r_trend_v02/fast_grid.py` |
+| `WFConfig`, `WFResult`, `WindowResult`, `WindowSplit`, `StitchWindow`, `TriggerResult`, `ISPipelineResult`, `WindowExecutionPlan`, `OOSStitchedResult` | `walkforward_engine.py` |
+| Lancelot partial bundle builder | `bundle_export.py` |
+| Display-identity canonicalization / param hashing | `param_identity.py` |
 | `aggregate_equity_curves` | `analytics.py` |
 | Strategy params dataclass | Each strategy's `strategy.py` |
 
@@ -227,6 +238,9 @@ wf_config = WFConfig(
     cusum_threshold=5.0,
     dd_threshold_multiplier=1.5,
     inactivity_multiplier=5.0,
+    cooldown_enabled=True,   # Skip re-optimization for cooldown_days after a trigger
+    cooldown_days=15,
+    store_top_n_trials=50,   # Per-module top-N trial retention for storage
 )
 
 ### Using Indicators
@@ -246,14 +260,16 @@ rsi_values = rsi(df["Close"], 14)
 pytest tests/ -v
 
 ### Key Test Files
-- `conftest.py` - Shared fixtures (isolated storage, Flask test client)
+- `conftest.py` - Shared fixtures (storage isolated under pytest temp roots outside the repo, Flask test client)
 - `test_sanity.py` - Infrastructure checks
 - `test_regression_s01.py` - S01 baseline regression
 - `test_s03_reversal_v10.py` - S03 strategy tests
 - `test_s04_stochrsi.py` - S04 strategy tests
+- `test_s06_r_trend_v02.py` - S06 strategy tests (slow execution contract, baselines)
+- `test_s06_fast_grid.py` - S06 fast Numba Grid tests (full enumeration, fast-vs-slow execution parity, determinism)
 - `test_naming_consistency.py` - camelCase guardrails
 - `test_storage.py` - Database storage tests
-- `test_server.py` - HTTP API endpoint tests
+- `test_server.py` - HTTP API endpoint tests (incl. Grid Settings sidebar Constraints row)
 - `test_post_process.py` - Post-process module tests
 - `test_dsr.py` - Deflated Sharpe Ratio tests
 - `test_oos_selection.py` - OOS selection tests
@@ -263,6 +279,12 @@ pytest tests/ -v
 - `test_db_management.py` - Multi-database management tests
 - `test_coverage_startup.py` - Initial Search Coverage mode tests
 - `test_strategy_loop_regression.py` - Strategy loop performance regression tests
+- `test_grid_engine.py` - Grid optimizer tests (allocation, LHS/full, validation, fast/slow refinement, backend metadata + default modes, diversity-field shape)
+- `test_multiprocess_score.py` - Multi-process composite-score optimization tests
+
+Tests never write generated files under `tests/`: storage/journal/CSV/queue/export
+artifacts use pytest `tmp_path` / `tmp_path_factory` (or a session temp root)
+outside the repository, and CWD changes are restored via `monkeypatch`.
 
 ### Regenerate S01 Baseline
 ```bash
@@ -314,6 +336,74 @@ python tools/generate_baseline_s01.py
 - **Concurrency**
 - Keep Merlin's existing multi-process optimization architecture. Do not replace it with `study.optimize(..., n_jobs=...)` threading.
 
+## Grid: Deterministic optimizer (parallel to Optuna)
+
+Grid is generic in `grid_engine.py` (discovery, ranking, validation, storage,
+DSR, diversity) and dispatches to a strategy-owned `fast_grid.py` backend. Each
+backend advertises capability via `get_backend_metadata()` (normalized by
+`get_fast_grid_backend_metadata`): `profile`, ordered `modes` (with
+`default_enabled`), seed/allocation support, and `diversity_group_fields`.
+
+**Key behavioral rules:**
+
+- **Mode-aware parameter space (per backend profile)**
+  - S03 (`sampled_by_mode`): splits the search into `cc_only` / `tbands_only` /
+    `both` and allocates a budget across them; default generation is "LHS by
+    mode" (seeded by `gridSeed`), falling back to full enumeration when a mode
+    fits its budget.
+  - S06 (`full_enumeration`): deterministically enumerates every selected
+    `bracket` / `trail` combination — 48,480 by default, up to 436,320 when both
+    optional Threshold OS/OB axes (`20, 30, 40`) are enabled. No seed/budget
+    sampling; an explicitly empty mode selection is an error.
+  - Missing `grid_enabled_modes` defaults to the backend's `default_enabled`
+    modes (`default_grid_enabled_modes`) — no per-strategy server hardcode.
+  - Allocation, mode budgets, and coverage % are surfaced through the Start page
+    Grid preview (`POST /api/grid/preview`).
+
+- **Fast / slow refinement**
+  - Fast pass uses the strategy's Numba backend to screen candidates against a
+    restricted "fast" objective set (`net_profit_pct`, `max_drawdown_pct`,
+    `romad`, `profit_factor`, `win_rate`).
+  - Optional slow refinement re-runs the top-N fast candidates through the full
+    Python strategy with the broader slow objective set (adds `sharpe_ratio`,
+    `sortino_ratio`, `sqn`, `ulcer_index`, `consistency_score`). Slow Objectives
+    operate only on the selected slow-validated top candidates.
+  - Selected fast candidates are always slow-validated against the real strategy
+    (`validate_selected_candidates`); WFA OOS is also slow-authoritative.
+  - Final objectives, primary objective, and constraint feasibility are stored on
+    each trial; UI sorts feasible Pareto → feasible non-Pareto → infeasible. The
+    multi-objective/Pareto path is supported but can be substantially more
+    expensive than single-objective ranking (not optimized here).
+
+- **Constraints & diversity**
+  - Constraints are soft feasibility/ranking rules (not candidate pruning),
+    shared with Optuna, and are surfaced in the Grid Settings sidebar on both
+    Results and Analytics (`build_grid_settings_view`).
+  - Diversity capping groups candidates by the backend's `diversity_group_fields`,
+    whose JSON-safe shape (S03 `list[str]`, S06 `dict[str, list[str]]`) is
+    preserved end-to-end by `normalize_diversity_group_fields`.
+
+- **Validation & ranking**
+  - Constraints, score formula, and Pareto evaluation use the shared
+    `optuna_engine` helpers — Grid results are interoperable with Optuna results
+    (same `trials` table, same display schema). DSR for Grid uses
+    `build_grid_dsr_results`.
+  - Budget is parsed from compact strings (e.g. `200k`) on the UI side; backends
+    use canonical integer counts.
+
+- **Strategy coverage**
+  - Grid is enabled for `s03_reversal_v10` and `s06_r_trend_v02`. A new strategy
+    participates by adding its own `fast_grid.py` backend (and metadata); no
+    shared-code or server changes are required.
+
+## Lancelot Bundle Export
+
+- `POST /api/studies/<id>/export/lancelot` produces a partial bundle for the Lancelot downstream executor.
+- Supported sources:
+  - **Optuna / Grid studies** — `trialNumber` in payload selects the trial/candidate.
+  - **WFA studies** — `windowNumber` in payload selects the window; the source trial is resolved via `is_best_trial_number` (or the selected per-module trial in `wfa_window_trials`).
+- Bundle is built by `core.bundle_export.build_lancelot_partial_bundle`, which stamps the Merlin version, strategy version, CSV-derived symbol/timeframe, and canonical params.
+
 
 ## UI Notes
 
@@ -321,14 +411,17 @@ python tools/generate_baseline_s01.py
 
 **Start Page (`/` - index.html):**
 - Strategy selection and parameter configuration
+- Optimizer mode selector: **Optuna** or **Grid**
 - Optuna settings (objectives + primary objective, budget, sampler, pruner, constraints)
-- Initial Search Coverage mode toggle with coverage analysis and warmup auto-fill
+- Grid settings (candidate budget, seed, LHS-by-mode sampling, top candidates, fast + optional slow objective sets, mode allocation, diversity, advanced)
+- Grid preview panel calls `POST /api/grid/preview` to show parameter space size, mode allocation and coverage
+- Initial Search Coverage mode toggle (Optuna) with coverage analysis and warmup auto-fill
 - Trials Log toggle for Optuna trial-level logging control
-- Walk-Forward Analysis settings (IS/OOS periods, adaptive mode)
+- Walk-Forward Analysis settings (IS/OOS periods, adaptive mode, adaptive cooldown, store top-N trials)
 - Scheduled run queue management
 - CSV file browser
 - Dataset preview (WFA window layout)
-- Run Optuna or Run WFA buttons
+- Run Optuna / Run Grid / Run WFA buttons
 - Results automatically saved to database
 - Light theme UI with dynamic forms from `config.json`
 
@@ -337,9 +430,11 @@ python tools/generate_baseline_s01.py
 - Database switching (multi-database support)
 - Study details: View trials (Optuna) or windows (WFA)
 - Pareto badge + constraint feasibility indicators for Optuna trials
+- Grid Settings sidebar (shared with Analytics) including an enabled-Constraints row (`None` when none enabled)
 - Equity curve visualization
 - Parameter comparison tables
 - Download trades CSV for IS/FT/OOS/Manual/WFA results (on-demand generation)
+- Export selected trial or WFA window as a Lancelot partial bundle
 - Delete studies or update CSV file paths
 
 **Analytics Page (`/analytics` - analytics.html):**
@@ -347,6 +442,7 @@ python tools/generate_baseline_s01.py
 - Multi-study equity curve comparison
 - Aggregated (portfolio) equity curve with annualized profit and max drawdown
 - Focused study mode with WFA window boundary overlays on equity chart
+- Same shared Grid Settings sidebar as Results (identical enabled-Constraints row for Grid/WFA-Grid studies)
 - Study sets: save/load/reorder named collections of studies (persisted in DB)
 - Study summary table with sorting and filtering
 - Filter by strategy, symbol, timeframe, WFA mode, IS/OOS periods
@@ -375,7 +471,8 @@ python tools/generate_baseline_s01.py
 - **analytics-equity.js**: Analytics equity curve SVG rendering
 - **analytics-filters.js**: Analytics filter panel (strategy/symbol/TF/WFA/IS-OOS)
 - **analytics-table.js**: Analytics sortable study table with checkbox selection
-- **analytics-sets.js**: Analytics study sets management (save/load/reorder named collections)
+- **analytics-sets.js**: Analytics study sets management (CRUD + membership)
+- **analytics-sets-view.js**: Study sets view — sorting, filtering, bulk color/delete actions
 - **utils.js**: Shared utility functions
 - Forms generated dynamically from `config.json`
 - Strategy dropdown auto-populated from discovered strategies
@@ -397,7 +494,8 @@ python tools/generate_baseline_s01.py
 - `GET /analytics` - Serve Analytics page
 
 ### Optimization
-- `POST /api/optimize` - Run Optuna optimization, returns study_id
+- `POST /api/optimize` - Run Optuna or Grid optimization (chosen via `optimization_mode`/`optimizer_mode`), returns study_id
+- `POST /api/grid/preview` - Preview Grid parameter space, mode allocation and coverage without running
 - `POST /api/walkforward` - Run WFA (fixed or adaptive mode), returns study_id
 - `POST /api/backtest` - Run single backtest (no database storage)
 - `POST /api/backtest/trades` - Download trades CSV for single backtest
@@ -422,6 +520,7 @@ python tools/generate_baseline_s01.py
 - `POST /api/studies/<study_id>/wfa/windows/<window_number>/equity` - Generate WFA window equity curve on-demand
 - `POST /api/studies/<study_id>/wfa/windows/<window_number>/trades` - Download WFA window trades CSV
 - `POST /api/studies/<study_id>/wfa/trades` - Download stitched WFA OOS trades CSV
+- `POST /api/studies/<study_id>/export/lancelot` - Build a Lancelot partial bundle from a trial (Optuna/Grid) or window (WFA)
 
 ### Database Management
 - `GET /api/databases` - List all `.db` files with active marker
@@ -440,13 +539,18 @@ python tools/generate_baseline_s01.py
 - `GET /api/analytics/summary` - WFA studies summary with filters and aggregated metrics
 - `POST /api/analytics/equity` - Aggregate equity curves for selected study IDs
 - `POST /api/analytics/equity/batch` - Batch aggregate equity curves for multiple groups
+- `GET /api/analytics/studies/<study_id>/equity` - Stitched OOS equity for a single WFA study (cached)
 - `GET /api/analytics/studies/<study_id>/window-boundaries` - Get WFA window boundary timestamps
+- `GET /api/analytics/all-studies/equity` - Aggregated equity across all WFA studies (cached)
 
 ### Study Sets
-- `GET /api/analytics/sets` - List all study sets
+- `GET /api/analytics/sets` - List all study sets (optionally hydrated with cached analytics summaries)
 - `POST /api/analytics/sets` - Create a new study set
-- `PUT /api/analytics/sets/<set_id>` - Update study set (name, study_ids, sort_order)
+- `PUT /api/analytics/sets/<set_id>` - Update study set (name, color, study_ids, sort_order)
 - `DELETE /api/analytics/sets/<set_id>` - Delete a study set
+- `GET /api/analytics/sets/<set_id>/equity` - Aggregated equity curve for a study set (cached)
+- `PUT /api/analytics/sets/bulk-color` - Bulk-assign a color token to multiple sets
+- `POST /api/analytics/sets/bulk-delete` - Bulk-delete study sets
 - `PUT /api/analytics/sets/reorder` - Reorder study sets
 
 ### Strategy & Presets
@@ -476,8 +580,9 @@ python tools/generate_baseline_s01.py
 | ID | Name | Description |
 |----|------|-------------|
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA with 11 MA types, close counts, ATR stops |
-| `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis |
+| `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis (LHS/full Grid backend) |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
+| `s06_r_trend_v02` | S06 R-Trend | Williams %R trend/reversal entries with Bracket or Trail exits (full-enumeration Grid backend) |
 
 ## Key Files for Reference
 
@@ -500,5 +605,7 @@ python tools/generate_baseline_s01.py
 | Flask analytics routes | `src/ui/server_routes_analytics.py` |
 | S03 example | `src/strategies/s03_reversal_v10/strategy.py` |
 | S04 example | `src/strategies/s04_stochrsi/strategy.py` |
+| S03 Grid backend (LHS/full) | `src/strategies/s03_reversal_v10/fast_grid.py` |
+| S06 Grid backend (full enumeration) | `src/strategies/s06_r_trend_v02/fast_grid.py` |
 | config.json example | `src/strategies/s04_stochrsi/config.json` |
 | Test baseline | `data/baseline/` |

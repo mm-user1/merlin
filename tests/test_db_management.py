@@ -1,11 +1,7 @@
 import json
-import gc
 import re
-import shutil
 import sqlite3
 import sys
-import time
-import uuid
 from pathlib import Path
 
 import pytest
@@ -16,37 +12,12 @@ from core import storage
 from ui import server_routes_data
 from ui.server import app
 
-TMP_DB_MGMT_DIR = Path(__file__).parent / ".tmp_db_mgmt"
-
-
-def _cleanup_dir(path: Path, *, attempts: int = 40, delay_s: float = 0.25) -> bool:
-    if not path.exists():
-        return True
-    for _ in range(attempts):
-        try:
-            gc.collect()
-            shutil.rmtree(path)
-            return True
-        except OSError:
-            time.sleep(delay_s)
-    return not path.exists()
-
-
-@pytest.fixture(scope="module", autouse=True)
-def cleanup_tmp_db_mgmt_dir():
-    _cleanup_dir(TMP_DB_MGMT_DIR)
-    TMP_DB_MGMT_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        yield
-    finally:
-        _cleanup_dir(TMP_DB_MGMT_DIR)
-
 
 @pytest.fixture
-def isolated_storage(monkeypatch):
-    root_dir = TMP_DB_MGMT_DIR / uuid.uuid4().hex
-    root_dir.mkdir(parents=True, exist_ok=False)
-    storage_dir = root_dir / "storage"
+def isolated_storage(monkeypatch, tmp_path):
+    # tmp_path is a per-test pytest temp directory outside the repository, so a
+    # failed or interrupted run never leaves artifacts under tests/.
+    storage_dir = tmp_path / "storage"
     journal_dir = storage_dir / "journals"
     storage_dir.mkdir(parents=True, exist_ok=True)
 
@@ -67,7 +38,6 @@ def isolated_storage(monkeypatch):
         yield storage_dir
     finally:
         storage.DB_INITIALIZED = False
-        _cleanup_dir(root_dir)
 
 
 @pytest.fixture

@@ -8,3 +8,4 @@ src/storage/journals/
 .DS_Store
 tests/.tmp_db_mgmt/
 db-mgmt-*/
+docs/_work/

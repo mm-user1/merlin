@@ -99,6 +99,25 @@ class OptimizationConfig:
     n_startup_trials: int = 20
     coverage_mode: bool = False
 
+    # Grid mode settings
+    grid_budget: int = 200_000
+    grid_seed: int = 42
+    grid_top_candidates: int = 10
+    grid_enabled_modes: List[str] = field(default_factory=list)
+    grid_allocation_method: str = "auto_sqrt_space"
+    grid_min_quota: float = 0.10
+    grid_manual_percents: Dict[str, float] = field(default_factory=dict)
+    grid_diversity_enabled: bool = True
+    grid_diversity_max_per_group: int = 2
+    grid_strict_validation: bool = True
+    grid_needs_dsr: bool = False
+    grid_dsr_top_k: int = 20
+    grid_fast_objectives: List[str] = field(default_factory=list)
+    grid_fast_primary_objective: Optional[str] = None
+    grid_slow_refinement_enabled: bool = False
+    grid_slow_objectives: List[str] = field(default_factory=list)
+    grid_slow_primary_objective: Optional[str] = None
+
 
 @dataclass
 class OptimizationResult:
@@ -108,6 +127,8 @@ class OptimizationResult:
     net_profit_pct: float
     max_drawdown_pct: float
     total_trades: int
+    winning_trades: int = 0
+    losing_trades: int = 0
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
@@ -1064,6 +1085,8 @@ def _run_single_combination(
             net_profit_pct=0.0,
             max_drawdown_pct=0.0,
             total_trades=0,
+            winning_trades=0,
+            losing_trades=0,
             win_rate=0.0,
             avg_win=0.0,
             avg_loss=0.0,
@@ -1090,6 +1113,8 @@ def _run_single_combination(
             net_profit_pct=basic_metrics.net_profit_pct,
             max_drawdown_pct=basic_metrics.max_drawdown_pct,
             total_trades=basic_metrics.total_trades,
+            winning_trades=basic_metrics.winning_trades,
+            losing_trades=basic_metrics.losing_trades,
             win_rate=basic_metrics.win_rate,
             avg_win=basic_metrics.avg_win,
             avg_loss=basic_metrics.avg_loss,
@@ -3330,13 +3355,18 @@ def run_optuna_optimization(
 
 
 def run_optimization(config: OptimizationConfig) -> Tuple[List[OptimizationResult], Optional[str]]:
-    """Compat wrapper that executes Optuna optimization only."""
+    """Compat wrapper that dispatches the requested optimizer mode."""
 
     if not getattr(config, "strategy_id", ""):
         raise ValueError("strategy_id must be specified in OptimizationConfig.")
 
-    if getattr(config, "optimization_mode", "optuna") != "optuna":
-        raise ValueError("Only Optuna optimization is supported in Phase 3.")
+    optimizer_mode = str(getattr(config, "optimization_mode", "optuna") or "optuna").strip().lower()
+    if optimizer_mode == "grid":
+        from .grid_engine import run_grid_optimization
+
+        return run_grid_optimization(config)
+    if optimizer_mode != "optuna":
+        raise ValueError(f"Unsupported optimization mode: {optimizer_mode}")
 
     objectives = getattr(config, "objectives", None) or getattr(config, "optuna_objectives", None) or []
     primary_objective = getattr(config, "primary_objective", None)

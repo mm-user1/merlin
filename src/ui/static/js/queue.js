@@ -1205,6 +1205,99 @@ function applyQueueObjectives(config) {
   }
 }
 
+function applyQueueGridObjectiveSelection(kind, objectives, primaryObjective) {
+  const selector = kind === 'slow' ? '.grid-slow-objective-checkbox' : '.grid-fast-objective-checkbox';
+  const checkboxes = Array.from(document.querySelectorAll(selector));
+  if (!checkboxes.length) return;
+
+  const selectedValues = Array.isArray(objectives) && objectives.length
+    ? objectives
+    : ['net_profit_pct'];
+  const selectedSet = new Set(selectedValues.map((value) => String(value)));
+  checkboxes.forEach((checkbox) => {
+    const objective = String(checkbox.dataset.objective || '');
+    checkbox.checked = selectedSet.has(objective);
+  });
+  if (!checkboxes.some((checkbox) => checkbox.checked)) {
+    checkboxes[0].checked = true;
+  }
+
+  if (typeof updateGridObjectiveSelection === 'function') {
+    updateGridObjectiveSelection(kind);
+  }
+
+  const select = document.getElementById(kind === 'slow' ? 'gridSlowPrimaryObjective' : 'gridFastPrimaryObjective');
+  const primary = String(primaryObjective || '').trim();
+  if (select && primary) {
+    const hasOption = Array.from(select.options).some((option) => option.value === primary);
+    if (hasOption) {
+      select.value = primary;
+    }
+  }
+}
+
+function applyQueueGridConfig(config) {
+  const isGrid = config?.optimization_mode === 'grid';
+  const gridRadio = document.getElementById('optimizerModeGrid');
+  const optunaRadio = document.getElementById('optimizerModeOptuna');
+  if (gridRadio && optunaRadio) {
+    gridRadio.checked = isGrid;
+    optunaRadio.checked = !isGrid;
+  }
+  if (!isGrid) return;
+
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_budget')) {
+    setInputValue('gridBudget', config.grid_budget);
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_seed')) {
+    setInputValue('gridSeed', config.grid_seed);
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_top_candidates')) {
+    setInputValue('gridTopCandidates', config.grid_top_candidates);
+  }
+  if (Array.isArray(config.grid_enabled_modes)) {
+    const enabledModes = new Set(config.grid_enabled_modes.map((value) => String(value)));
+    document.querySelectorAll('input[name="gridEnabledMode"]').forEach((checkbox) => {
+      checkbox.checked = enabledModes.has(String(checkbox.value));
+    });
+  }
+  const allocationMethod = String(config.grid_allocation_method || 'auto_sqrt_space');
+  const allocationRadio = document.querySelector(`input[name="gridAllocationMethod"][value="${allocationMethod}"]`);
+  if (allocationRadio) {
+    allocationRadio.checked = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_min_quota')) {
+    setInputValue('gridMinQuota', config.grid_min_quota);
+  }
+  const manual = config.grid_manual_percents && typeof config.grid_manual_percents === 'object'
+    ? config.grid_manual_percents
+    : {};
+  if (Object.prototype.hasOwnProperty.call(manual, 'cc_only')) setInputValue('gridManualCc', manual.cc_only);
+  if (Object.prototype.hasOwnProperty.call(manual, 'tbands_only')) setInputValue('gridManualTbands', manual.tbands_only);
+  if (Object.prototype.hasOwnProperty.call(manual, 'both')) setInputValue('gridManualBoth', manual.both);
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_diversity_enabled')) {
+    setCheckboxValue('gridDiversityEnabled', Boolean(config.grid_diversity_enabled));
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_diversity_max_per_group')) {
+    setInputValue('gridDiversityMaxPerGroup', config.grid_diversity_max_per_group);
+  }
+  if (Object.prototype.hasOwnProperty.call(config, 'grid_strict_validation')) {
+    setCheckboxValue('gridStrictValidation', Boolean(config.grid_strict_validation));
+  }
+
+  setCheckboxValue('gridSlowRefinementEnabled', Boolean(config.grid_slow_refinement_enabled));
+  applyQueueGridObjectiveSelection(
+    'fast',
+    config.grid_fast_objectives || config.objectives,
+    config.grid_fast_primary_objective || config.primary_objective
+  );
+  applyQueueGridObjectiveSelection(
+    'slow',
+    config.grid_slow_objectives || ['net_profit_pct'],
+    config.grid_slow_primary_objective || config.primary_objective
+  );
+}
+
 function applyQueueConstraints(config) {
   const constraints = Array.isArray(config?.constraints) ? config.constraints : [];
   const constraintsByMetric = new Map();
@@ -1396,6 +1489,7 @@ function applyQueueConfigFallback(item) {
   }
 
   applyQueueObjectives(config);
+  applyQueueGridConfig(config);
   applyQueueConstraints(config);
   applyQueueParamSelection(config);
 
@@ -1512,6 +1606,21 @@ function refreshQueueFormUiAfterApply() {
   }
   if (window.OptunaUI && typeof window.OptunaUI.syncDispatcherControls === 'function') {
     window.OptunaUI.syncDispatcherControls();
+  }
+  if (typeof syncOptimizerModeUI === 'function') {
+    syncOptimizerModeUI();
+  }
+  if (typeof syncGridBudgetHelp === 'function') {
+    syncGridBudgetHelp({ normalizeInput: true });
+  }
+  if (typeof syncGridAllocationUi === 'function') {
+    syncGridAllocationUi();
+  }
+  if (typeof syncGridObjectiveUi === 'function') {
+    syncGridObjectiveUi();
+  }
+  if (typeof scheduleGridPreviewUpdate === 'function') {
+    scheduleGridPreviewUpdate();
   }
   if (typeof syncMinProfitFilterUI === 'function') {
     syncMinProfitFilterUI();
@@ -1724,6 +1833,9 @@ function formatQueueCompactTrialCount(rawCount) {
 }
 
 function buildQueueAutoSetBudgetLabel(item) {
+  if (item?.config?.optimization_mode === 'grid') {
+    return `${formatQueueCompactTrialCount(item?.config?.grid_budget || 0)}c`;
+  }
   const budgetMode = String(item?.config?.optuna_budget_mode || 'trials').trim().toLowerCase();
   if (budgetMode === 'time') {
     const minutes = Math.max(1, Math.round(Number(item?.config?.optuna_time_limit || 3600) / 60));
@@ -1764,7 +1876,9 @@ function buildQueueStudySetNameLegacy(item) {
   const queueLabel = Number.isFinite(itemIndex) && itemIndex > 0 ? `#${Math.round(itemIndex)}` : '#?';
   const strategyLabel = extractQueueStrategyShortLabel(item);
   const timeframeLabel = extractQueueTimeframeLabel(item);
-  const samplerLabel = formatQueueSamplerLabel(item?.config?.sampler);
+  const samplerLabel = item?.config?.optimization_mode === 'grid'
+    ? 'GRID'
+    : formatQueueSamplerLabel(item?.config?.sampler);
   const initialTrials = Math.max(0, Math.round(Number(item?.config?.n_startup_trials || 0)));
   const budgetLabel = buildQueueAutoSetBudgetLabel(item);
   const modeLabel = buildQueueAutoSetModeLabel(item);
@@ -1772,7 +1886,7 @@ function buildQueueStudySetNameLegacy(item) {
     queueLabel,
     strategyLabel,
     timeframeLabel,
-    `${samplerLabel} (${initialTrials})`,
+    item?.config?.optimization_mode === 'grid' ? samplerLabel : `${samplerLabel} (${initialTrials})`,
     budgetLabel,
     modeLabel,
   ].join(' · ');
@@ -1783,7 +1897,9 @@ function buildQueueStudySetName(item) {
   const queueLabel = Number.isFinite(itemIndex) && itemIndex > 0 ? `#${Math.round(itemIndex)}` : '#?';
   const strategyLabel = extractQueueStrategyShortLabel(item);
   const timeframeLabel = extractQueueTimeframeLabel(item);
-  const samplerLabel = formatQueueSamplerLabel(item?.config?.sampler);
+  const samplerLabel = item?.config?.optimization_mode === 'grid'
+    ? 'GRID'
+    : formatQueueSamplerLabel(item?.config?.sampler);
   const initialTrials = Math.max(0, Math.round(Number(item?.config?.n_startup_trials || 0)));
   const budgetLabel = buildQueueAutoSetBudgetLabel(item);
   const modeLabel = buildQueueAutoSetModeLabel(item);
@@ -1791,7 +1907,7 @@ function buildQueueStudySetName(item) {
     queueLabel,
     strategyLabel,
     timeframeLabel,
-    `${samplerLabel} (${initialTrials})`,
+    item?.config?.optimization_mode === 'grid' ? samplerLabel : `${samplerLabel} (${initialTrials})`,
     budgetLabel,
     modeLabel,
   ].join(' \u00B7 ');
@@ -1896,7 +2012,9 @@ function collectQueueItem() {
     return null;
   }
 
-  const config = buildOptunaConfig(state);
+  const config = typeof buildCurrentOptimizerConfig === 'function'
+    ? buildCurrentOptimizerConfig(state)
+    : buildOptunaConfig(state);
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
   if (!hasEnabledParams) {
     showQueueError('Please enable at least one parameter to optimize.');
@@ -1905,7 +2023,8 @@ function collectQueueItem() {
 
   const wfToggle = document.getElementById('enableWF');
   const wfEnabled = Boolean(wfToggle && wfToggle.checked && !wfToggle.disabled);
-  const mode = wfEnabled ? 'wfa' : 'optuna';
+  const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
+  const mode = wfEnabled ? 'wfa' : optimizerMode;
 
   const queue = loadQueue();
   const itemIndex = queue.nextIndex || 1;
@@ -1980,22 +2099,27 @@ function generateQueueLabel(item) {
     dateLabel = fmtDate(startRaw) + '-' + fmtDate(endRaw);
   }
 
-  let modeLabel = 'OPT';
+  let modeLabel = item.config?.optimization_mode === 'grid' || item.mode === 'grid' ? 'GRID' : 'OPT';
   if (item.mode === 'wfa') {
     const isPeriod = item.wfa?.isPeriodDays || '?';
     const oosPeriod = item.wfa?.oosPeriodDays || '?';
-    modeLabel = (item.wfa?.adaptiveMode ? 'WFA-A' : 'WFA-F') + ' ' + isPeriod + '/' + oosPeriod;
+    modeLabel = (item.wfa?.adaptiveMode ? 'WFA-A' : 'WFA-F') + ' ' + isPeriod + '/' + oosPeriod
+      + (item.config?.optimization_mode === 'grid' ? ' GRID' : '');
   }
 
   let budgetLabel;
-  const budgetMode = item.config?.optuna_budget_mode || 'trials';
-  if (budgetMode === 'trials') {
-    budgetLabel = String(item.config?.optuna_n_trials || 500) + 't';
-  } else if (budgetMode === 'time') {
-    const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-    budgetLabel = String(minutes) + 'min';
+  if (item.config?.optimization_mode === 'grid' || item.mode === 'grid') {
+    budgetLabel = String(item.config?.grid_budget || 200000) + 'c';
   } else {
-    budgetLabel = 'conv ' + String(item.config?.optuna_convergence || 50);
+    const budgetMode = item.config?.optuna_budget_mode || 'trials';
+    if (budgetMode === 'trials') {
+      budgetLabel = String(item.config?.optuna_n_trials || 500) + 't';
+    } else if (budgetMode === 'time') {
+      const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+      budgetLabel = String(minutes) + 'min';
+    } else {
+      budgetLabel = 'conv ' + String(item.config?.optuna_convergence || 50);
+    }
   }
 
   return '#' + index + ' \u00B7 ' + strategyLabel + ' \u00B7 ' + csvLabel + ' \u00B7 '
@@ -2087,25 +2211,35 @@ function buildQueueTooltip(item) {
   if (item.mode === 'wfa') {
     const typeLabel = item.wfa?.adaptiveMode ? 'Adaptive' : 'Fixed';
     lines.push('Mode: WFA ' + typeLabel + ' (IS: ' + item.wfa?.isPeriodDays + 'd, OOS: ' + item.wfa?.oosPeriodDays + 'd)');
+  } else if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+    lines.push('Mode: Grid Optimization');
   } else {
     lines.push('Mode: Optuna Optimization');
   }
 
-  const budgetMode = item.config?.optuna_budget_mode || 'trials';
-  const sampler = (item.config?.sampler || 'tpe').toUpperCase();
-  if (budgetMode === 'trials') {
-    lines.push('Budget: ' + item.config?.optuna_n_trials + ' trials (' + sampler + ' sampler)');
-  } else if (budgetMode === 'time') {
-    const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-    lines.push('Budget: ' + minutes + ' min (' + sampler + ' sampler)');
+  if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+    const candidates = Number(item.config?.grid_budget || 200000).toLocaleString('en-US');
+    lines.push('Budget: ' + candidates + ' candidates (LHS by mode)');
   } else {
-    lines.push('Budget: convergence ' + item.config?.optuna_convergence + ' (' + sampler + ' sampler)');
+    const budgetMode = item.config?.optuna_budget_mode || 'trials';
+    const sampler = (item.config?.sampler || 'tpe').toUpperCase();
+    if (budgetMode === 'trials') {
+      lines.push('Budget: ' + item.config?.optuna_n_trials + ' trials (' + sampler + ' sampler)');
+    } else if (budgetMode === 'time') {
+      const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+      lines.push('Budget: ' + minutes + ' min (' + sampler + ' sampler)');
+    } else {
+      lines.push('Budget: convergence ' + item.config?.optuna_convergence + ' (' + sampler + ' sampler)');
+    }
   }
 
-  const objectives = item.config?.objectives || [];
+  const objectives = item.config?.grid_fast_objectives || item.config?.objectives || [];
   if (objectives.length) {
     const objectiveNames = objectives.map((objective) => objective.replace(/_/g, ' ').replace(/pct/g, '%'));
-    lines.push('Objectives: ' + objectiveNames.join(', '));
+    lines.push((item.config?.optimization_mode === 'grid' ? 'Fast Objectives: ' : 'Objectives: ') + objectiveNames.join(', '));
+  }
+  if (item.config?.optimization_mode === 'grid') {
+    lines.push('Slow Refinement: ' + (item.config?.grid_slow_refinement_enabled ? 'On' : 'Off'));
   }
 
   if (shouldQueueItemAutoCreateSet(item)) {
@@ -2399,6 +2533,18 @@ function buildStateForItem(item, status) {
       sanitizeEnabled: item.config?.sanitize_enabled,
       sanitizeTradesThreshold: item.config?.sanitize_trades_threshold
     },
+    grid: item.config?.optimization_mode === 'grid' ? {
+      budget: item.config?.grid_budget,
+      seed: item.config?.grid_seed,
+      topCandidates: item.config?.grid_top_candidates,
+      enabledModes: item.config?.grid_enabled_modes,
+      allocationMethod: item.config?.grid_allocation_method,
+      fastObjectives: item.config?.grid_fast_objectives,
+      fastPrimaryObjective: item.config?.grid_fast_primary_objective,
+      slowRefinementEnabled: item.config?.grid_slow_refinement_enabled,
+      slowObjectives: item.config?.grid_slow_objectives,
+      slowPrimaryObjective: item.config?.grid_slow_primary_objective
+    } : null,
     fixedParams: clonePreset(item.config?.fixed_params || {}),
     strategyConfig: clonePreset(item.strategyConfig || {})
   };
@@ -2561,19 +2707,26 @@ async function runQueue() {
 
         if (optunaProgressFill) optunaProgressFill.style.width = '0%';
         if (optunaProgressText) {
-          const budgetMode = item.config?.optuna_budget_mode;
-          if (budgetMode === 'trials') {
-            const trials = item.config?.optuna_n_trials || 500;
-            optunaProgressText.textContent = 'Trial: 0 / ' + trials.toLocaleString('en-US') + ' (0%)';
-          } else if (budgetMode === 'time') {
-            const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
-            optunaProgressText.textContent = 'Time budget: ' + minutes + ' min';
+          if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
+            const candidates = Number(item.config?.grid_budget || 200000);
+            optunaProgressText.textContent = 'Candidate: 0 / ' + candidates.toLocaleString('en-US') + ' (0%)';
           } else {
-            optunaProgressText.textContent = 'Running...';
+            const budgetMode = item.config?.optuna_budget_mode;
+            if (budgetMode === 'trials') {
+              const trials = item.config?.optuna_n_trials || 500;
+              optunaProgressText.textContent = 'Trial: 0 / ' + trials.toLocaleString('en-US') + ' (0%)';
+            } else if (budgetMode === 'time') {
+              const minutes = Math.round((item.config?.optuna_time_limit || 3600) / 60);
+              optunaProgressText.textContent = 'Time budget: ' + minutes + ' min';
+            } else {
+              optunaProgressText.textContent = 'Running...';
+            }
           }
         }
         if (optunaBestTrial) {
-          optunaBestTrial.textContent = 'Waiting for first trial...';
+          optunaBestTrial.textContent = (item.mode === 'grid' || item.config?.optimization_mode === 'grid')
+            ? 'Waiting for first candidate...'
+            : 'Waiting for first trial...';
         }
 
         const formData = new FormData();

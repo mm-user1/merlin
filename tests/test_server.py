@@ -55,6 +55,37 @@ def test_core_logger_console_handler_is_configured_once():
     assert core_logger.level <= logging.INFO
 
 
+def test_grid_start_page_label_and_marker_are_compact():
+    repo_root = Path(__file__).parent.parent
+    index_html = (repo_root / "src" / "ui" / "templates" / "index.html").read_text(encoding="utf-8")
+    ui_handlers_js = (repo_root / "src" / "ui" / "static" / "js" / "ui-handlers.js").read_text(encoding="utf-8")
+    results_html = (repo_root / "src" / "ui" / "templates" / "results.html").read_text(encoding="utf-8")
+    results_tables_js = (repo_root / "src" / "ui" / "static" / "js" / "results-tables.js").read_text(encoding="utf-8")
+    analytics_js = (repo_root / "src" / "ui" / "static" / "js" / "analytics.js").read_text(encoding="utf-8")
+    queue_js = (repo_root / "src" / "ui" / "static" / "js" / "queue.js").read_text(encoding="utf-8")
+
+    assert "Grid v1 is supported only for S03 Reversal v10." not in ui_handlers_js
+    assert "No fast Grid backend is available." in ui_handlers_js
+    assert "в–ѕ" not in index_html
+    assert "&#9660;" in index_html
+    assert "GRID SETTINGS" in index_html
+    assert 'id="optuna-settings-section"' in results_html
+    assert 'id="gridFastObjectivesSection"' in index_html
+    assert 'class="grid-fast-objective-checkbox"' in index_html
+    assert 'id="gridSlowRefinementEnabled"' in index_html
+    assert 'class="grid-slow-objective-checkbox"' in index_html
+    assert 'id="gridProfileModesSection"' in index_html
+    assert "grid_enabled_modes" in ui_handlers_js
+    assert "collectGridObjectiveSelection('fast')" in ui_handlers_js
+    assert "grid_fast_objectives" in ui_handlers_js
+    assert "applyQueueGridConfig" in queue_js
+    assert "grid_slow_refinement_enabled" in queue_js
+    assert results_html.index('id="optuna-settings-section"') < results_html.index("Optuna Settings")
+    assert results_html.index('id="optuna-settings-section"') > results_html.index("Status &amp; Controls")
+    assert "setElementVisible('optuna-settings-section', gridRows.length === 0)" in results_tables_js
+    assert "optunaSection.style.display = gridRows.length ? 'none' : ''" in analytics_js
+
+
 @contextmanager
 def _temporary_active_db(label: str):
     previous_db = get_active_db_name()
@@ -271,6 +302,76 @@ def _insert_lancelot_export_trial(*, study_id: str, trial_number: int, params: d
         conn.commit()
 
 
+def _grid_sidebar_config() -> dict:
+    return {
+        "strategy_id": "s03_reversal_v10",
+        "optimization_mode": "grid",
+        "enabled_params": {
+            "maType3": True,
+            "maLength3": True,
+            "maOffset3": False,
+            "useCloseCount": True,
+            "useTBands": True,
+            "closeCountLong": True,
+            "closeCountShort": True,
+            "tBandLongPct": True,
+            "tBandShortPct": True,
+        },
+        "param_ranges": {
+            "maLength3": [3, 4, 1],
+            "closeCountLong": [1, 2, 1],
+            "closeCountShort": [1, 1, 1],
+            "tBandLongPct": [0.5, 1.0, 0.5],
+            "tBandShortPct": [0.5, 1.0, 0.5],
+        },
+        "param_types": {
+            "maType3": "select",
+            "maLength3": "int",
+            "maOffset3": "float",
+            "useCloseCount": "bool",
+            "useTBands": "bool",
+            "closeCountLong": "int",
+            "closeCountShort": "int",
+            "tBandLongPct": "float",
+            "tBandShortPct": "float",
+        },
+        "fixed_params": {
+            "maType3_options": ["SMA"],
+            "useCloseCount_options": [True],
+            "useTBands_options": [True],
+            "contractSize": 0.01,
+            "commissionPct": 0.05,
+            "dateFilter": False,
+        },
+        "worker_processes": 6,
+        "warmup_bars": 20,
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "score_config": {},
+        "objectives": ["net_profit_pct"],
+        "primary_objective": None,
+        "constraints": [],
+        "grid_budget": 10,
+        "grid_seed": 42,
+        "grid_top_candidates": 5,
+        "grid_allocation_method": "auto_sqrt_space",
+        "grid_min_quota": 0.10,
+        "grid_diversity_enabled": True,
+        "grid_diversity_max_per_group": 2,
+        "grid_strict_validation": True,
+        "grid_config": {
+            "budget": 10,
+            "seed": 42,
+            "top_candidates": 5,
+            "allocation_method": "auto_sqrt_space",
+            "min_quota": 0.10,
+        },
+    }
+
+
 def _insert_lancelot_export_wfa_window(
     *,
     study_id: str,
@@ -438,6 +539,16 @@ def test_csv_import_fails_when_strategy_config_unloadable(monkeypatch, client):
     message = response.get_data(as_text=True)
     assert "s01_trailing_ma" in message
     assert "parameter types are unavailable" in message
+
+
+def test_grid_availability_reason_uses_generic_backend_label(client):
+    response = client.get("/api/strategy/s01_trailing_ma/config")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["grid_optimizer"]["reason"] == (
+        "No fast Grid backend is available for this strategy."
+    )
 
 
 def test_csv_import_rejects_invalid_int(client):
@@ -617,24 +728,10 @@ def test_optuna_score_config_migrates_legacy_consistency_bounds():
     assert config.score_config["metric_bounds"]["consistency"] == {"min": -1.0, "max": 1.0}
 
 
-def _ensure_local_test_tmp_dir() -> Path:
-    path = Path(__file__).parent / ".tmp_server_cancel"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _ensure_local_queue_tmp_dir() -> Path:
-    path = Path(__file__).parent / ".tmp_server_queue"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _patch_queue_storage_path(monkeypatch, filename: str) -> Path:
+def _patch_queue_storage_path(monkeypatch, tmp_path: Path, filename: str) -> Path:
     from ui import server_services
 
-    queue_file = _ensure_local_queue_tmp_dir() / filename
-    if queue_file.exists():
-        queue_file.unlink()
+    queue_file = tmp_path / filename
 
     monkeypatch.setattr(
         server_services,
@@ -644,8 +741,8 @@ def _patch_queue_storage_path(monkeypatch, filename: str) -> Path:
     return queue_file
 
 
-def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_roundtrip.json")
+def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_roundtrip.json")
 
     payload = {
         "items": [
@@ -686,8 +783,8 @@ def test_queue_api_roundtrip_persists_in_file_storage(client, monkeypatch):
     assert not queue_file.exists()
 
 
-def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_empty_cleanup.json")
+def test_queue_api_empty_items_removes_queue_file(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_empty_cleanup.json")
 
     seed_payload = {
         "items": [
@@ -723,8 +820,8 @@ def test_queue_api_empty_items_removes_queue_file(client, monkeypatch):
     assert not queue_file.exists()
 
 
-def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch):
-    queue_file = _patch_queue_storage_path(monkeypatch, "queue_extended_metadata.json")
+def test_queue_api_roundtrip_preserves_extended_item_metadata(client, monkeypatch, tmp_path):
+    queue_file = _patch_queue_storage_path(monkeypatch, tmp_path, "queue_extended_metadata.json")
 
     payload = {
         "items": [
@@ -807,10 +904,10 @@ def test_queue_api_rejects_non_object_payload(client):
     assert "json object" in payload["error"].lower()
 
 
-def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch):
+def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch, tmp_path):
     from ui import server_routes_run
 
-    csv_path = _ensure_local_test_tmp_dir() / "opt_cancel.csv"
+    csv_path = tmp_path / "opt_cancel.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n",
@@ -849,11 +946,11 @@ def test_optimize_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert deleted_studies == ["study_cancel_opt"]
 
 
-def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
+def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_cancel.csv"
+    csv_path = tmp_path / "wfa_cancel.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n",
@@ -913,11 +1010,65 @@ def test_walkforward_cancelled_run_cleans_up_saved_study(client, monkeypatch):
     assert deleted_studies == ["study_cancel_wfa"]
 
 
-def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
+def test_walkforward_route_logs_value_error_details(client, monkeypatch, caplog, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_cooldown_route.csv"
+    csv_path = tmp_path / "wfa_value_error.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n"
+        "2026-01-01 00:00:00,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+    df = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]},
+        index=pd.to_datetime(["2026-01-01 00:00:00"], utc=True),
+    )
+    error_text = (
+        "Adaptive WFA window 12 IS optimization failed "
+        "(2025-05-26 to 2025-07-25, optimizer=grid): "
+        "Grid fast-vs-slow validation failed: {\"candidate_id\": 99}"
+    )
+
+    class DummyWalkForwardEngine:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run_wf_optimization(self, _dataframe):
+            raise ValueError(error_text)
+
+    monkeypatch.setattr(server_routes_run, "_resolve_csv_path", lambda _raw: csv_path)
+    monkeypatch.setattr(server_routes_run, "load_data", lambda _path: df)
+    monkeypatch.setattr(walkforward_engine, "WalkForwardEngine", DummyWalkForwardEngine)
+
+    payload = _build_minimal_optuna_payload()
+    payload["optimization_mode"] = "grid"
+    payload["strategy_id"] = "s03_reversal_v10"
+    payload["primary_objective"] = "net_profit_pct"
+
+    with caplog.at_level(logging.WARNING, logger=app.logger.name):
+        response = client.post(
+            "/api/walkforward",
+            data={
+                "strategy": "s03_reversal_v10",
+                "csvPath": str(csv_path),
+                "runId": "run_wfa_error",
+                "config": json.dumps(payload),
+                "wf_adaptive_mode": "true",
+            },
+        )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data["error"] == error_text
+    assert any(error_text in record.getMessage() for record in caplog.records)
+
+
+def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch, tmp_path):
+    from ui import server_routes_run
+    import core.walkforward_engine as walkforward_engine
+
+    csv_path = tmp_path / "wfa_cooldown_route.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n"
@@ -993,11 +1144,11 @@ def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch):
     assert captured["base_template"]["wfa"]["cooldown_days"] == 21
 
 
-def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch):
+def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch, tmp_path):
     from ui import server_routes_run
     import core.walkforward_engine as walkforward_engine
 
-    csv_path = _ensure_local_test_tmp_dir() / "wfa_ft_reject_route.csv"
+    csv_path = tmp_path / "wfa_ft_reject_route.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n"
         "2026-01-01 00:00:00,1,1,1,1,1\n"
@@ -1224,10 +1375,10 @@ def test_resolve_wfa_period_oos_prefers_precise_timestamp():
     assert legacy_end == "2025-01-02"
 
 
-def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monkeypatch):
+def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monkeypatch, tmp_path):
     import ui.server_routes_data as routes_data
 
-    csv_path = Path(__file__).parent / "_tmp_wfa_window_trades.csv"
+    csv_path = tmp_path / "_tmp_wfa_window_trades.csv"
     csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
 
     try:
@@ -1303,11 +1454,11 @@ def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monk
             csv_path.unlink()
 
 
-def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
+def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch, tmp_path):
     import strategies
     import ui.server_routes_data as routes_data
 
-    csv_path = Path(__file__).parent / "_tmp_wfa_precise_bounds.csv"
+    csv_path = tmp_path / "_tmp_wfa_precise_bounds.csv"
     csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
 
     try:
@@ -1398,8 +1549,8 @@ def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch):
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_optuna_trial(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_optuna.csv"
+def test_export_lancelot_bundle_from_optuna_trial(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_optuna.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1450,8 +1601,136 @@ def test_export_lancelot_bundle_from_optuna_trial(client):
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa.csv"
+def test_export_lancelot_bundle_from_grid_candidate(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_grid.csv"
+    csv_path.write_text(
+        "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with _temporary_active_db(f"bundle_export_grid_{uuid.uuid4().hex[:8]}"):
+            study_id = "bundle_grid_1"
+            _insert_lancelot_export_study(
+                study_id=study_id,
+                study_name="bundle_grid_1",
+                optimization_mode="grid",
+                csv_file_path=str(csv_path),
+                csv_file_name="OKX_SOLUSDT.P, 5 2025.05.01-2025.11.20.csv",
+                warmup_bars=500,
+            )
+            _insert_lancelot_export_trial(
+                study_id=study_id,
+                trial_number=9,
+                params={"maType3": "EMA", "maLength3": 75, "useCloseCount": True},
+            )
+
+            response = client.post(
+                f"/api/studies/{study_id}/export/lancelot",
+                json={"trialNumber": 9},
+            )
+
+            assert response.status_code == 200
+            payload = response.get_json()
+            assert payload["symbol"] == "SOL/USDT:USDT"
+            assert payload["timeframe"] == "5m"
+            assert payload["warmupBars"] == 500
+            assert payload["params"] == {"maType3": "EMA", "maLength3": 75, "useCloseCount": True}
+            assert payload["source"]["trialNumber"] == 9
+    finally:
+        if csv_path.exists():
+            csv_path.unlink()
+
+
+def test_study_endpoint_includes_single_grid_settings(client):
+    preview = {
+        "total_space": 20,
+        "total_space_label": "20",
+        "actual_budget": 10,
+        "actual_budget_label": "10",
+        "coverage_pct": 50.0,
+        "coverage_label": "50.0%",
+        "allocation_method": "auto_sqrt_space",
+        "modes": [
+            {
+                "mode": "cc_only",
+                "space_size": 8,
+                "space_label": "8",
+                "budget": 4,
+                "budget_label": "4",
+                "coverage_pct": 50.0,
+                "coverage_label": "50.0%",
+                "generation": "LHS",
+            }
+        ],
+    }
+    config = _grid_sidebar_config()
+    summary = {
+        "requested_budget": 10,
+        "actual_budget": 10,
+        "grid": {"preview": preview},
+        "optimization_time_seconds": 26,
+    }
+
+    with _temporary_active_db(f"grid_settings_single_{uuid.uuid4().hex[:8]}"):
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id,
+                    study_name,
+                    strategy_id,
+                    optimization_mode,
+                    optimizer_mode,
+                    config_json,
+                    grid_requested_budget,
+                    grid_actual_budget,
+                    grid_coverage_pct,
+                    grid_top_candidates,
+                    grid_summary_json,
+                    optimization_time_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "grid_settings_single",
+                    "GRID_SETTINGS_SINGLE",
+                    "s03_reversal_v10",
+                    "grid",
+                    "grid",
+                    json.dumps(config),
+                    10,
+                    10,
+                    50.0,
+                    5,
+                    json.dumps(summary),
+                    26,
+                ),
+            )
+            conn.commit()
+
+        response = client.get("/api/studies/grid_settings_single")
+        assert response.status_code == 200
+        study = response.get_json()["study"]
+        grid = study["grid_settings"]
+        rows = {row["key"]: row["val"] for row in grid["rows"]}
+        allocation = {row["key"]: row["val"] for row in grid["allocation_rows"]}
+
+        assert grid["enabled"] is True
+        assert grid["is_wfa_grid"] is False
+        assert rows["Budget"] == "10 candidates"
+        assert rows["Parameter Space"] == "20 combinations"
+        assert rows["Coverage"] == "50.0%"
+        assert rows["Workers"] == "6 Numba threads"
+        assert rows["Fast Objectives"] == "Net Profit %"
+        assert rows["Fast Primary"] == "Net Profit %"
+        assert rows["Slow Refinement"] == "Off"
+        assert rows["Runtime"] == "26s"
+        assert allocation["Allocation"] == "Auto sqrt-space"
+        assert allocation["CC only"] == "4 / 8 | 50.0% | LHS"
+
+
+def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_wfa.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1492,8 +1771,8 @@ def test_export_lancelot_bundle_from_wfa_window_uses_window_trial_number(client)
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_wfa_selected.csv"
+def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_trial(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_wfa_selected.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -1540,8 +1819,8 @@ def test_export_lancelot_bundle_from_wfa_window_falls_back_to_selected_module_tr
             csv_path.unlink()
 
 
-def test_export_lancelot_bundle_requires_selection_payload(client):
-    csv_path = Path(__file__).parent / "_tmp_lancelot_export_missing.csv"
+def test_export_lancelot_bundle_requires_selection_payload(client, tmp_path):
+    csv_path = tmp_path / "_tmp_lancelot_export_missing.csv"
     csv_path.write_text(
         "timestamp,open,high,low,close,volume\n2025-01-01T00:00:00Z,1,1,1,1,1\n",
         encoding="utf-8",
@@ -2401,6 +2680,50 @@ def test_analytics_summary_includes_focus_settings_payload(client):
         assert second["post_process_settings"]["st_enabled"] is False
 
 
+def test_analytics_summary_includes_wfa_grid_settings_from_config(client):
+    with _temporary_active_db(f"analytics_grid_settings_{uuid.uuid4().hex[:8]}"):
+        grid_config = _grid_sidebar_config()
+        grid_config["wfa"] = {"is_period_days": 60, "oos_period_days": 30}
+        _insert_analytics_study(
+            study_id="wfa_grid_settings",
+            study_name="WFA_GRID_SETTINGS",
+            strategy_id="s03_reversal_v10",
+            optimization_mode="wfa",
+            adaptive_mode=0,
+            is_period_days=60,
+            config_json=grid_config,
+        )
+        _insert_analytics_study(
+            study_id="wfa_optuna_settings",
+            study_name="WFA_OPTUNA_SETTINGS",
+            optimization_mode="wfa",
+            adaptive_mode=0,
+            is_period_days=60,
+            config_json={"wfa": {"oos_period_days": 30}},
+        )
+
+        response = client.get("/api/analytics/summary")
+        assert response.status_code == 200
+        studies = {row["study_id"]: row for row in response.get_json()["studies"]}
+
+        grid = studies["wfa_grid_settings"]["grid_settings"]
+        rows = {row["key"]: row["val"] for row in grid["rows"]}
+        allocation_rows = {row["key"]: row["val"] for row in grid["allocation_rows"]}
+
+        assert grid["enabled"] is True
+        assert grid["is_wfa_grid"] is True
+        assert rows["Budget"] == "10 candidates"
+        assert rows["Seed"] == "42"
+        assert rows["Top Candidates"] == "5"
+        assert rows["Workers"] == "6 Numba threads"
+        assert rows["Fast Objectives"] == "Net Profit %"
+        assert rows["Slow Refinement"] == "Off"
+        assert "Runtime" not in rows
+        assert allocation_rows["Allocation"] == "Auto sqrt-space"
+        assert any("|" in value for key, value in allocation_rows.items() if key != "Allocation")
+        assert studies["wfa_optuna_settings"]["grid_settings"] is None
+
+
 def test_analytics_sets_crud_and_reorder(client):
     with _temporary_active_db(f"analytics_sets_{uuid.uuid4().hex[:8]}"):
         _insert_analytics_study(
@@ -2721,3 +3044,98 @@ def test_optuna_sanitize_threshold_validation(threshold):
             strategy_id="s01_trailing_ma",
             warmup_bars=1000,
         )
+
+
+# ---------------------------------------------------------------------------
+# Workstream D: Constraints row in the shared Grid Settings sidebar
+# ---------------------------------------------------------------------------
+
+from ui.server_services import build_grid_settings_view
+
+
+_TWO_ENABLED_CONSTRAINTS = [
+    {"metric": "total_trades", "threshold": 30, "enabled": True},
+    {"metric": "max_drawdown_pct", "threshold": 30.0, "enabled": True},
+    {"metric": "net_profit_pct", "threshold": 5.0, "enabled": False},
+]
+_EXPECTED_CONSTRAINTS_TEXT = "Total Trades >= 30, Min Drawdown % <= 30"
+
+
+def _constraints_row(view):
+    assert view is not None
+    return next((row["val"] for row in view["rows"] if row["key"] == "Constraints"), None)
+
+
+def _standalone_grid_study(**overrides):
+    study = {
+        "optimization_mode": "grid",
+        "config_json": {
+            "grid_budget": 10,
+            "grid_seed": 42,
+            "grid_top_candidates": 5,
+            "grid_fast_objectives": ["net_profit_pct"],
+        },
+    }
+    study.update(overrides)
+    return study
+
+
+def test_grid_settings_constraints_standalone_two_enabled():
+    study = _standalone_grid_study(constraints=list(_TWO_ENABLED_CONSTRAINTS))
+    assert _constraints_row(build_grid_settings_view(study)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_wfa_grid_two_enabled():
+    study = {
+        "optimization_mode": "wfa",
+        "optimizer_mode": "grid",
+        "config_json": {"optimization_mode": "grid", "grid_budget": 10},
+        "constraints_json": json.dumps(_TWO_ENABLED_CONSTRAINTS),
+    }
+    view = build_grid_settings_view(study)
+    assert view["is_wfa_grid"] is True
+    assert _constraints_row(view) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_none_when_absent():
+    assert _constraints_row(build_grid_settings_view(_standalone_grid_study())) == "None"
+
+
+def test_grid_settings_constraints_excludes_disabled():
+    disabled = [
+        {"metric": "total_trades", "threshold": 30, "enabled": False},
+        {"metric": "max_drawdown_pct", "threshold": 30.0, "enabled": False},
+    ]
+    study = _standalone_grid_study(constraints=disabled)
+    assert _constraints_row(build_grid_settings_view(study)) == "None"
+
+
+def test_grid_settings_constraints_from_constraints_json_string():
+    # Analytics passes the raw constraints_json column (a JSON string).
+    study = _standalone_grid_study(constraints_json=json.dumps(_TWO_ENABLED_CONSTRAINTS))
+    assert _constraints_row(build_grid_settings_view(study)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_config_fallback_shapes():
+    top_level = _standalone_grid_study()
+    top_level["config_json"]["constraints"] = list(_TWO_ENABLED_CONSTRAINTS)
+    assert _constraints_row(build_grid_settings_view(top_level)) == _EXPECTED_CONSTRAINTS_TEXT
+
+    nested = _standalone_grid_study()
+    nested["config_json"]["optuna_config"] = {"constraints": list(_TWO_ENABLED_CONSTRAINTS)}
+    assert _constraints_row(build_grid_settings_view(nested)) == _EXPECTED_CONSTRAINTS_TEXT
+
+
+def test_grid_settings_constraints_results_and_analytics_row_identical():
+    # Results loads constraints into a parsed list; Analytics keeps the raw JSON
+    # string column.  Both must yield an identical Constraints row.
+    results_shape = _standalone_grid_study(
+        constraints=list(_TWO_ENABLED_CONSTRAINTS),
+        constraints_json=list(_TWO_ENABLED_CONSTRAINTS),
+    )
+    analytics_shape = _standalone_grid_study(
+        constraints_json=json.dumps(_TWO_ENABLED_CONSTRAINTS),
+    )
+    assert _constraints_row(build_grid_settings_view(results_shape)) == _constraints_row(
+        build_grid_settings_view(analytics_shape)
+    )

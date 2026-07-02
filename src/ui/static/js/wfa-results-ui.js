@@ -1,5 +1,9 @@
 (function () {
   const MODULE_ORDER = ['optuna_is', 'dsr', 'forward_test', 'stress_test'];
+  function getBaseOptimizerLabel() {
+    return window.ResultsState?.wfa?.optimizerMode === 'grid' ? 'Grid IS' : 'Optuna IS';
+  }
+
   const MODULE_LABELS = {
     optuna_is: 'Optuna IS',
     dsr: 'DSR',
@@ -57,6 +61,11 @@
     if (!Array.isArray(availableModules)) return [];
     const set = new Set(availableModules.map((m) => String(m)));
     return MODULE_ORDER.filter((key) => set.has(key));
+  }
+
+  function getModuleLabel(moduleType) {
+    if (moduleType === 'optuna_is') return getBaseOptimizerLabel();
+    return MODULE_LABELS[moduleType] || moduleType;
   }
 
   function hasConstraintFlags(items) {
@@ -239,13 +248,14 @@
   function getModuleSourceLabel(windowNumber, moduleType) {
     const cached = WFAState.windowTrials[windowNumber];
     const modules = cached?.modules || {};
+    const baseLabel = getBaseOptimizerLabel();
     if (moduleType === 'forward_test') {
-      return (modules.dsr && modules.dsr.length) ? 'DSR' : 'Optuna';
+      return (modules.dsr && modules.dsr.length) ? 'DSR' : baseLabel;
     }
     if (moduleType === 'stress_test') {
       if (modules.forward_test && modules.forward_test.length) return 'FT';
       if (modules.dsr && modules.dsr.length) return 'DSR';
-      return 'Optuna';
+      return baseLabel;
     }
     return '';
   }
@@ -264,7 +274,7 @@
     }
     if (moduleType === 'forward_test') {
       const rankDelta = getRankDelta(trial);
-      const sourceLabel = getModuleSourceLabel(windowNumber, moduleType) || 'Optuna';
+      const sourceLabel = getModuleSourceLabel(windowNumber, moduleType) || getBaseOptimizerLabel();
       const rankLine = rankDelta !== null
         ? `Rank: ${formatSigned(rankDelta, 0)} (vs ${sourceLabel})`
         : null;
@@ -294,7 +304,7 @@
         return 'Status: No Testable Parameters (strategy has only categorical params)';
       }
       const rankDelta = getRankDelta(trial);
-      const sourceLabel = getModuleSourceLabel(windowNumber, moduleType) || 'Optuna';
+      const sourceLabel = getModuleSourceLabel(windowNumber, moduleType) || getBaseOptimizerLabel();
       const rankLine = rankDelta !== null
         ? `Rank: ${formatSigned(rankDelta, 0)} (vs ${sourceLabel})`
         : null;
@@ -366,7 +376,7 @@
 
   function updateWfaTableHeader(windowData, moduleType) {
     if (typeof updateTableHeader !== 'function') return;
-    const title = MODULE_LABELS[moduleType] || moduleType || '';
+    const title = getModuleLabel(moduleType) || moduleType || '';
     const periodLabel = getWfaModulePeriodLabel(windowData, moduleType);
     const subtitle = getWfaModuleSortSubtitle(moduleType);
     updateTableHeader(title, subtitle, periodLabel);
@@ -374,7 +384,8 @@
 
   function renderModuleTrialsTable(trials, moduleType, windowNumber) {
     if (!trials || !trials.length) {
-      return '<div class="no-data">No trials available for this module.</div>';
+      const itemLabel = window.ResultsState?.wfa?.optimizerMode === 'grid' ? 'candidates' : 'trials';
+      return `<div class="no-data">No ${itemLabel} available for this module.</div>`;
     }
 
     const { objectives, hasConstraints } = getOptunaMeta({ trials });
@@ -464,7 +475,7 @@
     WFAState.activeTab[windowNumber] = active;
 
     const tabButtons = modules.map((moduleType) => {
-      const label = MODULE_LABELS[moduleType] || moduleType;
+      const label = getModuleLabel(moduleType) || moduleType;
       const activeClass = moduleType === active ? 'active' : '';
       return `<button class="tab-btn wfa-tab-btn ${activeClass}" data-window-number="${windowNumber}" data-module="${moduleType}">${label}</button>`;
     }).join('');

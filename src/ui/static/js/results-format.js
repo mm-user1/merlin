@@ -22,6 +22,7 @@ const SORT_METRIC_LABELS = {
 
 const SOURCE_LABELS = {
   optuna: 'Optuna IS',
+  grid: 'Grid Candidates',
   dsr: 'DSR',
   forward_test: 'Forward Test',
   stress_test: 'Stress Test',
@@ -221,7 +222,8 @@ function formatParamValue(value) {
 
 function createParamId(params, strategyConfig, fixedParams) {
   const merged = { ...(fixedParams || {}), ...(params || {}) };
-  const paramStr = stableStringify(merged);
+  const canonical = canonicalizeParamIdParams(merged);
+  const paramStr = stableStringify(canonical);
   const hash = md5(paramStr).slice(0, 8);
   const configParams = (strategyConfig && strategyConfig.parameters) || {};
   const optimizable = [];
@@ -237,7 +239,7 @@ function createParamId(params, strategyConfig, fixedParams) {
     ];
     let labelKeys = null;
     preferredPairs.some((pair) => {
-      const hasPair = pair.every((key) => Object.prototype.hasOwnProperty.call(merged, key));
+      const hasPair = pair.every((key) => Object.prototype.hasOwnProperty.call(canonical, key));
       if (hasPair) {
         labelKeys = pair;
         return true;
@@ -248,13 +250,43 @@ function createParamId(params, strategyConfig, fixedParams) {
       labelKeys = optimizable.slice(0, 2);
     }
   const labelParts = labelKeys.map((key) => {
-    const value = Object.prototype.hasOwnProperty.call(merged, key) ? merged[key] : '?';
+    const value = Object.prototype.hasOwnProperty.call(canonical, key) ? canonical[key] : '?';
     return String(value);
   });
   if (labelParts.length) {
     return `${labelParts.join(' ')}_${hash}`;
   }
   return hash;
+}
+
+const PARAM_ID_IGNORED_KEYS = new Set([
+  'dateFilter',
+  'start',
+  'end',
+  'riskPerTrade',
+  'commissionRate',
+  'commissionPct',
+  'initialCapital',
+  'contractSize',
+  'warmupBars',
+  'date_filter',
+  'risk_per_trade',
+  'risk_per_trade_pct',
+  'commission_rate',
+  'commission_pct',
+  'initial_capital',
+  'contract_size',
+  'warmup_bars',
+  'use_backtester'
+]);
+
+function canonicalizeParamIdParams(params) {
+  const canonical = {};
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (PARAM_ID_IGNORED_KEYS.has(key) || key.endsWith('_options')) return;
+    canonical[key] = value;
+  });
+  return canonical;
 }
 
 function stableStringify(obj) {

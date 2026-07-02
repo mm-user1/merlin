@@ -28,12 +28,6 @@ DATA_PATH = (
 )
 
 
-def _ensure_local_test_tmp_dir(name: str) -> Path:
-    path = Path(__file__).parent / ".tmp_multiprocess" / name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 @pytest.mark.slow
 class TestMultiProcessScore:
     """Test multi-process optimization with composite scoring enabled."""
@@ -125,7 +119,7 @@ class TestMultiProcessScore:
         assert after_entries == before_entries
         assert isinstance(results, list)
 
-    def test_single_process_ignores_save_study_without_creating_sqlite(self, base_config, monkeypatch):
+    def test_single_process_ignores_save_study_without_creating_sqlite(self, base_config, monkeypatch, tmp_path):
         """Deprecated raw Optuna persistence should not create optuna_study.db."""
         base_config.worker_processes = 1
         optuna_config = OptunaConfig(
@@ -135,12 +129,10 @@ class TestMultiProcessScore:
             save_study=True,
         )
 
-        tmp_dir = _ensure_local_test_tmp_dir("sqlite_disabled")
-        sqlite_path = tmp_dir / "optuna_study.db"
-        if sqlite_path.exists():
-            sqlite_path.unlink()
-
-        monkeypatch.chdir(tmp_dir)
+        # tmp_path is an absolute pytest temp directory outside the repository;
+        # monkeypatch.chdir restores the original CWD even on assertion failure.
+        sqlite_path = tmp_path / "optuna_study.db"
+        monkeypatch.chdir(tmp_path)
         optimizer = OptunaOptimizer(base_config, optuna_config)
         optimizer.optimize()
 

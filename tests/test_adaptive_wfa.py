@@ -30,6 +30,41 @@ def _result(trades, balances, timestamps):
     )
 
 
+def test_adaptive_wfa_is_failure_includes_window_context(monkeypatch):
+    index = pd.date_range("2025-01-01 00:00:00", "2025-04-30 00:00:00", freq="1D", tz="UTC")
+    df = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
+        index=index,
+    )
+    config = WFConfig(
+        strategy_id="s03_reversal_v10",
+        adaptive_mode=True,
+        is_period_days=20,
+        max_oos_period_days=10,
+        min_oos_trades=1,
+        check_interval_trades=1,
+    )
+    engine = WalkForwardEngine(
+        config,
+        {"optimization_mode": "grid", "fixed_params": {"dateFilter": False}},
+        {},
+    )
+
+    def fail_pipeline(self, df, is_start, is_end, window_id):  # noqa: ARG001
+        raise ValueError("Grid screening produced no candidates with usable objective values.")
+
+    monkeypatch.setattr(WalkForwardEngine, "_run_window_is_pipeline", fail_pipeline)
+
+    with pytest.raises(ValueError) as excinfo:
+        engine.run_wf_optimization(df)
+
+    message = str(excinfo.value)
+    assert "Adaptive WFA window 1 IS optimization failed" in message
+    assert "2025-01-01 to 2025-01-20" in message
+    assert "optimizer=grid" in message
+    assert "Grid screening produced no candidates with usable objective values." in message
+
+
 def test_compute_is_baseline_zero_trades_disables_triggers():
     engine = _build_engine()
     is_result = _result([], [100.0, 102.0], [pd.Timestamp("2025-01-01", tz="UTC"), pd.Timestamp("2025-01-02", tz="UTC")])

@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -24,6 +25,15 @@ from core.backtest_engine import (
     prepare_dataset_with_warmup,
 )
 from core.export import export_trades_csv
+from core.grid_engine import (
+    GRID_SUPPORTED_FAST_OBJECTIVES,
+    GRID_SUPPORTED_SLOW_OBJECTIVES,
+    default_grid_enabled_modes,
+    format_compact_count,
+    format_coverage_pct,
+    parse_grid_budget,
+    preview_grid_parameter_space,
+)
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
     OBJECTIVE_DIRECTIONS,
@@ -970,6 +980,488 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _parse_json_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _grid_setting_number(value: Any, *, integer: bool = True) -> Optional[Any]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return int(round(parsed)) if integer else parsed
+
+
+def _grid_setting_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _grid_config_value(config: Dict[str, Any], key: str, *aliases: str) -> Any:
+    grid_config = _parse_json_dict(config.get("grid_config"))
+    for candidate_key in (key, *aliases):
+        if candidate_key in config and config.get(candidate_key) not in (None, ""):
+            return config.get(candidate_key)
+        if candidate_key in grid_config and grid_config.get(candidate_key) not in (None, ""):
+            return grid_config.get(candidate_key)
+    return None
+
+
+def _grid_allocation_label(value: Any) -> str:
+    normalized = str(value or "auto_sqrt_space").strip().lower()
+    labels = {
+        "auto": "Auto sqrt-space",
+        "auto_sqrt": "Auto sqrt-space",
+        "auto_sqrt_space": "Auto sqrt-space",
+        "auto-sqrt-space": "Auto sqrt-space",
+        "proportional": "Proportional space",
+        "proportional_space": "Proportional space",
+        "proportional-space": "Proportional space",
+        "manual": "Manual",
+        "manual_percent": "Manual",
+        "manual_pct": "Manual",
+    }
+    return labels.get(normalized, normalized.replace("_", " ").replace("-", " ").title() or "-")
+
+
+def _grid_mode_label(value: Any) -> str:
+    labels = {
+        "cc_only": "CC only",
+        "tbands_only": "T Bands only",
+        "both": "Both",
+        "bracket": "Bracket",
+        "trail": "Trail",
+    }
+    return labels.get(str(value or "").strip(), str(value or "").strip() or "-")
+
+
+def _grid_objective_list(
+    config: Dict[str, Any],
+    key: str,
+    *aliases: str,
+    fallback: Optional[List[str]] = None,
+) -> List[str]:
+    raw = _grid_config_value(config, key, *aliases)
+    if isinstance(raw, list):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+    else:
+        values = []
+    if not values and fallback:
+        values = [str(item).strip() for item in fallback if str(item).strip()]
+    return values
+
+
+def _grid_objectives_label(values: List[str]) -> str:
+    if not values:
+        return "-"
+    return ", ".join(OBJECTIVE_DISPLAY_NAMES.get(value, value) for value in values)
+
+
+# Constraint-only metrics that are not Optuna objectives lack an entry in
+# OBJECTIVE_DISPLAY_NAMES; supplement (do not replace) the shared display map.
+_CONSTRAINT_EXTRA_DISPLAY_NAMES: Dict[str, str] = {
+    "total_trades": "Total Trades",
+    "max_consecutive_losses": "Max Consecutive Losses",
+}
+
+_CONSTRAINT_OPERATOR_SYMBOLS: Dict[str, str] = {"gte": ">=", "lte": "<="}
+
+
+def _constraint_metric_label(metric: str) -> str:
+    return (
+        OBJECTIVE_DISPLAY_NAMES.get(metric)
+        or _CONSTRAINT_EXTRA_DISPLAY_NAMES.get(metric)
+        or metric
+    )
+
+
+def _format_constraint_threshold(value: Any) -> Optional[str]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    if number == int(number):
+        return str(int(number))
+    return f"{number:.10f}".rstrip("0").rstrip(".")
+
+
+def _coerce_constraint_list(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, str) and value.strip():
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _grid_constraint_sources(study: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Resolve persisted constraints across current and legacy study/config shapes.
+
+    Precedence mirrors other Results/Analytics settings reconstruction: prefer
+    study-level columns, then top-level config, then the nested optuna config.
+    The first source that carries any constraint entries (enabled or not) wins,
+    so a fully-disabled set is not silently overridden by another source.
+    """
+    for candidate in (
+        study.get("constraints"),
+        study.get("constraints_json"),
+        config.get("constraints"),
+        _parse_json_dict(config.get("optuna_config")).get("constraints"),
+    ):
+        parsed = _coerce_constraint_list(candidate)
+        if parsed:
+            return parsed
+    return []
+
+
+def _grid_constraints_label(constraints: List[Dict[str, Any]]) -> str:
+    """Format enabled constraints as e.g. ``Total Trades >= 30, Max DD % <= 30``."""
+    parts: List[str] = []
+    for spec in constraints:
+        if not isinstance(spec, dict):
+            continue
+        if not _grid_setting_bool(spec.get("enabled"), False):
+            continue
+        metric = str(spec.get("metric") or "").strip()
+        operator = CONSTRAINT_OPERATORS.get(metric)
+        if not operator:
+            continue
+        threshold = _format_constraint_threshold(spec.get("threshold"))
+        if threshold is None:
+            continue
+        symbol = _CONSTRAINT_OPERATOR_SYMBOLS.get(operator, operator)
+        parts.append(f"{_constraint_metric_label(metric)} {symbol} {threshold}")
+    return ", ".join(parts) if parts else "None"
+
+
+def _format_duration_seconds(seconds: Any) -> str:
+    total = _grid_setting_number(seconds)
+    if total is None or total < 0:
+        return "-"
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _grid_preview_from_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    grid_section = _parse_json_dict(summary.get("grid"))
+    preview = _parse_json_dict(grid_section.get("preview"))
+    if preview:
+        return preview
+    return _parse_json_dict(summary.get("preview"))
+
+
+def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[str, Any]:
+    payload = deepcopy(config)
+    grid_config = _parse_json_dict(payload.get("grid_config"))
+    aliases = {
+        "grid_budget": ("budget",),
+        "grid_seed": ("seed",),
+        "grid_top_candidates": ("top_candidates",),
+        "grid_enabled_modes": ("enabled_modes",),
+        "grid_allocation_method": ("allocation_method",),
+        "grid_min_quota": ("min_quota",),
+        "grid_manual_percents": ("manual_percents",),
+        "grid_fast_objectives": ("fast_objectives",),
+        "grid_fast_primary_objective": ("fast_primary_objective",),
+        "grid_slow_refinement_enabled": ("slow_refinement_enabled",),
+        "grid_slow_objectives": ("slow_objectives",),
+        "grid_slow_primary_objective": ("slow_primary_objective",),
+    }
+    for target, source_keys in aliases.items():
+        if payload.get(target) in (None, ""):
+            for source_key in source_keys:
+                if grid_config.get(source_key) not in (None, ""):
+                    payload[target] = grid_config.get(source_key)
+                    break
+    payload["optimization_mode"] = "grid"
+
+    strategy_id = str(
+        study.get("strategy_id")
+        or payload.get("strategy_id")
+        or "s03_reversal_v10"
+    )
+    worker_processes = _grid_setting_number(
+        payload.get("worker_processes", payload.get("workerProcesses")),
+    )
+    warmup_bars = _grid_setting_number(payload.get("warmup_bars"))
+    try:
+        config_obj = _build_optimization_config(
+            "grid-sidebar.csv",
+            payload,
+            worker_processes or 1,
+            strategy_id,
+            warmup_bars or 1000,
+        )
+        return preview_grid_parameter_space(config_obj)
+    except Exception:
+        return {}
+
+
+def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build compact Grid sidebar rows for Results and Analytics."""
+    if not isinstance(study, dict):
+        return None
+
+    config = _parse_json_dict(study.get("config_json"))
+    mode = str(study.get("optimization_mode") or "").strip().lower()
+    optimizer_mode = str(
+        study.get("optimizer_mode")
+        or _grid_config_value(config, "optimization_mode")
+        or ""
+    ).strip().lower()
+    has_grid_config = bool(_parse_json_dict(config.get("grid_config")))
+    if mode == "grid":
+        is_wfa_grid = False
+    elif mode == "wfa" and (optimizer_mode == "grid" or has_grid_config):
+        is_wfa_grid = True
+    else:
+        return None
+
+    grid_summary = _parse_json_dict(study.get("grid_summary"))
+    if not grid_summary:
+        grid_summary = _parse_json_dict(study.get("grid_summary_json"))
+    if not grid_summary:
+        grid_summary = _parse_json_dict(config.get("grid_summary"))
+    preview = _grid_preview_from_summary(grid_summary)
+    if not preview:
+        preview = _derive_grid_preview(config, study)
+
+    requested_budget = _grid_setting_number(
+        study.get("grid_requested_budget")
+        or grid_summary.get("requested_budget")
+        or _grid_config_value(config, "grid_budget", "budget", "gridBudget")
+    )
+    actual_budget = _grid_setting_number(
+        study.get("grid_actual_budget")
+        or grid_summary.get("actual_budget")
+        or preview.get("actual_budget")
+        or requested_budget
+    )
+    total_space = _grid_setting_number(preview.get("total_space"))
+    coverage_pct = _grid_setting_number(study.get("grid_coverage_pct"), integer=False)
+    if coverage_pct is None:
+        coverage_pct = _grid_setting_number(preview.get("coverage_pct"), integer=False)
+    seed = _grid_setting_number(_grid_config_value(config, "grid_seed", "seed", "gridSeed"))
+    top_candidates = _grid_setting_number(
+        study.get("grid_top_candidates")
+        or _grid_config_value(config, "grid_top_candidates", "top_candidates", "gridTopCandidates")
+    )
+    workers = _grid_setting_number(_grid_config_value(config, "worker_processes", "workerProcesses"))
+    diversity_enabled = _grid_setting_bool(
+        _grid_config_value(config, "grid_diversity_enabled", "gridDiversityEnabled"),
+        True,
+    )
+    diversity_max = _grid_setting_number(
+        _grid_config_value(config, "grid_diversity_max_per_group", "gridDiversityMaxPerGroup")
+    ) or 2
+    strict_validation = _grid_setting_bool(
+        _grid_config_value(config, "grid_strict_validation", "gridStrictValidation"),
+        True,
+    )
+    allocation_method = (
+        preview.get("allocation_method")
+        or _grid_config_value(config, "grid_allocation_method", "allocation_method", "gridAllocationMethod")
+        or "auto_sqrt_space"
+    )
+    legacy_objectives = _grid_objective_list(config, "objectives", fallback=["net_profit_pct"])
+    fast_objectives = _grid_objective_list(
+        config,
+        "grid_fast_objectives",
+        "fast_objectives",
+        "gridFastObjectives",
+        fallback=legacy_objectives or ["net_profit_pct"],
+    )
+    fast_primary = (
+        _grid_config_value(config, "grid_fast_primary_objective", "fast_primary_objective", "gridFastPrimaryObjective")
+        or _grid_config_value(config, "primary_objective")
+        or (fast_objectives[0] if fast_objectives else None)
+    )
+    slow_refinement_enabled = _grid_setting_bool(
+        _grid_config_value(
+            config,
+            "grid_slow_refinement_enabled",
+            "slow_refinement_enabled",
+            "gridSlowRefinementEnabled",
+        ),
+        False,
+    )
+    slow_objectives = _grid_objective_list(
+        config,
+        "grid_slow_objectives",
+        "slow_objectives",
+        "gridSlowObjectives",
+        fallback=legacy_objectives or ["net_profit_pct"],
+    )
+    slow_primary = (
+        _grid_config_value(config, "grid_slow_primary_objective", "slow_primary_objective", "gridSlowPrimaryObjective")
+        or _grid_config_value(config, "primary_objective")
+        or (slow_objectives[0] if slow_objectives else None)
+    )
+    constraints_label = _grid_constraints_label(_grid_constraint_sources(study, config))
+
+    mode_rows = []
+    generations = set()
+    for mode_item in preview.get("modes") or []:
+        if not isinstance(mode_item, dict):
+            continue
+        generation = str(mode_item.get("generation") or "-")
+        generations.add(generation.lower())
+        budget_label = mode_item.get("budget_label") or format_compact_count(mode_item.get("budget"))
+        space_label = mode_item.get("space_label") or format_compact_count(mode_item.get("space_size"))
+        coverage_label = mode_item.get("coverage_label") or format_coverage_pct(mode_item.get("coverage_pct"))
+        mode_rows.append(
+            {
+                "key": _grid_mode_label(mode_item.get("mode")),
+                "val": f"{budget_label} / {space_label} | {coverage_label} | {generation}",
+            }
+        )
+
+    if not mode_rows:
+        allocation = _parse_json_dict((_parse_json_dict(grid_summary.get("grid"))).get("allocation"))
+        mode_budgets = _parse_json_dict(allocation.get("mode_budgets"))
+        mode_spaces = _parse_json_dict(allocation.get("mode_space_sizes"))
+        mode_coverages = _parse_json_dict(allocation.get("mode_coverage_pct"))
+        for mode_key in ("cc_only", "tbands_only", "both", "bracket", "trail"):
+            if mode_key not in mode_spaces and mode_key not in mode_budgets:
+                continue
+            budget = mode_budgets.get(mode_key)
+            space = mode_spaces.get(mode_key)
+            coverage = mode_coverages.get(mode_key)
+            generation = "Full" if _grid_setting_number(budget) == _grid_setting_number(space) else "LHS"
+            mode_rows.append(
+                {
+                    "key": _grid_mode_label(mode_key),
+                    "val": (
+                        f"{format_compact_count(budget)} / {format_compact_count(space)} "
+                        f"| {format_coverage_pct(coverage)} | {generation}"
+                    ),
+                }
+            )
+            generations.add(generation.lower())
+
+    if str(preview.get("profile") or "").strip().lower() == "full_enumeration":
+        sampling_label = "Full enumeration"
+    elif generations and generations <= {"full", "full enumeration", "disabled"}:
+        sampling_label = "Full enumeration"
+    elif any("lhs" in item for item in generations):
+        sampling_label = "LHS by mode"
+    elif generations:
+        sampling_label = "Mixed by mode"
+    else:
+        sampling_label = "-"
+    is_full_enumeration = (
+        str(preview.get("profile") or "").strip().lower() == "full_enumeration"
+        or str(allocation_method).strip().lower() == "full_enumeration"
+    )
+
+    rows = [
+        {
+            "key": "Budget",
+            "val": f"{format_compact_count(actual_budget)} candidates" if actual_budget is not None else "-",
+        },
+        {
+            "key": "Parameter Space",
+            "val": f"{format_compact_count(total_space)} combinations" if total_space is not None else "-",
+        },
+        {"key": "Coverage", "val": format_coverage_pct(coverage_pct)},
+        {"key": "Sampling", "val": sampling_label},
+        {"key": "Top Candidates", "val": str(top_candidates) if top_candidates is not None else "-"},
+        {
+            "key": "Workers",
+            "val": f"{workers} Numba threads" if workers is not None else "-",
+        },
+        {
+            "key": "Diversity",
+            "val": (
+                (
+                    f"On, max {diversity_max} / strategy group"
+                    if is_full_enumeration
+                    else f"On, max {diversity_max} / Mode+MA+Period"
+                )
+                if diversity_enabled
+                else "Off"
+            ),
+        },
+        {
+            "key": "Validation",
+            "val": "Strict fast-vs-slow" if strict_validation else "Non-strict fast-vs-slow",
+        },
+        {"key": "Fast Objectives", "val": _grid_objectives_label(fast_objectives)},
+        {
+            "key": "Fast Primary",
+            "val": OBJECTIVE_DISPLAY_NAMES.get(str(fast_primary), str(fast_primary)) if fast_primary else "-",
+        },
+        {"key": "Slow Refinement", "val": "On" if slow_refinement_enabled else "Off"},
+    ]
+    if not is_full_enumeration:
+        rows.insert(4, {"key": "Seed", "val": str(seed) if seed is not None else "-"})
+    if slow_refinement_enabled:
+        rows.extend(
+            [
+                {"key": "Slow Objectives", "val": _grid_objectives_label(slow_objectives)},
+                {
+                    "key": "Slow Primary",
+                    "val": OBJECTIVE_DISPLAY_NAMES.get(str(slow_primary), str(slow_primary)) if slow_primary else "-",
+                },
+            ]
+        )
+    rows.append({"key": "Constraints", "val": constraints_label})
+    if not is_wfa_grid:
+        rows.append(
+            {
+                "key": "Runtime",
+                "val": _format_duration_seconds(study.get("optimization_time_seconds")),
+            }
+        )
+
+    allocation_label = (
+        "Full enumeration"
+        if str(allocation_method).lower() == "full_enumeration"
+        else _grid_allocation_label(allocation_method)
+    )
+    allocation_rows = [{"key": "Allocation", "val": allocation_label}]
+    allocation_rows.extend(mode_rows)
+    return {
+        "enabled": True,
+        "is_wfa_grid": is_wfa_grid,
+        "rows": rows,
+        "allocation_rows": allocation_rows,
+    }
+
+
 def _split_timestamp(value: str) -> Tuple[str, str]:
     normalized = (value or "").strip()
     if not normalized:
@@ -1423,6 +1915,56 @@ def _resolve_wfa_period(
     return start, end, None
 
 
+def _payload_objective_list(payload: Dict[str, Any], *keys: str, fallback: Optional[List[str]] = None) -> List[str]:
+    values: List[str] = []
+    for key in keys:
+        raw = payload.get(key)
+        if isinstance(raw, list):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+            if values:
+                break
+    if not values and fallback:
+        values = [str(item).strip() for item in fallback if str(item).strip()]
+    return values or ["net_profit_pct"]
+
+
+def _payload_primary_objective(
+    payload: Dict[str, Any],
+    objectives: List[str],
+    *keys: str,
+    fallback: Any = None,
+) -> Optional[str]:
+    primary = ""
+    for key in keys:
+        raw = payload.get(key)
+        if raw not in (None, ""):
+            primary = str(raw).strip()
+            break
+    if not primary and fallback not in (None, ""):
+        primary = str(fallback).strip()
+    if len(objectives) <= 1:
+        return None
+    return primary or None
+
+
+def _validate_grid_objective_payload(
+    *,
+    stage: str,
+    objectives: List[str],
+    primary_objective: Optional[str],
+    supported: set,
+) -> None:
+    if not objectives:
+        raise ValueError(f"At least 1 Grid {stage} objective is required.")
+    unsupported = sorted(set(objectives) - supported)
+    if unsupported:
+        if "composite_score" in unsupported:
+            raise ValueError("Composite Score is not supported in Grid v1.")
+        raise ValueError(f"Grid {stage} objective is not available: " + ", ".join(unsupported))
+    if len(objectives) > 1 and primary_objective not in objectives:
+        raise ValueError(f"Primary Grid {stage} objective must be one of the selected objectives.")
+
+
 def _build_optimization_config(
     csv_file,
     payload: dict,
@@ -1663,8 +2205,8 @@ def _build_optimization_config(
 
     optimization_mode_raw = payload.get("optimization_mode", "optuna")
     optimization_mode = str(optimization_mode_raw).strip().lower() or "optuna"
-    if optimization_mode != "optuna":
-        raise ValueError("Grid Search has been removed. Use Optuna optimization only.")
+    if optimization_mode not in {"optuna", "grid"}:
+        raise ValueError(f"Unsupported optimization mode: {optimization_mode}")
 
     objectives = payload.get("objectives", [])
     if not isinstance(objectives, list):
@@ -1776,6 +2318,128 @@ def _build_optimization_config(
         "sanitize_trades_threshold": sanitize_trades_threshold,
     }
 
+    try:
+        grid_budget = parse_grid_budget(
+            payload.get("grid_budget", payload.get("gridBudget", "200k"))
+        )
+    except ValueError as exc:
+        raise ValueError(str(exc))
+    try:
+        grid_seed = int(payload.get("grid_seed", payload.get("gridSeed", 42)))
+    except (TypeError, ValueError):
+        raise ValueError("Grid seed must be an integer.")
+    try:
+        grid_top_candidates = int(
+            payload.get("grid_top_candidates", payload.get("gridTopCandidates", 10))
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Grid top candidates must be an integer.")
+    if grid_top_candidates <= 0:
+        raise ValueError("Grid top candidates must be greater than zero.")
+    enabled_modes_present = (
+        "grid_enabled_modes" in payload or "gridEnabledModes" in payload
+    )
+    enabled_modes_raw = payload.get(
+        "grid_enabled_modes",
+        payload.get("gridEnabledModes", []),
+    )
+    if enabled_modes_raw in (None, ""):
+        grid_enabled_modes: List[str] = []
+    elif isinstance(enabled_modes_raw, (list, tuple)):
+        grid_enabled_modes = list(
+            dict.fromkeys(
+                str(value).strip().lower()
+                for value in enabled_modes_raw
+                if str(value).strip()
+            )
+        )
+    else:
+        raise ValueError("Grid enabled modes must be an array.")
+    if not enabled_modes_present:
+        # Derive defaults from the registered fast backend contract instead of a
+        # per-strategy hardcode.  Full-enumeration backends (e.g. S06) expose
+        # default-enabled modes; sampled backends (e.g. S03) expose none and keep
+        # their existing cc/tbands/both allocation defaulting untouched.
+        grid_enabled_modes = default_grid_enabled_modes(strategy_id)
+    grid_allocation_method = str(
+        payload.get("grid_allocation_method", payload.get("gridAllocationMethod", "auto_sqrt_space"))
+    ).strip().lower()
+    try:
+        grid_min_quota = float(payload.get("grid_min_quota", payload.get("gridMinQuota", 0.10)))
+    except (TypeError, ValueError):
+        raise ValueError("Grid min quota must be numeric.")
+    manual_raw = payload.get("grid_manual_percents", payload.get("gridManualPercents", {}))
+    grid_manual_percents: Dict[str, float] = {}
+    if isinstance(manual_raw, dict):
+        for key in ("cc_only", "tbands_only", "both"):
+            try:
+                grid_manual_percents[key] = float(manual_raw.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                raise ValueError("Grid manual allocation percentages must be numeric.")
+    grid_diversity_enabled = _parse_bool(
+        payload.get("grid_diversity_enabled", payload.get("gridDiversityEnabled", True)),
+        True,
+    )
+    try:
+        grid_diversity_max_per_group = int(
+            payload.get("grid_diversity_max_per_group", payload.get("gridDiversityMaxPerGroup", 2))
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Grid diversity max per group must be an integer.")
+    grid_diversity_max_per_group = max(1, grid_diversity_max_per_group)
+    grid_strict_validation = _parse_bool(
+        payload.get("grid_strict_validation", payload.get("gridStrictValidation", True)),
+        True,
+    )
+    grid_fast_objectives = _payload_objective_list(
+        payload,
+        "grid_fast_objectives",
+        "gridFastObjectives",
+        fallback=objectives or ["net_profit_pct"],
+    )
+    grid_fast_primary_objective = _payload_primary_objective(
+        payload,
+        grid_fast_objectives,
+        "grid_fast_primary_objective",
+        "gridFastPrimaryObjective",
+        fallback=primary_objective,
+    )
+    grid_slow_refinement_enabled = _parse_bool(
+        payload.get("grid_slow_refinement_enabled", payload.get("gridSlowRefinementEnabled", False)),
+        False,
+    )
+    grid_slow_objectives = _payload_objective_list(
+        payload,
+        "grid_slow_objectives",
+        "gridSlowObjectives",
+        fallback=objectives or ["net_profit_pct"],
+    )
+    grid_slow_primary_objective = _payload_primary_objective(
+        payload,
+        grid_slow_objectives,
+        "grid_slow_primary_objective",
+        "gridSlowPrimaryObjective",
+        fallback=primary_objective,
+    )
+    if optimization_mode == "grid":
+        _validate_grid_objective_payload(
+            stage="fast screening",
+            objectives=grid_fast_objectives,
+            primary_objective=grid_fast_primary_objective,
+            supported=GRID_SUPPORTED_FAST_OBJECTIVES,
+        )
+        if grid_slow_refinement_enabled:
+            _validate_grid_objective_payload(
+                stage="slow refinement",
+                objectives=grid_slow_objectives,
+                primary_objective=grid_slow_primary_objective,
+                supported=GRID_SUPPORTED_SLOW_OBJECTIVES,
+            )
+        objectives = list(grid_fast_objectives)
+        primary_objective = grid_fast_primary_objective
+        optuna_params["objectives"] = list(objectives)
+        optuna_params["primary_objective"] = primary_objective
+
     config = OptimizationConfig(
         csv_file=csv_file,
         strategy_id=str(strategy_id),
@@ -1809,10 +2473,31 @@ def _build_optimization_config(
         swapping_prob=swapping_prob if swapping_prob is not None else 0.5,
         n_startup_trials=n_startup_trials,
         coverage_mode=coverage_mode,
+        grid_budget=grid_budget,
+        grid_seed=grid_seed,
+        grid_top_candidates=grid_top_candidates,
+        grid_enabled_modes=grid_enabled_modes,
+        grid_allocation_method=grid_allocation_method,
+        grid_min_quota=grid_min_quota,
+        grid_manual_percents=grid_manual_percents,
+        grid_diversity_enabled=grid_diversity_enabled,
+        grid_diversity_max_per_group=grid_diversity_max_per_group,
+        grid_strict_validation=grid_strict_validation,
+        grid_fast_objectives=grid_fast_objectives,
+        grid_fast_primary_objective=grid_fast_primary_objective,
+        grid_slow_refinement_enabled=grid_slow_refinement_enabled,
+        grid_slow_objectives=grid_slow_objectives,
+        grid_slow_primary_objective=grid_slow_primary_objective,
     )
 
     if optimization_mode == "optuna":
         for key, value in optuna_params.items():
+            setattr(config, key, value)
+    elif optimization_mode == "grid":
+        for key, value in optuna_params.items():
+            # Preserve objective/constraint/sanitization metadata for storage and
+            # shared result rendering; Optuna sampler/pruner settings are ignored
+            # by the Grid engine.
             setattr(config, key, value)
 
     return config
