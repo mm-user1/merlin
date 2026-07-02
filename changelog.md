@@ -1,114 +1,118 @@
 ### Changelog
-Все значимые изменения и история версий записаны в этом файле.
+All significant changes and version history are recorded in this file.
+#### [1.3.2] - 2026-07-02
+- Added Multi-Equity mode for the Analytics page
+- Added Fast Numba Grid Search for S_03 v10
+- Added the new S_06 R-Trend v02 strategy with Fast Numba Grid mode
 #### [1.3.1] - 2026-04-01
-- Добавлен Initial Search Coverage - равномерное начальное покрытие поля параметров
-- Метрика Consistency заменена на R2 (название осталось то же) - описание кривой доходности одним числом
-- Существенно увеличена производительность - бэкенд перенесен из файловой системы в RAM, loop в стратегиях теперь используют numpy array
-- Исправлена проблема с повторяющимися комбинациями во время оптимизации
-- Существенно улучшена и доработана страница Analytics
-	- Улучшен UI
-	- Улучшена производительность работы с БД - метрики и кривые доходности сетов теперь кэшируются
-	- Добавлены фильтры, сортировка, цвета сетов, массовые действия с сетами
-	- Добавлена метрика Consist для сетов
-	- Добавлен мини-график распределения доходностей внутри сета
-- Улучшена работа с очередью Queue
-	- Автоматическое создание сета
-	- Можно менять очередность queue items
-	- Можно удалять выполненные queue items
-- Добавлен настраиваемый режим WFA Adaptive Cooldown
-- Улучшен режим Forward Test - он не дает торговать комбинациями, которые не прошли порог, настраивается на главной странице
+- Added Initial Search Coverage - uniform initial coverage of the parameter space
+- The Consistency metric was replaced with R2 (the name remained the same) - describing the equity curve with a single number
+- Significantly improved performance - the backend was moved from the file system to RAM, loops in strategies now use numpy arrays
+- Fixed the issue with duplicate combinations during optimization
+- Significantly improved and refined the Analytics page
+	- Improved UI
+	- Improved database performance - metrics and equity curves for sets are now cached
+	- Added filters, sorting, set colors, bulk actions with sets
+	- Added the Consist metric for sets
+	- Added a mini-chart of return distribution inside the set
+- Improved work with the Queue
+	- Automatic set creation
+	- Queue items can be reordered
+	- Completed queue items can be deleted
+- Added configurable WFA Adaptive Cooldown mode
+- Improved Forward Test mode - it does not allow combinations that did not pass the threshold to trade, configured on the main page
 #### [1.3.0] - 2026-02-28
-- Добавлено управление БД - выбор БД при старте, переключение между разными БД
-- Добавлен WFA Adaptive режим
-- Добавлено превью периодов IS, OOS, FW, а также сколько WFA окон всего будет при текущих настройках
-- Добавлена очередь для исследований - можно запускать и останавливать запланированные исследования
-- Исправлены пути к CSV файлам - теперь они везде absolute
-- Добавлена страница аналитики - отдельная большая фича с огромным количеством новых возможностей
-	- Отображение таблицы исследований с метриками + мульти-выбор и агрегированные метрики
-	- Сортировка, фильтры, метрика аннуализированной прибыли, режим фокусировки на одном исследовании
-	- Возможность объединять исследования в сеты, далее работать с ними (переименовывать, удалять, передвигать, обновлять)
-	- Агрегированная equity кривая отображается когда выбрано несколько исследований
+- Added database management - database selection on startup, switching between different databases
+- Added WFA Adaptive mode
+- Added preview of IS, OOS, FW periods, as well as how many WFA windows there will be in total with the current settings
+- Added a research queue - planned research jobs can be started and stopped
+- Fixed paths to CSV files - they are now absolute everywhere
+- Added the Analytics page - a separate large feature with a huge number of new capabilities
+	- Displaying a table of research studies with metrics + multi-select and aggregated metrics
+	- Sorting, filters, annualized profit metric, focus mode on one research study
+	- Ability to combine research studies into sets, then work with them (rename, delete, move, update)
+	- Aggregated equity curve is displayed when several research studies are selected
 #### [1.2.5] - 2026-02-07
-- Добавлена новая стратегия S03 Reversal v10
-- Добавлена возможность скачать трейды для однократного бэктеста из главной страницы - кнопка Trades
+- Added the new strategy S03 Reversal v10
+- Added the ability to download trades for a single backtest from the main page - Trades button
 #### [1.2.1] - 2026-02-04
-- Исправлено - БД теперь занимает на 40% меньше места на диске для WFA исследования, Stitched Equity Curve хранится и выводится в упрощенном виде, остальные Equity Curves не хранятся в БД и генерируются по запросу
+- Fixed - the database now takes 40% less disk space for a WFA research study, Stitched Equity Curve is stored and displayed in simplified form, other Equity Curves are not stored in the database and are generated on request
 #### [1.2.0] - 2026-02-01
-- Добавлен Post Process модуль для отбора кандидатов уже после завершения оптимизации, он включает в себя Deflated Sharpe Ratio (DSR), Forward Test (FT) и Stress Test (ST) - можно включать все вместе и по отдельности
-- Добавлены Winrate % (таргет и ограничение) и Consecutive Losses (только ограничение) - они теперь выводятся в таблицу результатов
-- Добавлена функция Manual Test - тестирование на отдельно заданном периоде выбранного сета параметров (запускается после завершения оптимизации)
-- Добавлена функция OOS Test - автоматизированный аналог Manual Test - теперь можно заранее решить будет ли выполняться тестирование на отдельном периоде после оптимизации, при включении OOS Test - WFA недоступен, и наоборот
-- Сделан рефактор результатов WFA - теперь такая же логика как у результатов Optuna (графики equity, табы, таблицы с сетами параметров итд)
+- Added Post Process module for selecting candidates after optimization has already completed, it includes Deflated Sharpe Ratio (DSR), Forward Test (FT) and Stress Test (ST) - they can be enabled all together and separately
+- Added Winrate % (target and constraint) and Consecutive Losses (constraint only) - they are now displayed in the results table
+- Added Manual Test function - testing on a separately specified period for the selected parameter set (launched after optimization is complete)
+- Added OOS Test function - automated analogue of Manual Test - now it is possible to decide in advance whether testing on a separate period will be performed after optimization, when OOS Test is enabled - WFA is unavailable, and vice versa
+- Refactored WFA results - now the same logic as Optuna results (equity charts, tabs, tables with parameter sets, etc.)
 #### [1.1.0] - 2026-01-11
-- Сделан рефактор WFA модуля - теперь он работает так, как должен (IS окно - оптимизация, OOS окно - симуляция торговли топ-1 сета параметров, после завершения работы выводится склеенная по всем OOS окнам equity кривая)
-- Добавлена новая страница Results - она полностью заменяет CSV вывод + дополнительно отображает equity кривую + из нее можно делать Download Trades для выбранного сета параметров
-- Интегрирована SQLite база данных - теперь все результаты исследований Optuna и WFA хранятся там
-- Сделан большой апдейт Optuna модуля - добавлена возможность выбора нескольких целей оптимизации, добавлены NSGA II и III сэмплеры, добавлены ограничения для оптимизации
-- Добавлена отключаемая возможность sanitize (работает только для Sharpe, Sortino, SQN, PF если они являются целью оптимизации), если PF = inf, это не сантайзится, такой трайл будет failed - это нужно для понимания сэмплера Optuna где живут "плохие" результаты (по дефолту выполняется только когда трейдов = 0, то есть чтобы Optuna не закидывала параметры из этой проблемной области)
-- Сделан рефактор Composite Score - теперь она детерминированная, ей не нужны другие трайлы для оценки (предыдущая версия осталась, можно переключать если надо), это нужно для корректной многопоточности
+- Refactored WFA module - now it works as it should (IS window - optimization, OOS window - trading simulation of the top-1 parameter set, after completion a stitched equity curve across all OOS windows is displayed)
+- Added a new Results page - it completely replaces CSV output + additionally displays the equity curve + from it you can do Download Trades for the selected parameter set
+- Integrated SQLite database - now all results of Optuna and WFA research studies are stored there
+- Made a large update of the Optuna module - added the ability to select several optimization objectives, added NSGA II and III samplers, added optimization constraints
+- Added disableable sanitize capability (works only for Sharpe, Sortino, SQN, PF if they are the optimization objective), if PF = inf, this is not sanitized, such a trial will be failed - this is needed for the Optuna sampler to understand where the "bad" results live (by default performed only when trades = 0, that is, so that Optuna does not throw parameters from this problematic area)
+- Refactored Composite Score - now it is deterministic, it does not need other trials for evaluation (the previous version remains, can be switched if needed), this is needed for correct multithreading
 #### [1.0.9] - 2025-12-20
-- Добавлена многопоточность в Optuna
-- Исправлено - часть параметров не выводилась (N/A) в WFA CSV (Trail RR, ATR Period итд)
-- Убран dynamic warmup, теперь количество warmup bars задается только напрямую в UI
-- Исправлено расхождение первого трейда с TradingView - в WFA модуль добавлен helper, который напрямую указывает начинать торговать с 00:00 требуемого дня
-- Исправлено - wf_config NameError bug in export_wfa_trades_history
-- Исправлено - presets directory casing in server.py
-- Исправлено - silent strategy resolution failure during CSV import
-- Исправлено - invalid numeric CSV values silently become 0 / 0.0
-- Исправлено - create param_id() swallows all exceptions
+- Added multithreading in Optuna
+- Fixed - some parameters were not displayed (N/A) in WFA CSV (Trail RR, ATR Period, etc.)
+- Removed dynamic warmup, now the number of warmup bars is set only directly in UI
+- Fixed the first-trade mismatch with TradingView - a helper was added to the WFA module that directly specifies starting trading from 00:00 of the required day
+- Fixed - wf_config NameError bug in export_wfa_trades_history
+- Fixed - presets directory casing in server.py
+- Fixed - silent strategy resolution failure during CSV import
+- Fixed - invalid numeric CSV values silently become 0 / 0.0
+- Fixed - create param_id() swallows all exceptions
 #### [1.0.0] - 2025-12-16
-- Проведена полная миграция на новую архитектуру - ядро + модули + добавление стратегий + разбивка монолитного html. Это была очень сложная задача, на все потрачено почти месяц
-- Параллельно сделано множество фиксов - в целом все работает, в проекте сейчас две стратегии, обе оптимизируются, все функции на них работают
-- Теперь проект называется Merlin - потому что он крутой волшебник
+- Completed full migration to the new architecture - core + modules + adding strategies + splitting the monolithic html. This was a very difficult task, almost a month was spent on everything
+- In parallel, many fixes were made - overall everything works, the project currently has two strategies, both are optimized, all functions work on them
+- Now the project is called Merlin - because he is a cool wizard
 #### [0.3.8] - 2025-11-27
-- Проведена частичная миграция на новую архитектуру - одно ядро + разные стратегии, задача оказалась сложнее, чем казалось, поэтому дальше будет еще большой этап миграции. Все промпты + аудиты и доки по миграции лежат в ./info/
-- Сделаны несколько фиксов после завершения миграции - в целом проект более-менее работает, все функции сохранились
+- Completed partial migration to the new architecture - one core + different strategies, the task turned out to be more difficult than it seemed, so there will be another large migration stage next. All prompts + audits and migration docs are located in ./info/
+- Made several fixes after migration completion - overall the project more or less works, all functions have been preserved
 #### [0.2.11] - 2025-11-20
-- Добавлен Walk-Forward Analysis Stage 1 MVP
-- Обновлены дефолты для Optimizer секции (включены почти все чекбоксы + МА шаг 25)
-- Обновлен UI
-- Фикс WFA движка - для расчета окон не использовался Date Range, выбранный в левой части UI, вместо этого использовались все данные
-- Убрано сохранение csv в static, теперь только загрузка через Download по завершении работы
-- Снято ограничение на Optuna 100 initial random trials (теперь max = 50000)
-- Добавлен Warmup period для всего проекта - везде теперь добавляется Warmup Period (он равен самому длинному периоду MA * 1.5), это происходит во всех местах, где обрезается датасет
+- Added Walk-Forward Analysis Stage 1 MVP
+- Updated defaults for the Optimizer section (almost all checkboxes enabled + MA step 25)
+- Updated UI
+- WFA engine fix - Date Range selected in the left part of UI was not used for window calculation, instead all data was used
+- Removed saving csv to static, now only loading via Download after completion
+- Removed the Optuna 100 initial random trials limit (now max = 50000)
+- Added Warmup period for the whole project - Warmup Period is now added everywhere (it equals the longest MA period * 1.5), this happens in all places where the dataset is trimmed
 - Output WFA CSV data fix
-	- Исправлены OOS и FW подсчет прибыли (был установлен initial capital = $10000 вместо $100)
-	- Добавлен Net Profit% в IS окнах
-	- В === WINDOW DETAILS === вместо номера бара пишется дата
-	- В начале CSV пишутся даты IS-OOS, и FW Reserve
-	- В Appearance теперь пишется в каком именно по счету окне была найдена комбинация
-- Добавлен экспорт сделок скрипта (только для WFA режима) - они скачиваются в отдельный ZIP после завершения работы, их можно загрузить в TV с помощью Trading Report Generator
-- Все названия выходных файлов стандартизированы (в конце добавляется режим работы - Grid, Optuna, Optuna+WFA)
-- Добавлена возможность при включенном WFA обрабатывать несколько тикеров
+	- Fixed OOS and FW profit calculation (initial capital was set to $10000 instead of $100)
+	- Added Net Profit% in IS windows
+	- In === WINDOW DETAILS === the date is written instead of the bar number
+	- At the beginning of CSV, IS-OOS dates and FW Reserve are written
+	- Appearance now writes in which exact window the combination was found
+- Added export of script trades (only for WFA mode) - they are downloaded in a separate ZIP after completion, they can be loaded into TV using Trading Report Generator
+- All output file names are standardized (operating mode is added at the end - Grid, Optuna, Optuna+WFA)
+- Added the ability to process several tickers when WFA is enabled
 #### [0.1.6] - 2025-11-10
-- Фикс некорректной цены выхода по трейлингу (если он выше для лонга и ниже для шорта) - была глобальная проблема в подсчете цены закрытия, исправлено в файлах backtest_engine.py и optimizer_engine.py
+- Fixed incorrect trailing exit price (if it is higher for long and lower for short) - there was a global problem in close price calculation, fixed in files backtest_engine.py and optimizer_engine.py
 #### [0.1.5] - 2025-11-06
-- Добавлена оптимизация через Optuna
-- Исправлена проблема с Score 15.00 при Optuna optimization (некорректно считался)
-- Исправлена проблема с Stop X = 1.7000000000000002 и для 2.4 также
-- Сокращены названия столбцов в выходном CSV
-- В выходном CSV переименована Optimization Metadata => Optuna Metadata
+- Added optimization via Optuna
+- Fixed issue with Score 15.00 during Optuna optimization (calculated incorrectly)
+- Fixed issue with Stop X = 1.7000000000000002 and for 2.4 as well
+- Shortened column names in the output CSV
+- In the output CSV renamed Optimization Metadata => Optuna Metadata
 #### [0.0.17] - 2025-11-02
-- Добавлена Score System из 6 параметров (в том числе Sharpe Ratio (исправленный), все записывается в выходной CSV) - это было предложение Клода
-- Добавлен Lock для типов Trail MA
+- Added Score System from 6 parameters (including Sharpe Ratio (corrected), everything is written to the output CSV) - this was Claude's suggestion
+- Added Lock for Trail MA types
 #### [0.0.15] - 2025-10-29
-- Убраны T MA Type и TrailMA Type столбцы из выходного CSV (если они не перебирались), перенесены в блок параметров - одинаковая логика для всего блока и всех параметров
-- Добавлены пресеты + импорт пресетов из выходного CSV (все, что прописано в блоке залоченных параметров), если параметр участвовал в переборе, то он не импортируется пресетом. Можно перезаписывать дефолтные настройки и добавленные пресеты (правая не участвует, ее пресеты не касаются)
+- Removed T MA Type and TrailMA Type columns from the output CSV (if they were not iterated), moved to the parameter block - same logic for the whole block and all parameters
+- Added presets + import of presets from the output CSV (everything specified in the locked parameters block), if a parameter participated in iteration, it is not imported as a preset. Default settings and added presets can be overwritten (the right side does not participate, its presets are not affected)
 #### [0.0.13] - 2025-10-28
-- Более точный подсчет ETA - теперь учитывается количество свечей во входном CSV и даты тестирования
-- Добавлен Net Profit Filter - удаление из выходного CSV строк с Net Profit% меньше заданного
-- Исправлено длинное число в Trail RR Long/Short в выходном CSV
+- More accurate ETA calculation - now the number of candles in the input CSV and testing dates are taken into account
+- Added Net Profit Filter - removing from the output CSV rows with Net Profit% below the specified value
+- Fixed long number in Trail RR Long/Short in the output CSV
 #### [0.0.10] - 2025-10-27
-- Переименованы столбцы в выходном CSV:
+- Renamed columns in the output CSV:
 Max Drawdown% => Max DD%
 Total Trades => Trades
-- В начале выходного CSV записан блок зафиксированных параметров, которые НЕ перебирались, также они исключены из таблицы (строка заменена на блок, так удобнее)
-- Сделан подсчет ETA из расчета 6 воркеров = 16 комбинаций/сек (ETA меняется при изменении количества воркеров)
-- Сделан выбор нескольких CSV на вход (с ctrl или мышкой в папке)
+- At the beginning of the output CSV, a block of fixed parameters that were NOT iterated is written, they are also excluded from the table (row replaced with block, this is more convenient)
+- ETA calculation made based on 6 workers = 16 combinations/sec (ETA changes when the number of workers changes)
+- Added selection of several CSV files as input (with ctrl or mouse in folder)
 #### [0.0.6] - 2025-10-26
-- По дефолту все галочки в правой части отключены
-- Фикс Trail MA Length (ругался на значение 5)
-- Добавлен выбор количества воркеров (дефолт 6)
-- Название CSV на выходе исправлено (пример "OKX_COREUSDT.P, 30 2024.01.01-2025.10.01_ALL.csv")
-- В начале выходного CSV записана строка зафиксированных параметров, которые НЕ перебирались, также они исключены из таблицы
-- Добавлен прогресс бар в терминале
+- By default all checkboxes in the right part are disabled
+- Fixed Trail MA Length (complained about value 5)
+- Added selection of number of workers (default 6)
+- CSV output name fixed (example "OKX_COREUSDT.P, 30 2024.01.01-2025.10.01_ALL.csv")
+- At the beginning of the output CSV, a row of fixed parameters that were NOT iterated is written, they are also excluded from the table
+- Added progress bar in terminal
