@@ -6,14 +6,18 @@ import pandas as pd
 import pytest
 
 from core.backtest_engine import load_data, prepare_dataset_with_warmup
-from core.engine_v2.profile import parse_execution_profile
 from core.engine_v2.runner import run_v2_strategy
 from strategies.s06_r_trend_v02_b2.signals import S06B2Params, build_s06_b2_execution_data
-from strategies.s06_r_trend_v02_b2.strategy import load_config, normalized_params
+from strategies.s06_r_trend_v02_b2.strategy import load_profile, normalized_params
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASELINE_ROOT = REPO_ROOT / "data" / "baseline_v2" / "s06_r_trend_v02"
+BASELINE_RUNTIME_PARAMS = {
+    "dateFilter": True,
+    "start": "2025-08-01T00:00:00Z",
+    "end": "2025-12-01T00:00:00Z",
+}
 
 
 def _csv_rows(path):
@@ -30,7 +34,7 @@ def _load_reference(reference_id):
 
 def _run_reference(reference_id):
     _, params, _ = _load_reference(reference_id)
-    merged = normalized_params(params)
+    merged = normalized_params({**params, **BASELINE_RUNTIME_PARAMS})
     parsed = S06B2Params.from_dict(merged)
     df = load_data(REPO_ROOT / "data" / "raw" / "OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv")
     prepared, trade_start_idx = prepare_dataset_with_warmup(
@@ -42,7 +46,7 @@ def _run_reference(reference_id):
     data = build_s06_b2_execution_data(prepared, parsed)
     return run_v2_strategy(
         data=data,
-        profile=parse_execution_profile(load_config()),
+        profile=load_profile(),
         params=merged,
         trade_start_idx=trade_start_idx,
     )
@@ -72,6 +76,17 @@ def _first_mismatch(rows, trades, *, size_tolerance):
             elif abs(expected - actual) > tolerance:
                 return f"trade {index} {field}: expected={expected} actual={actual}"
     return None
+
+
+def _size_residuals(rows, trades):
+    residuals = []
+    for index, (row, trade) in enumerate(zip(rows, trades), start=1):
+        expected = float(row["size_qty"])
+        actual = trade.size
+        delta = abs(expected - actual)
+        if delta > 1e-9:
+            residuals.append((index, expected, actual, delta))
+    return residuals
 
 
 def test_pinned_data_prep_recipe_is_used_for_baseline_parity():
@@ -124,4 +139,8 @@ def test_reference_a_trail_boundary_characterization_and_first_residual():
     assert run.guardrail_summary.no_capital_halt is False
 
     first_residual = _first_mismatch(rows, result.trades, size_tolerance=1e-9)
+    size_residuals = _size_residuals(rows, result.trades)
     assert first_residual == "trade 11 size: expected=24.36 actual=24.37"
+    assert len(size_residuals) == 35
+    assert max(delta for _, _, _, delta in size_residuals) == pytest.approx(0.03)
+    assert size_residuals[-1][:3] == (61, 27.91, 27.93)

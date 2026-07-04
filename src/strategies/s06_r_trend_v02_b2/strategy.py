@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict
 
@@ -10,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from core.backtest_engine import StrategyResult
+from core.engine_v2.contracts import ExecutionProfile
 from core.engine_v2.profile import parse_execution_profile
 from core.engine_v2.runner import run_v2_strategy
 from strategies.base import BaseStrategy
@@ -17,18 +20,30 @@ from strategies.base import BaseStrategy
 from .signals import S06B2Params, build_s06_b2_execution_data, normalize_parameter_aliases
 
 
-def load_config() -> dict[str, Any]:
+@lru_cache(maxsize=1)
+def _load_config_cached() -> dict[str, Any]:
     with (Path(__file__).with_name("config.json")).open(encoding="utf-8") as handle:
         return json.load(handle)
 
 
+def load_config() -> dict[str, Any]:
+    """Return a caller-owned config copy backed by a cached JSON load."""
+
+    return deepcopy(_load_config_cached())
+
+
 def default_params_from_config(config: Dict[str, Any] | None = None) -> dict[str, Any]:
-    payload = config if config is not None else load_config()
+    payload = config if config is not None else _load_config_cached()
     defaults: dict[str, Any] = {}
     for name, spec in payload.get("parameters", {}).items():
         if isinstance(spec, dict) and "default" in spec:
             defaults[str(name)] = spec["default"]
     return defaults
+
+
+@lru_cache(maxsize=1)
+def load_profile() -> ExecutionProfile:
+    return parse_execution_profile(_load_config_cached())
 
 
 def normalized_params(params: Dict[str, Any] | None = None) -> dict[str, Any]:
@@ -48,8 +63,7 @@ class S06RTrendV02B2(BaseStrategy):
         params: Dict[str, Any],
         trade_start_idx: int = 0,
     ) -> StrategyResult:
-        config = load_config()
-        merged_params = default_params_from_config(config)
+        merged_params = default_params_from_config()
         merged_params.update(params or {})
         merged_params = normalize_parameter_aliases(merged_params)
         parsed = S06B2Params.from_dict(merged_params)
@@ -62,10 +76,9 @@ class S06RTrendV02B2(BaseStrategy):
                 df = df.iloc[: int(eligible[-1]) + 1]
 
         data = build_s06_b2_execution_data(df, parsed)
-        profile = parse_execution_profile(config)
         return run_v2_strategy(
             data=data,
-            profile=profile,
+            profile=load_profile(),
             params=merged_params,
             trade_start_idx=trade_start_idx,
         ).strategy_result
@@ -75,5 +88,6 @@ __all__ = [
     "S06RTrendV02B2",
     "default_params_from_config",
     "load_config",
+    "load_profile",
     "normalized_params",
 ]

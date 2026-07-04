@@ -282,22 +282,6 @@
       "role": "runtime",
       "optimize": { "enabled": false }
     },
-    "start": {
-      "type": "datetime",
-      "label": "Start",
-      "default": "2025-08-01T00:00:00Z",
-      "group": "Backtest Settings",
-      "role": "runtime",
-      "optimize": { "enabled": false }
-    },
-    "end": {
-      "type": "datetime",
-      "label": "End",
-      "default": "2025-12-01T00:00:00Z",
-      "group": "Backtest Settings",
-      "role": "runtime",
-      "optimize": { "enabled": false }
-    },
     "warmupBars": {
       "type": "int",
       "label": "Warmup Bars",

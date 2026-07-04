@@ -54,6 +54,40 @@ def _require_mode(modes: Mapping[str, str], name: str, expected: str) -> None:
         raise ValueError(f"Unsupported Phase-1 execution mode {name}={actual!r}; expected {expected!r}.")
 
 
+def _validate_bool_mode(name: str, value: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"Unsupported Phase-1 execution mode {name}={value!r}; expected 'true' or 'false'.")
+
+
+def _validate_phase1_exit_topology(
+    *,
+    target_mode: str,
+    trail_mode: str,
+    trail_activation_mode: str,
+) -> None:
+    if trail_activation_mode not in {"none", "rr"}:
+        raise ValueError(f"Unsupported Phase-1 trailActivation mode: {trail_activation_mode!r}.")
+
+    valid_bracket = (
+        target_mode == "rr"
+        and trail_mode == "none"
+        and trail_activation_mode == "none"
+    )
+    valid_trail = (
+        target_mode == "none"
+        and trail_mode == "ma"
+        and trail_activation_mode == "rr"
+    )
+    if not (valid_bracket or valid_trail):
+        raise ValueError(
+            "Phase 1 supports exactly one exit topology: target=rr/trail=none "
+            "or target=none/trail=ma with trailActivation=rr."
+        )
+
+
 def build_kernel_config(
     *,
     profile: Any,
@@ -82,7 +116,15 @@ def build_kernel_config(
     if trail_mode not in {"ma", "none"}:
         raise ValueError(f"Unsupported Phase-1 trail mode: {trail_mode!r}.")
 
+    trail_activation_mode = modes.get("trailActivation", "none")
+    _validate_phase1_exit_topology(
+        target_mode=target_mode,
+        trail_mode=trail_mode,
+        trail_activation_mode=trail_activation_mode,
+    )
+
     max_days_mode = modes.get("maxDays", "false")
+    max_days_enabled = _validate_bool_mode("maxDays", max_days_mode)
     return KernelConfig(
         initial_capital=float(params.get("initialCapital", 100.0)),
         commission_pct=float(params.get("commissionPct", 0.0)),
@@ -96,9 +138,9 @@ def build_kernel_config(
         enable_short=_coerce_bool(params.get("enableShort"), True),
         target_mode=target_mode,
         trail_mode=trail_mode,
-        trail_activation_mode=modes.get("trailActivation", "none"),
+        trail_activation_mode=trail_activation_mode,
         trail_activation_rr=float(params.get("trailRR", 1.0)),
-        max_days_enabled=max_days_mode == "true",
+        max_days_enabled=max_days_enabled,
         boundary_mode=boundary_mode,
         margin_mode=margin_mode,
         trade_start_idx=trade_start_idx,

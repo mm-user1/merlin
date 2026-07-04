@@ -155,6 +155,32 @@ def test_stop_target_collision_uses_path_order_and_flat_segment_is_rising():
     assert intrabar_path(100.0, 100.0, 99.0, 100.0) == (100.0, 100.0, 99.0, 100.0)
 
 
+def test_flat_segment_execution_remains_stable_when_open_equals_high():
+    data = _data(
+        open_=[100.0, 100.0],
+        high=[100.0, 100.0],
+        low=[97.0, 94.0],
+        close=[100.0, 96.0],
+        long=[True, False],
+        rolling_low=[97.0, 94.0],
+    )
+
+    result = run_reference_kernel(
+        data,
+        KernelConfig(
+            initial_capital=100.0,
+            risk_per_trade_pct=100.0,
+            contract_size=1.0,
+            stop_x=0.0,
+            reward_risk=1.0,
+            max_stop_pct=10.0,
+        ),
+    )
+
+    assert intrabar_path(100.0, 100.0, 94.0, 96.0)[:2] == (100.0, 100.0)
+    assert result.trades[0].exit_price == 97.0
+
+
 def test_trail_activation_on_entry_fill_bar_can_exit_same_bar():
     data = _data(
         open_=[100.0, 103.0],
@@ -217,12 +243,12 @@ def test_post_path_trail_ratchet_applies_to_future_bar_only():
 
 def test_max_days_and_strict_boundary_behaviors():
     scheduled = _data(
-        open_=[100.0, 100.0, 100.0, 102.0],
-        high=[100.0, 101.0, 101.0, 102.0],
-        low=[97.0, 99.0, 99.0, 102.0],
-        close=[100.0, 100.0, 100.0, 102.0],
-        long=[True, False, False, False],
-        rolling_low=[97.0, 99.0, 99.0, 102.0],
+        open_=[100.0, 100.0, 101.0, 103.0, 104.0],
+        high=[100.0, 101.0, 102.0, 104.0, 104.0],
+        low=[97.0, 99.0, 100.0, 102.0, 104.0],
+        close=[100.0, 100.5, 101.0, 102.0, 104.0],
+        long=[True, False, False, False, False],
+        rolling_low=[97.0, 99.0, 100.0, 102.0, 104.0],
     )
     scheduled_result = run_reference_kernel(
         scheduled,
@@ -233,12 +259,12 @@ def test_max_days_and_strict_boundary_behaviors():
             stop_x=0.0,
             max_stop_pct=10.0,
             reward_risk=10.0,
-            max_days=1.0 / 24.0,
+            max_days=1.0 / 48.0,
         ),
     )
 
     final = _data(
-        open_=[100.0, 100.0, 100.0],
+        open_=[100.0, 100.0, 101.0],
         high=[100.0, 101.0, 101.0],
         low=[97.0, 99.0, 99.0],
         close=[100.0, 100.0, 102.0],
@@ -259,9 +285,34 @@ def test_max_days_and_strict_boundary_behaviors():
     )
 
     assert scheduled_result.trades[0].exit_time == scheduled.timestamps[3]
-    assert scheduled_result.trades[0].exit_price == 102.0
+    assert scheduled_result.trades[0].exit_price == 103.0
     assert final_result.trades[0].exit_time == final.timestamps[2]
     assert final_result.trades[0].exit_price == 102.0
+
+
+def test_strict_boundary_cancels_final_bar_entry_signal():
+    data = _data(
+        open_=[100.0, 100.0],
+        high=[100.0, 100.0],
+        low=[97.0, 97.0],
+        close=[100.0, 100.0],
+        long=[False, True],
+        rolling_low=[97.0, 97.0],
+    )
+
+    result = run_reference_kernel(
+        data,
+        KernelConfig(
+            initial_capital=100.0,
+            risk_per_trade_pct=100.0,
+            contract_size=1.0,
+            stop_x=0.0,
+            max_stop_pct=10.0,
+        ),
+    )
+
+    assert result.trades == []
+    assert result.standing_state.pending_entry_direction == 0
 
 
 def test_boundary_none_preserves_pending_entry_and_pending_close_state():

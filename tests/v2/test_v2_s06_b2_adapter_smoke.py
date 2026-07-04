@@ -5,7 +5,11 @@ from core.backtest_engine import load_data, prepare_dataset_with_warmup
 from core.engine_v2.profile import is_v2_config, parse_execution_profile
 from strategies import get_strategy, get_strategy_config
 from strategies.s06_r_trend_v02.strategy import S06RTrendV02
-from strategies.s06_r_trend_v02_b2.strategy import S06RTrendV02B2
+from strategies.s06_r_trend_v02_b2.strategy import (
+    S06RTrendV02B2,
+    default_params_from_config,
+    load_profile,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -24,9 +28,23 @@ def test_b2_config_validates_as_v2_with_roles_for_optimized_parameters():
     assert is_v2_config(config)
     profile = parse_execution_profile(config)
     assert profile.engine == "v2"
+    assert "start" not in config["parameters"]
+    assert "end" not in config["parameters"]
+    assert all(spec.get("type") != "datetime" for spec in config["parameters"].values())
     for name, spec in config["parameters"].items():
         if spec.get("optimize", {}).get("enabled", False):
             assert spec["role"] in {"signal", "execution", "runtime"}, name
+
+
+def test_b2_cached_defaults_return_fresh_mutable_copies():
+    first = default_params_from_config()
+    second = default_params_from_config()
+
+    assert first == second
+    assert first is not second
+    first["entryMode"] = "Trend @ Square"
+    assert default_params_from_config()["entryMode"] == second["entryMode"]
+    assert load_profile() is load_profile()
 
 
 def test_b2_adapter_returns_enriched_strategy_result_on_small_window():
@@ -40,6 +58,9 @@ def test_b2_adapter_returns_enriched_strategy_result_on_small_window():
         params.get("end"),
         1000,
     )
+
+    assert prepared.index[0] == df.index[0]
+    assert trade_start_idx == 0
 
     result = get_strategy("s06_r_trend_v02_b2").run(
         prepared.iloc[:1100],
