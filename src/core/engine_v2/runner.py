@@ -1,0 +1,141 @@
+"""Backtester V2 runner that adapts kernel output to Merlin results."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional
+
+import pandas as pd
+
+from core import metrics
+from core.backtest_engine import StrategyResult
+
+from .contracts import GuardrailSummary, StandingState
+from .kernel import ExecutionData, KernelConfig, KernelResult, run_reference_kernel
+from .profile import active_mode_values
+
+
+@dataclass(frozen=True)
+class V2RunResult:
+    """High-level V2 run output with compact execution telemetry."""
+
+    strategy_result: StrategyResult
+    guardrail_summary: GuardrailSummary
+    standing_state: StandingState
+    kernel_result: KernelResult
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _timestamp(value: Any) -> Optional[pd.Timestamp]:
+    if value in (None, ""):
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _require_mode(modes: Mapping[str, str], name: str, expected: str) -> None:
+    actual = modes.get(name)
+    if actual != expected:
+        raise ValueError(f"Unsupported Phase-1 execution mode {name}={actual!r}; expected {expected!r}.")
+
+
+def build_kernel_config(
+    *,
+    profile: Any,
+    params: Mapping[str, Any],
+    trade_start_idx: int = 0,
+) -> KernelConfig:
+    """Convert a parsed execution profile and params into kernel settings."""
+
+    modes = active_mode_values(profile, params)
+    _require_mode(modes, "entryOrder", "market_next_open")
+    _require_mode(modes, "stop", "atr_swing")
+    _require_mode(modes, "sizing", "risk_per_trade")
+
+    margin_mode = modes.get("margin", "off")
+    if margin_mode not in {"off", "report_only"}:
+        raise ValueError(f"Unsupported Phase-1 margin mode: {margin_mode!r}.")
+
+    boundary_mode = modes.get("boundary", "strict_close")
+    if boundary_mode not in {"strict_close", "none"}:
+        raise ValueError(f"Unsupported Phase-1 boundary mode: {boundary_mode!r}.")
+
+    target_mode = modes.get("target", "none")
+    trail_mode = modes.get("trail", "none")
+    if target_mode not in {"rr", "none"}:
+        raise ValueError(f"Unsupported Phase-1 target mode: {target_mode!r}.")
+    if trail_mode not in {"ma", "none"}:
+        raise ValueError(f"Unsupported Phase-1 trail mode: {trail_mode!r}.")
+
+    max_days_mode = modes.get("maxDays", "false")
+    return KernelConfig(
+        initial_capital=float(params.get("initialCapital", 100.0)),
+        commission_pct=float(params.get("commissionPct", 0.0)),
+        stop_x=float(params.get("stopX", 2.0)),
+        reward_risk=float(params.get("stopRR", 2.0)),
+        max_stop_pct=float(params.get("stopMaxPct", float("inf"))),
+        max_days=float(params.get("stopMaxDays", float("inf"))),
+        risk_per_trade_pct=float(params.get("riskPerTrade", 2.0)),
+        contract_size=float(params.get("contractSize", 0.01)),
+        enable_long=_coerce_bool(params.get("enableLong"), True),
+        enable_short=_coerce_bool(params.get("enableShort"), True),
+        target_mode=target_mode,
+        trail_mode=trail_mode,
+        trail_activation_mode=modes.get("trailActivation", "none"),
+        trail_activation_rr=float(params.get("trailRR", 1.0)),
+        max_days_enabled=max_days_mode == "true",
+        boundary_mode=boundary_mode,
+        margin_mode=margin_mode,
+        trade_start_idx=trade_start_idx,
+        use_date_filter=_coerce_bool(params.get("dateFilter"), True),
+        start=_timestamp(params.get("start")),
+        end=_timestamp(params.get("end")),
+    )
+
+
+def run_v2_strategy(
+    *,
+    data: ExecutionData,
+    profile: Any,
+    params: Mapping[str, Any],
+    trade_start_idx: int = 0,
+) -> V2RunResult:
+    """Run V2 execution and return an enriched Merlin strategy result."""
+
+    config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
+    kernel_result = run_reference_kernel(data, config)
+    strategy_result = StrategyResult(
+        trades=kernel_result.trades,
+        equity_curve=kernel_result.equity_curve,
+        balance_curve=kernel_result.balance_curve,
+        timestamps=kernel_result.timestamps,
+    )
+    metrics.enrich_strategy_result(
+        strategy_result,
+        initial_balance=config.initial_capital,
+        risk_free_rate=0.02,
+    )
+    return V2RunResult(
+        strategy_result=strategy_result,
+        guardrail_summary=kernel_result.guardrail_summary,
+        standing_state=kernel_result.standing_state,
+        kernel_result=kernel_result,
+    )
+
+
+__all__ = ["V2RunResult", "build_kernel_config", "run_v2_strategy"]

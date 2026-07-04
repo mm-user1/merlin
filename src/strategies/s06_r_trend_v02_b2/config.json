@@ -1,0 +1,313 @@
+{
+  "id": "s06_r_trend_v02_b2",
+  "name": "S06 R-Trend B2",
+  "version": "v02-b2",
+  "engine": "v2",
+  "description": "S06 R-Trend v02 clone using the shared Backtester V2 execution kernel",
+  "author": "",
+  "execution": {
+    "entryOrder": "market_next_open",
+    "stop": "atr_swing",
+    "sizing": "risk_per_trade",
+    "maxDays": true,
+    "margin": "report_only",
+    "boundary": "strict_close",
+    "variantSelector": {
+      "param": "useTrailMA",
+      "mapping": {
+        "false": "bracket",
+        "true": "trail"
+      }
+    },
+    "variants": {
+      "bracket": {
+        "target": "rr",
+        "trail": "none"
+      },
+      "trail": {
+        "target": "none",
+        "trail": "ma",
+        "trailActivation": "rr"
+      }
+    }
+  },
+  "parameters": {
+    "entryMode": {
+      "type": "select",
+      "label": "Entry Mode",
+      "default": "Reversal @ Triangle",
+      "options": ["Reversal @ Triangle", "Trend @ Square"],
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "enableLong": {
+      "type": "bool",
+      "label": "Enable Long",
+      "default": true,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "enableShort": {
+      "type": "bool",
+      "label": "Enable Short",
+      "default": true,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "fastLength": {
+      "type": "int",
+      "label": "Fast Length",
+      "default": 21,
+      "min": 2,
+      "max": 500,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "fastSmooth": {
+      "type": "int",
+      "label": "Fast Smoothing",
+      "default": 7,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "slowLength": {
+      "type": "int",
+      "label": "Slow Length",
+      "default": 112,
+      "min": 2,
+      "max": 500,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "slowSmooth": {
+      "type": "int",
+      "label": "Slow Smoothing",
+      "default": 3,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": false }
+    },
+    "thresholdOS": {
+      "type": "int",
+      "label": "Threshold OS",
+      "default": 20,
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
+    },
+    "thresholdOB": {
+      "type": "int",
+      "label": "Threshold OB",
+      "default": 20,
+      "min": 1,
+      "max": 50,
+      "step": 1,
+      "group": "%R Trend Exhaustion",
+      "role": "signal",
+      "optimize": { "enabled": true, "default_enabled": false, "min": 20, "max": 40, "step": 10 }
+    },
+    "stopX": {
+      "type": "float",
+      "label": "Stop X",
+      "default": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": true, "min": 1.0, "max": 3.0, "step": 0.5 }
+    },
+    "stopRR": {
+      "type": "float",
+      "label": "Stop RR",
+      "default": 3.0,
+      "min": 1.5,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": true, "min": 1.5, "max": 3.0, "step": 0.5 }
+    },
+    "stopLP": {
+      "type": "int",
+      "label": "Stop LP",
+      "default": 2,
+      "min": 2,
+      "max": 4,
+      "step": 2,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": true, "min": 2, "max": 4, "step": 2 }
+    },
+    "stopMaxPct": {
+      "type": "float",
+      "label": "Stop Max %",
+      "default": 4.0,
+      "min": 2.0,
+      "max": 8.0,
+      "step": 2.0,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": true, "min": 2.0, "max": 8.0, "step": 2.0 }
+    },
+    "stopMaxDays": {
+      "type": "int",
+      "label": "Stop Max Days",
+      "default": 4,
+      "min": 2,
+      "max": 6,
+      "step": 2,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": true, "min": 2, "max": 6, "step": 2 }
+    },
+    "riskPerTrade": {
+      "type": "float",
+      "label": "Risk Per Trade (%)",
+      "default": 2.0,
+      "min": 0.1,
+      "max": 100.0,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    },
+    "contractSize": {
+      "type": "select",
+      "label": "Contract Size",
+      "default": 0.01,
+      "options": [0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000, 100000, 1000000],
+      "group": "Risk",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    },
+    "useTrailMA": {
+      "type": "bool",
+      "label": "Use Trail MA",
+      "default": true,
+      "group": "Trailing",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    },
+    "trailRR": {
+      "type": "float",
+      "label": "Trail RR",
+      "default": 1.0,
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Trailing",
+      "role": "execution",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 1.0, "max": 3.0, "step": 0.5 }
+    },
+    "trailMAType": {
+      "type": "select",
+      "label": "Trail MA Type",
+      "default": "SMA",
+      "options": ["SMA", "HMA", "KAMA", "T3"],
+      "group": "Trailing",
+      "role": "execution",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true }
+    },
+    "trailMALength": {
+      "type": "int",
+      "label": "Trail MA Length",
+      "default": 150,
+      "min": 50,
+      "max": 200,
+      "step": 50,
+      "group": "Trailing",
+      "role": "execution",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 50, "max": 200, "step": 50 }
+    },
+    "trailMAOffsetEx": {
+      "type": "float",
+      "label": "Trail MA Offset %",
+      "default": 0.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.5,
+      "group": "Trailing",
+      "role": "execution",
+      "depends_on": "useTrailMA",
+      "optimize": { "enabled": true, "min": 0.0, "max": 2.0, "step": 0.5 }
+    },
+    "initialCapital": {
+      "type": "float",
+      "label": "Initial Capital",
+      "default": 100.0,
+      "min": 0.01,
+      "max": 1000000.0,
+      "step": 1.0,
+      "group": "Backtest Settings",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    },
+    "commissionPct": {
+      "type": "float",
+      "label": "Commission (%)",
+      "default": 0.05,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "group": "Backtest Settings",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    },
+    "dateFilter": {
+      "type": "bool",
+      "label": "Date Filter",
+      "default": true,
+      "group": "Backtest Settings",
+      "role": "runtime",
+      "optimize": { "enabled": false }
+    },
+    "start": {
+      "type": "datetime",
+      "label": "Start",
+      "default": "2025-08-01T00:00:00Z",
+      "group": "Backtest Settings",
+      "role": "runtime",
+      "optimize": { "enabled": false }
+    },
+    "end": {
+      "type": "datetime",
+      "label": "End",
+      "default": "2025-12-01T00:00:00Z",
+      "group": "Backtest Settings",
+      "role": "runtime",
+      "optimize": { "enabled": false }
+    },
+    "warmupBars": {
+      "type": "int",
+      "label": "Warmup Bars",
+      "default": 1000,
+      "min": 0,
+      "max": 5000,
+      "step": 50,
+      "group": "Backtest Settings",
+      "role": "execution",
+      "optimize": { "enabled": false }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Backtester V2 Phase 0 public contracts."""
+"""Backtester V2 public contracts and reference runner."""
 
 from .contracts import (
     EXECUTION_REASON_BOUNDARY_STATE,
@@ -27,6 +27,8 @@ from .contracts import (
     VariantSelector,
     VariantSpec,
 )
+from .kernel import ExecutionData, KernelConfig, KernelResult, intrabar_path, run_reference_kernel
+from .runner import V2RunResult, build_kernel_config, run_v2_strategy
 
 __all__ = [
     "EXECUTION_REASON_BOUNDARY_STATE",
@@ -46,12 +48,20 @@ __all__ = [
     "GUARDRAIL_FLAG_REJECTED_FILL",
     "GUARDRAIL_FLAG_ZERO_SIZE_ENTRY",
     "ExecutionIntent",
+    "ExecutionData",
     "ExecutionProfile",
     "GuardrailSummary",
+    "KernelConfig",
+    "KernelResult",
     "ModeBinding",
     "OverlaySpec",
     "Signals",
     "StandingState",
+    "V2RunResult",
     "VariantSelector",
     "VariantSpec",
+    "build_kernel_config",
+    "intrabar_path",
+    "run_reference_kernel",
+    "run_v2_strategy",
 ]
