@@ -34,6 +34,7 @@ def test_dataset_json_parses_and_matches_expected_market_data_hash():
     assert dataset["strategy_id"] == "s06_r_trend_v02"
     assert market_data["path"] == "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv"
     assert market_data["sha256"] == "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae"
+    assert dataset["instrument"]["tick_size"] == 0.0001
     assert data_path.exists()
     assert _sha256(data_path) == market_data["sha256"]
 

@@ -30,6 +30,8 @@ MODE_PARAMETER_BINDINGS: tuple[ModeBinding, ...] = (
     ModeBinding("trail", "none", "phase1"),
     ModeBinding("sizing", "risk_per_trade", "phase1", ("riskPerTrade", "contractSize")),
     ModeBinding("maxDays", "true", "phase1", ("stopMaxDays",), ("timestamps",)),
+    ModeBinding("priceRounding", "none", "phase1"),
+    ModeBinding("priceRounding", "tick_outward", "phase1", ("tickSize",)),
     ModeBinding(
         "margin",
         "report_only",
@@ -302,6 +304,13 @@ def _all_bound_params(variants: Mapping[str, VariantSpec]) -> set[str]:
     return bound
 
 
+def _all_known_mode_params() -> set[str]:
+    bound: set[str] = set()
+    for binding in MODE_PARAMETER_BINDINGS:
+        bound.update(binding.consumes_params)
+    return bound
+
+
 def _variant_independent_params(
     *,
     roles: Mapping[str, str],
@@ -318,8 +327,11 @@ def _variant_independent_params(
         independent.add(selector.param)
 
     bound_params = _all_bound_params(variants)
+    known_mode_params = _all_known_mode_params()
     for name, role in roles.items():
         if role != "execution" or name in bound_params or name in independent:
+            continue
+        if name in known_mode_params:
             continue
         independent.add(name)
         warnings.append(

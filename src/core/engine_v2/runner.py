@@ -12,6 +12,7 @@ from core.backtest_engine import StrategyResult
 
 from .contracts import GuardrailSummary, StandingState
 from .kernel import ExecutionData, KernelConfig, KernelResult, run_reference_kernel
+from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD, validate_tick_size
 from .profile import active_mode_values
 
 
@@ -88,6 +89,16 @@ def _validate_phase1_exit_topology(
         )
 
 
+def _validate_price_rounding_mode(mode: str, params: Mapping[str, Any]) -> tuple[str, float]:
+    if mode == PRICE_ROUNDING_NONE:
+        return mode, float("nan")
+    if mode == PRICE_ROUNDING_TICK_OUTWARD:
+        if "tickSize" not in params:
+            raise ValueError("tickSize is required when priceRounding='tick_outward'.")
+        return mode, validate_tick_size(float(params["tickSize"]))
+    raise ValueError(f"Unsupported Phase-1 priceRounding mode: {mode!r}.")
+
+
 def build_kernel_config(
     *,
     profile: Any,
@@ -125,6 +136,10 @@ def build_kernel_config(
 
     max_days_mode = modes.get("maxDays", "false")
     max_days_enabled = _validate_bool_mode("maxDays", max_days_mode)
+    price_rounding_mode, tick_size = _validate_price_rounding_mode(
+        modes.get("priceRounding", PRICE_ROUNDING_NONE),
+        params,
+    )
     return KernelConfig(
         initial_capital=float(params.get("initialCapital", 100.0)),
         commission_pct=float(params.get("commissionPct", 0.0)),
@@ -147,6 +162,8 @@ def build_kernel_config(
         use_date_filter=_coerce_bool(params.get("dateFilter"), True),
         start=_timestamp(params.get("start")),
         end=_timestamp(params.get("end")),
+        price_rounding_mode=price_rounding_mode,
+        tick_size=tick_size,
     )
 
 

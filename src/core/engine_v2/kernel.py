@@ -22,6 +22,13 @@ from .contracts import (
     Signals,
     StandingState,
 )
+from .price_rounding import (
+    PRICE_ROUNDING_NONE,
+    PRICE_ROUNDING_TICK_OUTWARD,
+    round_stop_level,
+    round_target_level,
+    round_trail_level,
+)
 from .sizing import risk_position_size
 
 
@@ -90,6 +97,8 @@ class KernelConfig:
     use_date_filter: bool = True
     start: Optional[pd.Timestamp] = None
     end: Optional[pd.Timestamp] = None
+    price_rounding_mode: str = PRICE_ROUNDING_NONE
+    tick_size: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -238,6 +247,32 @@ def _active_stop(position: _Position, trail_enabled: bool) -> float:
     return position.initial_stop
 
 
+def _rounding_enabled(config: KernelConfig) -> bool:
+    if config.price_rounding_mode == PRICE_ROUNDING_NONE:
+        return False
+    if config.price_rounding_mode == PRICE_ROUNDING_TICK_OUTWARD:
+        return True
+    raise ValueError(f"Unsupported priceRounding mode: {config.price_rounding_mode!r}.")
+
+
+def _rounded_stop(direction: int, price: float, config: KernelConfig) -> float:
+    if not _rounding_enabled(config):
+        return price
+    return round_stop_level(direction, price, config.tick_size)
+
+
+def _rounded_target(direction: int, price: float, config: KernelConfig) -> float:
+    if not _rounding_enabled(config):
+        return price
+    return round_target_level(direction, price, config.tick_size)
+
+
+def _rounded_trail(direction: int, price: float, config: KernelConfig) -> float:
+    if not _rounding_enabled(config):
+        return price
+    return round_trail_level(direction, price, config.tick_size)
+
+
 def _standing_state(
     *,
     position: _Position,
@@ -367,10 +402,11 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                     position.trail_active = True
                     current_band = data.trail_long[i] if position.direction > 0 else data.trail_short[i]
                     if math.isfinite(float(current_band)):
+                        current_band = _rounded_trail(position.direction, float(current_band), config)
                         if position.direction > 0:
-                            position.trail_stop = max(position.trail_stop, float(current_band))
+                            position.trail_stop = max(position.trail_stop, current_band)
                         else:
-                            position.trail_stop = min(position.trail_stop, float(current_band))
+                            position.trail_stop = min(position.trail_stop, current_band)
 
         if position.direction != 0:
             stop_active_for_this_bar = _active_stop(position, trail_enabled)
@@ -426,10 +462,11 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                 position.trail_active = True
                 current_band = data.trail_long[i] if position.direction > 0 else data.trail_short[i]
                 if math.isfinite(float(current_band)):
+                    current_band = _rounded_trail(position.direction, float(current_band), config)
                     if position.direction > 0:
-                        position.trail_stop = max(position.initial_stop, position.trail_stop, float(current_band))
+                        position.trail_stop = max(position.initial_stop, position.trail_stop, current_band)
                     else:
-                        position.trail_stop = min(position.initial_stop, position.trail_stop, float(current_band))
+                        position.trail_stop = min(position.initial_stop, position.trail_stop, current_band)
 
         if position.direction != 0 and position.entry_time is not None and config.max_days_enabled:
             days_in_trade = (timestamp - position.entry_time).total_seconds() / 86400.0
@@ -485,12 +522,14 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                     guardrails.zero_size_entry_count += 1
                     guardrails.flag(GUARDRAIL_FLAG_ZERO_SIZE_ENTRY)
                 else:
+                    order_stop = _rounded_stop(direction, stop, config)
+                    order_target = _rounded_target(direction, target, config) if target_enabled else target
                     pending_entry = _PendingEntry(
                         direction=direction,
                         anchor_price=anchor,
-                        stop_price=stop,
+                        stop_price=order_stop,
                         risk=risk,
-                        target_price=target,
+                        target_price=order_target,
                         size=float(order_size),
                     )
 

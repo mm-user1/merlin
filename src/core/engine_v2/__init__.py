@@ -28,6 +28,18 @@ from .contracts import (
     VariantSpec,
 )
 from .kernel import ExecutionData, KernelConfig, KernelResult, intrabar_path, run_reference_kernel
+from .metrics_kernel import CoreMetrics, compute_core_metrics_from_balance_and_trades
+from .price_rounding import (
+    PRICE_ROUNDING_NONE,
+    PRICE_ROUNDING_TICK_OUTWARD,
+    round_level_outward,
+    round_stop_level,
+    round_target_level,
+    round_to_tick_ceil,
+    round_to_tick_floor,
+    round_trail_level,
+    validate_tick_size,
+)
 from .runner import V2RunResult, build_kernel_config, run_v2_strategy
 
 __all__ = [
@@ -47,6 +59,9 @@ __all__ = [
     "GUARDRAIL_FLAG_NO_CAPITAL_HALT",
     "GUARDRAIL_FLAG_REJECTED_FILL",
     "GUARDRAIL_FLAG_ZERO_SIZE_ENTRY",
+    "PRICE_ROUNDING_NONE",
+    "PRICE_ROUNDING_TICK_OUTWARD",
+    "CoreMetrics",
     "ExecutionIntent",
     "ExecutionData",
     "ExecutionProfile",
@@ -61,7 +76,15 @@ __all__ = [
     "VariantSelector",
     "VariantSpec",
     "build_kernel_config",
+    "compute_core_metrics_from_balance_and_trades",
     "intrabar_path",
+    "round_level_outward",
+    "round_stop_level",
+    "round_target_level",
+    "round_to_tick_ceil",
+    "round_to_tick_floor",
+    "round_trail_level",
     "run_reference_kernel",
     "run_v2_strategy",
+    "validate_tick_size",
 ]

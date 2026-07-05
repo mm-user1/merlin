@@ -13,6 +13,9 @@
     "sha256": "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae",
     "timezone": "UTC"
   },
+  "instrument": {
+    "tick_size": 0.0001
+  },
   "canonical_period": {
     "start_utc": "2025-08-01T00:00:00Z",
     "end_utc": "2025-12-01T00:00:00Z",
