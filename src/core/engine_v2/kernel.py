@@ -28,6 +28,7 @@ from .price_rounding import (
     round_stop_level,
     round_target_level,
     round_trail_level,
+    validate_tick_size,
 )
 from .sizing import risk_position_size
 
@@ -255,6 +256,15 @@ def _rounding_enabled(config: KernelConfig) -> bool:
     raise ValueError(f"Unsupported priceRounding mode: {config.price_rounding_mode!r}.")
 
 
+def _validate_price_rounding_config(config: KernelConfig) -> None:
+    if config.price_rounding_mode == PRICE_ROUNDING_NONE:
+        return
+    if config.price_rounding_mode == PRICE_ROUNDING_TICK_OUTWARD:
+        validate_tick_size(config.tick_size)
+        return
+    raise ValueError(f"Unsupported priceRounding mode: {config.price_rounding_mode!r}.")
+
+
 def _rounded_stop(direction: int, price: float, config: KernelConfig) -> float:
     if not _rounding_enabled(config):
         return price
@@ -304,6 +314,7 @@ def _standing_state(
 def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelResult:
     """Run the deterministic Phase-1 reference execution loop."""
 
+    _validate_price_rounding_config(config)
     length = len(data.timestamps)
     guardrails = _GuardrailAccumulator()
     if length == 0:

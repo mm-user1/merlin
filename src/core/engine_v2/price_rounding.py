@@ -8,7 +8,8 @@ import math
 PRICE_ROUNDING_NONE = "none"
 PRICE_ROUNDING_TICK_OUTWARD = "tick_outward"
 
-_GRID_EPSILON = 1e-9
+_MIN_GRID_EPSILON = 1e-9
+_ULP_MULTIPLIER = 8.0
 
 
 def validate_tick_size(tick_size: float) -> float:
@@ -24,16 +25,25 @@ def round_to_tick_floor(price: float, tick_size: float) -> float:
     """Round a price down to the tick grid with an epsilon guard."""
 
     tick = validate_tick_size(tick_size)
-    scaled = float(price) / tick
-    return math.floor(scaled + _GRID_EPSILON) * tick
+    scaled = _scaled_price(float(price), tick)
+    return math.floor(scaled) * tick
 
 
 def round_to_tick_ceil(price: float, tick_size: float) -> float:
     """Round a price up to the tick grid with an epsilon guard."""
 
     tick = validate_tick_size(tick_size)
-    scaled = float(price) / tick
-    return math.ceil(scaled - _GRID_EPSILON) * tick
+    scaled = _scaled_price(float(price), tick)
+    return math.ceil(scaled) * tick
+
+
+def _scaled_price(price: float, tick_size: float) -> float:
+    scaled = price / tick_size
+    nearest = round(scaled)
+    tolerance = max(_MIN_GRID_EPSILON, _ULP_MULTIPLIER * math.ulp(scaled))
+    if abs(scaled - nearest) <= tolerance:
+        return float(nearest)
+    return scaled
 
 
 def round_level_outward(price: float, tick_size: float, *, below_market: bool) -> float:

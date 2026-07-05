@@ -90,6 +90,16 @@ def test_floor_and_ceil_use_epsilon_without_shifting_grid_prices():
     assert round_to_tick_ceil(1.23451, 0.0001) == pytest.approx(1.2346)
 
 
+def test_large_magnitude_on_grid_tick_values_do_not_shift():
+    price = 43210.5001
+    tick_size = 0.0001
+
+    assert round_to_tick_floor(price, tick_size) == pytest.approx(price)
+    assert round_to_tick_ceil(price, tick_size) == pytest.approx(price)
+    assert round_to_tick_floor(price - 0.00000001, tick_size) == pytest.approx(43210.5)
+    assert round_to_tick_ceil(price + 0.00000001, tick_size) == pytest.approx(43210.5002)
+
+
 def test_outward_level_rounding_floors_below_market_and_ceils_above_market():
     assert round_level_outward(100.019, 0.01, below_market=True) == pytest.approx(100.01)
     assert round_level_outward(100.011, 0.01, below_market=False) == pytest.approx(100.02)
@@ -131,6 +141,21 @@ def test_inactive_tick_size_is_inert_in_no_rounding_mode():
 
     assert config.price_rounding_mode == "none"
     assert math.isnan(config.tick_size)
+
+
+def test_direct_kernel_rejects_unknown_rounding_mode_before_bar_execution():
+    empty = _data(open_=[], high=[], low=[], close=[])
+    with pytest.raises(ValueError, match="Unsupported priceRounding mode"):
+        run_reference_kernel(empty, KernelConfig(price_rounding_mode="bad"))
+
+    signal_free = _data(
+        open_=[100.0, 101.0],
+        high=[101.0, 102.0],
+        low=[99.0, 100.0],
+        close=[100.5, 101.5],
+    )
+    with pytest.raises(ValueError, match="Unsupported priceRounding mode"):
+        run_reference_kernel(signal_free, KernelConfig(price_rounding_mode="bad"))
 
 
 def test_tick_rounding_changes_only_standing_stop_and_target_levels():

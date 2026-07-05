@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from core.grid_v2 import GridV2Settings, build_grid_v2_plan
+from core.optuna_engine import OptimizationConfig
+
+os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+
+from strategies.s06_r_trend_v02 import fast_grid
+from strategies.s06_r_trend_v02_b2.strategy import load_config
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DATA_PATH = REPO_ROOT / "data" / "raw" / "OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv"
+TRADING_START = "2025-08-01T00:00:00+00:00"
+TRADING_END = "2025-12-01T00:00:00+00:00"
+GRID_PARAMS = (
+    "stopX",
+    "stopRR",
+    "stopLP",
+    "stopMaxPct",
+    "stopMaxDays",
+    "trailRR",
+    "trailMAType",
+    "trailMALength",
+    "trailMAOffsetEx",
+)
+
+
+def _v1_config() -> OptimizationConfig:
+    return OptimizationConfig(
+        csv_file=str(DATA_PATH),
+        strategy_id="s06_r_trend_v02",
+        enabled_params={name: True for name in GRID_PARAMS} | {"thresholdOS": False, "thresholdOB": False},
+        param_ranges={},
+        param_types={
+            "thresholdOS": "int",
+            "thresholdOB": "int",
+            "stopX": "float",
+            "stopRR": "float",
+            "stopLP": "int",
+            "stopMaxPct": "float",
+            "stopMaxDays": "int",
+            "trailRR": "float",
+            "trailMAType": "select",
+            "trailMALength": "int",
+            "trailMAOffsetEx": "float",
+        },
+        fixed_params={
+            "dateFilter": True,
+            "start": TRADING_START,
+            "end": TRADING_END,
+            "entryMode": "Reversal @ Triangle",
+            "enableLong": True,
+            "enableShort": True,
+            "fastLength": 21,
+            "fastSmoothing": 7,
+            "slowLength": 112,
+            "slowSmoothing": 3,
+            "thresholdOS": 20,
+            "thresholdOB": 20,
+            "stopX": 2.0,
+            "stopRR": 3.0,
+            "stopLP": 2,
+            "stopMaxPct": 6.0,
+            "stopMaxDays": 6,
+            "riskPerTrade": 2.0,
+            "contractSize": 0.01,
+            "useTrailMA": True,
+            "trailRR": 1.0,
+            "trailMAType": "SMA",
+            "trailMALength": 150,
+            "trailMAOffsetEx": 0.0,
+            "initialCapital": 100.0,
+            "commissionPct": 0.05,
+        },
+        warmup_bars=1000,
+        optimization_mode="grid",
+        objectives=["net_profit_pct"],
+        grid_enabled_modes=["bracket", "trail"],
+        grid_budget=1,
+    )
+
+
+def _v2_base_params() -> dict:
+    fixed = dict(_v1_config().fixed_params)
+    fixed["fastSmooth"] = fixed.pop("fastSmoothing")
+    fixed["slowSmooth"] = fixed.pop("slowSmoothing")
+    return fixed
+
+
+def _v1_candidates():
+    config = _v1_config()
+    space = fast_grid.build_parameter_space(config)
+    allocation = fast_grid.build_allocation(config, space, None)
+    return fast_grid.generate_candidates(config, space, allocation, seed=123).candidates
+
+
+def _canonical_from_v1(candidate) -> tuple:
+    return (
+        candidate.mode,
+        tuple((name, candidate.params[name]) for name in fast_grid.MODE_AXES[candidate.mode]),
+    )
+
+
+def _canonical_from_v2(candidate) -> tuple:
+    return (
+        candidate.variant_name,
+        tuple((name, candidate.params[name]) for name in fast_grid.MODE_AXES[candidate.variant_name]),
+    )
+
+
+def test_full_s06_default_identity_space_maps_one_to_one_with_v1_fast_grid():
+    v1 = _v1_candidates()
+    v2 = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
+
+    assert len(v1) == 48_480
+    assert v2.deduped_candidate_count == 48_480
+    assert v2.per_variant_counts == {"bracket": 480, "trail": 48_000}
+
+    v1_keys = [_canonical_from_v1(candidate) for candidate in v1]
+    v2_keys = [_canonical_from_v2(candidate) for candidate in v2.candidates]
+    assert v2_keys == v1_keys
+    assert len(set(v2_keys)) == 48_480
+
+    sample_indices = [0, 1, 479, 480, 20_000, 48_479]
+    assert [v2.candidates[index].candidate_id for index in sample_indices] == [
+        index + 1 for index in sample_indices
+    ]
+
+
+def test_v2_semantic_keys_exclude_runtime_and_inactive_variant_params():
+    plan = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
+
+    bracket_payload = json.loads(plan.candidates[0].semantic_key)
+    assert "dateFilter" not in bracket_payload["params"]
+    assert "start" not in bracket_payload["params"]
+    assert "end" not in bracket_payload["params"]
+    assert "trailMAType" not in bracket_payload["params"]
+    assert "trailRR" not in bracket_payload["params"]
+    assert "stopRR" in bracket_payload["params"]
+
+    trail_payload = json.loads(plan.candidates[480].semantic_key)
+    assert "stopRR" not in trail_payload["params"]
+    assert "trailMAType" in trail_payload["params"]
+    assert "trailRR" in trail_payload["params"]
+
+
+def _collapse_config():
+    config = {
+        "id": "collapse_fixture",
+        "version": "test",
+        "engine": "v2",
+        "execution": {
+            "entryOrder": "market_next_open",
+            "stop": "atr_swing",
+            "sizing": "risk_per_trade",
+            "maxDays": True,
+            "margin": "off",
+            "boundary": "strict_close",
+            "priceRounding": "none",
+            "variantSelector": {
+                "param": "selector",
+                "mapping": {"false": "with_target", "true": "without_target"},
+            },
+            "variants": {
+                "with_target": {"target": "rr", "trail": "none"},
+                "without_target": {"target": "none", "trail": "none"},
+            },
+        },
+        "parameters": {
+            "selector": {"type": "bool", "default": False, "role": "execution", "optimize": {"enabled": False}},
+            "signal": {"type": "int", "default": 1, "role": "signal", "optimize": {"enabled": False}},
+            "stopRR": {
+                "type": "float",
+                "default": 1.0,
+                "role": "execution",
+                "optimize": {"enabled": True, "gridValues": [1.0, 2.0]},
+            },
+            "stopX": {"type": "float", "default": 2.0, "role": "execution", "optimize": {"enabled": False}},
+            "stopLP": {"type": "int", "default": 2, "role": "execution", "optimize": {"enabled": False}},
+            "stopMaxPct": {"type": "float", "default": 10.0, "role": "execution", "optimize": {"enabled": False}},
+            "riskPerTrade": {"type": "float", "default": 2.0, "role": "execution", "optimize": {"enabled": False}},
+            "contractSize": {"type": "float", "default": 0.01, "role": "execution", "optimize": {"enabled": False}},
+            "stopMaxDays": {"type": "int", "default": 4, "role": "execution", "optimize": {"enabled": False}},
+        },
+    }
+    return config
+
+
+def test_inactive_axis_dedup_collapses_to_first_deterministic_candidate():
+    plan = build_grid_v2_plan(
+        _collapse_config(),
+        GridV2Settings(include_inactive_axes_for_dedup=True),
+    )
+
+    assert plan.raw_candidate_count == 4
+    assert plan.enumerated_candidate_count == 4
+    assert plan.deduped_candidate_count == 3
+    assert plan.per_variant_counts == {"with_target": 2, "without_target": 1}
+    assert [candidate.candidate_id for candidate in plan.candidates] == [1, 2, 3]
+    assert plan.candidates[-1].params["stopRR"] == 1.0

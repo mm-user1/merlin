@@ -72,20 +72,20 @@ def _validate_phase1_exit_topology(
     if trail_activation_mode not in {"none", "rr"}:
         raise ValueError(f"Unsupported Phase-1 trailActivation mode: {trail_activation_mode!r}.")
 
-    valid_bracket = (
+    valid_target_exit = (
         target_mode == "rr"
         and trail_mode == "none"
         and trail_activation_mode == "none"
     )
-    valid_trail = (
+    valid_ma_exit = (
         target_mode == "none"
         and trail_mode == "ma"
         and trail_activation_mode == "rr"
     )
-    if not (valid_bracket or valid_trail):
+    if not (valid_target_exit or valid_ma_exit):
         raise ValueError(
-            "Phase 1 supports exactly one exit topology: target=rr/trail=none "
-            "or target=none/trail=ma with trailActivation=rr."
+            "Phase 1 supports exactly one exit topology: target=rr with no trailing mode "
+            "or target=none with moving-average trailing mode and trailActivation=rr."
         )
 
 

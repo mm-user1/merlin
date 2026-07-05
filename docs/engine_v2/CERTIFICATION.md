@@ -7,6 +7,8 @@ certified for Python-native strategy trust.
 Phase 1.5 adds a shared balance-based V2 metric parity layer, deterministic run
 checks, prefix/window-start anti-repainting checks, and an opt-in
 TradingView-compatible outward tick-rounding mode for computed order levels.
+Phase 2 adds a backend-only, reference-batch Grid V2 foundation. It is not wired
+into the legacy Grid dispatcher, UI, server routes, WFA, or Scout workflows.
 
 ## Fields
 
@@ -51,6 +53,61 @@ window-start test requires exact trade skeleton and exact contract-rounded
 sizes, but uses `1e-9` relative tolerance for prices and PnL because EMA/RMA and
 rolling calculations can have ULP-level start-dependent differences.
 
+## Phase 2 Grid V2 Backend Status
+
+Grid V2 entry points live in `src/core/grid_v2.py`:
+
+- `build_grid_v2_plan(...)`
+- `preview_grid_v2_counts(...)`
+- `estimate_grid_v2_cache(...)`
+- `execute_grid_v2_candidates(...)`
+- `run_grid_v2(...)`
+- `deterministic_candidate_subset_indices(...)`
+
+The Phase 2 backend is reference-only. It loops selected candidates through the
+shared public V2 runner and does not claim Fast/Numba Grid V2 completion.
+Compiled batch execution, `src/core/grid_engine.py` dispatch wiring, UI/server
+integration, WFA integration, and persistent Grid V2 storage are deferred.
+
+Candidate planning is data-driven from V2 config/profile metadata. Semantic
+keys include the strategy id/version, Grid V2 engine version, resolved variant,
+resolved mode values, and active non-runtime parameter values. Runtime params
+such as date filters and start/end values are excluded. Parameters inactive for
+the resolved variant are excluded from semantic identity and deduplication.
+
+Optional axes use `optimize.default_enabled`: optimized params are axes by
+default unless `default_enabled=false`; `GridV2Settings.enabled_axes` can
+override the default set explicitly. Variant selector params are not normal
+axes. Grid V2 enumerates variants from `execution.variants` and derives the
+selector param value from the inverse `execution.variantSelector.mapping`.
+
+Signal/dataprep cache scope is local to one run. Cache keys include
+strategy/version, data fingerprint, trade-start metadata, active cache params,
+and the hook fingerprint. The memory estimate includes two bool signal arrays,
+five float dataprep arrays, number of bars, combo counts, and worker multiplier.
+The default hard limit is `max_signal_cache_mb=512`; runs fail clearly if the
+estimate exceeds the limit. Diagnostics expose signal/dataprep hits and misses,
+combo counts, and estimated MB.
+
+S06 B2 Phase 2 gates:
+
+- Full T1 identity gate vs S06 V1 fast-grid candidate order: `48,480` V2
+  candidates, per-variant counts `480` and `48,000`, one-to-one canonical
+  mapping, no execution.
+- Expanded threshold-enabled breadth is count-previewed at `436,320`.
+- T1 metric gate is a deterministic reference subset against V1 fast-grid
+  metrics, not full-breadth compiled parity.
+- T2 authority gate reruns selected candidates against the S06 V1 slow strategy
+  with B2-to-V1 param translation (`fastSmooth`/`slowSmooth`) and exact trade
+  sequence comparison.
+- Tick-outward Grid V2 support is certified only against direct V2 single-run
+  output, not against V1 no-rounding Grid output.
+
+The S06 B2 config order was adjusted so trailing parameters are declared as
+`trailMAType`, `trailMALength`, `trailMAOffsetEx`, `trailRR`, matching the V1
+candidate axis order for literal T1 identity. V1 strategy and V1 fast-grid
+runtime files are unchanged by Phase 2.
+
 ## Notes
 
 The tick-rounding API is:
@@ -70,5 +127,5 @@ TradingView UI drawdown can differ when it uses an equity/open-excursion
 convention. Merlin does not duplicate that TradingView drawdown convention in
 Phase 1.5.
 
-No slippage, Bar Magnifier, lower-timeframe reconstruction, Grid V2, Scout WFA,
-or V1 runtime migration is certified by this registry.
+No slippage, Bar Magnifier, lower-timeframe reconstruction, Fast/Numba Grid V2,
+Scout WFA, or V1 runtime migration is certified by this registry.

@@ -5,8 +5,8 @@ from core.engine_v2.runner import build_kernel_config
 
 
 TOPOLOGY_ERROR = (
-    "Phase 1 supports exactly one exit topology: target=rr/trail=none "
-    "or target=none/trail=ma with trailActivation=rr."
+    "Phase 1 supports exactly one exit topology: target=rr with no trailing mode "
+    "or target=none with moving-average trailing mode and trailActivation=rr."
 )
 
 
