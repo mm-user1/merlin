@@ -16,9 +16,6 @@ from core.grid_v2 import (
 )
 from core.optuna_engine import OptimizationConfig
 
-os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
-
-from strategies.s06_r_trend_v02 import fast_grid
 from strategies.s06_r_trend_v02.strategy import S06RTrendV02
 from strategies.s06_r_trend_v02_b2 import strategy as s06_b2_strategy
 from strategies.s06_r_trend_v02_b2.strategy import load_config
@@ -39,6 +36,24 @@ GRID_PARAMS = (
     "trailMALength",
     "trailMAOffsetEx",
 )
+T1_SUBSET_LIMIT = 240
+
+
+def _fast_grid():
+    # The V1 fast-grid oracle is imported lazily with JIT disabled. This test
+    # compares V1/V2 semantics, while V1 owns separate compiled-vs-interpreted
+    # tests. The setting is process-global, so this helper is called only by
+    # V1-oracle tests and after the V2 compiled Grid test has run.
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+    try:
+        import numba
+
+        numba.config.DISABLE_JIT = True
+    except Exception:
+        pass
+    from strategies.s06_r_trend_v02 import fast_grid
+
+    return fast_grid
 
 
 @pytest.fixture(scope="module")
@@ -125,13 +140,14 @@ def _v2_base_params() -> dict:
 
 
 def _v1_candidates():
+    fast_grid = _fast_grid()
     config = _v1_config()
     space = fast_grid.build_parameter_space(config)
     allocation = fast_grid.build_allocation(config, space, None)
     return config, fast_grid.generate_candidates(config, space, allocation, seed=99).candidates
 
 
-def _assert_float_close(actual, expected, *, abs_tol=1e-3):
+def _assert_float_close(actual, expected):
     if expected is None:
         assert math.isnan(float(actual))
         return
@@ -142,18 +158,36 @@ def _assert_float_close(actual, expected, *, abs_tol=1e-3):
     elif math.isinf(expected):
         assert math.isinf(actual) and (actual > 0) == (expected > 0)
     else:
-        assert actual == pytest.approx(expected, abs=abs_tol)
+        assert actual == pytest.approx(expected, rel=1e-9, abs=1e-12)
 
 
-@pytest.mark.skipif(not fast_grid.NUMBA_AVAILABLE, reason="Numba is required")
+def _default_like_indices(plan) -> tuple[int, ...]:
+    base = _v2_base_params()
+    indices: list[int] = []
+    for candidate in plan.candidates:
+        if all(candidate.params.get(name) == base.get(name) for name in candidate.axis_param_names):
+            indices.append(candidate.candidate_id - 1)
+    return tuple(indices)
+
+
 def test_s06_t1_reference_subset_metrics_match_v1_fast_grid(prepared_data, hooks):
+    fast_grid = _fast_grid()
+    if not fast_grid.NUMBA_AVAILABLE:
+        pytest.skip("Numba is required by the V1 fast-grid oracle")
     df, trade_start_idx = prepared_data
     v1_config, v1_source = _v1_candidates()
     v2_plan = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
     indices = deterministic_candidate_subset_indices(
         len(v2_plan.candidates),
-        8,
-        required_indices=(0, 1, 479, 480, len(v2_plan.candidates) - 1),
+        T1_SUBSET_LIMIT,
+        required_indices=(
+            0,
+            1,
+            479,
+            480,
+            len(v2_plan.candidates) - 1,
+            *_default_like_indices(v2_plan),
+        ),
     )
 
     fast_data = fast_grid.prepare_fast_data(df, trade_start_idx, v1_source)
@@ -168,10 +202,13 @@ def test_s06_t1_reference_subset_metrics_match_v1_fast_grid(prepared_data, hooks
     for v1_row, v2_row in zip(v1_results, v2_result.rows):
         _assert_float_close(v2_row.net_profit_pct, v1_row.net_profit_pct)
         _assert_float_close(v2_row.max_drawdown_pct, v1_row.max_drawdown_pct)
-        _assert_float_close(v2_row.romad, v1_row.romad, abs_tol=5e-3)
+        _assert_float_close(v2_row.romad, v1_row.romad)
         _assert_float_close(v2_row.profit_factor, v1_row.profit_factor)
         _assert_float_close(v2_row.win_rate_pct, v1_row.win_rate)
         assert v2_row.total_trades == v1_row.total_trades
+        assert v2_row.winning_trades == v1_row.winning_trades
+        assert v2_row.losing_trades == v1_row.losing_trades
+        assert v2_row.max_consecutive_losses == v1_row.max_consecutive_losses
     assert v1_config.grid_enabled_modes == ["bracket", "trail"]
 
 
@@ -198,13 +235,38 @@ def test_s06_t2_selected_candidates_match_v1_slow_strategy(prepared_data, hooks)
     df, trade_start_idx = prepared_data
     plan = build_grid_v2_plan(
         load_config(),
-        GridV2Settings(enabled_axes=(), top_n=2),
         base_params=_v2_base_params(),
     )
-    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks)
-    assert {row.variant_name for row in result.rows} == {"bracket", "trail"}
+    indices = deterministic_candidate_subset_indices(
+        len(plan.candidates),
+        T1_SUBSET_LIMIT,
+        required_indices=(
+            0,
+            1,
+            479,
+            480,
+            len(plan.candidates) - 1,
+            *_default_like_indices(plan),
+        ),
+    )
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks, indices)
+    rows_by_id = {row.candidate_id: row for row in result.rows}
+    top_rows = sorted(
+        [row for row in result.rows if row.status == "ok"],
+        key=lambda row: (-float(row.net_profit_pct), row.candidate_id),
+    )[:6]
+    coverage_ids = {
+        next(row.candidate_id for row in result.rows if row.variant_name == "bracket"),
+        next(row.candidate_id for row in result.rows if row.variant_name == "trail"),
+        *[index + 1 for index in _default_like_indices(plan)],
+    }
+    selected_ids = list(dict.fromkeys([row.candidate_id for row in top_rows] + sorted(coverage_ids)))
 
-    for candidate in plan.candidates:
+    assert any(rows_by_id[candidate_id].variant_name == "bracket" for candidate_id in selected_ids)
+    assert any(rows_by_id[candidate_id].variant_name == "trail" for candidate_id in selected_ids)
+
+    for candidate_id in selected_ids:
+        candidate = plan.candidates[candidate_id - 1]
         params = hooks.normalize_params(dict(candidate.params)) if hooks.normalize_params else candidate.params
         data = hooks.build_execution_data(df, params)
         from core.engine_v2.runner import run_v2_strategy

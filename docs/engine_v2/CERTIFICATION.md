@@ -7,8 +7,10 @@ certified for Python-native strategy trust.
 Phase 1.5 adds a shared balance-based V2 metric parity layer, deterministic run
 checks, prefix/window-start anti-repainting checks, and an opt-in
 TradingView-compatible outward tick-rounding mode for computed order levels.
-Phase 2 adds a backend-only, reference-batch Grid V2 foundation. It is not wired
-into the legacy Grid dispatcher, UI, server routes, WFA, or Scout workflows.
+Phase 2 adds generic Grid V2 planning. Phase 2.5 integrates Grid V2 into the
+normal Grid dispatcher/storage workflow and adds a generic compiled batch
+evaluator for supported V2 execution profiles. WFA/Scout integration remains
+deferred.
 
 ## Fields
 
@@ -53,7 +55,7 @@ window-start test requires exact trade skeleton and exact contract-rounded
 sizes, but uses `1e-9` relative tolerance for prices and PnL because EMA/RMA and
 rolling calculations can have ULP-level start-dependent differences.
 
-## Phase 2 Grid V2 Backend Status
+## Phase 2.5 Grid V2 Status
 
 Grid V2 entry points live in `src/core/grid_v2.py`:
 
@@ -64,10 +66,24 @@ Grid V2 entry points live in `src/core/grid_v2.py`:
 - `run_grid_v2(...)`
 - `deterministic_candidate_subset_indices(...)`
 
-The Phase 2 backend is reference-only. It loops selected candidates through the
-shared public V2 runner and does not claim Fast/Numba Grid V2 completion.
-Compiled batch execution, `src/core/grid_engine.py` dispatch wiring, UI/server
-integration, WFA integration, and persistent Grid V2 storage are deferred.
+Grid V2 has two execution tiers:
+
+- reference tier: loops candidates through the shared public V2 runner;
+- compiled tier: `src/core/engine_v2/compiled_kernel.py` packs primitive
+  candidate config arrays and evaluates candidates through a generic
+  Numba-compiled batch loop when Numba is available and JIT is not disabled.
+
+`GridV2Settings.prefer_compiled` is live. The normal dispatcher in
+`src/core/grid_engine.py` routes `engine="v2"` strategies into Grid V2 before
+V1 `validate_grid_config`, V1 `FAST_GRID_BACKENDS`, V1 Numba checks, or V1
+backend loading. V2 strategies are not registered in `FAST_GRID_BACKENDS`.
+
+Selected V2 Grid candidates are persisted with `save_grid_study_to_db(...)`
+using the existing studies/trials schema. V2 compact metadata is stored in
+`grid_summary_json`, including engine, Grid V2 engine version, backend kind,
+compiled availability/use, candidate counts, per-variant counts, cache
+estimate/stats, timings, candidates/sec, optional-axis/variant settings, DSR
+deferred status, and aggregate guardrail counters.
 
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
@@ -89,24 +105,32 @@ The default hard limit is `max_signal_cache_mb=512`; runs fail clearly if the
 estimate exceeds the limit. Diagnostics expose signal/dataprep hits and misses,
 combo counts, and estimated MB.
 
-S06 B2 Phase 2 gates:
+S06 B2 Phase 2.5 gates:
 
 - Full T1 identity gate vs S06 V1 fast-grid candidate order: `48,480` V2
   candidates, per-variant counts `480` and `48,000`, one-to-one canonical
   mapping, no execution.
 - Expanded threshold-enabled breadth is count-previewed at `436,320`.
-- T1 metric gate is a deterministic reference subset against V1 fast-grid
-  metrics, not full-breadth compiled parity.
-- T2 authority gate reruns selected candidates against the S06 V1 slow strategy
-  with B2-to-V1 param translation (`fastSmooth`/`slowSmooth`) and exact trade
-  sequence comparison.
+- T1 metric gate is a deterministic 240-candidate subset against V1 fast-grid
+  metrics with first/last, variant-boundary, stop/target/trail, and
+  default-like coverage.
+- T2 authority gate reruns top-ranked candidates from the executed T1 subset,
+  plus bracket/trail/default-like coverage cases, against the S06 V1 slow
+  strategy with B2-to-V1 param translation (`fastSmooth`/`slowSmooth`) and exact
+  trade sequence comparison.
 - Tick-outward Grid V2 support is certified only against direct V2 single-run
   output, not against V1 no-rounding Grid output.
+- Compiled-vs-reference V2 Grid parity is covered by
+  `tests/v2/test_v2_grid_compiled.py`: deterministic 240-candidate subsets for
+  `priceRounding=none` and `priceRounding=tick_outward`, plus direct synthetic
+  no-trade, zero-loss, max-days/strict-boundary, and episodic drawdown edge
+  cases. It must be run without `NUMBA_DISABLE_JIT=1`. Full-population compiled
+  parity remains deferred to an explicit slow gate.
 
 The S06 B2 config order was adjusted so trailing parameters are declared as
 `trailMAType`, `trailMALength`, `trailMAOffsetEx`, `trailRR`, matching the V1
 candidate axis order for literal T1 identity. V1 strategy and V1 fast-grid
-runtime files are unchanged by Phase 2.
+runtime files are unchanged by Phase 2.5.
 
 ## Notes
 
@@ -127,5 +151,12 @@ TradingView UI drawdown can differ when it uses an equity/open-excursion
 convention. Merlin does not duplicate that TradingView drawdown convention in
 Phase 1.5.
 
-No slippage, Bar Magnifier, lower-timeframe reconstruction, Fast/Numba Grid V2,
-Scout WFA, or V1 runtime migration is certified by this registry.
+Tests that import the V1 fast-grid oracle set `NUMBA_DISABLE_JIT=1` before any
+Numba-importing modules are loaded. This keeps the V1 oracle practical in this
+Windows environment, where normal-JIT V1 fast-grid import has previously timed
+out. V1 compiled-vs-interpreted behavior remains covered by existing V1 tests,
+and the V2 compiled Grid test is intentionally separate.
+
+No slippage, Bar Magnifier, lower-timeframe reconstruction, Scout WFA,
+Grid-WFA integration, V2 population DSR, or V1 runtime migration is certified
+by this registry.

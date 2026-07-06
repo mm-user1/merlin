@@ -1538,19 +1538,23 @@ def register_routes(app):
             try:
                 from core.grid_engine import (
                     get_fast_grid_backend_metadata,
+                    get_grid_v2_backend_metadata,
+                    supports_grid_v2,
                     supports_fast_grid,
                 )
-                grid_strategy_supported = supports_fast_grid(strategy_id)
-                backend_metadata = (
-                    get_fast_grid_backend_metadata(strategy_id)
-                    if grid_strategy_supported
-                    else {}
-                )
+                grid_v2_supported = supports_grid_v2(strategy_id)
+                grid_strategy_supported = grid_v2_supported or supports_fast_grid(strategy_id)
+                if grid_v2_supported:
+                    backend_metadata = get_grid_v2_backend_metadata(strategy_id)
+                elif grid_strategy_supported:
+                    backend_metadata = get_fast_grid_backend_metadata(strategy_id)
+                else:
+                    backend_metadata = {}
                 grid_numba_available = bool(backend_metadata.get("numba_available", False))
                 grid_reason = ""
                 if not grid_strategy_supported:
                     grid_reason = "No fast Grid backend is available for this strategy."
-                elif not grid_numba_available:
+                elif not grid_v2_supported and not grid_numba_available:
                     grid_reason = (
                         "Numba is unavailable: "
                         f"{backend_metadata.get('numba_import_error') or 'import failed'}"
@@ -1559,7 +1563,7 @@ def register_routes(app):
                     **backend_metadata,
                     "supported": grid_strategy_supported,
                     "numba_available": grid_numba_available,
-                    "available": grid_strategy_supported and grid_numba_available,
+                    "available": grid_strategy_supported and (grid_v2_supported or grid_numba_available),
                     "reason": grid_reason,
                 }
             except Exception as exc:  # pragma: no cover - defensive UI metadata only

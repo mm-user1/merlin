@@ -28,11 +28,14 @@ from core.export import export_trades_csv
 from core.grid_engine import (
     GRID_SUPPORTED_FAST_OBJECTIVES,
     GRID_SUPPORTED_SLOW_OBJECTIVES,
+    GRID_V2_SUPPORTED_FAST_OBJECTIVES,
+    GRID_V2_SUPPORTED_SLOW_OBJECTIVES,
     default_grid_enabled_modes,
     format_compact_count,
     format_coverage_pct,
     parse_grid_budget,
     preview_grid_parameter_space,
+    supports_grid_v2,
 )
 from core.optuna_engine import (
     CONSTRAINT_OPERATORS,
@@ -2422,18 +2425,24 @@ def _build_optimization_config(
         fallback=primary_objective,
     )
     if optimization_mode == "grid":
+        if supports_grid_v2(strategy_id):
+            supported_fast_objectives = GRID_V2_SUPPORTED_FAST_OBJECTIVES
+            supported_slow_objectives = GRID_V2_SUPPORTED_SLOW_OBJECTIVES
+        else:
+            supported_fast_objectives = GRID_SUPPORTED_FAST_OBJECTIVES
+            supported_slow_objectives = GRID_SUPPORTED_SLOW_OBJECTIVES
         _validate_grid_objective_payload(
             stage="fast screening",
             objectives=grid_fast_objectives,
             primary_objective=grid_fast_primary_objective,
-            supported=GRID_SUPPORTED_FAST_OBJECTIVES,
+            supported=supported_fast_objectives,
         )
         if grid_slow_refinement_enabled:
             _validate_grid_objective_payload(
                 stage="slow refinement",
                 objectives=grid_slow_objectives,
                 primary_objective=grid_slow_primary_objective,
-                supported=GRID_SUPPORTED_SLOW_OBJECTIVES,
+                supported=supported_slow_objectives,
             )
         objectives = list(grid_fast_objectives)
         primary_objective = grid_fast_primary_objective

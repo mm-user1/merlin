@@ -7,9 +7,6 @@ from pathlib import Path
 from core.grid_v2 import GridV2Settings, build_grid_v2_plan
 from core.optuna_engine import OptimizationConfig
 
-os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
-
-from strategies.s06_r_trend_v02 import fast_grid
 from strategies.s06_r_trend_v02_b2.strategy import load_config
 
 
@@ -28,6 +25,23 @@ GRID_PARAMS = (
     "trailMALength",
     "trailMAOffsetEx",
 )
+
+
+def _fast_grid():
+    # The V1 fast-grid oracle is imported lazily with JIT disabled. Identity
+    # mapping does not need compiled V1 execution, and V1 has separate
+    # compiled-vs-interpreted tests. This setting is process-global, so this
+    # helper is called only by V1-oracle tests.
+    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+    try:
+        import numba
+
+        numba.config.DISABLE_JIT = True
+    except Exception:
+        pass
+    from strategies.s06_r_trend_v02 import fast_grid
+
+    return fast_grid
 
 
 def _v1_config() -> OptimizationConfig:
@@ -93,6 +107,7 @@ def _v2_base_params() -> dict:
 
 
 def _v1_candidates():
+    fast_grid = _fast_grid()
     config = _v1_config()
     space = fast_grid.build_parameter_space(config)
     allocation = fast_grid.build_allocation(config, space, None)
@@ -100,6 +115,7 @@ def _v1_candidates():
 
 
 def _canonical_from_v1(candidate) -> tuple:
+    fast_grid = _fast_grid()
     return (
         candidate.mode,
         tuple((name, candidate.params[name]) for name in fast_grid.MODE_AXES[candidate.mode]),
@@ -107,6 +123,7 @@ def _canonical_from_v1(candidate) -> tuple:
 
 
 def _canonical_from_v2(candidate) -> tuple:
+    fast_grid = _fast_grid()
     return (
         candidate.variant_name,
         tuple((name, candidate.params[name]) for name in fast_grid.MODE_AXES[candidate.variant_name]),

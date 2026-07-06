@@ -5,6 +5,7 @@ import math
 import pytest
 
 from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
+from core.engine_v2.compiled_kernel import compiled_batch_available
 from core.engine_v2.runner import run_v2_strategy
 from core.grid_v2 import (
     GridV2Settings,
@@ -74,7 +75,8 @@ def test_one_candidate_grid_result_equals_direct_v2_run(prepared_data, hooks):
     direct = _direct_run(plan, plan.candidates[0], df, trade_start_idx, hooks)
     _assert_row_matches_direct(result.rows[0], direct, plan.candidates[0].params["initialCapital"])
     assert len(result.selected) == 1
-    assert result.metadata["backend_kind"] == "reference"
+    assert result.metadata["backend_kind"] in {"compiled_numba", "reference"}
+    assert result.metadata["compiled_batch_available"] is compiled_batch_available()
 
 
 def test_multi_candidate_grid_result_equals_repeated_direct_v2_runs(prepared_data, hooks):

@@ -1,8 +1,8 @@
 """Generic Backtester V2 Grid backend.
 
-This module is backend-only. It plans deterministic V2 candidate spaces and
-executes selected candidates through the shared V2 reference runner. It does
-not integrate with the legacy Grid dispatcher.
+This module plans deterministic V2 candidate spaces and executes candidates
+through generic V2 execution contracts. Strategy-specific code supplies only
+signal/dataprep hooks.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import inspect
 import itertools
 import json
 import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -23,7 +24,34 @@ import pandas as pd
 
 from core.engine_v2.contracts import ExecutionProfile, GuardrailSummary, VariantSpec
 from core.engine_v2.kernel import ExecutionData
-from core.engine_v2.metrics_kernel import CoreMetrics, compute_core_metrics_from_balance_and_trades
+from core.engine_v2.compiled_kernel import (
+    COMPILED_BATCH_KIND,
+    OUTPUT_FINAL_BALANCE,
+    OUTPUT_FLAGS,
+    OUTPUT_GROSS_LOSS,
+    OUTPUT_GROSS_PROFIT,
+    OUTPUT_INVALID_STOP_DISTANCE_COUNT,
+    OUTPUT_LOSING_TRADES,
+    OUTPUT_LIQUIDATION_COUNT,
+    OUTPUT_MARGIN_REJECT_COUNT,
+    OUTPUT_MAX_CONSECUTIVE_LOSSES,
+    OUTPUT_MAX_DRAWDOWN_PCT,
+    OUTPUT_MAX_NOTIONAL,
+    OUTPUT_MAX_REQUIRED_LEVERAGE,
+    OUTPUT_NET_PROFIT_PCT,
+    OUTPUT_NO_CAPITAL_HALT,
+    OUTPUT_PROFIT_FACTOR,
+    OUTPUT_REJECTED_FILL_COUNT,
+    OUTPUT_ROMAD,
+    OUTPUT_TOTAL_TRADES,
+    OUTPUT_WINNING_TRADES,
+    OUTPUT_WIN_RATE_PCT,
+    OUTPUT_ZERO_SIZE_ENTRY_COUNT,
+    compiled_batch_available,
+    compiled_unavailable_reason,
+    evaluate_compiled_batch,
+)
+from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
 from core.engine_v2.profile import (
     active_parameter_names,
     canonical_selector_key,
@@ -34,7 +62,7 @@ from core.engine_v2.profile import (
 from core.engine_v2.runner import V2RunResult, run_v2_strategy
 
 
-GRID_V2_ENGINE_VERSION = "grid_v2_phase2_reference"
+GRID_V2_ENGINE_VERSION = "grid_v2_phase2_5"
 REFERENCE_BATCH_KIND = "reference"
 _BOOL_SIGNAL_ARRAYS = 2
 _FLOAT_DATAPREP_ARRAYS = 5
@@ -54,6 +82,12 @@ class GridV2Settings:
     prefer_compiled: bool = True
     primary_metric: str = "net_profit_pct"
     include_inactive_axes_for_dedup: bool = False
+
+    @property
+    def top_candidates(self) -> int:
+        """Compatibility alias for storage helpers shared with Grid V1."""
+
+        return self.top_n
 
 
 @dataclass(frozen=True)
@@ -174,6 +208,7 @@ class GridV2CacheStats:
 class GridV2ResultRow:
     candidate_id: int
     semantic_key: str
+    canonical_identity: str
     variant_name: str
     modes: Mapping[str, str]
     params: Mapping[str, Any]
@@ -183,8 +218,14 @@ class GridV2ResultRow:
     profit_factor: float
     win_rate_pct: float
     total_trades: int
+    winning_trades: int
+    losing_trades: int
+    gross_profit: float
+    gross_loss: float
+    max_consecutive_losses: int
     final_balance: float
     guardrail_summary: Mapping[str, Any]
+    backend_kind: str = REFERENCE_BATCH_KIND
     status: str = "ok"
     error: str | None = None
 
@@ -213,6 +254,13 @@ class GridV2RunResult:
     cache_estimate: GridV2CacheEstimate
     cache_stats: GridV2CacheStats
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _CacheKeyContext:
+    data_fingerprint: str
+    trade_start_idx: int
+    function_fingerprint: str | None
 
 
 def build_grid_v2_plan(
@@ -301,9 +349,10 @@ def build_grid_v2_plan(
             )
 
     metadata = {
-        "backend_kind": REFERENCE_BATCH_KIND,
+        "backend_kind": COMPILED_BATCH_KIND if compiled_batch_available() else REFERENCE_BATCH_KIND,
         "engine_version": GRID_V2_ENGINE_VERSION,
-        "compiled_batch_available": False,
+        "compiled_batch_available": compiled_batch_available(),
+        "compiled_unavailable_reason": compiled_unavailable_reason(),
         "default_enabled_axes": [
             name for name, domain in domains.items() if domain.is_axis
         ],
@@ -383,12 +432,51 @@ def estimate_grid_v2_cache(
     hooks = _coerce_hooks(hooks)
     selected = _selected_candidates(plan, candidate_indices)
     n_bars = int(len(df))
+    context = _cache_key_context(df, trade_start_idx, hooks)
     signal_keys = {
-        _signal_cache_key(plan, candidate, df, trade_start_idx, hooks)
+        _signal_cache_key(plan, candidate, context, hooks)
         for candidate in selected
     }
     dataprep_keys = {
-        _dataprep_cache_key(plan, candidate, df, trade_start_idx, hooks)
+        _dataprep_cache_key(plan, candidate, context, hooks)
+        for candidate in selected
+    }
+    signal_combo_count = len(signal_keys)
+    dataprep_combo_count = len(dataprep_keys)
+    worker_multiplier = max(1, int(plan.settings.worker_multiplier))
+    bytes_per_signal_combo = int(n_bars * _BOOL_SIGNAL_ARRAYS * np.dtype(np.bool_).itemsize)
+    bytes_per_dataprep_combo = int(n_bars * _FLOAT_DATAPREP_ARRAYS * np.dtype(np.float64).itemsize)
+    estimated_signal_bytes = signal_combo_count * bytes_per_signal_combo
+    estimated_dataprep_bytes = dataprep_combo_count * bytes_per_dataprep_combo
+    estimated_total_bytes = (estimated_signal_bytes + estimated_dataprep_bytes) * worker_multiplier
+    return GridV2CacheEstimate(
+        n_bars=n_bars,
+        signal_combo_count=signal_combo_count,
+        dataprep_combo_count=dataprep_combo_count,
+        worker_multiplier=worker_multiplier,
+        bytes_per_signal_combo=bytes_per_signal_combo,
+        bytes_per_dataprep_combo=bytes_per_dataprep_combo,
+        estimated_signal_mb=estimated_signal_bytes / _BYTES_PER_MB,
+        estimated_dataprep_mb=estimated_dataprep_bytes / _BYTES_PER_MB,
+        estimated_total_mb=estimated_total_bytes / _BYTES_PER_MB,
+        max_signal_cache_mb=float(plan.settings.max_signal_cache_mb),
+    )
+
+
+def _estimate_grid_v2_cache_with_context(
+    plan: GridV2Plan,
+    df: pd.DataFrame,
+    context: _CacheKeyContext,
+    hooks: GridV2StrategyHooks,
+    selected: Sequence[GridV2Candidate],
+) -> GridV2CacheEstimate:
+    n_bars = int(len(df))
+    signal_keys = {
+        _signal_cache_key(plan, candidate, context, hooks)
+        for candidate in selected
+    }
+    dataprep_keys = {
+        _dataprep_cache_key(plan, candidate, context, hooks)
         for candidate in selected
     }
     signal_combo_count = len(signal_keys)
@@ -420,34 +508,42 @@ def execute_grid_v2_candidates(
     hooks: GridV2StrategyHooks | Any,
     candidate_indices: Sequence[int] | None = None,
 ) -> GridV2RunResult:
-    """Execute planned candidates through the shared V2 reference runner."""
+    """Execute planned candidates through the selected V2 batch backend."""
 
     hooks = _coerce_hooks(hooks)
     selected_candidates = _selected_candidates(plan, candidate_indices)
-    estimate = estimate_grid_v2_cache(plan, df, trade_start_idx, hooks, candidate_indices)
+    context = _cache_key_context(df, trade_start_idx, hooks)
+    estimate = _estimate_grid_v2_cache_with_context(
+        plan,
+        df,
+        context,
+        hooks,
+        selected_candidates,
+    )
     if estimate.estimated_total_mb > estimate.max_signal_cache_mb:
         raise MemoryError(
             "Grid V2 cache estimate exceeds max_signal_cache_mb "
             f"({estimate.estimated_total_mb:.3f} MB > {estimate.max_signal_cache_mb:.3f} MB)."
         )
 
+    eval_started = time.time()
     stats = GridV2CacheStats()
     signal_seen: set[str] = set()
     dataprep_cache: dict[str, ExecutionData] = {}
+    data_groups: dict[str, list[GridV2Candidate]] = {}
     rows: list[GridV2ResultRow] = []
 
     for candidate in selected_candidates:
-        signal_key = _signal_cache_key(plan, candidate, df, trade_start_idx, hooks)
+        signal_key = _signal_cache_key(plan, candidate, context, hooks)
         if signal_key in signal_seen:
             stats.signal_hits += 1
         else:
             stats.signal_misses += 1
             signal_seen.add(signal_key)
 
-        data_key = _dataprep_cache_key(plan, candidate, df, trade_start_idx, hooks)
+        data_key = _dataprep_cache_key(plan, candidate, context, hooks)
         if data_key in dataprep_cache:
             stats.dataprep_hits += 1
-            data = dataprep_cache[data_key]
         else:
             stats.dataprep_misses += 1
             try:
@@ -456,23 +552,50 @@ def execute_grid_v2_candidates(
                 rows.append(_error_row(candidate, exc))
                 continue
             dataprep_cache[data_key] = data
+        data_groups.setdefault(data_key, []).append(candidate)
 
-        try:
-            run = run_v2_strategy(
-                data=data,
-                profile=plan.profile,
-                params=_normalized_candidate_params(hooks, candidate.params),
-                trade_start_idx=trade_start_idx,
-            )
-        except Exception as exc:
-            rows.append(_error_row(candidate, exc))
-            continue
-        rows.append(_row_from_run(candidate, run))
+    compiled_available = compiled_batch_available()
+    use_compiled = bool(plan.settings.prefer_compiled and compiled_available)
+    backend_kind = COMPILED_BATCH_KIND if use_compiled else REFERENCE_BATCH_KIND
 
+    if use_compiled:
+        for data_key, candidates in data_groups.items():
+            data = dataprep_cache[data_key]
+            params_batch = [_normalized_candidate_params(hooks, candidate.params) for candidate in candidates]
+            try:
+                batch = evaluate_compiled_batch(
+                    data=data,
+                    profile=plan.profile,
+                    params_batch=params_batch,
+                    trade_start_idx=trade_start_idx,
+                )
+            except Exception as exc:
+                rows.extend(_error_row(candidate, exc) for candidate in candidates)
+                continue
+            for candidate, values in zip(candidates, batch.outputs):
+                rows.append(_row_from_compiled_output(candidate, values))
+    else:
+        for data_key, candidates in data_groups.items():
+            data = dataprep_cache[data_key]
+            for candidate in candidates:
+                try:
+                    run = run_v2_strategy(
+                        data=data,
+                        profile=plan.profile,
+                        params=_normalized_candidate_params(hooks, candidate.params),
+                        trade_start_idx=trade_start_idx,
+                    )
+                except Exception as exc:
+                    rows.append(_error_row(candidate, exc))
+                    continue
+                rows.append(_row_from_run(candidate, run))
+
+    rows.sort(key=lambda row: row.candidate_id)
     selected = tuple(
-        _slow_enrich_selected(plan, df, trade_start_idx, hooks, row, dataprep_cache)
+        _slow_enrich_selected(plan, context, trade_start_idx, hooks, row, dataprep_cache)
         for row in _rank_rows(rows, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
     )
+    evaluation_seconds = time.time() - eval_started
     return GridV2RunResult(
         plan=plan,
         rows=tuple(rows),
@@ -480,10 +603,14 @@ def execute_grid_v2_candidates(
         cache_estimate=estimate,
         cache_stats=stats,
         metadata={
-            "backend_kind": REFERENCE_BATCH_KIND,
-            "compiled_batch_available": False,
+            "backend_kind": backend_kind,
+            "compiled_batch_available": compiled_available,
+            "compiled_batch_used": use_compiled,
+            "compiled_unavailable_reason": compiled_unavailable_reason(),
             "metric_tier": "core_fast_rows_plus_selected_public_v2_enrichment",
             "executed_candidate_count": len(rows),
+            "evaluation_seconds": evaluation_seconds,
+            "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
         },
     )
 
@@ -902,6 +1029,18 @@ def _data_fingerprint(df: pd.DataFrame) -> str:
     return digest.hexdigest()
 
 
+def _cache_key_context(
+    df: pd.DataFrame,
+    trade_start_idx: int,
+    hooks: GridV2StrategyHooks,
+) -> _CacheKeyContext:
+    return _CacheKeyContext(
+        data_fingerprint=_data_fingerprint(df),
+        trade_start_idx=int(trade_start_idx),
+        function_fingerprint=hooks.function_fingerprint,
+    )
+
+
 def _cache_param_names(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
@@ -934,8 +1073,7 @@ def _cache_param_names(
 def _cache_key_payload(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
-    df: pd.DataFrame,
-    trade_start_idx: int,
+    context: _CacheKeyContext,
     hooks: GridV2StrategyHooks,
     *,
     signal_only: bool,
@@ -945,9 +1083,9 @@ def _cache_key_payload(
         "strategy_id": plan.strategy_id,
         "strategy_version": plan.strategy_version,
         "engine": GRID_V2_ENGINE_VERSION,
-        "data": _data_fingerprint(df),
-        "trade_start_idx": int(trade_start_idx),
-        "function": hooks.function_fingerprint,
+        "data": context.data_fingerprint,
+        "trade_start_idx": int(context.trade_start_idx),
+        "function": context.function_fingerprint,
         "params": {
             name: _jsonable_value(candidate.params[name])
             for name in param_names
@@ -959,21 +1097,19 @@ def _cache_key_payload(
 def _signal_cache_key(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
-    df: pd.DataFrame,
-    trade_start_idx: int,
+    context: _CacheKeyContext,
     hooks: GridV2StrategyHooks,
 ) -> str:
-    return _stable_json(_cache_key_payload(plan, candidate, df, trade_start_idx, hooks, signal_only=True))
+    return _stable_json(_cache_key_payload(plan, candidate, context, hooks, signal_only=True))
 
 
 def _dataprep_cache_key(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
-    df: pd.DataFrame,
-    trade_start_idx: int,
+    context: _CacheKeyContext,
     hooks: GridV2StrategyHooks,
 ) -> str:
-    payload = _cache_key_payload(plan, candidate, df, trade_start_idx, hooks, signal_only=False)
+    payload = _cache_key_payload(plan, candidate, context, hooks, signal_only=False)
     payload["variant"] = candidate.variant_name
     payload["modes"] = dict(candidate.modes)
     return _stable_json(payload)
@@ -1014,6 +1150,7 @@ def _row_from_run(candidate: GridV2Candidate, run: V2RunResult) -> GridV2ResultR
     return GridV2ResultRow(
         candidate_id=candidate.candidate_id,
         semantic_key=candidate.semantic_key,
+        canonical_identity=candidate.canonical_identity,
         variant_name=candidate.variant_name,
         modes=candidate.modes,
         params=candidate.params,
@@ -1023,8 +1160,50 @@ def _row_from_run(candidate: GridV2Candidate, run: V2RunResult) -> GridV2ResultR
         profit_factor=core.profit_factor,
         win_rate_pct=core.win_rate_pct,
         total_trades=core.total_trades,
+        winning_trades=core.winning_trades,
+        losing_trades=core.losing_trades,
+        gross_profit=core.gross_profit,
+        gross_loss=core.gross_loss,
+        max_consecutive_losses=_max_consecutive_losses(result.trades),
         final_balance=core.final_balance,
         guardrail_summary=_guardrail_mapping(run.guardrail_summary),
+        backend_kind=REFERENCE_BATCH_KIND,
+    )
+
+
+def _row_from_compiled_output(candidate: GridV2Candidate, values: Sequence[Any]) -> GridV2ResultRow:
+    guardrail_summary = {
+        "invalid_stop_distance_count": int(values[OUTPUT_INVALID_STOP_DISTANCE_COUNT]),
+        "zero_size_entry_count": int(values[OUTPUT_ZERO_SIZE_ENTRY_COUNT]),
+        "rejected_fill_count": int(values[OUTPUT_REJECTED_FILL_COUNT]),
+        "margin_reject_count": int(values[OUTPUT_MARGIN_REJECT_COUNT]),
+        "liquidation_count": int(values[OUTPUT_LIQUIDATION_COUNT]),
+        "no_capital_halt": bool(int(values[OUTPUT_NO_CAPITAL_HALT])),
+        "max_required_leverage": float(values[OUTPUT_MAX_REQUIRED_LEVERAGE]),
+        "max_notional": float(values[OUTPUT_MAX_NOTIONAL]),
+        "flags": int(values[OUTPUT_FLAGS]),
+    }
+    return GridV2ResultRow(
+        candidate_id=candidate.candidate_id,
+        semantic_key=candidate.semantic_key,
+        canonical_identity=candidate.canonical_identity,
+        variant_name=candidate.variant_name,
+        modes=candidate.modes,
+        params=candidate.params,
+        net_profit_pct=float(values[OUTPUT_NET_PROFIT_PCT]),
+        max_drawdown_pct=float(values[OUTPUT_MAX_DRAWDOWN_PCT]),
+        romad=float(values[OUTPUT_ROMAD]),
+        profit_factor=float(values[OUTPUT_PROFIT_FACTOR]),
+        win_rate_pct=float(values[OUTPUT_WIN_RATE_PCT]),
+        total_trades=int(values[OUTPUT_TOTAL_TRADES]),
+        winning_trades=int(values[OUTPUT_WINNING_TRADES]),
+        losing_trades=int(values[OUTPUT_LOSING_TRADES]),
+        gross_profit=float(values[OUTPUT_GROSS_PROFIT]),
+        gross_loss=float(values[OUTPUT_GROSS_LOSS]),
+        max_consecutive_losses=int(values[OUTPUT_MAX_CONSECUTIVE_LOSSES]),
+        final_balance=float(values[OUTPUT_FINAL_BALANCE]),
+        guardrail_summary=guardrail_summary,
+        backend_kind=COMPILED_BATCH_KIND,
     )
 
 
@@ -1032,6 +1211,7 @@ def _error_row(candidate: GridV2Candidate, exc: Exception) -> GridV2ResultRow:
     return GridV2ResultRow(
         candidate_id=candidate.candidate_id,
         semantic_key=candidate.semantic_key,
+        canonical_identity=candidate.canonical_identity,
         variant_name=candidate.variant_name,
         modes=candidate.modes,
         params=candidate.params,
@@ -1041,11 +1221,34 @@ def _error_row(candidate: GridV2Candidate, exc: Exception) -> GridV2ResultRow:
         profit_factor=float("nan"),
         win_rate_pct=float("nan"),
         total_trades=0,
+        winning_trades=0,
+        losing_trades=0,
+        gross_profit=float("nan"),
+        gross_loss=float("nan"),
+        max_consecutive_losses=0,
         final_balance=float("nan"),
         guardrail_summary={},
         status="error",
         error=str(exc),
     )
+
+
+def _max_consecutive_losses(trades: Sequence[Any]) -> int:
+    max_consecutive = 0
+    consecutive = 0
+    for trade in trades:
+        if isinstance(trade, Mapping):
+            pnl = float(trade["net_pnl"])
+        elif hasattr(trade, "net_pnl"):
+            pnl = float(trade.net_pnl)
+        else:
+            pnl = float(trade)
+        if pnl <= 0.0:
+            consecutive += 1
+            max_consecutive = max(max_consecutive, consecutive)
+        else:
+            consecutive = 0
+    return max_consecutive
 
 
 def _guardrail_mapping(summary: GuardrailSummary) -> Mapping[str, Any]:
@@ -1073,7 +1276,7 @@ def _rank_rows(rows: Sequence[GridV2ResultRow], metric: str) -> list[GridV2Resul
 
 def _slow_enrich_selected(
     plan: GridV2Plan,
-    df: pd.DataFrame,
+    context: _CacheKeyContext,
     trade_start_idx: int,
     hooks: GridV2StrategyHooks,
     row: GridV2ResultRow,
@@ -1082,7 +1285,7 @@ def _slow_enrich_selected(
     if row.status != "ok":
         return GridV2SelectedResult(row=row, metrics={}, guardrail_summary={})
     candidate = plan.candidates[row.candidate_id - 1]
-    data_key = _dataprep_cache_key(plan, candidate, df, trade_start_idx, hooks)
+    data_key = _dataprep_cache_key(plan, candidate, context, hooks)
     data = dataprep_cache[data_key]
     run = run_v2_strategy(
         data=data,
@@ -1098,6 +1301,11 @@ def _slow_enrich_selected(
         "profit_factor": getattr(strategy_result, "profit_factor", None),
         "win_rate_pct": getattr(strategy_result, "win_rate", None),
         "total_trades": getattr(strategy_result, "total_trades", None),
+        "winning_trades": getattr(strategy_result, "winning_trades", None),
+        "losing_trades": getattr(strategy_result, "losing_trades", None),
+        "gross_profit": getattr(strategy_result, "gross_profit", None),
+        "gross_loss": getattr(strategy_result, "gross_loss", None),
+        "max_consecutive_losses": _max_consecutive_losses(strategy_result.trades),
         "sharpe_ratio": getattr(strategy_result, "sharpe_ratio", None),
         "sortino_ratio": getattr(strategy_result, "sortino_ratio", None),
         "sqn": getattr(strategy_result, "sqn", None),
@@ -1113,6 +1321,7 @@ def _slow_enrich_selected(
 
 __all__ = [
     "GRID_V2_ENGINE_VERSION",
+    "COMPILED_BATCH_KIND",
     "REFERENCE_BATCH_KIND",
     "CandidateMappingRecord",
     "GridV2CacheEstimate",

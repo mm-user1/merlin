@@ -14,7 +14,7 @@ import math
 import re
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -68,7 +68,18 @@ GRID_SUPPORTED_CONSTRAINTS = {
     "win_rate",
     "max_consecutive_losses",
 }
+GRID_V2_SUPPORTED_FAST_OBJECTIVES = GRID_SUPPORTED_FAST_OBJECTIVES | {
+    "total_trades",
+    "max_consecutive_losses",
+}
+GRID_V2_SUPPORTED_SLOW_OBJECTIVES = GRID_SUPPORTED_SLOW_OBJECTIVES | {
+    "total_trades",
+    "max_consecutive_losses",
+}
 MODE_ORDER = ("cc_only", "tbands_only", "both")
+
+OBJECTIVE_DIRECTIONS.setdefault("total_trades", "maximize")
+OBJECTIVE_DIRECTIONS.setdefault("max_consecutive_losses", "minimize")
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,53 @@ class GridAllocation:
 
 def supports_fast_grid(strategy_id: str) -> bool:
     return str(strategy_id or "").strip().lower() in FAST_GRID_BACKENDS
+
+
+def supports_grid_v2(strategy_id: str) -> bool:
+    """Return whether a registered strategy opts into the generic V2 Grid path."""
+
+    try:
+        from strategies import get_strategy_config
+
+        strategy_config = get_strategy_config(str(strategy_id or "").strip())
+    except Exception:
+        return False
+    return str(strategy_config.get("engine", "v1")).strip().lower() == "v2"
+
+
+def get_grid_v2_backend_metadata(strategy_id: str) -> Dict[str, Any]:
+    """Return capability metadata for the generic V2 Grid backend."""
+
+    from strategies import get_strategy_config
+
+    from .engine_v2.compiled_kernel import compiled_batch_available, compiled_unavailable_reason
+    from .engine_v2.profile import parse_execution_profile
+    from .grid_v2 import COMPILED_BATCH_KIND, GRID_V2_ENGINE_VERSION, REFERENCE_BATCH_KIND
+
+    strategy_config = get_strategy_config(str(strategy_id or "").strip())
+    if str(strategy_config.get("engine", "v1")).strip().lower() != "v2":
+        raise ValueError(f"Grid V2 is not supported for strategy '{strategy_id}'.")
+    profile = parse_execution_profile(strategy_config)
+    compiled_available = compiled_batch_available()
+    return {
+        "profile": "full_enumeration_v2",
+        "engine": "v2",
+        "engine_version": GRID_V2_ENGINE_VERSION,
+        "backend_kind": COMPILED_BATCH_KIND if compiled_available else REFERENCE_BATCH_KIND,
+        "compiled_batch_available": compiled_available,
+        "compiled_unavailable_reason": compiled_unavailable_reason(),
+        "numba_available": compiled_available,
+        "numba_import_error": compiled_unavailable_reason(),
+        "supports_partial_coverage": False,
+        "supports_seed": False,
+        "supports_mode_allocation": False,
+        "retain_all_fast_results": True,
+        "modes": [
+            {"id": name, "label": name, "default_enabled": True}
+            for name in profile.variants
+        ],
+        "diversity_group_fields": ["variant_name"],
+    }
 
 
 def parse_grid_budget(value: Any) -> int:
@@ -383,6 +441,39 @@ def _settings_from_config(config: OptimizationConfig) -> GridSettings:
     )
 
 
+def _grid_v2_settings_from_config(config: OptimizationConfig):
+    from strategies import get_strategy_config
+
+    from .grid_v2 import GridV2Settings
+
+    strategy_config = get_strategy_config(config.strategy_id)
+    parameter_specs = strategy_config.get("parameters", {}) if isinstance(strategy_config, Mapping) else {}
+    optimized_names = {
+        str(name)
+        for name, spec in parameter_specs.items()
+        if isinstance(spec, Mapping)
+        and isinstance(spec.get("optimize", {}), Mapping)
+        and bool(spec.get("optimize", {}).get("enabled", False))
+    }
+    enabled_params = getattr(config, "enabled_params", {}) or {}
+    enabled_axes = tuple(
+        name for name, enabled in enabled_params.items()
+        if bool(enabled) and str(name) in optimized_names
+    )
+    enabled_variants = tuple(getattr(config, "grid_enabled_modes", []) or ()) or None
+    return GridV2Settings(
+        top_n=max(0, int(getattr(config, "grid_top_candidates", 10) or 10)),
+        worker_multiplier=max(1, int(getattr(config, "worker_processes", 1) or 1)),
+        enabled_variants=enabled_variants,
+        enabled_axes=enabled_axes or None,
+        prefer_compiled=bool(getattr(config, "grid_v2_prefer_compiled", True)),
+        primary_metric=(
+            getattr(config, "grid_fast_primary_objective", None)
+            or (getattr(config, "grid_fast_objectives", None) or getattr(config, "objectives", None) or ["net_profit_pct"])[0]
+        ),
+    )
+
+
 def _load_backend(strategy_id: str):
     normalized = str(strategy_id or "").strip().lower()
     module_name = FAST_GRID_BACKENDS.get(normalized)
@@ -437,6 +528,13 @@ def default_grid_enabled_modes(strategy_id: str) -> List[str]:
     list, leaving their existing defaulting untouched.  Backend order is
     preserved and malformed metadata is rejected clearly.
     """
+    if supports_grid_v2(strategy_id):
+        metadata = get_grid_v2_backend_metadata(strategy_id)
+        return [
+            str(mode.get("id"))
+            for mode in metadata.get("modes", [])
+            if isinstance(mode, Mapping) and mode.get("default_enabled", True) is not False
+        ]
     if not supports_fast_grid(strategy_id):
         return []
     metadata = get_fast_grid_backend_metadata(strategy_id)
@@ -615,12 +713,42 @@ def validate_grid_config(config: OptimizationConfig) -> None:
 
 
 def preview_grid_parameter_space(config: OptimizationConfig) -> Dict[str, Any]:
+    if supports_grid_v2(config.strategy_id):
+        return _preview_grid_v2_parameter_space(config)
     validate_grid_config(config)
     backend = _load_backend(config.strategy_id)
     settings = _settings_from_config(config)
     space = backend.build_parameter_space(config)
     allocation = _build_backend_allocation(backend, config, space, settings)
     return backend.build_preview(space, allocation)
+
+
+def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, Any]:
+    from strategies import get_strategy_config
+
+    from .grid_v2 import GridV2Settings, preview_grid_v2_counts
+
+    strategy_config = get_strategy_config(config.strategy_id)
+    settings = _grid_v2_settings_from_config(config)
+    preview = preview_grid_v2_counts(
+        strategy_config,
+        settings=settings,
+        base_params=getattr(config, "fixed_params", {}) or {},
+    )
+    total = int(preview.deduped_candidate_count or preview.enumerated_candidate_count)
+    return {
+        "engine": "v2",
+        "profile": "full_enumeration_v2",
+        "full_candidate_count": total,
+        "candidate_count": total,
+        "coverage_pct": 100.0,
+        "mode_space_sizes": dict(preview.per_variant_counts),
+        "mode_budgets": dict(preview.per_variant_counts),
+        "mode_coverage_pct": {name: 100.0 for name in preview.per_variant_counts},
+        "axis_names_by_variant": {
+            name: list(values) for name, values in preview.axis_names_by_variant.items()
+        },
+    }
 
 
 def _metric_value(result: OptimizationResult, metric: str) -> Any:
@@ -1138,11 +1266,449 @@ def _resolve_csv_path_for_storage(csv_file: Any) -> str:
     return ""
 
 
+def _grid_v2_result_from_row(row: Any, *, metric_tier: str) -> OptimizationResult:
+    profit_factor = float(row.profit_factor)
+    result = OptimizationResult(
+        params=dict(row.params),
+        net_profit_pct=float(row.net_profit_pct),
+        max_drawdown_pct=float(row.max_drawdown_pct),
+        total_trades=int(row.total_trades),
+        winning_trades=int(row.winning_trades),
+        losing_trades=int(row.losing_trades),
+        win_rate=float(row.win_rate_pct),
+        avg_win=(float(row.gross_profit) / int(row.winning_trades)) if int(row.winning_trades) else 0.0,
+        avg_loss=(float(row.gross_loss) / int(row.losing_trades)) if int(row.losing_trades) else 0.0,
+        gross_profit=float(row.gross_profit),
+        gross_loss=float(row.gross_loss),
+        max_consecutive_losses=int(row.max_consecutive_losses),
+        romad=float(row.romad),
+        profit_factor=None if math.isnan(profit_factor) else profit_factor,
+        optuna_trial_number=int(row.candidate_id),
+    )
+    setattr(result, "engine", "v2")
+    setattr(result, "candidate_id", int(row.candidate_id))
+    setattr(result, "semantic_key", row.semantic_key)
+    setattr(result, "param_key", row.semantic_key)
+    setattr(result, "canonical_identity", row.canonical_identity)
+    setattr(result, "variant_name", row.variant_name)
+    setattr(result, "grid_mode_name", row.variant_name)
+    setattr(result, "grid_generation_mode", "full_enumeration_v2")
+    setattr(result, "grid_backend_kind", row.backend_kind)
+    setattr(result, "grid_v2_engine_version", "grid_v2_phase2_5")
+    setattr(result, "metric_tier", metric_tier)
+    setattr(result, "guardrail_summary", dict(row.guardrail_summary or {}))
+    setattr(
+        result,
+        "fast_metrics",
+        {
+            "net_profit_pct": row.net_profit_pct,
+            "max_drawdown_pct": row.max_drawdown_pct,
+            "romad": row.romad,
+            "profit_factor": row.profit_factor,
+            "win_rate": row.win_rate_pct,
+            "total_trades": row.total_trades,
+            "winning_trades": row.winning_trades,
+            "losing_trades": row.losing_trades,
+            "gross_profit": row.gross_profit,
+            "gross_loss": row.gross_loss,
+            "max_consecutive_losses": row.max_consecutive_losses,
+        },
+    )
+    setattr(result, "validation_status", row.status)
+    return result
+
+
+def _grid_v2_slow_result(
+    *,
+    plan: Any,
+    df: pd.DataFrame,
+    trade_start_idx: int,
+    hooks: Any,
+    row: Any,
+) -> OptimizationResult:
+    candidate = plan.candidates[int(row.candidate_id) - 1]
+    params = hooks.normalize_params(dict(candidate.params)) if hooks.normalize_params else dict(candidate.params)
+    data = hooks.build_execution_data(df, params)
+    from .engine_v2.runner import run_v2_strategy
+
+    run = run_v2_strategy(
+        data=data,
+        profile=plan.profile,
+        params=params,
+        trade_start_idx=trade_start_idx,
+    )
+    strategy_result = run.strategy_result
+    profit_factor = getattr(strategy_result, "profit_factor", None)
+    result = OptimizationResult(
+        params=dict(candidate.params),
+        net_profit_pct=float(getattr(strategy_result, "net_profit_pct", 0.0)),
+        max_drawdown_pct=float(getattr(strategy_result, "max_drawdown_pct", 0.0)),
+        total_trades=int(getattr(strategy_result, "total_trades", 0)),
+        winning_trades=int(getattr(strategy_result, "winning_trades", 0)),
+        losing_trades=int(getattr(strategy_result, "losing_trades", 0)),
+        win_rate=(
+            float(getattr(strategy_result, "winning_trades", 0))
+            / float(getattr(strategy_result, "total_trades", 0))
+            * 100.0
+            if int(getattr(strategy_result, "total_trades", 0)) else 0.0
+        ),
+        gross_profit=float(getattr(strategy_result, "gross_profit", 0.0)),
+        gross_loss=float(getattr(strategy_result, "gross_loss", 0.0)),
+        max_consecutive_losses=_max_consecutive_losses_for_grid_v2(strategy_result.trades),
+        romad=getattr(strategy_result, "romad", None),
+        profit_factor=profit_factor,
+        sharpe_ratio=getattr(strategy_result, "sharpe_ratio", None),
+        sortino_ratio=getattr(strategy_result, "sortino_ratio", None),
+        sqn=getattr(strategy_result, "sqn", None),
+        ulcer_index=getattr(strategy_result, "ulcer_index", None),
+        consistency_score=getattr(strategy_result, "consistency_score", None),
+        optuna_trial_number=int(row.candidate_id),
+    )
+    result.avg_win = (
+        result.gross_profit / result.winning_trades if result.winning_trades else 0.0
+    )
+    result.avg_loss = (
+        result.gross_loss / result.losing_trades if result.losing_trades else 0.0
+    )
+    fast_result = _grid_v2_result_from_row(row, metric_tier="fast")
+    for attr in (
+        "engine",
+        "candidate_id",
+        "semantic_key",
+        "param_key",
+        "canonical_identity",
+        "variant_name",
+        "grid_mode_name",
+        "grid_generation_mode",
+        "grid_backend_kind",
+        "grid_v2_engine_version",
+        "guardrail_summary",
+        "fast_metrics",
+    ):
+        if hasattr(fast_result, attr):
+            setattr(result, attr, getattr(fast_result, attr))
+    setattr(result, "metric_tier", "slow_public_v2")
+    setattr(result, "validation_status", "passed")
+    return result
+
+
+def _max_consecutive_losses_for_grid_v2(trades: Sequence[Any]) -> int:
+    max_consecutive = 0
+    consecutive = 0
+    for trade in trades:
+        if isinstance(trade, Mapping):
+            pnl = float(trade["net_pnl"])
+        elif hasattr(trade, "net_pnl"):
+            pnl = float(trade.net_pnl)
+        else:
+            pnl = float(trade)
+        if pnl <= 0.0:
+            consecutive += 1
+            max_consecutive = max(max_consecutive, consecutive)
+        else:
+            consecutive = 0
+    return max_consecutive
+
+
+def _run_grid_v2_optimization(
+    config: OptimizationConfig,
+    *,
+    save_study: bool,
+) -> Tuple[List[OptimizationResult], Optional[str]]:
+    if bool(getattr(config, "grid_needs_dsr", False)):
+        raise ValueError("V2 Grid DSR is unavailable in Phase 2.5; disable DSR for engine='v2'.")
+
+    from strategies import get_strategy, get_strategy_config
+
+    from .grid_v2 import GridV2StrategyHooks, build_grid_v2_plan, execute_grid_v2_candidates
+
+    strategy_config = get_strategy_config(config.strategy_id)
+    strategy_class = get_strategy(config.strategy_id)
+    strategy_module = importlib.import_module(strategy_class.__module__)
+    hooks = GridV2StrategyHooks.from_strategy(strategy_module)
+    settings = _grid_v2_settings_from_config(config)
+    constraints = _build_constraint_specs(getattr(config, "constraints", []) or [])
+    selection_config = resolve_grid_selection_config(config)
+    _validate_objective_set(
+        stage="V2 fast screening",
+        objectives=selection_config.fast_objectives,
+        primary_objective=selection_config.fast_primary_objective,
+        supported=GRID_V2_SUPPORTED_FAST_OBJECTIVES,
+    )
+    if selection_config.slow_refinement_enabled:
+        _validate_objective_set(
+            stage="V2 slow refinement",
+            objectives=selection_config.slow_objectives,
+            primary_objective=selection_config.slow_primary_objective,
+            supported=GRID_V2_SUPPORTED_SLOW_OBJECTIVES,
+        )
+    unsupported_constraints = sorted(
+        {spec.metric for spec in constraints if spec.enabled and spec.metric not in GRID_SUPPORTED_CONSTRAINTS}
+    )
+    if unsupported_constraints:
+        raise ValueError(
+            "Grid V2 constraint metric is not available: " + ", ".join(unsupported_constraints)
+        )
+
+    started = time.time()
+    timings: Dict[str, float] = {}
+
+    plan_started = time.time()
+    plan = build_grid_v2_plan(
+        strategy_config,
+        settings=settings,
+        base_params=getattr(config, "fixed_params", {}) or {},
+    )
+    timings["candidate_generation_seconds"] = time.time() - plan_started
+
+    data_started = time.time()
+    df, trade_start_idx, start_ts, end_ts = _prepare_grid_dataframe(config)
+    timings["data_prepare_seconds"] = time.time() - data_started
+
+    eval_started = time.time()
+    run_result = execute_grid_v2_candidates(
+        plan,
+        df,
+        trade_start_idx,
+        hooks,
+    )
+    timings["fast_evaluation_seconds"] = time.time() - eval_started
+
+    metric_tier = (
+        "compiled_fast"
+        if bool(run_result.metadata.get("compiled_batch_used"))
+        else "reference_fast"
+    )
+    all_fast_results = [
+        _grid_v2_result_from_row(row, metric_tier=metric_tier)
+        for row in run_result.rows
+    ]
+    ranked_fast = rank_grid_results(
+        all_fast_results,
+        objectives=selection_config.fast_objectives,
+        primary_objective=selection_config.fast_primary_objective,
+        constraints=constraints,
+        stage_label="Grid V2 fast screening",
+    )
+    selected_fast, diversity_metadata = apply_diversity_cap(
+        ranked_fast,
+        top_n=settings.top_n,
+        enabled=bool(getattr(config, "grid_diversity_enabled", True)),
+        max_per_group=max(1, int(getattr(config, "grid_diversity_max_per_group", 2) or 2)),
+    )
+    objective_selected_count = len(selected_fast)
+
+    row_by_id = {int(row.candidate_id): row for row in run_result.rows}
+    validation_started = time.time()
+    selected_results = [
+        _grid_v2_slow_result(
+            plan=plan,
+            df=df,
+            trade_start_idx=trade_start_idx,
+            hooks=hooks,
+            row=row_by_id[int(getattr(result, "candidate_id"))],
+        )
+        for result in selected_fast
+    ]
+    _preserve_fast_selection_metadata(selected_fast, selected_results)
+    timings["slow_validation_seconds"] = time.time() - validation_started
+
+    slow_refinement_started = time.time()
+    if selection_config.slow_refinement_enabled:
+        ranked_selected = rank_grid_results(
+            selected_results,
+            objectives=selection_config.slow_objectives,
+            primary_objective=selection_config.slow_primary_objective,
+            constraints=constraints,
+            stage_label="Grid V2 slow refinement",
+            rank_attr="slow_refinement_rank",
+        )
+    else:
+        ranked_selected = _refresh_selected_metrics(
+            selected_results,
+            objectives=selection_config.fast_objectives,
+            constraints=constraints,
+        )
+    timings["slow_refinement_seconds"] = time.time() - slow_refinement_started
+
+    for result in ranked_selected:
+        _add_selection_source(result, "objective")
+        setattr(result, "optimizer_mode", GRID_MODE)
+        result.optuna_trial_number = int(getattr(result, "candidate_id", result.optuna_trial_number or 0) or 0)
+
+    ranked_selected = calculate_grid_display_scores(ranked_selected, getattr(config, "score_config", None))
+
+    total_seconds = time.time() - started
+    timings["total_seconds"] = total_seconds
+    candidates_per_second = (
+        len(run_result.rows) / timings["fast_evaluation_seconds"]
+        if timings["fast_evaluation_seconds"] > 0.0
+        else None
+    )
+    requested_budget = parse_grid_budget(getattr(config, "grid_budget", plan.deduped_candidate_count))
+    actual_budget = len(run_result.rows)
+    dsr_metadata = {
+        "enabled": False,
+        "status": "unavailable_deferred",
+        "reason": "V2 Grid DSR is deferred; full-population DSR is not computed in Phase 2.5.",
+        "top_k": None,
+        "selected_count": 0,
+        "dsr_n_trials": None,
+        "dsr_mean_sharpe": None,
+        "dsr_var_sharpe": None,
+        "dsr_sr0": None,
+    }
+    cache_estimate = asdict(run_result.cache_estimate)
+    cache_stats = asdict(run_result.cache_stats)
+    backend_metadata = get_grid_v2_backend_metadata(config.strategy_id)
+    backend_metadata.update(
+        {
+            "backend_kind": run_result.metadata.get("backend_kind"),
+            "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
+        }
+    )
+    summary = {
+        "method": "Grid",
+        "optimizer_mode": GRID_MODE,
+        "engine": "v2",
+        "grid_v2_engine_version": plan.metadata.get("engine_version"),
+        "objectives": selection_config.final_objectives,
+        "primary_objective": selection_config.final_primary_objective,
+        "selection_objectives": selection_config.final_objectives,
+        "selection_primary_objective": selection_config.final_primary_objective,
+        "grid_fast_objectives": selection_config.fast_objectives,
+        "grid_fast_primary_objective": selection_config.fast_primary_objective,
+        "grid_slow_refinement_enabled": selection_config.slow_refinement_enabled,
+        "grid_slow_objectives": selection_config.slow_objectives,
+        "grid_slow_primary_objective": selection_config.slow_primary_objective,
+        "requested_budget": requested_budget,
+        "actual_budget": actual_budget,
+        "unused_budget": max(0, requested_budget - actual_budget),
+        "total_trials": actual_budget,
+        "completed_trials": len(ranked_fast),
+        "pruned_trials": 0,
+        "candidate_count": plan.deduped_candidate_count,
+        "valid_candidate_count": len(ranked_fast),
+        "selected_candidate_count": len(ranked_selected),
+        "full_candidate_count": plan.deduped_candidate_count,
+        "objective_selected_count": objective_selected_count,
+        "dsr_selected_count": 0,
+        "union_selected_count": len(ranked_selected),
+        "dsr_n_trials": None,
+        "dsr_mean_sharpe": None,
+        "dsr_var_sharpe": None,
+        "best_trial_number": getattr(ranked_selected[0], "candidate_id", None) if ranked_selected else None,
+        "best_value": ranked_selected[0].objective_values[0] if ranked_selected and ranked_selected[0].objective_values else None,
+        "best_values": dict(zip(selection_config.final_objectives, ranked_selected[0].objective_values))
+        if ranked_selected and len(selection_config.final_objectives) > 1
+        else None,
+        "pareto_front_size": sum(1 for result in ranked_selected if getattr(result, "is_pareto_optimal", False))
+        if len(selection_config.final_objectives) > 1
+        else None,
+        "optimization_time_seconds": total_seconds,
+        "grid": {
+            "backend": backend_metadata,
+            "backend_kind": run_result.metadata.get("backend_kind"),
+            "compiled_batch_available": bool(run_result.metadata.get("compiled_batch_available")),
+            "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
+            "candidate_count": plan.deduped_candidate_count,
+            "valid_candidate_count": len(ranked_fast),
+            "selected_candidate_count": len(ranked_selected),
+            "per_variant_counts": dict(plan.per_variant_counts),
+            "cache_estimate": cache_estimate,
+            "cache_stats": cache_stats,
+            "timings": timings,
+            "candidates_per_second": candidates_per_second,
+            "fast_objectives": selection_config.fast_objectives,
+            "fast_primary_objective": selection_config.fast_primary_objective,
+            "slow_refinement_enabled": selection_config.slow_refinement_enabled,
+            "slow_objectives": selection_config.slow_objectives,
+            "slow_primary_objective": selection_config.slow_primary_objective,
+            "preview": {
+                "full_candidate_count": plan.deduped_candidate_count,
+                "coverage_pct": 100.0,
+            },
+            "allocation": {
+                "requested_budget": requested_budget,
+                "actual_budget": actual_budget,
+                "unused_budget": max(0, requested_budget - actual_budget),
+                "mode_space_sizes": dict(plan.per_variant_counts),
+                "mode_budgets": dict(plan.per_variant_counts),
+                "mode_coverage_pct": {name: 100.0 for name in plan.per_variant_counts},
+                "allocation_method": "full_enumeration_v2",
+            },
+            "optional_axis_settings": {
+                "enabled_axes": list(settings.enabled_axes) if settings.enabled_axes is not None else None,
+                "enabled_variants": list(settings.enabled_variants) if settings.enabled_variants is not None else None,
+            },
+            "dsr_metric_computation_enabled": False,
+            "dsr": dsr_metadata,
+            "guardrail_aggregate_summary": _grid_v2_guardrail_aggregate(run_result.rows),
+            "full_candidate_count": plan.deduped_candidate_count,
+            "objective_selected_count": objective_selected_count,
+            "dsr_selected_count": 0,
+            "union_selected_count": len(ranked_selected),
+            "start": start_ts.isoformat() if isinstance(start_ts, pd.Timestamp) else None,
+            "end": end_ts.isoformat() if isinstance(end_ts, pd.Timestamp) else None,
+        },
+    }
+    setattr(config, "optuna_summary", summary)
+    setattr(config, "grid_summary", summary)
+    setattr(config, "optuna_all_results", all_fast_results)
+
+    study_id = None
+    if save_study:
+        from .storage import save_grid_study_to_db
+
+        study_id = save_grid_study_to_db(
+            config=config,
+            grid_settings=settings,
+            grid_summary=summary,
+            trial_results=ranked_selected,
+            csv_file_path=_resolve_csv_path_for_storage(getattr(config, "csv_file", "")),
+            start_time=started,
+            score_config=getattr(config, "score_config", None),
+        )
+    return ranked_selected, study_id
+
+
+def _grid_v2_guardrail_aggregate(rows: Sequence[Any]) -> Dict[str, Any]:
+    aggregate: Dict[str, Any] = {
+        "candidate_rows": len(rows),
+        "rows_with_guardrail_flags": 0,
+        "invalid_stop_distance_count": 0,
+        "zero_size_entry_count": 0,
+        "rejected_fill_count": 0,
+        "margin_reject_count": 0,
+        "liquidation_count": 0,
+        "no_capital_halt_count": 0,
+    }
+    for row in rows:
+        summary = dict(getattr(row, "guardrail_summary", {}) or {})
+        flags = int(summary.get("flags", 0) or 0)
+        if flags:
+            aggregate["rows_with_guardrail_flags"] += 1
+        for key in (
+            "invalid_stop_distance_count",
+            "zero_size_entry_count",
+            "rejected_fill_count",
+            "margin_reject_count",
+            "liquidation_count",
+        ):
+            aggregate[key] += int(summary.get(key, 0) or 0)
+        if bool(summary.get("no_capital_halt", False)):
+            aggregate["no_capital_halt_count"] += 1
+    return aggregate
+
+
 def run_grid_optimization(
     config: OptimizationConfig,
     *,
     save_study: bool = True,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
+    if supports_grid_v2(config.strategy_id):
+        return _run_grid_v2_optimization(config, save_study=save_study)
+
     validate_grid_config(config)
     backend = _load_backend(config.strategy_id)
     backend_metadata = get_fast_grid_backend_metadata(config.strategy_id)
