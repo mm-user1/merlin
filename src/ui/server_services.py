@@ -1007,6 +1007,14 @@ def _grid_setting_number(value: Any, *, integer: bool = True) -> Optional[Any]:
     return int(round(parsed)) if integer else parsed
 
 
+def _is_full_enumeration_profile(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"full_enumeration", "full_enumeration_v2"}
+
+
+def _is_full_enumeration_allocation(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"full_enumeration", "full_enumeration_v2"}
+
+
 def _grid_setting_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
     if value in (None, ""):
         return default
@@ -1273,7 +1281,17 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         or preview.get("actual_budget")
         or requested_budget
     )
-    total_space = _grid_setting_number(preview.get("total_space"))
+    grid_section = _parse_json_dict(grid_summary.get("grid"))
+    allocation_summary = _parse_json_dict(grid_section.get("allocation"))
+    total_space = _grid_setting_number(
+        preview.get("total_space")
+        or preview.get("full_candidate_count")
+        or preview.get("candidate_count")
+        or grid_summary.get("full_candidate_count")
+        or grid_summary.get("candidate_count")
+        or grid_section.get("full_candidate_count")
+        or grid_section.get("candidate_count")
+    )
     coverage_pct = _grid_setting_number(study.get("grid_coverage_pct"), integer=False)
     if coverage_pct is None:
         coverage_pct = _grid_setting_number(preview.get("coverage_pct"), integer=False)
@@ -1296,6 +1314,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     )
     allocation_method = (
         preview.get("allocation_method")
+        or allocation_summary.get("allocation_method")
         or _grid_config_value(config, "grid_allocation_method", "allocation_method", "gridAllocationMethod")
         or "auto_sqrt_space"
     )
@@ -1353,10 +1372,9 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         )
 
     if not mode_rows:
-        allocation = _parse_json_dict((_parse_json_dict(grid_summary.get("grid"))).get("allocation"))
-        mode_budgets = _parse_json_dict(allocation.get("mode_budgets"))
-        mode_spaces = _parse_json_dict(allocation.get("mode_space_sizes"))
-        mode_coverages = _parse_json_dict(allocation.get("mode_coverage_pct"))
+        mode_budgets = _parse_json_dict(allocation_summary.get("mode_budgets"))
+        mode_spaces = _parse_json_dict(allocation_summary.get("mode_space_sizes"))
+        mode_coverages = _parse_json_dict(allocation_summary.get("mode_coverage_pct"))
         for mode_key in ("cc_only", "tbands_only", "both", "bracket", "trail"):
             if mode_key not in mode_spaces and mode_key not in mode_budgets:
                 continue
@@ -1375,7 +1393,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             )
             generations.add(generation.lower())
 
-    if str(preview.get("profile") or "").strip().lower() == "full_enumeration":
+    if _is_full_enumeration_profile(preview.get("profile")):
         sampling_label = "Full enumeration"
     elif generations and generations <= {"full", "full enumeration", "disabled"}:
         sampling_label = "Full enumeration"
@@ -1386,8 +1404,8 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         sampling_label = "-"
     is_full_enumeration = (
-        str(preview.get("profile") or "").strip().lower() == "full_enumeration"
-        or str(allocation_method).strip().lower() == "full_enumeration"
+        _is_full_enumeration_profile(preview.get("profile"))
+        or _is_full_enumeration_allocation(allocation_method)
     )
 
     rows = [
@@ -1452,7 +1470,7 @@ def build_grid_settings_view(study: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     allocation_label = (
         "Full enumeration"
-        if str(allocation_method).lower() == "full_enumeration"
+        if _is_full_enumeration_allocation(allocation_method)
         else _grid_allocation_label(allocation_method)
     )
     allocation_rows = [{"key": "Allocation", "val": allocation_label}]
@@ -2394,6 +2412,22 @@ def _build_optimization_config(
         payload.get("grid_strict_validation", payload.get("gridStrictValidation", True)),
         True,
     )
+    grid_v2_prefer_compiled = _parse_bool(
+        payload.get("grid_v2_prefer_compiled", payload.get("gridV2PreferCompiled", True)),
+        True,
+    )
+    grid_v2_max_cache_mb_raw = payload.get(
+        "grid_v2_max_cache_mb",
+        payload.get("gridV2MaxCacheMb", None),
+    )
+    grid_v2_max_cache_mb = None
+    if grid_v2_max_cache_mb_raw not in (None, ""):
+        try:
+            grid_v2_max_cache_mb = float(grid_v2_max_cache_mb_raw)
+        except (TypeError, ValueError):
+            raise ValueError("Grid V2 max cache MB must be a finite positive number.")
+        if not math.isfinite(grid_v2_max_cache_mb) or grid_v2_max_cache_mb <= 0.0:
+            raise ValueError("Grid V2 max cache MB must be a finite positive number.")
     grid_fast_objectives = _payload_objective_list(
         payload,
         "grid_fast_objectives",
@@ -2497,6 +2531,8 @@ def _build_optimization_config(
         grid_slow_refinement_enabled=grid_slow_refinement_enabled,
         grid_slow_objectives=grid_slow_objectives,
         grid_slow_primary_objective=grid_slow_primary_objective,
+        grid_v2_prefer_compiled=grid_v2_prefer_compiled,
+        grid_v2_max_cache_mb=grid_v2_max_cache_mb,
     )
 
     if optimization_mode == "optuna":

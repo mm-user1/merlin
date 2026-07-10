@@ -76,6 +76,8 @@ class GridV2Settings:
     top_n: int = 10
     max_signal_cache_mb: float = 512.0
     worker_multiplier: int = 1
+    compiled_workers: int = 1
+    slow_enrich_selected: bool = True
     enabled_variants: tuple[str, ...] | None = None
     enabled_axes: tuple[str, ...] | None = None
     price_rounding: str | None = None
@@ -356,6 +358,11 @@ def build_grid_v2_plan(
         "default_enabled_axes": [
             name for name, domain in domains.items() if domain.is_axis
         ],
+        "select_option_subsets": {
+            name: list(domain.values)
+            for name, domain in domains.items()
+            if domain.is_axis and str(domain.source).endswith(".runtime_options")
+        },
         "variant_order": list(selected_variants),
         "semantic_dedup_count": enumerated_count - len(candidates),
     }
@@ -568,6 +575,7 @@ def execute_grid_v2_candidates(
                     profile=plan.profile,
                     params_batch=params_batch,
                     trade_start_idx=trade_start_idx,
+                    n_workers=plan.settings.compiled_workers,
                 )
             except Exception as exc:
                 rows.extend(_error_row(candidate, exc) for candidate in candidates)
@@ -591,10 +599,12 @@ def execute_grid_v2_candidates(
                 rows.append(_row_from_run(candidate, run))
 
     rows.sort(key=lambda row: row.candidate_id)
-    selected = tuple(
-        _slow_enrich_selected(plan, context, trade_start_idx, hooks, row, dataprep_cache)
-        for row in _rank_rows(rows, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
-    )
+    selected = ()
+    if plan.settings.slow_enrich_selected:
+        selected = tuple(
+            _slow_enrich_selected(plan, context, trade_start_idx, hooks, row, dataprep_cache)
+            for row in _rank_rows(rows, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
+        )
     evaluation_seconds = time.time() - eval_started
     return GridV2RunResult(
         plan=plan,
@@ -609,6 +619,8 @@ def execute_grid_v2_candidates(
             "compiled_unavailable_reason": compiled_unavailable_reason(),
             "metric_tier": "core_fast_rows_plus_selected_public_v2_enrichment",
             "executed_candidate_count": len(rows),
+            "slow_enrich_selected": bool(plan.settings.slow_enrich_selected),
+            "compiled_workers": int(plan.settings.compiled_workers),
             "evaluation_seconds": evaluation_seconds,
             "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
         },
@@ -713,7 +725,7 @@ def _build_parameter_domains(
             raise ValueError(f"Grid V2 axis '{name}' is not an optimized non-runtime parameter.")
         is_axis = axis_available and _axis_enabled(name, optimize, settings)
         if is_axis:
-            values, source = _axis_values(name, spec, param_type)
+            values, source = _axis_values(name, spec, param_type, fixed_params)
         else:
             values, source = (_coerce_value(default, param_type),), "fixed_default"
         if not values:
@@ -736,7 +748,12 @@ def _axis_enabled(name: str, optimize: Mapping[str, Any], settings: GridV2Settin
     return optimize.get("default_enabled", True) is not False
 
 
-def _axis_values(name: str, spec: Mapping[str, Any], param_type: str) -> tuple[tuple[Any, ...], str]:
+def _axis_values(
+    name: str,
+    spec: Mapping[str, Any],
+    param_type: str,
+    fixed_params: Mapping[str, Any],
+) -> tuple[tuple[Any, ...], str]:
     optimize = spec.get("optimize", {}) if isinstance(spec.get("optimize", {}), Mapping) else {}
     for source, values in (
         ("gridValues", spec.get("gridValues")),
@@ -744,14 +761,44 @@ def _axis_values(name: str, spec: Mapping[str, Any], param_type: str) -> tuple[t
         ("optimize.values", optimize.get("values")),
     ):
         if values is not None:
-            return _explicit_values(name, values, param_type), source
+            explicit = _explicit_values(name, values, param_type)
+            return _select_subset_values(name, explicit, param_type, fixed_params, source)
     if param_type in {"select", "options"}:
-        return _explicit_values(name, spec.get("options"), param_type), "options"
+        explicit = _explicit_values(name, spec.get("options"), param_type)
+        return _select_subset_values(name, explicit, param_type, fixed_params, "options")
     if param_type == "bool":
         return (False, True), "bool"
     if param_type in {"int", "integer", "float", "number"}:
         return _numeric_range_values(name, spec, optimize, param_type), "optimize.range"
     raise ValueError(f"Grid V2 parameter '{name}' has unsupported type '{param_type}'.")
+
+
+def _select_subset_values(
+    name: str,
+    values: tuple[Any, ...],
+    param_type: str,
+    fixed_params: Mapping[str, Any],
+    source: str,
+) -> tuple[tuple[Any, ...], str]:
+    if param_type not in {"select", "options"}:
+        return values, source
+    option_key = f"{name}_options"
+    if option_key not in fixed_params:
+        return values, source
+    raw_subset = fixed_params.get(option_key)
+    if not isinstance(raw_subset, (list, tuple)) or not raw_subset:
+        raise ValueError(f"Grid V2 select option subset '{option_key}' must be a non-empty list.")
+    requested = tuple(dict.fromkeys(_coerce_value(value, param_type) for value in raw_subset))
+    available = set(values)
+    unknown = [value for value in requested if value not in available]
+    if unknown:
+        raise ValueError(
+            f"Grid V2 select option subset '{option_key}' contains unknown option(s): {unknown}."
+        )
+    filtered = tuple(value for value in values if value in set(requested))
+    if not filtered:
+        raise ValueError(f"Grid V2 select option subset '{option_key}' leaves an empty domain.")
+    return filtered, f"{source}.runtime_options"
 
 
 def _explicit_values(name: str, values: Any, param_type: str) -> tuple[Any, ...]:

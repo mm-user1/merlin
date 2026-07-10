@@ -1068,6 +1068,10 @@ function getEnabledGridMetadata() {
   };
 }
 
+function isFullEnumerationProfile(profile) {
+  return profile === 'full_enumeration' || profile === 'full_enumeration_v2';
+}
+
 function getSelectedGridModes() {
   return Array.from(document.querySelectorAll('input[name="gridEnabledMode"]'))
     .filter((checkbox) => checkbox.checked)
@@ -1077,7 +1081,7 @@ function getSelectedGridModes() {
 
 function syncGridProfileUi() {
   const metadata = getEnabledGridMetadata();
-  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const fullEnumeration = isFullEnumerationProfile(metadata.profile);
   const modeSection = document.getElementById('gridProfileModesSection');
   const modeContainer = document.getElementById('gridEnabledModes');
   const budgetRow = document.getElementById('gridBudgetRow');
@@ -1207,7 +1211,7 @@ function validateOptimizerForm(config) {
   const gridMetadata = getEnabledGridMetadata();
   if (
     enabledCount === 0
-    && !(optimizerMode === 'grid' && gridMetadata.profile === 'full_enumeration')
+    && !(optimizerMode === 'grid' && isFullEnumerationProfile(gridMetadata.profile))
   ) {
     errors.push('Enable at least one parameter to optimize.');
   }
@@ -1217,7 +1221,7 @@ function validateOptimizerForm(config) {
     if (!gridMeta.available) {
       errors.push(gridMeta.reason || 'Grid mode is unavailable for this strategy.');
     }
-    if (gridMeta.profile === 'full_enumeration' && !getSelectedGridModes().length) {
+    if (isFullEnumerationProfile(gridMeta.profile) && !getSelectedGridModes().length) {
       errors.push('Enable at least one Grid mode.');
     }
 
@@ -1563,7 +1567,7 @@ function buildGridConfig(state) {
   const optunaCompatibleConfig = buildOptunaConfig(state);
   const gridBaseConfig = buildOptimizationConfig(state, 'grid');
   const metadata = getEnabledGridMetadata();
-  const fullEnumeration = metadata.profile === 'full_enumeration';
+  const fullEnumeration = isFullEnumerationProfile(metadata.profile);
   const previewBudget = Number(window.lastGridPreview?.actual_budget);
   const budget = fullEnumeration && Number.isFinite(previewBudget) && previewBudget > 0
     ? previewBudget
@@ -2041,7 +2045,7 @@ function syncGridBudgetHelp({ normalizeInput = false } = {}) {
 }
 
 function syncGridAllocationUi() {
-  if (getEnabledGridMetadata().profile === 'full_enumeration') return;
+  if (isFullEnumerationProfile(getEnabledGridMetadata().profile)) return;
   const method = Array.from(document.querySelectorAll('input[name="gridAllocationMethod"]'))
     .find((radio) => radio.checked)?.value || 'auto_sqrt_space';
   const minQuotaRow = document.getElementById('gridMinQuotaRow');
@@ -2067,7 +2071,7 @@ function updateGridPreviewDom(preview) {
     const total = preview?.total_space_label || '-';
     const budget = preview?.actual_budget_label || preview?.requested_budget_label || '-';
     const coverage = preview?.coverage_label || '-';
-    summary.textContent = preview?.profile === 'full_enumeration'
+    summary.textContent = isFullEnumerationProfile(preview?.profile)
       ? `Parameter space: ${total} semantic combinations. Coverage: ${coverage}. Method: Full enumeration.`
       : `Parameter space: ${total} semantic combinations. Grid budget: ${budget} candidates, ${coverage} coverage.`;
   }

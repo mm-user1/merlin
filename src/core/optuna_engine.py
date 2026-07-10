@@ -117,6 +117,8 @@ class OptimizationConfig:
     grid_slow_refinement_enabled: bool = False
     grid_slow_objectives: List[str] = field(default_factory=list)
     grid_slow_primary_objective: Optional[str] = None
+    grid_v2_prefer_compiled: bool = True
+    grid_v2_max_cache_mb: Optional[float] = None
 
 
 @dataclass
@@ -241,6 +243,9 @@ OBJECTIVE_DIRECTIONS: Dict[str, str] = {
     "ulcer_index": "minimize",
     "consistency_score": "maximize",
     "composite_score": "maximize",
+    # Grid-supported objectives used by ranking/constraint paths.
+    "total_trades": "maximize",
+    "max_consecutive_losses": "minimize",
 }
 
 OBJECTIVE_DISPLAY_NAMES: Dict[str, str] = {

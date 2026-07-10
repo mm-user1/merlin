@@ -100,6 +100,12 @@ Declare `execution` with:
 - optional axes through normal `optimize.enabled` and `optimize.default_enabled`
   metadata.
 
+For `select`/`options` Grid axes, a runtime config may restrict the enumerated
+values with `{param}_options`. The value must be a non-empty subset of the
+declared config options. Grid V2 preserves the strategy config order and rejects
+unknown runtime options. Use this for apples-to-apples candidate count checks
+instead of editing the strategy config.
+
 ## Signals.py Requirements
 
 Signal code must be deterministic and causal:
@@ -166,6 +172,24 @@ target=none, trail=ma, trailActivation=rr
 If the next strategy fits these modes, add only the strategy package, config,
 hooks, and tests. Do not add a new Grid backend.
 
+## Grid V2 Runtime Settings
+
+The normal Grid dispatcher passes V2 runs into the generic Grid V2 planner and
+compiled evaluator when available. `grid_v2_prefer_compiled` defaults to `true`.
+Set it to `false` only when a reference-tier run is intentionally required.
+
+`grid_v2_max_cache_mb` overrides the signal/dataprep cache estimate limit. The
+default is `512`; custom values must be finite positive numbers. In the normal
+dispatcher, `worker_processes` caps Numba batch threads for compiled Grid V2
+evaluation. Signal/dataprep cache memory is estimated once per in-process run,
+so the dispatcher uses a cache worker multiplier of `1` even when multiple Numba
+threads are requested.
+
+When comparing candidate counts across tools or baselines, document the enabled
+axes, enabled variants, `{param}_options` subsets, budget, and whether the UI
+preview profile is `full_enumeration` or `full_enumeration_v2`. Both full
+enumeration preview profiles should be treated as complete enumeration rows.
+
 ## Adding Unsupported Modes Later
 
 For a new execution mode, update the system in this order:
@@ -192,6 +216,10 @@ Add focused tests for every new V2 strategy:
 - one-candidate and multi-candidate Grid V2 parity against direct V2 runs;
 - compiled-vs-reference Grid V2 subset parity when Numba is available;
 - selected slow-enrichment smoke through the normal Grid workflow.
+- select/options runtime subset count checks when `{param}_options` is part of
+  the workflow;
+- compiled Grid V2 thread-count determinism checks when a strategy relies on the
+  compiled evaluator.
 
 When using a V1 or external oracle, document any process-global test settings
 such as `NUMBA_DISABLE_JIT`.
@@ -221,5 +249,8 @@ Check these first when V2 strategy work drifts:
 - `trade_start_idx` is ignored in warmup data;
 - tick rounding is applied to risk sizing instead of only placed levels;
 - selected Grid candidates are not slow-enriched through the reference runner;
+- selected Grid candidates reuse fast guardrail summaries instead of the slow
+  reference summary;
+- cache estimates are multiplied by Numba thread count even though the
+  signal/dataprep cache is shared in process;
 - a test imported the V1 Numba oracle before setting process-global JIT state.
-

@@ -160,6 +160,37 @@ def test_compiled_grid_v2_batch_matches_reference_batch_for_certification_subset
         _assert_rows_equal(compiled_row, reference_row)
 
 
+def test_compiled_grid_v2_worker_count_is_deterministic(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    base_params = merged_reference_params("reference_b_trend_bracket")
+    config = _config_with_rounding("none")
+    settings = {
+        "enabled_variants": ("bracket",),
+        "enabled_axes": ("stopX", "stopRR"),
+        "prefer_compiled": True,
+        "top_n": 0,
+    }
+    one_worker_plan = build_grid_v2_plan(
+        config,
+        GridV2Settings(**settings, compiled_workers=1),
+        base_params=base_params,
+    )
+    many_worker_plan = build_grid_v2_plan(
+        config,
+        GridV2Settings(**settings, compiled_workers=2),
+        base_params=base_params,
+    )
+    indices = (0, 1, 5, len(one_worker_plan.candidates) - 1)
+
+    one_worker = execute_grid_v2_candidates(one_worker_plan, df, trade_start_idx, hooks, indices)
+    many_workers = execute_grid_v2_candidates(many_worker_plan, df, trade_start_idx, hooks, indices)
+
+    assert one_worker.metadata["compiled_workers"] == 1
+    assert many_workers.metadata["compiled_workers"] == 2
+    for left, right in zip(one_worker.rows, many_workers.rows):
+        _assert_rows_equal(left, right)
+
+
 def _data(
     *,
     open_,

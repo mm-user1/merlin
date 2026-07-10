@@ -14,7 +14,7 @@ import math
 import re
 import time
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -77,9 +77,6 @@ GRID_V2_SUPPORTED_SLOW_OBJECTIVES = GRID_SUPPORTED_SLOW_OBJECTIVES | {
     "max_consecutive_losses",
 }
 MODE_ORDER = ("cc_only", "tbands_only", "both")
-
-OBJECTIVE_DIRECTIONS.setdefault("total_trades", "maximize")
-OBJECTIVE_DIRECTIONS.setdefault("max_consecutive_losses", "minimize")
 
 
 @dataclass(frozen=True)
@@ -461,9 +458,13 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
         if bool(enabled) and str(name) in optimized_names
     )
     enabled_variants = tuple(getattr(config, "grid_enabled_modes", []) or ()) or None
+    compiled_workers = max(1, int(getattr(config, "worker_processes", 1) or 1))
     return GridV2Settings(
         top_n=max(0, int(getattr(config, "grid_top_candidates", 10) or 10)),
-        worker_multiplier=max(1, int(getattr(config, "worker_processes", 1) or 1)),
+        max_signal_cache_mb=_grid_v2_max_cache_mb_from_config(config),
+        worker_multiplier=1,
+        compiled_workers=compiled_workers,
+        slow_enrich_selected=False,
         enabled_variants=enabled_variants,
         enabled_axes=enabled_axes or None,
         prefer_compiled=bool(getattr(config, "grid_v2_prefer_compiled", True)),
@@ -472,6 +473,19 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
             or (getattr(config, "grid_fast_objectives", None) or getattr(config, "objectives", None) or ["net_profit_pct"])[0]
         ),
     )
+
+
+def _grid_v2_max_cache_mb_from_config(config: OptimizationConfig) -> float:
+    raw = getattr(config, "grid_v2_max_cache_mb", None)
+    if raw in (None, ""):
+        return 512.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Grid V2 max cache MB must be a finite positive number.") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError("Grid V2 max cache MB must be a finite positive number.")
+    return value
 
 
 def _load_backend(strategy_id: str):
@@ -736,12 +750,21 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
         base_params=getattr(config, "fixed_params", {}) or {},
     )
     total = int(preview.deduped_candidate_count or preview.enumerated_candidate_count)
+    modes = _grid_v2_preview_modes(preview.per_variant_counts)
     return {
         "engine": "v2",
         "profile": "full_enumeration_v2",
         "full_candidate_count": total,
         "candidate_count": total,
+        "total_space": total,
+        "total_space_label": format_compact_count(total),
+        "requested_budget": total,
+        "requested_budget_label": format_compact_count(total),
+        "actual_budget": total,
+        "actual_budget_label": format_compact_count(total),
         "coverage_pct": 100.0,
+        "coverage_label": format_coverage_pct(100.0),
+        "modes": modes,
         "mode_space_sizes": dict(preview.per_variant_counts),
         "mode_budgets": dict(preview.per_variant_counts),
         "mode_coverage_pct": {name: 100.0 for name in preview.per_variant_counts},
@@ -749,6 +772,26 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
             name: list(values) for name, values in preview.axis_names_by_variant.items()
         },
     }
+
+
+def _grid_v2_preview_modes(per_variant_counts: Mapping[str, int]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for name, count_raw in per_variant_counts.items():
+        count = int(count_raw)
+        rows.append(
+            {
+                "mode": name,
+                "label": name,
+                "space_size": count,
+                "space_label": format_compact_count(count),
+                "budget": count,
+                "budget_label": format_compact_count(count),
+                "coverage_pct": 100.0,
+                "coverage_label": format_coverage_pct(100.0),
+                "generation": "Full enumeration",
+            }
+        )
+    return rows
 
 
 def _metric_value(result: OptimizationResult, metric: str) -> Any:
@@ -1382,11 +1425,11 @@ def _grid_v2_slow_result(
         "grid_generation_mode",
         "grid_backend_kind",
         "grid_v2_engine_version",
-        "guardrail_summary",
         "fast_metrics",
     ):
         if hasattr(fast_result, attr):
             setattr(result, attr, getattr(fast_result, attr))
+    setattr(result, "guardrail_summary", _grid_v2_guardrail_mapping(run.guardrail_summary))
     setattr(result, "metric_tier", "slow_public_v2")
     setattr(result, "validation_status", "passed")
     return result
@@ -1408,6 +1451,26 @@ def _max_consecutive_losses_for_grid_v2(trades: Sequence[Any]) -> int:
         else:
             consecutive = 0
     return max_consecutive
+
+
+def _grid_v2_guardrail_mapping(summary: Any) -> Dict[str, Any]:
+    if is_dataclass(summary):
+        summary = asdict(summary)
+    if not isinstance(summary, Mapping):
+        return {}
+    return {str(key): _grid_v2_jsonable_value(value) for key, value in summary.items()}
+
+
+def _grid_v2_jsonable_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _grid_v2_jsonable_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_grid_v2_jsonable_value(item) for item in value]
+    if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    return value
 
 
 def _run_grid_v2_optimization(
@@ -1611,11 +1674,13 @@ def _run_grid_v2_optimization(
             "backend_kind": run_result.metadata.get("backend_kind"),
             "compiled_batch_available": bool(run_result.metadata.get("compiled_batch_available")),
             "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
+            "compiled_workers": int(run_result.metadata.get("compiled_workers") or settings.compiled_workers),
             "candidate_count": plan.deduped_candidate_count,
             "valid_candidate_count": len(ranked_fast),
             "selected_candidate_count": len(ranked_selected),
             "per_variant_counts": dict(plan.per_variant_counts),
             "cache_estimate": cache_estimate,
+            "max_signal_cache_mb": float(settings.max_signal_cache_mb),
             "cache_stats": cache_stats,
             "timings": timings,
             "candidates_per_second": candidates_per_second,
@@ -1640,6 +1705,7 @@ def _run_grid_v2_optimization(
             "optional_axis_settings": {
                 "enabled_axes": list(settings.enabled_axes) if settings.enabled_axes is not None else None,
                 "enabled_variants": list(settings.enabled_variants) if settings.enabled_variants is not None else None,
+                "select_option_subsets": dict(plan.metadata.get("select_option_subsets") or {}),
             },
             "dsr_metric_computation_enabled": False,
             "dsr": dsr_metadata,

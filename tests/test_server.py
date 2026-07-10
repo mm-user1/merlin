@@ -76,6 +76,8 @@ def test_grid_start_page_label_and_marker_are_compact():
     assert 'class="grid-slow-objective-checkbox"' in index_html
     assert 'id="gridProfileModesSection"' in index_html
     assert "grid_enabled_modes" in ui_handlers_js
+    assert "function isFullEnumerationProfile(profile)" in ui_handlers_js
+    assert "profile === 'full_enumeration_v2'" in ui_handlers_js
     assert "collectGridObjectiveSelection('fast')" in ui_handlers_js
     assert "grid_fast_objectives" in ui_handlers_js
     assert "applyQueueGridConfig" in queue_js
@@ -3078,6 +3080,69 @@ def _standalone_grid_study(**overrides):
     }
     study.update(overrides)
     return study
+
+
+def _saved_v2_full_enumeration_grid_summary():
+    return {
+        "grid": {
+            "preview": {
+                "profile": "full_enumeration_v2",
+                "full_candidate_count": 48_480,
+            },
+            "allocation": {
+                "allocation_method": "full_enumeration_v2",
+                "mode_space_sizes": {"bracket": 480, "trail": 48_000},
+                "mode_budgets": {"bracket": 480, "trail": 48_000},
+                "mode_coverage_pct": {"bracket": 100.0, "trail": 100.0},
+            },
+        },
+    }
+
+
+def _grid_settings_rows(view):
+    assert view is not None
+    return {row["key"]: row["val"] for row in view["rows"]}
+
+
+def _grid_settings_allocation_rows(view):
+    assert view is not None
+    return {row["key"]: row["val"] for row in view["allocation_rows"]}
+
+
+def _assert_saved_v2_full_enumeration_grid_settings(view):
+    rows = _grid_settings_rows(view)
+    allocation_rows = _grid_settings_allocation_rows(view)
+
+    assert rows["Sampling"] == "Full enumeration"
+    assert "Seed" not in rows
+    assert rows["Parameter Space"] != "-"
+    assert rows["Diversity"] == "On, max 2 / strategy group"
+    assert allocation_rows["Allocation"] == "Full enumeration"
+    assert "Bracket" in allocation_rows
+    assert "Trail" in allocation_rows
+
+
+def test_grid_settings_saved_v2_full_enumeration_labels():
+    study = _standalone_grid_study(grid_summary=_saved_v2_full_enumeration_grid_summary())
+
+    view = build_grid_settings_view(study)
+
+    assert view["is_wfa_grid"] is False
+    _assert_saved_v2_full_enumeration_grid_settings(view)
+
+
+def test_grid_settings_saved_wfa_v2_full_enumeration_labels():
+    study = {
+        "optimization_mode": "wfa",
+        "optimizer_mode": "grid",
+        "config_json": {"optimization_mode": "grid", "grid_budget": 10},
+        "grid_summary": _saved_v2_full_enumeration_grid_summary(),
+    }
+
+    view = build_grid_settings_view(study)
+
+    assert view["is_wfa_grid"] is True
+    _assert_saved_v2_full_enumeration_grid_settings(view)
 
 
 def test_grid_settings_constraints_standalone_two_enabled():

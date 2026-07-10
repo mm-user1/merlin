@@ -94,6 +94,7 @@ def evaluate_compiled_batch(
     profile: Any,
     params_batch: Sequence[Mapping[str, Any]],
     trade_start_idx: int,
+    n_workers: int = 1,
 ) -> CompiledBatchOutput:
     """Evaluate one batch of candidates sharing the same ``ExecutionData``."""
 
@@ -104,45 +105,64 @@ def evaluate_compiled_batch(
 
     packed = _pack_config_arrays(profile, params_batch, trade_start_idx)
     outputs = np.empty((len(params_batch), OUTPUT_COLUMN_COUNT), dtype=np.float64)
-    _COMPILED_BATCH_LOOP(
-        np.asarray(data.open, dtype=np.float64),
-        np.asarray(data.high, dtype=np.float64),
-        np.asarray(data.low, dtype=np.float64),
-        np.asarray(data.close, dtype=np.float64),
-        _timestamps_ns(data.timestamps),
-        np.asarray(data.signals.long_entries, dtype=np.bool_),
-        np.asarray(data.signals.short_entries, dtype=np.bool_),
-        np.asarray(data.atr, dtype=np.float64),
-        np.asarray(data.rolling_low, dtype=np.float64),
-        np.asarray(data.rolling_high, dtype=np.float64),
-        np.asarray(data.trail_long, dtype=np.float64),
-        np.asarray(data.trail_short, dtype=np.float64),
-        int(trade_start_idx),
-        packed["initial_capital"],
-        packed["commission_pct"],
-        packed["stop_x"],
-        packed["reward_risk"],
-        packed["max_stop_pct"],
-        packed["max_days"],
-        packed["risk_per_trade_pct"],
-        packed["contract_size"],
-        packed["trail_activation_rr"],
-        packed["tick_size"],
-        packed["start_ns"],
-        packed["end_ns"],
-        packed["enable_long"],
-        packed["enable_short"],
-        packed["target_enabled"],
-        packed["trail_enabled"],
-        packed["max_days_enabled"],
-        packed["use_date_filter"],
-        packed["strict_boundary"],
-        packed["boundary_none"],
-        packed["report_margin"],
-        packed["rounding_code"],
-        outputs,
-    )
+    worker_count = _validated_worker_count(n_workers)
+    previous_threads = numba.get_num_threads()
+    target_threads = max(1, min(worker_count, previous_threads))
+    try:
+        if target_threads != previous_threads:
+            numba.set_num_threads(target_threads)
+        _COMPILED_BATCH_LOOP(
+            np.asarray(data.open, dtype=np.float64),
+            np.asarray(data.high, dtype=np.float64),
+            np.asarray(data.low, dtype=np.float64),
+            np.asarray(data.close, dtype=np.float64),
+            _timestamps_ns(data.timestamps),
+            np.asarray(data.signals.long_entries, dtype=np.bool_),
+            np.asarray(data.signals.short_entries, dtype=np.bool_),
+            np.asarray(data.atr, dtype=np.float64),
+            np.asarray(data.rolling_low, dtype=np.float64),
+            np.asarray(data.rolling_high, dtype=np.float64),
+            np.asarray(data.trail_long, dtype=np.float64),
+            np.asarray(data.trail_short, dtype=np.float64),
+            int(trade_start_idx),
+            packed["initial_capital"],
+            packed["commission_pct"],
+            packed["stop_x"],
+            packed["reward_risk"],
+            packed["max_stop_pct"],
+            packed["max_days"],
+            packed["risk_per_trade_pct"],
+            packed["contract_size"],
+            packed["trail_activation_rr"],
+            packed["tick_size"],
+            packed["start_ns"],
+            packed["end_ns"],
+            packed["enable_long"],
+            packed["enable_short"],
+            packed["target_enabled"],
+            packed["trail_enabled"],
+            packed["max_days_enabled"],
+            packed["use_date_filter"],
+            packed["strict_boundary"],
+            packed["boundary_none"],
+            packed["report_margin"],
+            packed["rounding_code"],
+            outputs,
+        )
+    finally:
+        if numba.get_num_threads() != previous_threads:
+            numba.set_num_threads(previous_threads)
     return CompiledBatchOutput(outputs=outputs)
+
+
+def _validated_worker_count(value: Any) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Compiled Grid V2 n_workers must be a positive integer.") from exc
+    if workers < 1:
+        raise ValueError("Compiled Grid V2 n_workers must be a positive integer.")
+    return workers
 
 
 def _pack_config_arrays(
@@ -231,7 +251,7 @@ def _timestamps_ns(values: Sequence[Any]) -> np.ndarray:
 def _compiled_target(func):
     if numba is None:  # pragma: no cover
         return func
-    return numba.njit(cache=False)(func)
+    return numba.njit(cache=True)(func)
 
 
 @_compiled_target
@@ -239,6 +259,9 @@ def _scaled_price(price: float, tick_size: float) -> float:
     scaled = price / tick_size
     nearest = round(scaled)
     tolerance = 1e-9
+    # Numba does not support math.ulp consistently here, so the compiled path
+    # uses a relative float64 epsilon proxy. Certified SUIUSDT.P tick ranges are
+    # covered by compiled/reference parity, and selected rows are slow-enriched.
     relative = abs(scaled) * 2.220446049250313e-16 * 8.0
     if relative > tolerance:
         tolerance = relative
@@ -820,7 +843,7 @@ def _batch_loop_impl(
     rounding_code_values: np.ndarray,
     outputs: np.ndarray,
 ) -> None:
-    for index in range(outputs.shape[0]):
+    for index in numba.prange(outputs.shape[0]):
         _compiled_loop_one(
             index,
             open_values,
@@ -863,7 +886,7 @@ def _batch_loop_impl(
 
 
 if numba is not None:
-    _COMPILED_BATCH_LOOP = numba.njit(cache=False)(_batch_loop_impl)
+    _COMPILED_BATCH_LOOP = numba.njit(cache=True, parallel=True)(_batch_loop_impl)
 else:  # pragma: no cover
     _COMPILED_BATCH_LOOP = _batch_loop_impl
 

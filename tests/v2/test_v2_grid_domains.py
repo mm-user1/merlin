@@ -166,6 +166,32 @@ def test_s06_default_and_threshold_enabled_breadth_counts():
     assert expanded.per_variant_counts == {"bracket": 4_320, "trail": 432_000}
 
 
+def test_s06_b2_select_axis_runtime_options_subset_counts():
+    config = load_config()
+
+    all_types = build_grid_v2_plan(
+        config,
+        base_params={"trailMAType_options": ["SMA", "HMA", "KAMA", "T3"]},
+    )
+    assert all_types.deduped_candidate_count == 48_480
+    assert all_types.per_variant_counts == {"bracket": 480, "trail": 48_000}
+
+    one_type = build_grid_v2_plan(config, base_params={"trailMAType_options": ["SMA"]})
+    assert one_type.deduped_candidate_count == 12_480
+    assert one_type.per_variant_counts == {"bracket": 480, "trail": 12_000}
+    assert one_type.parameter_domains["trailMAType"].values == ("SMA",)
+
+    two_types = preview_grid_v2_counts(
+        config,
+        base_params={"trailMAType_options": ["SMA", "HMA"]},
+    )
+    assert two_types.deduped_candidate_count == 24_480
+    assert two_types.per_variant_counts == {"bracket": 480, "trail": 24_000}
+
+    with pytest.raises(ValueError, match="unknown option"):
+        build_grid_v2_plan(config, base_params={"trailMAType_options": ["SMA", "BAD"]})
+
+
 def test_s06_b2_trailing_parameter_order_matches_v1_axis_order():
     parameter_names = list(load_config()["parameters"])
     assert parameter_names.index("trailMAType") < parameter_names.index("trailMALength")

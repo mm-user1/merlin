@@ -10,7 +10,8 @@ TradingView-compatible outward tick-rounding mode for computed order levels.
 Phase 2 adds generic Grid V2 planning. Phase 2.5 integrates Grid V2 into the
 normal Grid dispatcher/storage workflow and adds a generic compiled batch
 evaluator for supported V2 execution profiles. WFA/Scout integration remains
-deferred.
+deferred. Phase 2.5.1 tightens dispatcher/storage behavior, runtime Grid
+settings, and compiled batch determinism without changing V1 runtime paths.
 
 ## Fields
 
@@ -72,11 +73,17 @@ Grid V2 has two execution tiers:
 - compiled tier: `src/core/engine_v2/compiled_kernel.py` packs primitive
   candidate config arrays and evaluates candidates through a generic
   Numba-compiled batch loop when Numba is available and JIT is not disabled.
+  The batch loop is compiled with `cache=True`, `parallel=True`, and `prange`;
+  evaluation saves and restores the process Numba thread count around each
+  compiled batch.
 
-`GridV2Settings.prefer_compiled` is live. The normal dispatcher in
-`src/core/grid_engine.py` routes `engine="v2"` strategies into Grid V2 before
-V1 `validate_grid_config`, V1 `FAST_GRID_BACKENDS`, V1 Numba checks, or V1
-backend loading. V2 strategies are not registered in `FAST_GRID_BACKENDS`.
+`GridV2Settings.prefer_compiled` is live. `grid_v2_prefer_compiled` defaults to
+true in normal Grid dispatch. `grid_v2_max_cache_mb` overrides the default
+512 MB signal/dataprep cache estimate limit and must be finite and positive.
+The normal dispatcher in `src/core/grid_engine.py` routes `engine="v2"`
+strategies into Grid V2 before V1 `validate_grid_config`, V1
+`FAST_GRID_BACKENDS`, V1 Numba checks, or V1 backend loading. V2 strategies are
+not registered in `FAST_GRID_BACKENDS`.
 
 Selected V2 Grid candidates are persisted with `save_grid_study_to_db(...)`
 using the existing studies/trials schema. V2 compact metadata is stored in
@@ -84,6 +91,12 @@ using the existing studies/trials schema. V2 compact metadata is stored in
 compiled availability/use, candidate counts, per-variant counts, cache
 estimate/stats, timings, candidates/sec, optional-axis/variant settings, DSR
 deferred status, and aggregate guardrail counters.
+
+The normal dispatcher does not duplicate slow enrichment from the generic Grid
+V2 runner. It executes the compiled/reference screening tier, then slow-reruns
+only the selected persisted rows through the public V2 reference runner. The
+per-result `guardrail_summary` stored on selected rows comes from that slow
+reference run, not from fast screening metadata.
 
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
@@ -96,20 +109,30 @@ default unless `default_enabled=false`; `GridV2Settings.enabled_axes` can
 override the default set explicitly. Variant selector params are not normal
 axes. Grid V2 enumerates variants from `execution.variants` and derives the
 selector param value from the inverse `execution.variantSelector.mapping`.
+`select`/`options` axes can be narrowed at runtime by passing
+`{param}_options`; values must be a non-empty subset of the declared config
+options. The subset preserves config order and is recorded in Grid V2 metadata.
 
 Signal/dataprep cache scope is local to one run. Cache keys include
 strategy/version, data fingerprint, trade-start metadata, active cache params,
 and the hook fingerprint. The memory estimate includes two bool signal arrays,
 five float dataprep arrays, number of bars, combo counts, and worker multiplier.
-The default hard limit is `max_signal_cache_mb=512`; runs fail clearly if the
-estimate exceeds the limit. Diagnostics expose signal/dataprep hits and misses,
-combo counts, and estimated MB.
+The default hard limit is `max_signal_cache_mb=512`; normal dispatch exposes it
+as `grid_v2_max_cache_mb`. Runs fail clearly if the estimate exceeds the limit.
+In normal dispatch, Numba workers are threads sharing one in-process
+signal/dataprep cache, so the cache estimate uses worker multiplier `1` while
+`worker_processes` is passed separately as the compiled batch thread cap.
+Diagnostics expose signal/dataprep hits and misses, combo counts, estimated MB,
+compiled worker count, and the configured cache limit.
 
 S06 B2 Phase 2.5 gates:
 
 - Full T1 identity gate vs S06 V1 fast-grid candidate order: `48,480` V2
   candidates, per-variant counts `480` and `48,000`, one-to-one canonical
   mapping, no execution.
+- Runtime `trailMAType_options` subsetting preserves config-order counts:
+  all four options keep `48,480` candidates, one option yields `12,480`, and
+  two options yield `24,480`.
 - Expanded threshold-enabled breadth is count-previewed at `436,320`.
 - T1 metric gate is a deterministic 240-candidate subset against V1 fast-grid
   metrics with first/last, variant-boundary, stop/target/trail, and
@@ -125,7 +148,9 @@ S06 B2 Phase 2.5 gates:
   `priceRounding=none` and `priceRounding=tick_outward`, plus direct synthetic
   no-trade, zero-loss, max-days/strict-boundary, and episodic drawdown edge
   cases. It must be run without `NUMBA_DISABLE_JIT=1`. Full-population compiled
-  parity remains deferred to an explicit slow gate.
+  parity remains deferred to an explicit slow gate. A focused determinism test
+  compares identical compiled candidate subsets under different Numba worker
+  caps.
 
 The S06 B2 config order was adjusted so trailing parameters are declared as
 `trailMAType`, `trailMALength`, `trailMAOffsetEx`, `trailRR`, matching the V1
