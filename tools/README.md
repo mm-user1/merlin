@@ -40,6 +40,19 @@ Performance benchmark for metrics calculations.
 python tools/benchmark_metrics.py
 ```
 
+### benchmark_grid_v2.py
+
+Grid V2 diagnostics and benchmark helper.
+
+**When to use:** Before and after Grid V2 performance work to collect comparable
+direct-grid timings, or to inspect saved WFA Grid metadata without rerunning WFA.
+
+```bash
+python tools/benchmark_grid_v2.py --help
+python tools/benchmark_grid_v2.py inspect-wfa-db --db src/storage/2026-07-06_233217_backtester-v2-test.db
+python tools/benchmark_grid_v2.py direct-grid --config tools/benchmark_configs/s06_b2_sui_baseline_grid.json --workers 1,6 --warmup-runs 1 --runs 2
+```
+
 ### test_all_ma_types.py
 
 Tests S01 strategy with all 11 MA types to ensure indicators work correctly.

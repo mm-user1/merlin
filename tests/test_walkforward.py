@@ -794,6 +794,34 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
     assert persisted["candidate_generation_seconds"] == pytest.approx(0.11)
 
 
+def test_grid_v2_diagnostics_uses_sibling_candidates_per_second():
+    summary = {
+        "engine": "v2",
+        "candidate_count": 10,
+        "valid_candidate_count": 10,
+        "selected_candidate_count": 2,
+        "grid": {
+            "backend_kind": "compiled_numba",
+            "compiled_batch_used": True,
+            "compiled_workers": 6,
+            "timings": {
+                "candidate_generation_seconds": 0.1,
+                "data_prepare_seconds": 0.2,
+                "fast_evaluation_seconds": 0.3,
+                "slow_validation_seconds": 0.4,
+                "total_seconds": 1.0,
+                "candidates_per_second": 999.0,
+            },
+            "candidates_per_second": 1234.5,
+        },
+    }
+
+    diagnostics = WalkForwardEngine._grid_v2_diagnostics_from_summary(summary)
+
+    assert diagnostics["fast_evaluation_seconds"] == pytest.approx(0.3)
+    assert diagnostics["candidates_per_second"] == pytest.approx(1234.5)
+
+
 def test_grid_wfa_dsr_disabled_leaves_replay_dsr_fields_empty(monkeypatch):
     index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
     df = pd.DataFrame(
