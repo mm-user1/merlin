@@ -180,6 +180,11 @@ def test_s06_b2_select_axis_runtime_options_subset_counts():
     assert one_type.deduped_candidate_count == 12_480
     assert one_type.per_variant_counts == {"bracket": 480, "trail": 12_000}
     assert one_type.parameter_domains["trailMAType"].values == ("SMA",)
+    assert all(
+        not str(key).endswith("_options")
+        for candidate in one_type.candidates
+        for key in candidate.params
+    )
 
     two_types = preview_grid_v2_counts(
         config,

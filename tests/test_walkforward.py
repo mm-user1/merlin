@@ -180,6 +180,8 @@ def test_s06_grid_wfa_threads_full_enumeration_modes(monkeypatch):
         "grid_budget": 1,
         "grid_seed": 999,
         "grid_top_candidates": 1,
+        "grid_v2_prefer_compiled": False,
+        "grid_v2_max_cache_mb": 2048.0,
     }
     engine = WalkForwardEngine(
         WFConfig(strategy_id="s06_r_trend_v02", warmup_bars=20),
@@ -208,6 +210,8 @@ def test_s06_grid_wfa_threads_full_enumeration_modes(monkeypatch):
     assert captured["save_study"] is False
     assert captured["config"].strategy_id == "s06_r_trend_v02"
     assert captured["config"].grid_enabled_modes == ["bracket"]
+    assert captured["config"].grid_v2_prefer_compiled is False
+    assert captured["config"].grid_v2_max_cache_mb == 2048.0
     assert captured["config"].fixed_params["start"] == index[20].isoformat()
     assert captured["config"].fixed_params["end"] == index[-1].isoformat()
 
@@ -681,9 +685,27 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
     def fake_grid_window(self, df_slice, start_time, end_time):  # noqa: ARG001
         candidates = [make_candidate(1, dsr_rank=1), make_candidate(2)]
         summary = {
+            "candidate_count": 48_480,
             "valid_candidate_count": 2,
             "selected_candidate_count": 2,
             "grid": {
+                "engine": "v2",
+                "backend_kind": "compiled_numba",
+                "compiled_batch_used": True,
+                "compiled_workers": 6,
+                "candidate_count": 48_480,
+                "valid_candidate_count": 2,
+                "selected_candidate_count": 2,
+                "cache_estimate": {"estimated_total_mb": 11.5},
+                "cache_stats": {"signal_misses": 1, "dataprep_misses": 3},
+                "candidates_per_second": 1234.5,
+                "timings": {
+                    "candidate_generation_seconds": 0.11,
+                    "data_prepare_seconds": 0.22,
+                    "fast_evaluation_seconds": 0.33,
+                    "slow_validation_seconds": 0.44,
+                    "total_seconds": 1.10,
+                },
                 "dsr": {
                     "enabled": True,
                     "top_k": 2,
@@ -716,7 +738,7 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
         "min_profit_threshold": 0.0,
         "score_config": {},
     }
-    engine = WalkForwardEngine(wf_config, base_template, {})
+    engine = WalkForwardEngine(wf_config, base_template, {}, csv_file_path="dummy.csv")
 
     class FakeStrategy:
         @staticmethod
@@ -729,10 +751,27 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
             )
 
     engine.strategy_class = FakeStrategy
-    result, _study_id = engine.run_wf_optimization(df)
+    result, study_id = engine.run_wf_optimization(df)
 
     assert result.windows
     for window in result.windows:
+        diagnostics = window.module_status["grid_v2"]
+        assert diagnostics["engine"] == "v2"
+        assert diagnostics["backend_kind"] == "compiled_numba"
+        assert diagnostics["compiled_batch_used"] is True
+        assert diagnostics["compiled_workers"] == 6
+        assert diagnostics["candidate_count"] == 48_480
+        assert diagnostics["valid_candidate_count"] == 2
+        assert diagnostics["selected_candidate_count"] == 2
+        assert diagnostics["cache_estimate"]["estimated_total_mb"] == pytest.approx(11.5)
+        assert diagnostics["cache_stats"]["signal_misses"] == 1
+        assert diagnostics["cache_stats"]["dataprep_misses"] == 3
+        assert diagnostics["candidate_generation_seconds"] == pytest.approx(0.11)
+        assert diagnostics["data_prepare_seconds"] == pytest.approx(0.22)
+        assert diagnostics["fast_evaluation_seconds"] == pytest.approx(0.33)
+        assert diagnostics["slow_validation_seconds"] == pytest.approx(0.44)
+        assert diagnostics["total_seconds"] == pytest.approx(1.10)
+        assert diagnostics["candidates_per_second"] == pytest.approx(1234.5)
         assert window.grid_dsr_enabled is True
         assert window.grid_dsr_top_k == 2
         assert window.grid_dsr_n_trials == 10
@@ -748,6 +787,11 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
             assert "dsr_skewness" in module_metrics
             assert "dsr_kurtosis" in module_metrics
             assert "dsr_track_length" in module_metrics
+
+    loaded = storage.load_study_from_db(study_id)
+    persisted = loaded["windows"][0]["module_status"]["grid_v2"]
+    assert persisted["backend_kind"] == "compiled_numba"
+    assert persisted["candidate_generation_seconds"] == pytest.approx(0.11)
 
 
 def test_grid_wfa_dsr_disabled_leaves_replay_dsr_fields_empty(monkeypatch):

@@ -504,6 +504,8 @@ def register_routes(app):
             ),
             "grid_slow_objectives": list(getattr(optimization_config, "grid_slow_objectives", []) or []),
             "grid_slow_primary_objective": getattr(optimization_config, "grid_slow_primary_objective", None),
+            "grid_v2_prefer_compiled": bool(getattr(optimization_config, "grid_v2_prefer_compiled", True)),
+            "grid_v2_max_cache_mb": getattr(optimization_config, "grid_v2_max_cache_mb", None),
         }
         if post_process_payload:
             base_template["postProcess"] = post_process_payload

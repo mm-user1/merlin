@@ -168,10 +168,12 @@ def test_grid_v2_cache_limit_propagates_and_rejects_invalid_values():
 
 
 def test_grid_v2_objective_directions_are_canonical_for_ranking():
-    assert MultiObjectiveConfig(
+    multi_objective = MultiObjectiveConfig(
         ["total_trades", "max_consecutive_losses"],
         "total_trades",
-    ).get_directions() == ["maximize", "minimize"]
+    )
+    assert multi_objective.get_directions() == ["maximize", "minimize"]
+    assert multi_objective.get_metric_names() == ["Total Trades", "Max Consecutive Losses"]
 
     few_trades = OptimizationResult(
         params={"id": "few"},
@@ -238,6 +240,7 @@ def test_grid_v2_execution_uses_reduced_select_domain():
     assert config.grid_summary["grid"]["optional_axis_settings"]["select_option_subsets"] == {"trailMAType": ["SMA"]}
     assert len(results) == 1
     assert results[0].params["trailMAType"] == "SMA"
+    assert all(not str(key).endswith("_options") for key in results[0].params)
 
 
 def test_grid_v2_storage_roundtrip_uses_existing_grid_schema():

@@ -166,6 +166,39 @@ def test_v2_semantic_keys_exclude_runtime_and_inactive_variant_params():
     assert "trailRR" in trail_payload["params"]
 
 
+def test_select_subset_helper_does_not_affect_identity_or_candidate_order():
+    base_params = _v2_base_params()
+    first = build_grid_v2_plan(
+        load_config(),
+        base_params={**base_params, "trailMAType_options": ["SMA", "HMA"]},
+    )
+    reordered = build_grid_v2_plan(
+        load_config(),
+        base_params={**base_params, "trailMAType_options": ["HMA", "SMA"]},
+    )
+
+    assert first.deduped_candidate_count == 24_480
+    assert first.per_variant_counts == {"bracket": 480, "trail": 24_000}
+    assert first.parameter_domains["trailMAType"].values == ("SMA", "HMA")
+    assert reordered.parameter_domains["trailMAType"].values == ("SMA", "HMA")
+    assert [candidate.canonical_identity for candidate in first.candidates] == [
+        candidate.canonical_identity for candidate in reordered.candidates
+    ]
+    assert [candidate.semantic_key for candidate in first.candidates] == [
+        candidate.semantic_key for candidate in reordered.candidates
+    ]
+    assert len({candidate.semantic_key for candidate in first.candidates}) == first.deduped_candidate_count
+    assert all(
+        not str(key).endswith("_options")
+        for candidate in first.candidates
+        for key in candidate.params
+    )
+    assert all(
+        "trailMAType_options" not in json.loads(candidate.semantic_key)["params"]
+        for candidate in first.candidates
+    )
+
+
 def _collapse_config():
     config = {
         "id": "collapse_fixture",

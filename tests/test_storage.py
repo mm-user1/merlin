@@ -33,7 +33,7 @@ from core.storage import (
     update_study_set,
 )
 from core.metrics import _calculate_r2_consistency
-from core.grid_engine import GridSettings
+from core.grid_engine import GRID_V2_SUPPORTED_FAST_OBJECTIVES, GridSettings
 from core.optuna_engine import OptimizationConfig, OptimizationResult
 from core.post_process import DSRConfig, DSRResult, PostProcessConfig, StressTestConfig
 from core.walkforward_engine import OOSStitchedResult, WFConfig, WFResult, WindowResult
@@ -176,6 +176,101 @@ def _build_grid_storage_result(
     result.is_dsr_selected = "dsr" in selection_sources
     result.validation_status = "passed"
     return result
+
+
+def test_storage_objective_directions_cover_grid_v2_fast_objectives():
+    missing = sorted(GRID_V2_SUPPORTED_FAST_OBJECTIVES - set(storage.OBJECTIVE_DIRECTIONS))
+    assert missing == []
+    assert storage.OBJECTIVE_DIRECTIONS["total_trades"] == "maximize"
+    assert storage.OBJECTIVE_DIRECTIONS["max_consecutive_losses"] == "minimize"
+
+
+def test_save_grid_study_persists_grid_v2_objective_directions(tmp_path):
+    csv_path = tmp_path / "BTCUSDT_2025.01.01_data.csv"
+    csv_path.write_text("time,open,high,low,close,Volume\n", encoding="utf-8")
+    config = _build_grid_storage_config(csv_path)
+    config.objectives = ["max_consecutive_losses", "total_trades"]
+    config.primary_objective = "max_consecutive_losses"
+    result = _build_grid_storage_result(
+        1,
+        grid_rank=1,
+        net_profit_pct=1.0,
+        selection_sources=["objective"],
+    )
+    result.objective_values = [3, 10]
+    result.max_consecutive_losses = 3
+    result.total_trades = 10
+    summary = {
+        "requested_budget": 1,
+        "actual_budget": 1,
+        "completed_trials": 1,
+        "grid": {"preview": {"coverage_pct": 100.0}},
+    }
+
+    with _temporary_active_db("grid_direction_metadata"):
+        study_id = save_grid_study_to_db(
+            config=config,
+            grid_settings=GridSettings(requested_budget=1, top_candidates=1),
+            grid_summary=summary,
+            trial_results=[result],
+            csv_file_path=str(csv_path),
+            start_time=0.0,
+        )
+        loaded = load_study_from_db(study_id)
+
+    assert loaded["study"]["objectives"] == ["max_consecutive_losses", "total_trades"]
+    assert loaded["study"]["directions"] == ["minimize", "maximize"]
+
+
+def test_load_study_sort_fallback_minimizes_max_consecutive_losses():
+    with _temporary_active_db("sort_max_consecutive_losses"):
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO studies (
+                    study_id,
+                    study_name,
+                    strategy_id,
+                    optimization_mode,
+                    objectives_json,
+                    primary_objective
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "sort_mcl",
+                    "SORT_MCL",
+                    "s03_reversal_v10",
+                    "optuna",
+                    json.dumps(["max_consecutive_losses"]),
+                    "max_consecutive_losses",
+                ),
+            )
+            for trial_number, losses in ((1, 5), (2, 2)):
+                conn.execute(
+                    """
+                    INSERT INTO trials (
+                        study_id,
+                        trial_number,
+                        params_json,
+                        objective_values_json,
+                        constraint_values_json,
+                        max_consecutive_losses
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "sort_mcl",
+                        trial_number,
+                        json.dumps({"candidate": trial_number}),
+                        json.dumps([losses]),
+                        json.dumps([]),
+                        losses,
+                    ),
+                )
+            conn.commit()
+
+        loaded = load_study_from_db("sort_mcl")
+
+    assert [trial["trial_number"] for trial in loaded["trials"]] == [2, 1]
 
 
 def test_wfa_window_trials_table_created():

@@ -21,6 +21,7 @@ from core.engine_v2.compiled_kernel import (
     OUTPUT_TOTAL_TRADES,
     OUTPUT_WINNING_TRADES,
     OUTPUT_WIN_RATE_PCT,
+    _validated_worker_count,
     compiled_batch_available,
     evaluate_compiled_batch,
 )
@@ -47,6 +48,23 @@ pytestmark = pytest.mark.skipif(
     not compiled_batch_available(),
     reason="Numba compiled V2 Grid path is unavailable in this process.",
 )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1, 1), (np.int64(6), 6), ("6", 6), (2.0, 2)],
+)
+def test_compiled_grid_v2_worker_count_accepts_integer_values(value, expected):
+    assert _validated_worker_count(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, np.int64(0), 2.9, np.nan, np.inf, True, False, "2.9", "abc", ""],
+)
+def test_compiled_grid_v2_worker_count_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="positive integer"):
+        _validated_worker_count(value)
 
 
 @pytest.fixture(scope="module")

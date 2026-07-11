@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
 OBJECTIVE_DIRECTIONS: Dict[str, str] = {
+    # Keep in sync with core.optuna_engine.OBJECTIVE_DIRECTIONS. Storage keeps a
+    # local copy to avoid import cycles during DB initialization.
     "net_profit_pct": "maximize",
     "max_drawdown_pct": "minimize",
     "sharpe_ratio": "maximize",
@@ -29,6 +31,8 @@ OBJECTIVE_DIRECTIONS: Dict[str, str] = {
     "ulcer_index": "minimize",
     "consistency_score": "maximize",
     "composite_score": "maximize",
+    "total_trades": "maximize",
+    "max_consecutive_losses": "minimize",
 }
 
 ANALYTICS_GROUP_KEY_ALL = "all"

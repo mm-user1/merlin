@@ -260,6 +260,8 @@ OBJECTIVE_DISPLAY_NAMES: Dict[str, str] = {
     "ulcer_index": "Ulcer Index",
     "consistency_score": "Consistency",
     "composite_score": "Composite Score",
+    "total_trades": "Total Trades",
+    "max_consecutive_losses": "Max Consecutive Losses",
 }
 
 SANITIZE_METRICS = {"sharpe_ratio", "sortino_ratio", "sqn", "profit_factor"}

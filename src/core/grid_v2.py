@@ -292,7 +292,7 @@ def build_grid_v2_plan(
 
     for variant_name in selected_variants:
         variant = profile.variants[variant_name]
-        seed_params = dict(fixed_params)
+        seed_params = _candidate_seed_params(fixed_params)
         if profile.variant_selector is not None:
             seed_params[profile.variant_selector.param] = selector_values[variant_name]
         active_names = _ordered_active_names(profile, seed_params)
@@ -403,7 +403,7 @@ def preview_grid_v2_counts(
     axis_names_by_variant: dict[str, tuple[str, ...]] = {}
     total = 0
     for variant_name in selected_variants:
-        seed_params = dict(fixed_params)
+        seed_params = _candidate_seed_params(fixed_params)
         if profile.variant_selector is not None:
             seed_params[profile.variant_selector.param] = selector_values[variant_name]
         active_names = _ordered_active_names(profile, seed_params)
@@ -694,6 +694,10 @@ def _parameter_defaults(params: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(spec, Mapping) and "default" in spec:
             defaults[str(name)] = spec["default"]
     return defaults
+
+
+def _candidate_seed_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(name): value for name, value in params.items() if not str(name).endswith("_options")}
 
 
 def _build_parameter_domains(

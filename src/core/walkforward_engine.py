@@ -824,6 +824,11 @@ class WalkForwardEngine:
         grid_replay_metadata = (
             self._grid_replay_metadata_from_summary(grid_summary) if is_grid_mode else {}
         )
+        grid_v2_diagnostics = (
+            self._grid_v2_diagnostics_from_summary(grid_summary) if is_grid_mode else {}
+        )
+        if grid_v2_diagnostics:
+            module_status["grid_v2"] = grid_v2_diagnostics
 
         dsr_results = []
         dsr_trials = None
@@ -1095,6 +1100,61 @@ class WalkForwardEngine:
             }
         )
         return metadata
+
+    @classmethod
+    def _grid_v2_diagnostics_from_summary(cls, summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(summary, dict):
+            return {}
+        grid_summary = summary.get("grid")
+        grid_summary = grid_summary if isinstance(grid_summary, dict) else {}
+        engine = grid_summary.get("engine") or summary.get("engine")
+        engine_version = summary.get("grid_v2_engine_version") or grid_summary.get(
+            "grid_v2_engine_version"
+        )
+        if str(engine or "").strip().lower() != "v2" and not engine_version:
+            return {}
+
+        timings = grid_summary.get("timings")
+        timings = timings if isinstance(timings, dict) else {}
+        cache_estimate = grid_summary.get("cache_estimate")
+        cache_estimate = cache_estimate if isinstance(cache_estimate, dict) else {}
+        cache_stats = grid_summary.get("cache_stats")
+        cache_stats = cache_stats if isinstance(cache_stats, dict) else {}
+
+        diagnostic = {
+            "engine": engine or "v2",
+            "backend_kind": grid_summary.get("backend_kind"),
+            "compiled_batch_used": grid_summary.get("compiled_batch_used"),
+            "compiled_workers": cls._safe_int(grid_summary.get("compiled_workers")),
+            "candidate_count": cls._safe_int(
+                summary.get("candidate_count", grid_summary.get("candidate_count"))
+            ),
+            "valid_candidate_count": cls._safe_int(
+                summary.get("valid_candidate_count", grid_summary.get("valid_candidate_count"))
+            ),
+            "selected_candidate_count": cls._safe_int(
+                summary.get("selected_candidate_count", grid_summary.get("selected_candidate_count"))
+            ),
+            "cache_estimate": {
+                "estimated_total_mb": cls._safe_float(cache_estimate.get("estimated_total_mb")),
+            },
+            "cache_stats": {
+                "signal_misses": cls._safe_int(cache_stats.get("signal_misses")),
+                "dataprep_misses": cls._safe_int(cache_stats.get("dataprep_misses")),
+            },
+        }
+        for key in (
+            "candidate_generation_seconds",
+            "data_prepare_seconds",
+            "fast_evaluation_seconds",
+            "slow_validation_seconds",
+            "total_seconds",
+        ):
+            diagnostic[key] = cls._safe_float(timings.get(key))
+        diagnostic["candidates_per_second"] = cls._safe_float(
+            grid_summary.get("candidates_per_second")
+        )
+        return diagnostic
 
     @staticmethod
     def _duration_days(start: pd.Timestamp, end: pd.Timestamp) -> float:
@@ -2619,6 +2679,8 @@ class WalkForwardEngine:
             ),
             grid_slow_objectives=list(self.base_config_template.get("grid_slow_objectives") or []),
             grid_slow_primary_objective=self.base_config_template.get("grid_slow_primary_objective"),
+            grid_v2_prefer_compiled=bool(self.base_config_template.get("grid_v2_prefer_compiled", True)),
+            grid_v2_max_cache_mb=self.base_config_template.get("grid_v2_max_cache_mb"),
             grid_needs_dsr=bool(self.config.dsr_config and self.config.dsr_config.enabled),
             grid_dsr_top_k=int(
                 getattr(self.config.dsr_config, "top_k", 20)

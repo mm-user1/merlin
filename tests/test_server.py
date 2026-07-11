@@ -1123,6 +1123,8 @@ def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch, 
 
     payload = _build_minimal_optuna_payload()
     payload["primary_objective"] = "net_profit_pct"
+    payload["grid_v2_prefer_compiled"] = False
+    payload["grid_v2_max_cache_mb"] = 123.5
 
     response = client.post(
         "/api/walkforward",
@@ -1144,6 +1146,8 @@ def test_walkforward_route_parses_adaptive_cooldown_fields(client, monkeypatch, 
     assert captured["base_template"]["cooldown_days"] == 21
     assert captured["base_template"]["wfa"]["cooldown_enabled"] is True
     assert captured["base_template"]["wfa"]["cooldown_days"] == 21
+    assert captured["base_template"]["grid_v2_prefer_compiled"] is False
+    assert captured["base_template"]["grid_v2_max_cache_mb"] == 123.5
 
 
 def test_walkforward_route_parses_ft_reject_policy_fields(client, monkeypatch, tmp_path):
@@ -3086,7 +3090,6 @@ def _saved_v2_full_enumeration_grid_summary():
     return {
         "grid": {
             "preview": {
-                "profile": "full_enumeration_v2",
                 "full_candidate_count": 48_480,
             },
             "allocation": {

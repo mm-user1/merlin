@@ -156,12 +156,25 @@ def evaluate_compiled_batch(
 
 
 def _validated_worker_count(value: Any) -> int:
-    try:
+    error = "Compiled Grid V2 n_workers must be a positive integer."
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(error)
+    if isinstance(value, (int, np.integer)):
         workers = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Compiled Grid V2 n_workers must be a positive integer.") from exc
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or not stripped.isdecimal():
+            raise ValueError(error)
+        workers = int(stripped)
+    elif isinstance(value, (float, np.floating)):
+        numeric = float(value)
+        if not math.isfinite(numeric) or not numeric.is_integer():
+            raise ValueError(error)
+        workers = int(numeric)
+    else:
+        raise ValueError(error)
     if workers < 1:
-        raise ValueError("Compiled Grid V2 n_workers must be a positive integer.")
+        raise ValueError(error)
     return workers
 
 
