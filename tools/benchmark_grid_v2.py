@@ -35,7 +35,6 @@ import time
 from collections.abc import Mapping, Sequence
 from importlib import metadata
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 
@@ -58,6 +57,10 @@ STABLE_WFA_GRID_V2_TIMING_KEYS = (
     "total_seconds",
     "candidates_per_second",
 )
+OPTIONAL_WFA_GRID_V2_TIMING_KEYS = (
+    "slow_refinement_seconds",
+)
+WFA_RATE_TIMING_KEYS = {"candidates_per_second"}
 
 TOP_RESULT_METRICS = (
     "net_profit_pct",
@@ -535,7 +538,10 @@ def _readonly_sqlite_connection(db_path: Path) -> sqlite3.Connection:
     resolved = db_path.resolve()
     if not resolved.exists():
         raise ValueError(f"SQLite database does not exist: {resolved}")
-    uri = f"file:{quote(resolved.as_posix(), safe='/:')}?mode=ro"
+    # Benchmark inputs are frozen/checkpointed DB snapshots. immutable=1 keeps
+    # inspection read-only and avoids -wal/-shm sidecars; do not use this helper
+    # for live SQLite DBs with uncheckpointed WAL frames.
+    uri = f"file:{quote(resolved.as_posix(), safe='/:')}?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     return conn
@@ -557,6 +563,30 @@ def _parse_json_object(raw: Any) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _numeric_aggregate(values: Sequence[float], *, include_sum: bool) -> dict[str, Any] | None:
+    if not values:
+        return None
+    aggregate: dict[str, Any] = {
+        "count": len(values),
+        "min": min(values),
+        "max": max(values),
+        "mean": statistics.fmean(values),
+    }
+    if include_sum:
+        aggregate["sum"] = math.fsum(values)
+    return aggregate
 
 
 def _window_count_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, Any]:
@@ -596,6 +626,8 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
     missing_keys: set[str] = set()
     backend_kinds: set[str] = set()
     compiled_workers: set[int] = set()
+    aggregate_keys = (*STABLE_WFA_GRID_V2_TIMING_KEYS, *OPTIONAL_WFA_GRID_V2_TIMING_KEYS)
+    timing_values: dict[str, list[float]] = {key: [] for key in aggregate_keys}
     for row in rows:
         module_status = _parse_json_object(row["module_status_json"])
         grid_v2 = module_status.get("grid_v2")
@@ -616,6 +648,10 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
         if not missing_for_window:
             windows_with_all_stable_keys += 1
         missing_keys.update(missing_for_window)
+        for key in aggregate_keys:
+            numeric = _finite_float(grid_v2.get(key))
+            if numeric is not None:
+                timing_values[key].append(numeric)
 
     if windows_with_grid_v2 == 0:
         status = "absent"
@@ -624,13 +660,24 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
     else:
         status = "partial"
 
+    timing_aggregates = {}
+    for key in aggregate_keys:
+        aggregate = _numeric_aggregate(
+            timing_values[key],
+            include_sum=key not in WFA_RATE_TIMING_KEYS,
+        )
+        if aggregate is not None:
+            timing_aggregates[key] = aggregate
+
     return {
         "status": status,
         "total_windows": total_windows,
         "windows_with_grid_v2": windows_with_grid_v2,
         "windows_with_all_stable_keys": windows_with_all_stable_keys,
         "stable_keys": list(STABLE_WFA_GRID_V2_TIMING_KEYS),
+        "optional_timing_keys": list(OPTIONAL_WFA_GRID_V2_TIMING_KEYS),
         "stable_keys_missing": sorted(missing_keys),
+        "timing_aggregates": timing_aggregates,
         "backend_kinds": sorted(backend_kinds),
         "compiled_workers": sorted(compiled_workers),
     }
@@ -772,6 +819,24 @@ def _format_count_summary(window_counts: Mapping[str, Any], prefix: str) -> str:
     return f"{int(min_value):,}/{avg_text}/{int(max_value):,}"
 
 
+def _format_mean_seconds(aggregate: Mapping[str, Any] | None) -> str:
+    if not aggregate:
+        return "-"
+    value = aggregate.get("mean")
+    if value is None:
+        return "-"
+    return f"{float(value):.3f}s"
+
+
+def _format_mean_rate(aggregate: Mapping[str, Any] | None) -> str:
+    if not aggregate:
+        return "-"
+    value = aggregate.get("mean")
+    if value is None:
+        return "-"
+    return f"{float(value):,.1f}"
+
+
 def print_direct_report(report: Mapping[str, Any]) -> None:
     config = report.get("config", {})
     print("Grid V2 direct benchmark")
@@ -840,6 +905,14 @@ def print_wfa_report(report: Mapping[str, Any]) -> None:
                 f"dd={stitched.get('max_drawdown_pct')} "
                 f"trades={stitched.get('total_trades')} "
                 f"wr={stitched.get('win_rate')}"
+            )
+        aggregates = diagnostics.get("timing_aggregates")
+        if isinstance(aggregates, dict) and aggregates:
+            print(
+                "  grid_v2 timing mean: "
+                f"total={_format_mean_seconds(aggregates.get('total_seconds'))} "
+                f"fast={_format_mean_seconds(aggregates.get('fast_evaluation_seconds'))} "
+                f"cps={_format_mean_rate(aggregates.get('candidates_per_second'))}"
             )
     for comparison in report.get("comparisons", []):
         print(

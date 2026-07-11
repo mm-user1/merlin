@@ -36,6 +36,34 @@ Optional manual Windows WFA rerun protocol:
 Do not read external market-data paths stored in old DB rows unless explicitly
 approved. The inspection helper reads stored metadata only.
 
+On Windows, prefer the repo-local pytest wrapper for validation:
+
+```powershell
+.\tools\run_pytest.ps1 -q tests\v2
+```
+
+The wrapper uses the required Merlin Python by default, passes
+`.pytest_tmp/run_<pid>` as pytest `--basetemp`, and removes the per-run
+directory unless `-KeepTemp` is supplied.
+
+`inspect-wfa-db` opens benchmark databases with SQLite
+`mode=ro&immutable=1`. This is intended for frozen/checkpointed benchmark DB
+snapshots and avoids `-shm`/`-wal` sidecars during inspection. Do not use
+immutable reads for live DBs that may have uncheckpointed WAL frames.
+
+## Grid V2 Domain Semantics
+
+Grid V2 candidate domains are governed by the strategy `config.json` optimize
+metadata, the runtime `enabled_params` selection, and select
+`{param}_options` subsets. The optimize-style benchmark payload keeps numeric
+`param_ranges` for compatibility with the canonical UI config builder, but
+those numeric ranges do not independently redefine V2 grid granularity.
+
+The current S06 B2 benchmark config mirrors the strategy config. Editing only a
+numeric `param_ranges` entry in that payload should not be expected to change
+the V2 candidate count; change the strategy optimize domain, `enabled_params`,
+or a supported select `{param}_options` subset instead.
+
 ## Stable Fields To Record
 
 For direct Grid V2 runs, record:
@@ -120,6 +148,82 @@ comparison DB. These studies predate Phase 2.5.2 diagnostics persistence, so
 `wfa_windows.module_status_json` has no `grid_v2` block and study-level
 `grid_summary_json` is empty for these WFA-Grid studies. Mark timings as "not
 captured" for these rows.
+
+## Phase 2.6.0 Windows Baseline
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_0_direct_grid_baseline.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_0_fresh_wfa_db_inspection.json
+src/storage/2026-07-11_184902_backtester-v2-phase-2-6-baseline.db
+```
+
+Environment:
+
+- platform: Windows-10-10.0.19042-SP0
+- logical CPUs: 16
+- Python: 3.13.7 MSC 64-bit
+- NumPy: 2.3.3
+- Pandas: 2.3.2
+- Numba: 0.65.1
+
+Direct Grid V2 baseline command used the S06 B2 SUI payload, 48,480 candidates,
+`workers=1,6`, one warmup run, and three measured runs.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Fast Eval | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 23.211s | 23.062s | 3.244s | 18.156s | 0.856s | 2,670.5 |
+| 6 | 21.693s | 21.550s | 3.202s | 16.700s | 0.864s | 2,903.3 |
+
+The top selected candidate was `18436` with
+`net_profit_pct=45.74422762364992`, `max_drawdown_pct=14.133826459897126`,
+and `total_trades=55`.
+
+Fresh WFA baseline inspection used the same Windows environment and the DB
+above. V1 `s06_r_trend_v02` studies completed in 26s / 26s with diagnostics
+absent. B2 `s06_r_trend_v02_b2` studies completed in 157s / 158s with
+diagnostics present, 12 windows each, 48,480 valid candidates per window, and
+10 selected candidates per window.
+
+## Phase 2.6.1 Windows After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_1_direct_grid_after.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_1_fresh_wfa_db_inspection.json
+```
+
+Implemented quick wins:
+
+- Grid V2 computes signal/dataprep cache keys once per candidate and reuses
+  those keys for the pre-allocation cache estimate and the execution grouping
+  pass. The memory-limit check still runs before any `build_execution_data`
+  call.
+- The compiled evaluator uses vectorized timestamp-to-UTC-nanosecond
+  conversion for clean `DatetimeIndex` / `datetime64` inputs and falls back to
+  the previous scalar conversion for mixed or null-like inputs.
+
+Same command, payload, candidate count, worker list, warmup count, measured
+run count, and Windows workstation as the Phase 2.6.0 direct baseline.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Fast Eval | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 19.774s | 19.632s | 3.234s | 14.985s | 0.619s | 3,235.3 |
+| 6 | 17.861s | 17.719s | 3.314s | 13.193s | 0.624s | 3,674.8 |
+
+Workers=6 mean wall improved from 21.693s to 17.861s, a 17.7% reduction. Mean
+`fast_evaluation_seconds` improved from 16.700s to 13.193s, a 21.0% reduction,
+and mean candidates/sec increased from 2,903.3 to 3,674.8. Candidate generation
+time was effectively unchanged. The top selected candidate remained `18436`
+with the same core metrics and params as the Phase 2.6.0 baseline.
+
+The regenerated fresh WFA DB inspection reports diagnostics still absent for
+the two V1 studies and present for the two B2 studies. B2 timing aggregates are
+now visible in JSON; the two B2 studies report mean `total_seconds` of 12.700s
+and 12.764s per window, mean `fast_evaluation_seconds` of 8.397s and 8.407s,
+and mean candidates/sec of 5,774.4 and 5,767.5.
 
 ## JSON Report Shape
 

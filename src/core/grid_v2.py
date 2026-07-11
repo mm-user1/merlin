@@ -265,6 +265,13 @@ class _CacheKeyContext:
     function_fingerprint: str | None
 
 
+@dataclass(frozen=True)
+class _CandidateCacheKeys:
+    candidate: GridV2Candidate
+    signal_key: str
+    dataprep_key: str
+
+
 def build_grid_v2_plan(
     config: Mapping[str, Any],
     settings: GridV2Settings | None = None,
@@ -440,54 +447,33 @@ def estimate_grid_v2_cache(
     selected = _selected_candidates(plan, candidate_indices)
     n_bars = int(len(df))
     context = _cache_key_context(df, trade_start_idx, hooks)
-    signal_keys = {
-        _signal_cache_key(plan, candidate, context, hooks)
-        for candidate in selected
-    }
-    dataprep_keys = {
-        _dataprep_cache_key(plan, candidate, context, hooks)
-        for candidate in selected
-    }
-    signal_combo_count = len(signal_keys)
-    dataprep_combo_count = len(dataprep_keys)
-    worker_multiplier = max(1, int(plan.settings.worker_multiplier))
-    bytes_per_signal_combo = int(n_bars * _BOOL_SIGNAL_ARRAYS * np.dtype(np.bool_).itemsize)
-    bytes_per_dataprep_combo = int(n_bars * _FLOAT_DATAPREP_ARRAYS * np.dtype(np.float64).itemsize)
-    estimated_signal_bytes = signal_combo_count * bytes_per_signal_combo
-    estimated_dataprep_bytes = dataprep_combo_count * bytes_per_dataprep_combo
-    estimated_total_bytes = (estimated_signal_bytes + estimated_dataprep_bytes) * worker_multiplier
-    return GridV2CacheEstimate(
-        n_bars=n_bars,
-        signal_combo_count=signal_combo_count,
-        dataprep_combo_count=dataprep_combo_count,
-        worker_multiplier=worker_multiplier,
-        bytes_per_signal_combo=bytes_per_signal_combo,
-        bytes_per_dataprep_combo=bytes_per_dataprep_combo,
-        estimated_signal_mb=estimated_signal_bytes / _BYTES_PER_MB,
-        estimated_dataprep_mb=estimated_dataprep_bytes / _BYTES_PER_MB,
-        estimated_total_mb=estimated_total_bytes / _BYTES_PER_MB,
-        max_signal_cache_mb=float(plan.settings.max_signal_cache_mb),
-    )
+    cache_keys = _candidate_cache_keys(plan, context, hooks, selected)
+    return _estimate_grid_v2_cache_from_keys(plan, n_bars, cache_keys)
 
 
-def _estimate_grid_v2_cache_with_context(
+def _candidate_cache_keys(
     plan: GridV2Plan,
-    df: pd.DataFrame,
     context: _CacheKeyContext,
     hooks: GridV2StrategyHooks,
     selected: Sequence[GridV2Candidate],
+) -> tuple[_CandidateCacheKeys, ...]:
+    return tuple(
+        _CandidateCacheKeys(
+            candidate=candidate,
+            signal_key=_signal_cache_key(plan, candidate, context, hooks),
+            dataprep_key=_dataprep_cache_key(plan, candidate, context, hooks),
+        )
+        for candidate in selected
+    )
+
+
+def _estimate_grid_v2_cache_from_keys(
+    plan: GridV2Plan,
+    n_bars: int,
+    cache_keys: Sequence[_CandidateCacheKeys],
 ) -> GridV2CacheEstimate:
-    n_bars = int(len(df))
-    signal_keys = {
-        _signal_cache_key(plan, candidate, context, hooks)
-        for candidate in selected
-    }
-    dataprep_keys = {
-        _dataprep_cache_key(plan, candidate, context, hooks)
-        for candidate in selected
-    }
-    signal_combo_count = len(signal_keys)
-    dataprep_combo_count = len(dataprep_keys)
+    signal_combo_count = len({item.signal_key for item in cache_keys})
+    dataprep_combo_count = len({item.dataprep_key for item in cache_keys})
     worker_multiplier = max(1, int(plan.settings.worker_multiplier))
     bytes_per_signal_combo = int(n_bars * _BOOL_SIGNAL_ARRAYS * np.dtype(np.bool_).itemsize)
     bytes_per_dataprep_combo = int(n_bars * _FLOAT_DATAPREP_ARRAYS * np.dtype(np.float64).itemsize)
@@ -520,13 +506,8 @@ def execute_grid_v2_candidates(
     hooks = _coerce_hooks(hooks)
     selected_candidates = _selected_candidates(plan, candidate_indices)
     context = _cache_key_context(df, trade_start_idx, hooks)
-    estimate = _estimate_grid_v2_cache_with_context(
-        plan,
-        df,
-        context,
-        hooks,
-        selected_candidates,
-    )
+    cache_keys = _candidate_cache_keys(plan, context, hooks, selected_candidates)
+    estimate = _estimate_grid_v2_cache_from_keys(plan, int(len(df)), cache_keys)
     if estimate.estimated_total_mb > estimate.max_signal_cache_mb:
         raise MemoryError(
             "Grid V2 cache estimate exceeds max_signal_cache_mb "
@@ -540,15 +521,16 @@ def execute_grid_v2_candidates(
     data_groups: dict[str, list[GridV2Candidate]] = {}
     rows: list[GridV2ResultRow] = []
 
-    for candidate in selected_candidates:
-        signal_key = _signal_cache_key(plan, candidate, context, hooks)
+    for key_record in cache_keys:
+        candidate = key_record.candidate
+        signal_key = key_record.signal_key
         if signal_key in signal_seen:
             stats.signal_hits += 1
         else:
             stats.signal_misses += 1
             signal_seen.add(signal_key)
 
-        data_key = _dataprep_cache_key(plan, candidate, context, hooks)
+        data_key = key_record.dataprep_key
         if data_key in dataprep_cache:
             stats.dataprep_hits += 1
         else:

@@ -22,6 +22,8 @@ from core.engine_v2.compiled_kernel import (
     OUTPUT_WINNING_TRADES,
     OUTPUT_WIN_RATE_PCT,
     _validated_worker_count,
+    _timestamp_ns,
+    _timestamps_ns,
     compiled_batch_available,
     evaluate_compiled_batch,
 )
@@ -65,6 +67,33 @@ def test_compiled_grid_v2_worker_count_accepts_integer_values(value, expected):
 def test_compiled_grid_v2_worker_count_rejects_invalid_values(value):
     with pytest.raises(ValueError, match="positive integer"):
         _validated_worker_count(value)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pd.date_range("2025-01-01", periods=3, freq="30min", tz="UTC"),
+        pd.date_range("2025-01-01", periods=3, freq="30min"),
+        np.array(
+            ["2025-01-01T00:00:00.000000000", "2025-01-01T00:30:00.123456789", "NaT"],
+            dtype="datetime64[ns]",
+        ),
+        tuple(pd.date_range("2025-01-01", periods=3, freq="30min", tz="UTC")),
+        [
+            pd.Timestamp("2025-01-01T00:00:00Z"),
+            pd.Timestamp("2025-01-01 00:30:00"),
+            np.datetime64("2025-01-01T01:00:00.123456789"),
+            pd.NaT,
+            np.datetime64("NaT"),
+            None,
+            "",
+        ],
+    ],
+)
+def test_compiled_timestamp_vectorization_matches_scalar_conversion(values):
+    expected = np.array([_timestamp_ns(value, 0) for value in values], dtype=np.int64)
+
+    assert np.array_equal(_timestamps_ns(values), expected)
 
 
 @pytest.fixture(scope="module")

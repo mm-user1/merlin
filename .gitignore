@@ -1,4 +1,5 @@
 __pycache__/
+.pytest_tmp/
 Presets/
 src/storage/*.db
 src/storage/*.db-wal

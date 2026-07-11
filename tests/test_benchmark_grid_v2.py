@@ -86,7 +86,16 @@ def _create_wfa_fixture_db(path: Path) -> None:
             """
             INSERT INTO studies VALUES (
                 'new-study', 'New WFA', 's06_r_trend_v02_b2', 'wfa', 'grid', ?,
-                'external.csv', 'external.csv', 1, 120, 10.5, 3.2, 42, 21, 50.0, '', '2026-01-02'
+                'external.csv', 'external.csv', 2, 120, 10.5, 3.2, 42, 21, 50.0, '', '2026-01-02'
+            )
+            """,
+            (json.dumps(base_config),),
+        )
+        conn.execute(
+            """
+            INSERT INTO studies VALUES (
+                'partial-study', 'Partial WFA', 's06_r_trend_v02_b2', 'wfa', 'grid', ?,
+                'external.csv', 'external.csv', 2, 140, 10.5, 3.2, 42, 21, 50.0, '', '2026-01-03'
             )
             """,
             (json.dumps(base_config),),
@@ -98,7 +107,7 @@ def _create_wfa_fixture_db(path: Path) -> None:
             )
             """
         )
-        diagnostics = {
+        diagnostics_1 = {
             "grid_v2": {
                 "engine": "v2",
                 "backend_kind": "compiled_numba",
@@ -111,13 +120,60 @@ def _create_wfa_fixture_db(path: Path) -> None:
                 "data_prepare_seconds": 0.2,
                 "fast_evaluation_seconds": 0.3,
                 "slow_validation_seconds": 0.4,
+                "slow_refinement_seconds": 0.05,
                 "total_seconds": 1.0,
                 "candidates_per_second": 1234.5,
             }
         }
+        diagnostics_2 = {
+            "grid_v2": {
+                "engine": "v2",
+                "backend_kind": "compiled_numba",
+                "compiled_batch_used": True,
+                "compiled_workers": 6,
+                "candidate_count": 48480,
+                "valid_candidate_count": 48480,
+                "selected_candidate_count": 10,
+                "candidate_generation_seconds": 0.3,
+                "data_prepare_seconds": 0.4,
+                "fast_evaluation_seconds": 0.7,
+                "slow_validation_seconds": 0.8,
+                "slow_refinement_seconds": 0.07,
+                "total_seconds": 2.2,
+                "candidates_per_second": 2469.0,
+            }
+        }
         conn.execute(
             "INSERT INTO wfa_windows VALUES ('new-study', 1, 48480, 10, ?)",
-            (json.dumps(diagnostics),),
+            (json.dumps(diagnostics_1),),
+        )
+        conn.execute(
+            "INSERT INTO wfa_windows VALUES ('new-study', 2, 48480, 10, ?)",
+            (json.dumps(diagnostics_2),),
+        )
+        partial_diagnostics = {
+            "grid_v2": {
+                "engine": "v2",
+                "backend_kind": "compiled_numba",
+                "compiled_batch_used": True,
+                "compiled_workers": 6,
+                "candidate_generation_seconds": 0.5,
+                "data_prepare_seconds": 0.6,
+                "fast_evaluation_seconds": 0.7,
+                "slow_validation_seconds": 0.8,
+                "total_seconds": 2.6,
+            }
+        }
+        conn.execute(
+            "INSERT INTO wfa_windows VALUES ('partial-study', 1, 48480, 10, ?)",
+            (json.dumps(partial_diagnostics),),
+        )
+        conn.execute(
+            """
+            INSERT INTO wfa_windows VALUES (
+                'partial-study', 2, 48480, 10, '{"optuna_is": {"enabled": true}}'
+            )
+            """
         )
         conn.commit()
     finally:
@@ -278,7 +334,7 @@ def test_direct_benchmark_reads_summary_from_config_and_top_selected_result(monk
     assert run["top_result"]["metrics"]["net_profit_pct"] == pytest.approx(12.3)
 
 
-def test_inspect_wfa_db_fixture_detects_absent_and_present_diagnostics(tmp_path):
+def test_inspect_wfa_db_fixture_detects_absent_present_and_partial_diagnostics(tmp_path):
     db_path = tmp_path / "wfa_fixture.db"
     _create_wfa_fixture_db(db_path)
 
@@ -288,6 +344,15 @@ def test_inspect_wfa_db_fixture_detects_absent_and_present_diagnostics(tmp_path)
     by_id = {study["study_id"]: study for study in report["studies"]}
     assert by_id["old-study"]["diagnostics"]["status"] == "absent"
     assert by_id["new-study"]["diagnostics"]["status"] == "present"
+    assert by_id["partial-study"]["diagnostics"]["status"] == "partial"
+    assert by_id["partial-study"]["diagnostics"]["stable_keys_missing"] == [
+        "candidate_generation_seconds",
+        "candidates_per_second",
+        "data_prepare_seconds",
+        "fast_evaluation_seconds",
+        "slow_validation_seconds",
+        "total_seconds",
+    ]
     assert by_id["new-study"]["window_counts"]["valid_min"] == 48_480
     assert by_id["new-study"]["select_option_subsets"]["trailMAType_options"] == [
         "SMA",
@@ -295,9 +360,44 @@ def test_inspect_wfa_db_fixture_detects_absent_and_present_diagnostics(tmp_path)
         "KAMA",
         "T3",
     ]
+    aggregates = by_id["new-study"]["diagnostics"]["timing_aggregates"]
+    assert aggregates["candidate_generation_seconds"]["count"] == 2
+    assert aggregates["candidate_generation_seconds"]["min"] == pytest.approx(0.1)
+    assert aggregates["candidate_generation_seconds"]["max"] == pytest.approx(0.3)
+    assert aggregates["candidate_generation_seconds"]["mean"] == pytest.approx(0.2)
+    assert aggregates["candidate_generation_seconds"]["sum"] == pytest.approx(0.4)
+    assert aggregates["fast_evaluation_seconds"]["count"] == 2
+    assert aggregates["fast_evaluation_seconds"]["min"] == pytest.approx(0.3)
+    assert aggregates["fast_evaluation_seconds"]["max"] == pytest.approx(0.7)
+    assert aggregates["fast_evaluation_seconds"]["mean"] == pytest.approx(0.5)
+    assert aggregates["fast_evaluation_seconds"]["sum"] == pytest.approx(1.0)
+    assert aggregates["total_seconds"]["sum"] == pytest.approx(3.2)
+    assert aggregates["slow_refinement_seconds"]["sum"] == pytest.approx(0.12)
+    assert aggregates["candidates_per_second"]["count"] == 2
+    assert aggregates["candidates_per_second"]["mean"] == pytest.approx(1851.75)
+    assert "sum" not in aggregates["candidates_per_second"]
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0] == 3
+
+
+def test_inspect_wfa_db_readonly_immutable_does_not_create_sidecars_or_mutate(tmp_path):
+    db_path = tmp_path / "wfa_fixture.db"
+    _create_wfa_fixture_db(db_path)
+    sidecars = [
+        Path(str(db_path) + "-wal"),
+        Path(str(db_path) + "-shm"),
+    ]
+    before_mtime_ns = db_path.stat().st_mtime_ns
+    assert not any(path.exists() for path in sidecars)
+
+    report = benchmark.inspect_wfa_db(db_path)
+
+    assert report["studies"]
+    assert db_path.stat().st_mtime_ns == before_mtime_ns
+    assert not any(path.exists() for path in sidecars)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0] == 3
 
 
 def test_real_corrected_db_inspection_reports_absent_diagnostics():
@@ -351,4 +451,4 @@ def test_cli_help_and_inspect_smoke(tmp_path):
     assert inspect_result.returncode == 0, inspect_result.stderr
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
-    assert len(payload["studies"]) == 2
+    assert len(payload["studies"]) == 3

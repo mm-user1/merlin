@@ -53,6 +53,30 @@ python tools/benchmark_grid_v2.py inspect-wfa-db --db src/storage/2026-07-06_233
 python tools/benchmark_grid_v2.py direct-grid --config tools/benchmark_configs/s06_b2_sui_baseline_grid.json --workers 1,6 --warmup-runs 1 --runs 2
 ```
 
+Grid V2 candidate domains come from the strategy `config.json` optimize
+metadata, `enabled_params`, and select `{param}_options` subsets. Numeric
+`param_ranges` in the benchmark payload are kept for compatibility with the
+canonical UI config builder; editing only those ranges does not independently
+redefine V2 grid granularity.
+
+`inspect-wfa-db` opens frozen benchmark DB snapshots with SQLite
+`mode=ro&immutable=1`, which avoids read sidecars. Do not use that mode for a
+live DB that may still have uncheckpointed WAL frames.
+
+### run_pytest.ps1
+
+Windows pytest wrapper that uses the required Merlin Python by default and
+redirects pytest temp directories into a repo-local `.pytest_tmp/run_<pid>`
+directory.
+
+```powershell
+.\tools\run_pytest.ps1 -q tests\test_benchmark_grid_v2.py
+.\tools\run_pytest.ps1 -q tests\v2
+```
+
+Set `MERLIN_PYTHON` to override the interpreter. Pass `-KeepTemp` before pytest
+arguments to preserve the per-run temp directory for debugging.
+
 ### test_all_ma_types.py
 
 Tests S01 strategy with all 11 MA types to ensure indicators work correctly.

@@ -255,10 +255,32 @@ def _timestamp_ns(value: Any, default: int) -> int:
 
 
 def _timestamps_ns(values: Sequence[Any]) -> np.ndarray:
+    fast = _timestamps_ns_fast(values)
+    if fast is not None:
+        return fast
     output = np.empty(len(values), dtype=np.int64)
     for index, value in enumerate(values):
         output[index] = _timestamp_ns(value, 0)
     return output
+
+
+def _timestamps_ns_fast(values: Sequence[Any]) -> np.ndarray | None:
+    if isinstance(values, pd.DatetimeIndex):
+        index = values.tz_convert("UTC") if values.tz is not None else values
+        return np.asarray(index.asi8, dtype=np.int64).copy()
+
+    array = np.asarray(values)
+    if np.issubdtype(array.dtype, np.datetime64):
+        return array.astype("datetime64[ns]", copy=False).astype(np.int64, copy=True)
+
+    try:
+        index = pd.DatetimeIndex(values)
+    except (TypeError, ValueError):
+        return None
+    if len(index) != len(values) or index.hasnans:
+        return None
+    index = index.tz_convert("UTC") if index.tz is not None else index
+    return np.asarray(index.asi8, dtype=np.int64).copy()
 
 
 def _compiled_target(func):

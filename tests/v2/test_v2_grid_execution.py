@@ -119,6 +119,25 @@ def test_signal_and_dataprep_cache_diagnostics(prepared_data, hooks):
     assert threshold_result.cache_stats.signal_hits == 0
 
 
+def test_execute_reuses_cache_key_estimate_without_changing_cache_diagnostics(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(enabled_variants=("bracket",), enabled_axes=("thresholdOS", "stopX"), top_n=1),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+    indices = (0, 1, 5)
+
+    expected = estimate_grid_v2_cache(plan, df, trade_start_idx, hooks, indices)
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks, indices)
+
+    assert result.cache_estimate == expected
+    assert result.cache_stats.signal_misses == expected.signal_combo_count
+    assert result.cache_stats.signal_hits == len(indices) - expected.signal_combo_count
+    assert result.cache_stats.dataprep_misses == expected.dataprep_combo_count
+    assert result.cache_stats.dataprep_hits == len(indices) - expected.dataprep_combo_count
+
+
 def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hooks):
     df, trade_start_idx = prepared_data
     base_settings = GridV2Settings(
@@ -143,8 +162,23 @@ def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hoo
         GridV2Settings(enabled_variants=("bracket",), enabled_axes=(), max_signal_cache_mb=0.000001),
         base_params=merged_reference_params("reference_b_trend_bracket"),
     )
+    build_calls = []
+
+    def forbidden_build(*args, **kwargs):  # noqa: ARG001
+        build_calls.append(1)
+        raise AssertionError("build_execution_data must not run after a failed cache estimate")
+
+    blocked_hooks = GridV2StrategyHooks(
+        build_execution_data=forbidden_build,
+        normalize_params=hooks.normalize_params,
+        label=hooks.label,
+        signal_param_names=hooks.signal_param_names,
+        dataprep_param_names=hooks.dataprep_param_names,
+        function_fingerprint=hooks.function_fingerprint,
+    )
     with pytest.raises(MemoryError, match="cache estimate"):
-        execute_grid_v2_candidates(tiny_limit, df, trade_start_idx, hooks)
+        execute_grid_v2_candidates(tiny_limit, df, trade_start_idx, blocked_hooks)
+    assert build_calls == []
 
 
 def test_tick_outward_grid_result_matches_direct_v2_tick_run(prepared_data, hooks):
