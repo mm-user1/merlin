@@ -1369,8 +1369,12 @@ def _grid_v2_slow_result(
     hooks: Any,
     row: Any,
 ) -> OptimizationResult:
-    candidate = plan.candidates[int(row.candidate_id) - 1]
-    params = hooks.normalize_params(dict(candidate.params)) if hooks.normalize_params else dict(candidate.params)
+    candidate_index = int(row.candidate_id) - 1
+    if hasattr(plan, "candidate_table"):
+        raw_params = dict(plan.candidate_table.params_for_index(candidate_index))
+    else:
+        raw_params = dict(plan.candidates[candidate_index].params)
+    params = hooks.normalize_params(dict(raw_params)) if hooks.normalize_params else dict(raw_params)
     data = hooks.build_execution_data(df, params)
     from .engine_v2.runner import run_v2_strategy
 
@@ -1383,7 +1387,7 @@ def _grid_v2_slow_result(
     strategy_result = run.strategy_result
     profit_factor = getattr(strategy_result, "profit_factor", None)
     result = OptimizationResult(
-        params=dict(candidate.params),
+        params=dict(raw_params),
         net_profit_pct=float(getattr(strategy_result, "net_profit_pct", 0.0)),
         max_drawdown_pct=float(getattr(strategy_result, "max_drawdown_pct", 0.0)),
         total_trades=int(getattr(strategy_result, "total_trades", 0)),
@@ -1429,6 +1433,12 @@ def _grid_v2_slow_result(
     ):
         if hasattr(fast_result, attr):
             setattr(result, attr, getattr(fast_result, attr))
+    if getattr(result, "canonical_identity", None) is None and hasattr(plan, "candidate_table"):
+        setattr(
+            result,
+            "canonical_identity",
+            plan.candidate_table.canonical_identity_for_index(candidate_index),
+        )
     setattr(result, "guardrail_summary", _grid_v2_guardrail_mapping(run.guardrail_summary))
     setattr(result, "metric_tier", "slow_public_v2")
     setattr(result, "validation_status", "passed")
@@ -1676,7 +1686,16 @@ def _run_grid_v2_optimization(
             "compiled_batch_available": bool(run_result.metadata.get("compiled_batch_available")),
             "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
             "compiled_execution_mode": run_result.metadata.get("compiled_execution_mode"),
+            "compiled_config_packing": run_result.metadata.get("compiled_config_packing"),
             "compiled_workers": int(run_result.metadata.get("compiled_workers") or settings.compiled_workers),
+            "candidate_table_used": bool(run_result.metadata.get("candidate_table_used")),
+            "candidate_table_row_count": plan.deduped_candidate_count,
+            "candidate_table_axis_count": len(getattr(plan.candidate_table, "axis_names", ()) or ()),
+            "candidate_table_unique_signal_rows": cache_estimate.get("signal_combo_count"),
+            "candidate_table_unique_dataprep_rows": cache_estimate.get("dataprep_combo_count"),
+            "legacy_candidates_materialized": run_result.metadata.get("legacy_candidates_materialized"),
+            "semantic_keys_materialized": run_result.metadata.get("semantic_keys_materialized"),
+            "canonical_identities_materialized": run_result.metadata.get("canonical_identities_materialized"),
             "stack_row_count": run_result.metadata.get("stack_row_count"),
             "stack_candidate_count": run_result.metadata.get("stack_candidate_count"),
             "stack_signal_nbytes": run_result.metadata.get("stack_signal_nbytes"),

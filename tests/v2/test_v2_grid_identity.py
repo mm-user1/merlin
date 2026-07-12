@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from core.grid_v2 import GridV2Settings, build_grid_v2_plan
+from core.grid_v2 import GRID_V2_ENGINE_VERSION, GridV2Settings, build_grid_v2_plan
 from core.optuna_engine import OptimizationConfig
 
 from strategies.s06_r_trend_v02_b2.strategy import load_config
@@ -164,6 +164,46 @@ def test_v2_semantic_keys_exclude_runtime_and_inactive_variant_params():
     assert "stopRR" not in trail_payload["params"]
     assert "trailMAType" in trail_payload["params"]
     assert "trailRR" in trail_payload["params"]
+
+
+def test_candidate_table_lazily_decodes_identity_subset_without_full_legacy_tuple():
+    plan = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
+    table = plan.candidate_table
+
+    assert plan._candidates_cache is None
+    assert table.legacy_candidates_materialized_count == 0
+    assert table.semantic_keys_materialized_count == plan.deduped_candidate_count
+    assert table.canonical_identities_materialized_count == 0
+
+    subset = (0, 479, 480, 18_435, 48_479)
+    for index in subset:
+        candidate = plan.candidate_for_index(index)
+        assert candidate.candidate_id == index + 1
+        assert table.params_for_index(index) == candidate.params
+        assert table.active_names_for_index(index) == candidate.active_param_names
+        assert table.inactive_names_for_index(index) == candidate.inactive_param_names
+        assert table.axis_names_for_index(index) == candidate.axis_param_names
+        assert table.semantic_payload_for_index(index) == candidate.semantic_payload
+        assert table.semantic_key_for_index(index) == candidate.semantic_key
+        assert table.canonical_identity_for_index(index) == candidate.canonical_identity
+
+    assert table.legacy_candidates_materialized_count == len(subset)
+    assert table.semantic_keys_materialized_count == plan.deduped_candidate_count
+    assert table.canonical_identities_materialized_count == len(subset)
+    assert plan._candidates_cache is None
+
+
+def test_candidate_table_compatibility_candidates_materialize_on_explicit_access():
+    plan = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
+
+    candidates = plan.candidates
+
+    assert len(candidates) == 48_480
+    assert plan._candidates_cache is candidates
+    assert plan.candidate_table.legacy_candidates_materialized_count == 48_480
+    assert candidates[0].candidate_id == 1
+    assert candidates[-1].candidate_id == 48_480
+    assert json.loads(candidates[0].semantic_key)["engine"] == GRID_V2_ENGINE_VERSION
 
 
 def test_select_subset_helper_does_not_affect_identity_or_candidate_order():

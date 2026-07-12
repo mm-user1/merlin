@@ -24,10 +24,12 @@ from core.engine_v2.compiled_kernel import (
     _validated_worker_count,
     _timestamp_ns,
     _timestamps_ns,
+    _pack_config_arrays,
     build_stacked_execution_data,
     compiled_batch_available,
     evaluate_compiled_batch,
     evaluate_compiled_stacked_batch,
+    pack_compiled_config_arrays_from_rows,
 )
 from core.engine_v2.contracts import Signals
 from core.engine_v2.kernel import ExecutionData
@@ -163,6 +165,42 @@ def _required_subset_indices(plan) -> tuple[int, ...]:
         *first_by_variant.values(),
         *default_like,
     )
+
+
+@pytest.mark.parametrize("price_rounding", ["none", "tick_outward"])
+def test_table_config_packer_matches_mapping_packer_for_certified_topologies(price_rounding):
+    base_params = merged_reference_params("reference_b_trend_bracket")
+    plan = build_grid_v2_plan(
+        _config_with_rounding(price_rounding),
+        GridV2Settings(top_n=0),
+        base_params=base_params,
+    )
+    indices = (0, 479, 480, 18_435, 48_479)
+    params_batch = [
+        normalized_params(plan.candidate_table.params_for_index(index))
+        for index in indices
+    ]
+    expected = _pack_config_arrays(plan.profile, params_batch, trade_start_idx=1000)
+
+    def get_value(row_index: int, name: str, default):
+        candidate_index = indices[row_index]
+        if plan.candidate_table.has_param_for_index(candidate_index, name):
+            return plan.candidate_table.param_value_for_index(candidate_index, name)
+        return default
+
+    def get_modes(row_index: int):
+        return plan.candidate_table.modes_for_index(indices[row_index])
+
+    actual = pack_compiled_config_arrays_from_rows(
+        row_count=len(indices),
+        get_value=get_value,
+        get_modes=get_modes,
+        trade_start_idx=1000,
+    )
+
+    assert expected.keys() == actual.keys()
+    for name in expected:
+        assert np.array_equal(actual[name], expected[name], equal_nan=True), name
 
 
 @pytest.mark.parametrize("price_rounding", ["none", "tick_outward"])

@@ -14,7 +14,9 @@ deferred. Phase 2.5.1 tightens dispatcher/storage behavior, runtime Grid
 settings, and compiled batch determinism without changing V1 runtime paths.
 Phase 2.6.2 changes the compiled Grid V2 plumbing to a generic stacked batch
 path while preserving the reference runner and grouped compiled path as
-certification oracles.
+certification oracles. Phase 2.6.3 moves Grid V2 planning/execution onto a
+typed candidate table while keeping legacy candidates as a lazy compatibility
+surface.
 
 ## Fields
 
@@ -121,6 +123,27 @@ Phase 2.6.2 certification notes:
 - The typed/lazy candidate table and row-level lazy full-population result
   materialization remain deferred; `config.optuna_all_results` stays
   full-population.
+
+Phase 2.6.3 certification notes:
+
+- Normal Grid V2 execution uses the typed candidate table for selected-index
+  handling, cache estimation, signal/dataprep grouping, params lookup, and slow
+  selected-row enrichment. `plan.candidates` is lazy and is not materialized by
+  normal compiled dispatch.
+- Full-population semantic keys remain materialized because the shared Grid
+  ranker uses `semantic_key` as a deterministic tie-break. This keeps ranking
+  semantics unchanged.
+- Full-population params remain cached in the table because storage/WFA/UI
+  compatibility still requires full-population `OptimizationResult.params`.
+- Canonical identity is selected-row lazy: fast-screening rows do not build
+  canonical JSON; selected slow-reference results do.
+- Typed cache grouping is certified for the S06 B2 SUI baseline at one signal
+  group and 162 dataprep rows.
+- The table-aware compiled config packer is covered by parity tests against the
+  mapping packer for both certified topologies and tick modes, but the default
+  compiled dispatch path uses mapping packing because the callback table packer
+  was slower on the Phase 2.6.3 benchmark. A vectorized table packer remains
+  future work.
 
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,

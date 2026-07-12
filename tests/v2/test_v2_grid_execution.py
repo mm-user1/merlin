@@ -140,6 +140,75 @@ def test_execute_reuses_cache_key_estimate_without_changing_cache_diagnostics(pr
     assert result.cache_stats.dataprep_hits == len(indices) - expected.dataprep_combo_count
 
 
+def test_s06_b2_full_table_cache_group_counts(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(top_n=0),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    estimate = estimate_grid_v2_cache(plan, df, trade_start_idx, hooks)
+
+    assert plan.deduped_candidate_count == 48_480
+    assert estimate.signal_combo_count == 1
+    assert estimate.dataprep_combo_count == 162
+    assert estimate.physical_signal_stack_rows == 162
+    assert estimate.physical_dataprep_stack_rows == 162
+    assert estimate.output_candidate_count == 48_480
+    assert plan._candidates_cache is None
+    assert plan.candidate_table.legacy_candidates_materialized_count == 0
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled path required for table metadata.")
+def test_compiled_execution_uses_table_without_legacy_or_canonical_materialization(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX", "stopRR"),
+            top_n=1,
+            prefer_compiled=True,
+        ),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks)
+
+    assert result.metadata["candidate_table_used"] is True
+    assert result.metadata["legacy_candidates_materialized"] == 0
+    assert result.metadata["canonical_identities_materialized"] == 0
+    assert result.metadata["semantic_keys_materialized"] == len(result.rows)
+    assert result.metadata["compiled_execution_mode"] == "stacked"
+    assert result.metadata["compiled_config_packing"] == "mapping"
+    assert plan._candidates_cache is None
+    assert plan.candidate_table.legacy_candidates_materialized_count == 0
+    assert plan.candidate_table.canonical_identities_materialized_count == 0
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled path required for table config packing.")
+def test_compiled_execution_can_use_table_config_packing_when_requested(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX",),
+            top_n=0,
+            prefer_compiled=True,
+            compiled_config_packing="table",
+        ),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks, candidate_indices=(0, 1))
+
+    assert result.metadata["compiled_execution_mode"] == "stacked"
+    assert result.metadata["compiled_config_packing"] == "table"
+    assert [row.candidate_id for row in result.rows] == [1, 2]
+
+
 def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hooks):
     df, trade_start_idx = prepared_data
     base_settings = GridV2Settings(

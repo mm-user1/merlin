@@ -283,6 +283,61 @@ created. It preserves the Phase 2.6.1 comparison table: V1 studies remain
 with diagnostics present. A fresh WFA rerun after stacked execution was not
 performed during this coding pass.
 
+## Phase 2.6.3 Windows After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_3_direct_grid_after.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_3_fresh_wfa_db_inspection_before_new_wfa.json
+```
+
+Implemented typed-table changes:
+
+- `GridV2Plan` now owns a typed candidate table. `plan.candidates` and
+  `plan.mapping_records` are lazy compatibility properties; normal execution,
+  cache estimation, cache grouping, and slow enrichment bypass the legacy
+  candidate tuple.
+- Full-population semantic keys are still materialized because shared Grid
+  ranking uses `semantic_key` as a deterministic tie-break. This is reported
+  explicitly as `semantic_keys_materialized=48480` for the SUI benchmark.
+- Full params are cached in the table for the full population. A fully lazy
+  params adapter was measured slower because normal dispatch still needs
+  full-population `OptimizationResult.params`.
+- Canonical identities are not built for fast-screening rows. They are
+  materialized only for selected slow-reference rows or explicit compatibility
+  access.
+- Cache grouping uses typed signatures and caches full cache keys by unique
+  group. The SUI benchmark still reports `signal_combo_count=1` and
+  `dataprep_combo_count=162`.
+- A table-aware compiled config packer exists and is parity-tested against the
+  mapping packer, but the default remains the mapping packer. The callback
+  table packer was correct but slower on this benchmark; a vectorized table
+  packer is deferred.
+
+Same command, payload, candidate count, worker list, warmup count, measured run
+count, and Windows workstation as the Phase 2.6.2 direct after-run.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Fast Eval | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 17.689s | 17.600s | 3.346s | 12.980s | 0.640s | 3,735.3 |
+| 6 | 14.871s | 14.788s | 3.254s | 10.279s | 0.656s | 4,716.2 |
+
+Workers=6 mean wall changed from 14.322s to 14.871s, a 3.8% regression, which
+passes the 5% hard gate but does not meet the target improvement gate. Mean
+`candidate_generation_seconds` improved slightly from 3.309s to 3.254s. Mean
+`fast_evaluation_seconds` regressed from 9.449s to 10.279s because full params
+and result rows are still full-population compatibility surfaces. The top
+selected candidate remained `18436` with
+`net_profit_pct=45.74422762364992`, `max_drawdown_pct=14.133826459897126`,
+and `total_trades=55`.
+
+The WFA inspection was run before any new WFA rerun. The existing Phase 2.6
+baseline DB still shows V1 studies at 26s/26s with diagnostics absent and the
+latest B2 studies at 117s/117s with diagnostics present. The stitched OOS
+metrics remain unchanged for the stored comparable studies. A fresh WFA rerun
+after Phase 2.6.3 was not performed during this coding pass.
+
 ## JSON Report Shape
 
 The benchmark helper writes schema version 1 JSON:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -291,24 +291,40 @@ def evaluate_compiled_stacked_batch(
     *,
     stacked_data: StackedExecutionData,
     profile: Any,
-    params_batch: Sequence[Mapping[str, Any]],
+    params_batch: Sequence[Mapping[str, Any]] | None = None,
     trade_start_idx: int,
     n_workers: int = 1,
+    packed_config_arrays: Mapping[str, np.ndarray] | None = None,
 ) -> CompiledBatchOutput:
     """Evaluate one stacked compiled batch with per-candidate data row indices."""
 
     if not compiled_batch_available():
         raise RuntimeError(compiled_unavailable_reason() or REFERENCE_UNAVAILABLE_REASON)
-    if not params_batch:
+    if packed_config_arrays is None:
+        if not params_batch:
+            return CompiledBatchOutput(
+                outputs=np.empty((0, OUTPUT_COLUMN_COUNT), dtype=np.float64),
+                execution_mode="stacked",
+            )
+        if len(params_batch) != stacked_data.candidate_count:
+            raise ValueError("Stacked compiled params_batch length must match data_index length.")
+        packed = _pack_config_arrays(profile, params_batch, trade_start_idx)
+        candidate_count = len(params_batch)
+    else:
+        packed = _validated_config_arrays(packed_config_arrays)
+        candidate_count = _packed_config_count(packed)
+        if candidate_count != stacked_data.candidate_count:
+            raise ValueError("Stacked compiled packed_config_arrays length must match data_index length.")
+        if params_batch is not None and len(params_batch) != candidate_count:
+            raise ValueError("Stacked compiled params_batch length must match packed_config_arrays length.")
+
+    if candidate_count == 0:
         return CompiledBatchOutput(
             outputs=np.empty((0, OUTPUT_COLUMN_COUNT), dtype=np.float64),
             execution_mode="stacked",
         )
-    if len(params_batch) != stacked_data.candidate_count:
-        raise ValueError("Stacked compiled params_batch length must match data_index length.")
 
-    packed = _pack_config_arrays(profile, params_batch, trade_start_idx)
-    outputs = np.empty((len(params_batch), OUTPUT_COLUMN_COUNT), dtype=np.float64)
+    outputs = np.empty((candidate_count, OUTPUT_COLUMN_COUNT), dtype=np.float64)
     worker_count = _validated_worker_count(n_workers)
     previous_threads = numba.get_num_threads()
     target_threads = max(1, min(worker_count, previous_threads))
@@ -390,36 +406,68 @@ def _validated_worker_count(value: Any) -> int:
     return workers
 
 
+_CONFIG_ARRAY_DTYPES: Mapping[str, Any] = {
+    "initial_capital": np.float64,
+    "commission_pct": np.float64,
+    "stop_x": np.float64,
+    "reward_risk": np.float64,
+    "max_stop_pct": np.float64,
+    "max_days": np.float64,
+    "risk_per_trade_pct": np.float64,
+    "contract_size": np.float64,
+    "trail_activation_rr": np.float64,
+    "tick_size": np.float64,
+    "start_ns": np.int64,
+    "end_ns": np.int64,
+    "enable_long": np.bool_,
+    "enable_short": np.bool_,
+    "target_enabled": np.bool_,
+    "trail_enabled": np.bool_,
+    "max_days_enabled": np.bool_,
+    "use_date_filter": np.bool_,
+    "strict_boundary": np.bool_,
+    "boundary_none": np.bool_,
+    "report_margin": np.bool_,
+    "rounding_code": np.int64,
+}
+
+
+def _empty_config_arrays(count: int) -> dict[str, np.ndarray]:
+    return {
+        name: np.empty(int(count), dtype=dtype)
+        for name, dtype in _CONFIG_ARRAY_DTYPES.items()
+    }
+
+
+def _validated_config_arrays(values: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    arrays: dict[str, np.ndarray] = {}
+    count: int | None = None
+    for name, dtype in _CONFIG_ARRAY_DTYPES.items():
+        if name not in values:
+            raise ValueError(f"Packed compiled config arrays missing required field {name!r}.")
+        array = np.asarray(values[name], dtype=dtype)
+        if array.ndim != 1:
+            raise ValueError(f"Packed compiled config array {name!r} must be 1D.")
+        if count is None:
+            count = int(array.shape[0])
+        elif int(array.shape[0]) != count:
+            raise ValueError("Packed compiled config arrays must all have the same length.")
+        arrays[name] = np.ascontiguousarray(array, dtype=dtype)
+    return arrays
+
+
+def _packed_config_count(arrays: Mapping[str, np.ndarray]) -> int:
+    first = next(iter(_CONFIG_ARRAY_DTYPES))
+    return int(np.asarray(arrays[first]).shape[0])
+
+
 def _pack_config_arrays(
     profile: Any,
     params_batch: Sequence[Mapping[str, Any]],
     trade_start_idx: int,
 ) -> dict[str, np.ndarray]:
     count = len(params_batch)
-    arrays = {
-        "initial_capital": np.empty(count, dtype=np.float64),
-        "commission_pct": np.empty(count, dtype=np.float64),
-        "stop_x": np.empty(count, dtype=np.float64),
-        "reward_risk": np.empty(count, dtype=np.float64),
-        "max_stop_pct": np.empty(count, dtype=np.float64),
-        "max_days": np.empty(count, dtype=np.float64),
-        "risk_per_trade_pct": np.empty(count, dtype=np.float64),
-        "contract_size": np.empty(count, dtype=np.float64),
-        "trail_activation_rr": np.empty(count, dtype=np.float64),
-        "tick_size": np.empty(count, dtype=np.float64),
-        "start_ns": np.empty(count, dtype=np.int64),
-        "end_ns": np.empty(count, dtype=np.int64),
-        "enable_long": np.empty(count, dtype=np.bool_),
-        "enable_short": np.empty(count, dtype=np.bool_),
-        "target_enabled": np.empty(count, dtype=np.bool_),
-        "trail_enabled": np.empty(count, dtype=np.bool_),
-        "max_days_enabled": np.empty(count, dtype=np.bool_),
-        "use_date_filter": np.empty(count, dtype=np.bool_),
-        "strict_boundary": np.empty(count, dtype=np.bool_),
-        "boundary_none": np.empty(count, dtype=np.bool_),
-        "report_margin": np.empty(count, dtype=np.bool_),
-        "rounding_code": np.empty(count, dtype=np.int64),
-    }
+    arrays = _empty_config_arrays(count)
     mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, bool, bool, bool, bool, bool, int]] = {}
     start_ns_cache: dict[Any, int] = {}
     end_ns_cache: dict[Any, int] = {}
@@ -471,6 +519,83 @@ def _pack_config_arrays(
         arrays["trail_enabled"][index] = trail_enabled
         arrays["max_days_enabled"][index] = max_days_enabled
         arrays["use_date_filter"][index] = _coerce_bool(params.get("dateFilter"), True)
+        arrays["strict_boundary"][index] = strict_boundary
+        arrays["boundary_none"][index] = boundary_none
+        arrays["report_margin"][index] = report_margin
+        arrays["rounding_code"][index] = rounding_code
+    return arrays
+
+
+def pack_compiled_config_arrays_from_rows(
+    *,
+    row_count: int,
+    get_value: Callable[[int, str, Any], Any],
+    get_modes: Callable[[int], Mapping[str, str]],
+    trade_start_idx: int,
+) -> dict[str, np.ndarray]:
+    """Pack compiled config arrays from typed row accessors.
+
+    This is the table-aware counterpart to ``_pack_config_arrays``. It keeps
+    the execution-mode semantics in this module while allowing Grid V2 to avoid
+    building a full params mapping solely for kernel config packing.
+    """
+
+    count = int(row_count)
+    if count < 0:
+        raise ValueError("row_count must be non-negative for compiled config packing.")
+    arrays = _empty_config_arrays(count)
+    mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, bool, bool, bool, bool, bool, int]] = {}
+    start_ns_cache: dict[Any, int] = {}
+    end_ns_cache: dict[Any, int] = {}
+    for index in range(count):
+        modes = get_modes(index)
+        mode_key = tuple(sorted((str(key), str(value)) for key, value in modes.items()))
+        mode_state = mode_cache.get(mode_key)
+        if mode_state is None:
+            mode_state = _compiled_mode_state(modes)
+            mode_cache[mode_key] = mode_state
+        (
+            target_enabled,
+            trail_enabled,
+            max_days_enabled,
+            strict_boundary,
+            boundary_none,
+            report_margin,
+            rounding_code,
+        ) = mode_state
+
+        arrays["initial_capital"][index] = float(get_value(index, "initialCapital", 100.0))
+        arrays["commission_pct"][index] = float(get_value(index, "commissionPct", 0.0))
+        arrays["stop_x"][index] = float(get_value(index, "stopX", 2.0))
+        arrays["reward_risk"][index] = float(get_value(index, "stopRR", 2.0))
+        arrays["max_stop_pct"][index] = float(get_value(index, "stopMaxPct", math.inf))
+        arrays["max_days"][index] = float(get_value(index, "stopMaxDays", math.inf))
+        arrays["risk_per_trade_pct"][index] = float(get_value(index, "riskPerTrade", 2.0))
+        arrays["contract_size"][index] = float(get_value(index, "contractSize", 0.01))
+        arrays["trail_activation_rr"][index] = float(get_value(index, "trailRR", 1.0))
+        if rounding_code == ROUNDING_TICK_OUTWARD_CODE:
+            tick_size = get_value(index, "tickSize", None)
+            if tick_size is None:
+                raise ValueError("tickSize is required when priceRounding='tick_outward'.")
+            arrays["tick_size"][index] = validate_tick_size(float(tick_size))
+        else:
+            arrays["tick_size"][index] = math.nan
+        arrays["start_ns"][index] = _cached_timestamp_ns(
+            get_value(index, "start", None),
+            np.iinfo(np.int64).min,
+            start_ns_cache,
+        )
+        arrays["end_ns"][index] = _cached_timestamp_ns(
+            get_value(index, "end", None),
+            np.iinfo(np.int64).max,
+            end_ns_cache,
+        )
+        arrays["enable_long"][index] = _coerce_bool(get_value(index, "enableLong", None), True)
+        arrays["enable_short"][index] = _coerce_bool(get_value(index, "enableShort", None), True)
+        arrays["target_enabled"][index] = target_enabled
+        arrays["trail_enabled"][index] = trail_enabled
+        arrays["max_days_enabled"][index] = max_days_enabled
+        arrays["use_date_filter"][index] = _coerce_bool(get_value(index, "dateFilter", None), True)
         arrays["strict_boundary"][index] = strict_boundary
         arrays["boundary_none"][index] = boundary_none
         arrays["report_margin"][index] = report_margin
@@ -1381,4 +1506,5 @@ __all__ = [
     "compiled_unavailable_reason",
     "evaluate_compiled_batch",
     "evaluate_compiled_stacked_batch",
+    "pack_compiled_config_arrays_from_rows",
 ]

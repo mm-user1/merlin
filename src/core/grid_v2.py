@@ -52,6 +52,7 @@ from core.engine_v2.compiled_kernel import (
     compiled_batch_available,
     compiled_unavailable_reason,
     evaluate_compiled_stacked_batch,
+    pack_compiled_config_arrays_from_rows,
 )
 from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
 from core.engine_v2.profile import (
@@ -69,6 +70,23 @@ REFERENCE_BATCH_KIND = "reference"
 _BOOL_SIGNAL_ARRAYS = 2
 _FLOAT_DATAPREP_ARRAYS = 5
 _BYTES_PER_MB = 1024.0 * 1024.0
+_KERNEL_CONFIG_PARAM_NAMES = (
+    "initialCapital",
+    "commissionPct",
+    "stopX",
+    "stopRR",
+    "stopMaxPct",
+    "stopMaxDays",
+    "riskPerTrade",
+    "contractSize",
+    "trailRR",
+    "tickSize",
+    "start",
+    "end",
+    "enableLong",
+    "enableShort",
+    "dateFilter",
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +102,7 @@ class GridV2Settings:
     enabled_axes: tuple[str, ...] | None = None
     price_rounding: str | None = None
     prefer_compiled: bool = True
+    compiled_config_packing: str = "mapping"
     primary_metric: str = "net_profit_pct"
     include_inactive_axes_for_dedup: bool = False
 
@@ -161,6 +180,205 @@ class GridV2Candidate:
     canonical_identity: str
 
 
+@dataclass
+class GridV2CandidateTable:
+    """Typed, lazy candidate table for deterministic Grid V2 plans."""
+
+    strategy_id: str
+    strategy_version: str
+    profile: ExecutionProfile
+    parameter_domains: Mapping[str, GridV2ParameterDomain]
+    axis_names: tuple[str, ...]
+    axis_column_by_name: Mapping[str, int]
+    variant_names: tuple[str, ...]
+    mode_tuples_by_variant: tuple[tuple[tuple[str, str], ...], ...]
+    variant_codes: np.ndarray = field(repr=False)
+    axis_value_codes: np.ndarray = field(repr=False)
+    semantic_keys_by_row: tuple[str, ...] | None = field(repr=False)
+    params_by_row: tuple[Mapping[str, Any], ...] | None = field(repr=False)
+    seed_params_by_variant: Mapping[str, Mapping[str, Any]]
+    active_names_by_variant: Mapping[str, tuple[str, ...]]
+    inactive_names_by_variant: Mapping[str, tuple[str, ...]]
+    axis_names_by_variant: Mapping[str, tuple[str, ...]]
+    raw_candidate_count: int
+    enumerated_candidate_count: int
+    semantic_dedup_count: int
+    per_variant_counts: Mapping[str, int]
+    _semantic_key_cache: dict[int, str] = field(default_factory=dict, init=False, repr=False)
+    _canonical_identity_cache: dict[int, str] = field(default_factory=dict, init=False, repr=False)
+    _candidate_cache: dict[int, GridV2Candidate] = field(default_factory=dict, init=False, repr=False)
+
+    def __len__(self) -> int:
+        return int(self.variant_codes.shape[0])
+
+    @property
+    def deduped_candidate_count(self) -> int:
+        return len(self)
+
+    @property
+    def semantic_keys_materialized_count(self) -> int:
+        if self.semantic_keys_by_row is not None:
+            return len(self.semantic_keys_by_row)
+        return len(self._semantic_key_cache)
+
+    @property
+    def canonical_identities_materialized_count(self) -> int:
+        return len(self._canonical_identity_cache)
+
+    @property
+    def legacy_candidates_materialized_count(self) -> int:
+        return len(self._candidate_cache)
+
+    def validate_index(self, index: int) -> int:
+        idx = int(index)
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Grid V2 candidate index out of range: {idx}.")
+        return idx
+
+    def validate_candidate_id(self, candidate_id: int) -> int:
+        idx = int(candidate_id) - 1
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Grid V2 candidate id out of range: {candidate_id}.")
+        return idx
+
+    def candidate_id_for_index(self, index: int) -> int:
+        return self.validate_index(index) + 1
+
+    def variant_name_for_index(self, index: int) -> str:
+        idx = self.validate_index(index)
+        return self.variant_names[int(self.variant_codes[idx])]
+
+    def modes_for_index(self, index: int) -> dict[str, str]:
+        variant_name = self.variant_name_for_index(index)
+        return dict(self.profile.variants[variant_name].modes)
+
+    def active_names_for_index(self, index: int) -> tuple[str, ...]:
+        return self.active_names_by_variant[self.variant_name_for_index(index)]
+
+    def inactive_names_for_index(self, index: int) -> tuple[str, ...]:
+        return self.inactive_names_by_variant[self.variant_name_for_index(index)]
+
+    def axis_names_for_index(self, index: int) -> tuple[str, ...]:
+        return self.axis_names_by_variant[self.variant_name_for_index(index)]
+
+    def params_for_index(self, index: int) -> dict[str, Any]:
+        idx = self.validate_index(index)
+        if self.params_by_row is not None:
+            return self.params_by_row[idx]  # type: ignore[return-value]
+        variant_name = self.variant_name_for_index(idx)
+        params = dict(self.seed_params_by_variant[variant_name])
+        for column, name in enumerate(self.axis_names):
+            code = int(self.axis_value_codes[idx, column]) if self.axis_value_codes.shape[1] else -1
+            if code >= 0:
+                params[name] = self.parameter_domains[name].values[code]
+        return _jsonable_mapping(params)
+
+    def param_value_for_index(self, index: int, name: str) -> Any:
+        idx = self.validate_index(index)
+        if self.params_by_row is not None:
+            return _jsonable_value(self.params_by_row[idx].get(name))
+        variant_name = self.variant_name_for_index(idx)
+        column = self.axis_column_by_name.get(name)
+        if column is not None:
+            code = int(self.axis_value_codes[idx, column]) if self.axis_value_codes.shape[1] else -1
+            if code >= 0:
+                return _jsonable_value(self.parameter_domains[name].values[code])
+        return _jsonable_value(self.seed_params_by_variant[variant_name].get(name))
+
+    def has_param_for_index(self, index: int, name: str) -> bool:
+        idx = self.validate_index(index)
+        if self.params_by_row is not None:
+            return name in self.params_by_row[idx]
+        variant_name = self.variant_name_for_index(idx)
+        if name in self.seed_params_by_variant[variant_name]:
+            return True
+        column = self.axis_column_by_name.get(name)
+        if column is None:
+            return False
+        return bool(self.axis_value_codes.shape[1] and int(self.axis_value_codes[idx, column]) >= 0)
+
+    def active_param_values_for_index(self, index: int) -> dict[str, Any]:
+        params = self.params_for_index(index)
+        return {
+            name: _jsonable_value(params[name])
+            for name in self.active_names_for_index(index)
+            if name in params
+        }
+
+    def axis_param_values_for_index(self, index: int) -> dict[str, Any]:
+        params = self.params_for_index(index)
+        return {
+            name: _jsonable_value(params[name])
+            for name in self.axis_names_for_index(index)
+            if name in params
+        }
+
+    def semantic_payload_for_index(self, index: int) -> dict[str, Any]:
+        variant_name = self.variant_name_for_index(index)
+        return _semantic_payload(
+            config={"id": self.strategy_id, "version": self.strategy_version},
+            profile=self.profile,
+            variant=self.profile.variants[variant_name],
+            params=self.params_for_index(index),
+            active_names=self.active_names_for_index(index),
+        )
+
+    def semantic_key_for_index(self, index: int) -> str:
+        idx = self.validate_index(index)
+        if self.semantic_keys_by_row is not None:
+            return self.semantic_keys_by_row[idx]
+        key = self._semantic_key_cache.get(idx)
+        if key is None:
+            key = _stable_json(self.semantic_payload_for_index(idx))
+            self._semantic_key_cache[idx] = key
+        return key
+
+    def canonical_identity_for_index(self, index: int) -> str:
+        idx = self.validate_index(index)
+        identity = self._canonical_identity_cache.get(idx)
+        if identity is None:
+            identity = _canonical_identity(
+                variant_name=self.variant_name_for_index(idx),
+                params=self.params_for_index(idx),
+                names=self.active_names_for_index(idx),
+            )
+            self._canonical_identity_cache[idx] = identity
+        return identity
+
+    def candidate_for_index(self, index: int) -> GridV2Candidate:
+        idx = self.validate_index(index)
+        candidate = self._candidate_cache.get(idx)
+        if candidate is None:
+            candidate = GridV2Candidate(
+                candidate_id=idx + 1,
+                variant_name=self.variant_name_for_index(idx),
+                modes=self.modes_for_index(idx),
+                params=self.params_for_index(idx),
+                active_param_names=self.active_names_for_index(idx),
+                inactive_param_names=self.inactive_names_for_index(idx),
+                axis_param_names=self.axis_names_for_index(idx),
+                semantic_key=self.semantic_key_for_index(idx),
+                semantic_payload=self.semantic_payload_for_index(idx),
+                canonical_identity=self.canonical_identity_for_index(idx),
+            )
+            self._candidate_cache[idx] = candidate
+        return candidate
+
+    def candidate_for_id(self, candidate_id: int) -> GridV2Candidate:
+        return self.candidate_for_index(self.validate_candidate_id(candidate_id))
+
+    def mapping_record_for_index(self, index: int) -> CandidateMappingRecord:
+        idx = self.validate_index(index)
+        return CandidateMappingRecord(
+            candidate_id=idx + 1,
+            variant_name=self.variant_name_for_index(idx),
+            semantic_key=self.semantic_key_for_index(idx),
+            canonical_identity=self.canonical_identity_for_index(idx),
+            active_param_values=self.active_param_values_for_index(idx),
+            axis_param_values=self.axis_param_values_for_index(idx),
+        )
+
+
 @dataclass(frozen=True)
 class GridV2Plan:
     settings: GridV2Settings
@@ -168,13 +386,49 @@ class GridV2Plan:
     strategy_version: str
     profile: ExecutionProfile
     parameter_domains: Mapping[str, GridV2ParameterDomain]
-    candidates: tuple[GridV2Candidate, ...]
-    mapping_records: tuple[CandidateMappingRecord, ...]
+    candidate_table: GridV2CandidateTable
     raw_candidate_count: int
     enumerated_candidate_count: int
     deduped_candidate_count: int
     per_variant_counts: Mapping[str, int]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    _candidates_cache: tuple[GridV2Candidate, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _mapping_records_cache: tuple[CandidateMappingRecord, ...] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def candidates(self) -> tuple[GridV2Candidate, ...]:
+        cache = self._candidates_cache
+        if cache is None:
+            cache = tuple(self.candidate_table.candidate_for_index(index) for index in range(self.deduped_candidate_count))
+            object.__setattr__(self, "_candidates_cache", cache)
+        return cache
+
+    @property
+    def mapping_records(self) -> tuple[CandidateMappingRecord, ...]:
+        cache = self._mapping_records_cache
+        if cache is None:
+            cache = tuple(
+                self.candidate_table.mapping_record_for_index(index)
+                for index in range(self.deduped_candidate_count)
+            )
+            object.__setattr__(self, "_mapping_records_cache", cache)
+        return cache
+
+    def candidate_for_index(self, index: int) -> GridV2Candidate:
+        return self.candidate_table.candidate_for_index(index)
+
+    def candidate_for_id(self, candidate_id: int) -> GridV2Candidate:
+        return self.candidate_table.candidate_for_id(candidate_id)
 
 
 @dataclass(frozen=True)
@@ -218,11 +472,11 @@ class GridV2CacheStats:
     dataprep_misses: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GridV2ResultRow:
     candidate_id: int
     semantic_key: str
-    canonical_identity: str
+    canonical_identity: Any
     variant_name: str
     modes: Mapping[str, str]
     params: Mapping[str, Any]
@@ -277,11 +531,12 @@ class _CacheKeyContext:
     function_fingerprint: str | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _CandidateCacheKeys:
-    candidate: GridV2Candidate
-    signal_key: str
-    dataprep_key: str
+    candidate_index: int
+    candidate_id: int
+    signal_key: Any
+    dataprep_key: Any
 
 
 def build_grid_v2_plan(
@@ -301,73 +556,15 @@ def build_grid_v2_plan(
     domains = _build_parameter_domains(config_copy, settings, fixed_params, profile)
     selector_values = _selector_values_by_variant(config_copy, profile)
     selected_variants = _selected_variants(profile, settings)
-
-    candidates: list[GridV2Candidate] = []
-    records: list[CandidateMappingRecord] = []
-    semantic_seen: set[str] = set()
-    raw_count = 0
-    enumerated_count = 0
-    per_variant_counts: dict[str, int] = {name: 0 for name in selected_variants}
-
-    for variant_name in selected_variants:
-        variant = profile.variants[variant_name]
-        seed_params = _candidate_seed_params(fixed_params)
-        if profile.variant_selector is not None:
-            seed_params[profile.variant_selector.param] = selector_values[variant_name]
-        active_names = _ordered_active_names(profile, seed_params)
-        inactive_names = _ordered_inactive_names(profile, seed_params)
-        axis_names = _variant_axis_names(
-            profile=profile,
-            domains=domains,
-            active_names=active_names,
-            settings=settings,
-        )
-        raw_count += _product_size(domains[name].values for name in axis_names)
-        for values in itertools.product(*(domains[name].values for name in axis_names)):
-            enumerated_count += 1
-            params = dict(seed_params)
-            params.update(zip(axis_names, values))
-            semantic_payload = _semantic_payload(
-                config=config_copy,
-                profile=profile,
-                variant=variant,
-                params=params,
-                active_names=active_names,
-            )
-            semantic_key = _stable_json(semantic_payload)
-            if semantic_key in semantic_seen:
-                continue
-            semantic_seen.add(semantic_key)
-            candidate_id = len(candidates) + 1
-            canonical_identity = _canonical_identity(
-                variant_name=variant_name,
-                params=params,
-                names=active_names,
-            )
-            candidate = GridV2Candidate(
-                candidate_id=candidate_id,
-                variant_name=variant_name,
-                modes=dict(variant.modes),
-                params=_jsonable_mapping(params),
-                active_param_names=active_names,
-                inactive_param_names=inactive_names,
-                axis_param_names=tuple(axis_names),
-                semantic_key=semantic_key,
-                semantic_payload=semantic_payload,
-                canonical_identity=canonical_identity,
-            )
-            candidates.append(candidate)
-            per_variant_counts[variant_name] += 1
-            records.append(
-                CandidateMappingRecord(
-                    candidate_id=candidate_id,
-                    variant_name=variant_name,
-                    semantic_key=semantic_key,
-                    canonical_identity=canonical_identity,
-                    active_param_values={name: _jsonable_value(params[name]) for name in active_names if name in params},
-                    axis_param_values={name: _jsonable_value(params[name]) for name in axis_names if name in params},
-                )
-            )
+    candidate_table = _build_candidate_table(
+        config=config_copy,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=selected_variants,
+    )
 
     metadata = {
         "backend_kind": COMPILED_BATCH_KIND if compiled_batch_available() else REFERENCE_BATCH_KIND,
@@ -383,7 +580,13 @@ def build_grid_v2_plan(
             if domain.is_axis and str(domain.source).endswith(".runtime_options")
         },
         "variant_order": list(selected_variants),
-        "semantic_dedup_count": enumerated_count - len(candidates),
+        "semantic_dedup_count": candidate_table.semantic_dedup_count,
+        "candidate_table": {
+            "enabled": True,
+            "layout": "typed_lazy",
+            "axis_count": len(candidate_table.axis_names),
+            "variant_count": len(candidate_table.variant_names),
+        },
     }
     return GridV2Plan(
         settings=settings,
@@ -391,13 +594,125 @@ def build_grid_v2_plan(
         strategy_version=str(config_copy.get("version", "")),
         profile=profile,
         parameter_domains=domains,
-        candidates=tuple(candidates),
-        mapping_records=tuple(records),
+        candidate_table=candidate_table,
+        raw_candidate_count=candidate_table.raw_candidate_count,
+        enumerated_candidate_count=candidate_table.enumerated_candidate_count,
+        deduped_candidate_count=candidate_table.deduped_candidate_count,
+        per_variant_counts=candidate_table.per_variant_counts,
+        metadata=metadata,
+    )
+
+
+def _build_candidate_table(
+    *,
+    config: Mapping[str, Any],
+    settings: GridV2Settings,
+    profile: ExecutionProfile,
+    fixed_params: Mapping[str, Any],
+    domains: Mapping[str, GridV2ParameterDomain],
+    selector_values: Mapping[str, Any],
+    selected_variants: Sequence[str],
+) -> GridV2CandidateTable:
+    axis_names = tuple(name for name in profile.parameter_names if domains[name].is_axis)
+    axis_columns = {name: index for index, name in enumerate(axis_names)}
+    seed_params_by_variant: dict[str, dict[str, Any]] = {}
+    active_names_by_variant: dict[str, tuple[str, ...]] = {}
+    inactive_names_by_variant: dict[str, tuple[str, ...]] = {}
+    axis_names_by_variant: dict[str, tuple[str, ...]] = {}
+    per_variant_counts: dict[str, int] = {name: 0 for name in selected_variants}
+    semantic_seen: set[tuple[Any, ...]] = set()
+    semantic_keys: list[str] = []
+    params_by_row: list[dict[str, Any]] = []
+    variant_codes: list[int] = []
+    axis_value_codes: list[list[int]] = []
+    raw_count = 0
+    enumerated_count = 0
+
+    for variant_code, variant_name in enumerate(selected_variants):
+        variant = profile.variants[variant_name]
+        seed_params = _candidate_seed_params(fixed_params)
+        if profile.variant_selector is not None:
+            seed_params[profile.variant_selector.param] = selector_values[variant_name]
+        active_names = _ordered_active_names(profile, seed_params)
+        inactive_names = _ordered_inactive_names(profile, seed_params)
+        variant_axis_names = _variant_axis_names(
+            profile=profile,
+            domains=domains,
+            active_names=active_names,
+            settings=settings,
+        )
+        seed_params_by_variant[variant_name] = seed_params
+        active_names_by_variant[variant_name] = active_names
+        inactive_names_by_variant[variant_name] = inactive_names
+        axis_names_by_variant[variant_name] = variant_axis_names
+
+        value_groups = tuple(domains[name].values for name in variant_axis_names)
+        code_groups = tuple(range(len(domains[name].values)) for name in variant_axis_names)
+        raw_count += _product_size(value_groups)
+        for values, codes in zip(itertools.product(*value_groups), itertools.product(*code_groups)):
+            enumerated_count += 1
+            params = dict(seed_params)
+            params.update(zip(variant_axis_names, values))
+            semantic_identity = _semantic_identity_tuple(
+                config=config,
+                profile=profile,
+                variant=variant,
+                params=params,
+                active_names=active_names,
+            )
+            if semantic_identity in semantic_seen:
+                continue
+            semantic_seen.add(semantic_identity)
+            jsonable_params = _jsonable_mapping(params)
+            params_by_row.append(jsonable_params)
+            semantic_keys.append(
+                _stable_json(
+                    _semantic_payload(
+                        config=config,
+                        profile=profile,
+                        variant=variant,
+                        params=jsonable_params,
+                        active_names=active_names,
+                    )
+                )
+            )
+            row_codes = [-1] * len(axis_names)
+            for name, code in zip(variant_axis_names, codes):
+                row_codes[axis_columns[name]] = int(code)
+            variant_codes.append(int(variant_code))
+            axis_value_codes.append(row_codes)
+            per_variant_counts[variant_name] += 1
+
+    axis_code_array = np.asarray(axis_value_codes, dtype=np.int32)
+    if not axis_value_codes:
+        axis_code_array = np.empty((0, len(axis_names)), dtype=np.int32)
+    elif axis_code_array.ndim == 1:
+        axis_code_array = axis_code_array.reshape((len(axis_value_codes), len(axis_names)))
+
+    return GridV2CandidateTable(
+        strategy_id=str(config.get("id", profile.strategy_id)),
+        strategy_version=str(config.get("version", "")),
+        profile=profile,
+        parameter_domains=domains,
+        axis_names=axis_names,
+        axis_column_by_name=axis_columns,
+        variant_names=tuple(selected_variants),
+        mode_tuples_by_variant=tuple(
+            tuple(sorted((str(name), str(value)) for name, value in profile.variants[variant].modes.items()))
+            for variant in selected_variants
+        ),
+        variant_codes=np.asarray(variant_codes, dtype=np.int32),
+        axis_value_codes=axis_code_array,
+        semantic_keys_by_row=tuple(semantic_keys),
+        params_by_row=tuple(params_by_row),
+        seed_params_by_variant=seed_params_by_variant,
+        active_names_by_variant=active_names_by_variant,
+        inactive_names_by_variant=inactive_names_by_variant,
+        axis_names_by_variant=axis_names_by_variant,
         raw_candidate_count=raw_count,
         enumerated_candidate_count=enumerated_count,
-        deduped_candidate_count=len(candidates),
+        semantic_dedup_count=enumerated_count - len(variant_codes),
         per_variant_counts=per_variant_counts,
-        metadata=metadata,
     )
 
 
@@ -456,10 +771,10 @@ def estimate_grid_v2_cache(
     """Estimate local cache memory for a planned run."""
 
     hooks = _coerce_hooks(hooks)
-    selected = _selected_candidates(plan, candidate_indices)
+    selected_indices = _selected_candidate_indices(plan, candidate_indices)
     n_bars = int(len(df))
     context = _cache_key_context(df, trade_start_idx, hooks)
-    cache_keys = _candidate_cache_keys(plan, context, hooks, selected)
+    cache_keys = _candidate_cache_keys(plan, context, hooks, selected_indices)
     return _estimate_grid_v2_cache_from_keys(plan, n_bars, cache_keys)
 
 
@@ -467,16 +782,33 @@ def _candidate_cache_keys(
     plan: GridV2Plan,
     context: _CacheKeyContext,
     hooks: GridV2StrategyHooks,
-    selected: Sequence[GridV2Candidate],
+    selected_indices: Sequence[int],
 ) -> tuple[_CandidateCacheKeys, ...]:
-    return tuple(
-        _CandidateCacheKeys(
-            candidate=candidate,
-            signal_key=_signal_cache_key(plan, candidate, context, hooks),
-            dataprep_key=_dataprep_cache_key(plan, candidate, context, hooks),
+    signal_cache: dict[tuple[Any, ...], Any] = {}
+    dataprep_cache: dict[tuple[Any, ...], Any] = {}
+    records: list[_CandidateCacheKeys] = []
+    for index in selected_indices:
+        signal_signature = _cache_signature_for_index(plan, index, hooks, signal_only=True)
+        signal_key = signal_cache.get(signal_signature)
+        if signal_key is None:
+            signal_key = _signal_cache_key_for_index(plan, index, context, hooks)
+            signal_cache[signal_signature] = signal_key
+
+        dataprep_signature = _cache_signature_for_index(plan, index, hooks, signal_only=False)
+        dataprep_key = dataprep_cache.get(dataprep_signature)
+        if dataprep_key is None:
+            dataprep_key = _dataprep_cache_key_for_index(plan, index, context, hooks)
+            dataprep_cache[dataprep_signature] = dataprep_key
+
+        records.append(
+            _CandidateCacheKeys(
+                candidate_index=index,
+                candidate_id=index + 1,
+                signal_key=signal_key,
+                dataprep_key=dataprep_key,
+            )
         )
-        for candidate in selected
-    )
+    return tuple(records)
 
 
 def _estimate_grid_v2_cache_from_keys(
@@ -540,9 +872,9 @@ def execute_grid_v2_candidates(
     """Execute planned candidates through the selected V2 batch backend."""
 
     hooks = _coerce_hooks(hooks)
-    selected_candidates = _selected_candidates(plan, candidate_indices)
+    selected_indices = _selected_candidate_indices(plan, candidate_indices)
     context = _cache_key_context(df, trade_start_idx, hooks)
-    cache_keys = _candidate_cache_keys(plan, context, hooks, selected_candidates)
+    cache_keys = _candidate_cache_keys(plan, context, hooks, selected_indices)
     estimate = _estimate_grid_v2_cache_from_keys(plan, int(len(df)), cache_keys)
     if estimate.estimated_total_mb > estimate.max_signal_cache_mb:
         raise MemoryError(
@@ -552,13 +884,13 @@ def execute_grid_v2_candidates(
 
     eval_started = time.time()
     stats = GridV2CacheStats()
-    signal_seen: set[str] = set()
-    dataprep_cache: dict[str, ExecutionData] = {}
-    data_groups: dict[str, list[GridV2Candidate]] = {}
+    signal_seen: set[Any] = set()
+    dataprep_cache: dict[Any, ExecutionData] = {}
+    data_groups: dict[Any, list[int]] = {}
     rows: list[GridV2ResultRow] = []
 
     for key_record in cache_keys:
-        candidate = key_record.candidate
+        candidate_index = key_record.candidate_index
         signal_key = key_record.signal_key
         if signal_key in signal_seen:
             stats.signal_hits += 1
@@ -572,44 +904,64 @@ def execute_grid_v2_candidates(
         else:
             stats.dataprep_misses += 1
             try:
-                data = hooks.build_execution_data(df, _normalized_candidate_params(hooks, candidate.params))
+                params = plan.candidate_table.params_for_index(candidate_index)
+                data = hooks.build_execution_data(df, _normalized_candidate_params(hooks, params))
             except Exception as exc:
-                rows.append(_error_row(candidate, exc))
+                rows.append(_error_row(plan, candidate_index, exc))
                 continue
             dataprep_cache[data_key] = data
-        data_groups.setdefault(data_key, []).append(candidate)
+        data_groups.setdefault(data_key, []).append(candidate_index)
 
     compiled_available = compiled_batch_available()
     use_compiled = bool(plan.settings.prefer_compiled and compiled_available)
     backend_kind = COMPILED_BATCH_KIND if use_compiled else REFERENCE_BATCH_KIND
     compiled_execution_mode: str | None = None
+    compiled_config_packing: str | None = None
     stack_metadata: dict[str, Any] = {}
 
     if use_compiled:
         data_keys = tuple(data_groups.keys())
         data_key_to_stack_row = {key: index for index, key in enumerate(data_keys)}
-        compiled_candidates: list[GridV2Candidate] = []
-        params_batch: list[Mapping[str, Any]] = []
+        compiled_indices: list[int] = []
         data_index: list[int] = []
         for key_record in cache_keys:
             data_key = key_record.dataprep_key
             if data_key not in data_key_to_stack_row:
                 continue
-            candidate = key_record.candidate
-            compiled_candidates.append(candidate)
-            params_batch.append(_normalized_candidate_params(hooks, candidate.params))
+            candidate_index = key_record.candidate_index
+            compiled_indices.append(candidate_index)
             data_index.append(data_key_to_stack_row[data_key])
-        if compiled_candidates:
+        if compiled_indices:
             stacked_data = build_stacked_execution_data(
                 [dataprep_cache[key] for key in data_keys],
                 data_index,
             )
+            params_batch: list[Mapping[str, Any]] | None = None
+            row_params_batch: list[Mapping[str, Any]] | None = None
+            packed_config_arrays: Mapping[str, np.ndarray] | None = None
+            requested_packing = str(plan.settings.compiled_config_packing or "mapping").strip().lower()
+            if requested_packing not in {"mapping", "table"}:
+                raise ValueError("Grid V2 compiled_config_packing must be 'mapping' or 'table'.")
+            if requested_packing == "table" and _can_use_table_config_packer(plan, hooks, compiled_indices):
+                packed_config_arrays = _pack_table_config_arrays(plan, compiled_indices, trade_start_idx)
+                compiled_config_packing = "table"
+            else:
+                row_params_batch = [
+                    plan.candidate_table.params_for_index(candidate_index)
+                    for candidate_index in compiled_indices
+                ]
+                params_batch = [
+                    _normalized_candidate_params(hooks, params)
+                    for params in row_params_batch
+                ]
+                compiled_config_packing = "mapping"
             batch = evaluate_compiled_stacked_batch(
                 stacked_data=stacked_data,
                 profile=plan.profile,
                 params_batch=params_batch,
                 trade_start_idx=trade_start_idx,
                 n_workers=plan.settings.compiled_workers,
+                packed_config_arrays=packed_config_arrays,
             )
             compiled_execution_mode = batch.execution_mode
             stack_metadata = {
@@ -622,25 +974,27 @@ def execute_grid_v2_candidates(
                 "stack_total_nbytes": int(stacked_data.nbytes + batch.outputs.nbytes),
                 "stack_total_mb": (stacked_data.nbytes + batch.outputs.nbytes) / _BYTES_PER_MB,
             }
-            for candidate, values in zip(compiled_candidates, batch.outputs):
-                rows.append(_row_from_compiled_output(candidate, values))
+            for output_index, (candidate_index, values) in enumerate(zip(compiled_indices, batch.outputs)):
+                params = row_params_batch[output_index] if row_params_batch is not None else None
+                rows.append(_row_from_compiled_output(plan, candidate_index, values, params=params))
         else:
             compiled_execution_mode = "stacked"
     else:
-        for data_key, candidates in data_groups.items():
+        for data_key, candidate_indices_for_data in data_groups.items():
             data = dataprep_cache[data_key]
-            for candidate in candidates:
+            for candidate_index in candidate_indices_for_data:
+                params = plan.candidate_table.params_for_index(candidate_index)
                 try:
                     run = run_v2_strategy(
                         data=data,
                         profile=plan.profile,
-                        params=_normalized_candidate_params(hooks, candidate.params),
+                        params=_normalized_candidate_params(hooks, params),
                         trade_start_idx=trade_start_idx,
                     )
                 except Exception as exc:
-                    rows.append(_error_row(candidate, exc))
+                    rows.append(_error_row(plan, candidate_index, exc))
                     continue
-                rows.append(_row_from_run(candidate, run))
+                rows.append(_row_from_run(plan, candidate_index, run, params=params))
 
     rows.sort(key=lambda row: row.candidate_id)
     selected = ()
@@ -659,8 +1013,9 @@ def execute_grid_v2_candidates(
         metadata={
             "backend_kind": backend_kind,
             "compiled_batch_available": compiled_available,
-            "compiled_batch_used": use_compiled,
-            "compiled_execution_mode": compiled_execution_mode,
+        "compiled_batch_used": use_compiled,
+        "compiled_execution_mode": compiled_execution_mode,
+        "compiled_config_packing": compiled_config_packing,
             "compiled_unavailable_reason": compiled_unavailable_reason(),
             "metric_tier": "core_fast_rows_plus_selected_public_v2_enrichment",
             "executed_candidate_count": len(rows),
@@ -668,6 +1023,10 @@ def execute_grid_v2_candidates(
             "compiled_workers": int(plan.settings.compiled_workers),
             "evaluation_seconds": evaluation_seconds,
             "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
+            "candidate_table_used": True,
+            "legacy_candidates_materialized": plan.candidate_table.legacy_candidates_materialized_count,
+            "semantic_keys_materialized": plan.candidate_table.semantic_keys_materialized_count,
+            "canonical_identities_materialized": plan.candidate_table.canonical_identities_materialized_count,
             **stack_metadata,
         },
     )
@@ -1031,6 +1390,37 @@ def _semantic_payload(
     }
 
 
+def _semantic_identity_tuple(
+    *,
+    config: Mapping[str, Any],
+    profile: ExecutionProfile,
+    variant: VariantSpec,
+    params: Mapping[str, Any],
+    active_names: Sequence[str],
+) -> tuple[Any, ...]:
+    active_params = tuple(
+        sorted(
+            (
+                name,
+                _hashable_jsonable_value(params[name]),
+            )
+            for name in active_names
+            if name in params and profile.parameter_roles.get(name) != "runtime"
+        )
+    )
+    modes = tuple(
+        sorted((str(name), _hashable_jsonable_value(value)) for name, value in variant.modes.items())
+    )
+    return (
+        GRID_V2_ENGINE_VERSION,
+        str(config.get("id", profile.strategy_id)),
+        str(config.get("version", "")),
+        str(variant.name),
+        modes,
+        active_params,
+    )
+
+
 def _canonical_identity(
     *,
     variant_name: str,
@@ -1075,6 +1465,15 @@ def _jsonable_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _jsonable_value(item) for key, item in value.items()}
     return value
+
+
+def _hashable_jsonable_value(value: Any) -> Any:
+    normalized = _jsonable_value(value)
+    if isinstance(normalized, Mapping):
+        return tuple(sorted((str(key), _hashable_jsonable_value(item)) for key, item in normalized.items()))
+    if isinstance(normalized, list):
+        return tuple(_hashable_jsonable_value(item) for item in normalized)
+    return normalized
 
 
 def _optional_name_tuple(value: Any) -> tuple[str, ...] | None:
@@ -1167,6 +1566,75 @@ def _cache_param_names(
     return tuple(name for name in plan.profile.parameter_names if name in names)
 
 
+def _cache_param_names_for_index(
+    plan: GridV2Plan,
+    candidate_index: int,
+    hooks: GridV2StrategyHooks,
+    *,
+    signal_only: bool,
+) -> tuple[str, ...]:
+    table = plan.candidate_table
+    if signal_only and hooks.signal_param_names is not None:
+        return tuple(name for name in hooks.signal_param_names if table.has_param_for_index(candidate_index, name))
+    if not signal_only and hooks.dataprep_param_names is not None:
+        return tuple(name for name in hooks.dataprep_param_names if table.has_param_for_index(candidate_index, name))
+    active = set(table.active_names_for_index(candidate_index))
+    if signal_only:
+        return tuple(
+            name
+            for name in plan.profile.parameter_names
+            if name in active and plan.profile.parameter_roles.get(name) == "signal"
+        )
+    names: set[str] = set(_cache_param_names_for_index(plan, candidate_index, hooks, signal_only=True))
+    for mode_field, mode_value in table.modes_for_index(candidate_index).items():
+        binding = mode_binding_for(mode_field, mode_value)
+        if binding is None or not binding.dataprep:
+            continue
+        names.update(name for name in binding.consumes_params if table.has_param_for_index(candidate_index, name))
+    if not names:
+        names.update(active)
+    return tuple(name for name in plan.profile.parameter_names if name in names)
+
+
+def _cache_signature_for_index(
+    plan: GridV2Plan,
+    candidate_index: int,
+    hooks: GridV2StrategyHooks,
+    *,
+    signal_only: bool,
+) -> tuple[Any, ...]:
+    table = plan.candidate_table
+    variant_code = int(table.variant_codes[candidate_index])
+    param_names = _cache_param_names_for_index(plan, candidate_index, hooks, signal_only=signal_only)
+    params = tuple(
+        (name, _cache_signature_param_value(table, candidate_index, name))
+        for name in param_names
+    )
+    if signal_only:
+        return ("signal", params)
+    return (
+        "dataprep",
+        table.variant_names[variant_code],
+        table.mode_tuples_by_variant[variant_code],
+        params,
+    )
+
+
+def _cache_signature_param_value(
+    table: GridV2CandidateTable,
+    candidate_index: int,
+    name: str,
+) -> tuple[Any, ...]:
+    column = table.axis_column_by_name.get(name)
+    if column is not None and table.axis_value_codes.shape[1]:
+        code = int(table.axis_value_codes[candidate_index, column])
+        if code >= 0:
+            return ("axis", code)
+    if table.has_param_for_index(candidate_index, name):
+        return ("value", _hashable_jsonable_value(table.param_value_for_index(candidate_index, name)))
+    return ("missing",)
+
+
 def _cache_key_payload(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
@@ -1191,6 +1659,31 @@ def _cache_key_payload(
     }
 
 
+def _cache_key_payload_for_index(
+    plan: GridV2Plan,
+    candidate_index: int,
+    context: _CacheKeyContext,
+    hooks: GridV2StrategyHooks,
+    *,
+    signal_only: bool,
+) -> tuple[Any, ...]:
+    table = plan.candidate_table
+    param_names = _cache_param_names_for_index(plan, candidate_index, hooks, signal_only=signal_only)
+    params = tuple(
+        (name, _hashable_jsonable_value(table.param_value_for_index(candidate_index, name)))
+        for name in param_names
+    )
+    return (
+        plan.strategy_id,
+        plan.strategy_version,
+        GRID_V2_ENGINE_VERSION,
+        context.data_fingerprint,
+        int(context.trade_start_idx),
+        context.function_fingerprint,
+        params,
+    )
+
+
 def _signal_cache_key(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
@@ -1198,6 +1691,15 @@ def _signal_cache_key(
     hooks: GridV2StrategyHooks,
 ) -> str:
     return _stable_json(_cache_key_payload(plan, candidate, context, hooks, signal_only=True))
+
+
+def _signal_cache_key_for_index(
+    plan: GridV2Plan,
+    candidate_index: int,
+    context: _CacheKeyContext,
+    hooks: GridV2StrategyHooks,
+) -> tuple[Any, ...]:
+    return _cache_key_payload_for_index(plan, candidate_index, context, hooks, signal_only=True)
 
 
 def _dataprep_cache_key(
@@ -1212,19 +1714,91 @@ def _dataprep_cache_key(
     return _stable_json(payload)
 
 
+def _dataprep_cache_key_for_index(
+    plan: GridV2Plan,
+    candidate_index: int,
+    context: _CacheKeyContext,
+    hooks: GridV2StrategyHooks,
+) -> tuple[Any, ...]:
+    table = plan.candidate_table
+    variant_code = int(table.variant_codes[candidate_index])
+    payload = _cache_key_payload_for_index(plan, candidate_index, context, hooks, signal_only=False)
+    return (
+        payload,
+        ("variant", table.variant_names[variant_code]),
+        ("modes", table.mode_tuples_by_variant[variant_code]),
+    )
+
+
+def _selected_candidate_indices(
+    plan: GridV2Plan,
+    candidate_indices: Sequence[int] | None,
+) -> tuple[int, ...]:
+    if candidate_indices is None:
+        return tuple(range(plan.deduped_candidate_count))
+    selected: list[int] = []
+    for index in candidate_indices:
+        selected.append(plan.candidate_table.validate_index(int(index)))
+    return tuple(selected)
+
+
 def _selected_candidates(
     plan: GridV2Plan,
     candidate_indices: Sequence[int] | None,
 ) -> tuple[GridV2Candidate, ...]:
-    if candidate_indices is None:
-        return plan.candidates
-    selected: list[GridV2Candidate] = []
-    for index in candidate_indices:
-        idx = int(index)
-        if idx < 0 or idx >= len(plan.candidates):
-            raise IndexError(f"Grid V2 candidate index out of range: {idx}.")
-        selected.append(plan.candidates[idx])
-    return tuple(selected)
+    return tuple(plan.candidate_for_index(index) for index in _selected_candidate_indices(plan, candidate_indices))
+
+
+def _can_use_table_config_packer(
+    plan: GridV2Plan,
+    hooks: GridV2StrategyHooks,
+    candidate_indices: Sequence[int],
+) -> bool:
+    if hooks.normalize_params is None:
+        return True
+    if not candidate_indices:
+        return True
+    sample_positions = deterministic_candidate_subset_indices(
+        len(candidate_indices),
+        min(12, len(candidate_indices)),
+    )
+    for position in sample_positions:
+        candidate_index = int(candidate_indices[position])
+        raw = plan.candidate_table.params_for_index(candidate_index)
+        normalized = hooks.normalize_params(dict(raw))
+        for name in _KERNEL_CONFIG_PARAM_NAMES:
+            raw_has_value = name in raw and raw.get(name) is not None
+            normalized_has_value = name in normalized and normalized.get(name) is not None
+            if not raw_has_value and not normalized_has_value:
+                continue
+            if _jsonable_value(raw.get(name)) != _jsonable_value(normalized.get(name)):
+                return False
+    return True
+
+
+def _pack_table_config_arrays(
+    plan: GridV2Plan,
+    candidate_indices: Sequence[int],
+    trade_start_idx: int,
+) -> dict[str, np.ndarray]:
+    table = plan.candidate_table
+    packed_indices = tuple(int(index) for index in candidate_indices)
+
+    def get_value(row_index: int, name: str, default: Any) -> Any:
+        candidate_index = packed_indices[int(row_index)]
+        if table.has_param_for_index(candidate_index, name):
+            return table.param_value_for_index(candidate_index, name)
+        return default
+
+    def get_modes(row_index: int) -> Mapping[str, str]:
+        return table.modes_for_index(packed_indices[int(row_index)])
+
+    return pack_compiled_config_arrays_from_rows(
+        row_count=len(packed_indices),
+        get_value=get_value,
+        get_modes=get_modes,
+        trade_start_idx=trade_start_idx,
+    )
 
 
 def _normalized_candidate_params(
@@ -1236,21 +1810,29 @@ def _normalized_candidate_params(
     return hooks.normalize_params(dict(params))
 
 
-def _row_from_run(candidate: GridV2Candidate, run: V2RunResult) -> GridV2ResultRow:
+def _row_from_run(
+    plan: GridV2Plan,
+    candidate_index: int,
+    run: V2RunResult,
+    *,
+    params: Mapping[str, Any] | None = None,
+) -> GridV2ResultRow:
+    table = plan.candidate_table
+    params = params or table.params_for_index(candidate_index)
     result = run.strategy_result
-    initial_balance = float(candidate.params.get("initialCapital", 100.0))
+    initial_balance = float(params.get("initialCapital", 100.0))
     core = compute_core_metrics_from_balance_and_trades(
         result.balance_curve,
         result.trades,
         initial_balance=initial_balance,
     )
     return GridV2ResultRow(
-        candidate_id=candidate.candidate_id,
-        semantic_key=candidate.semantic_key,
-        canonical_identity=candidate.canonical_identity,
-        variant_name=candidate.variant_name,
-        modes=candidate.modes,
-        params=candidate.params,
+        candidate_id=table.candidate_id_for_index(candidate_index),
+        semantic_key=table.semantic_key_for_index(candidate_index),
+        canonical_identity=None,
+        variant_name=table.variant_name_for_index(candidate_index),
+        modes=table.modes_for_index(candidate_index),
+        params=params,
         net_profit_pct=core.net_profit_pct,
         max_drawdown_pct=core.max_drawdown_pct,
         romad=core.romad,
@@ -1268,7 +1850,22 @@ def _row_from_run(candidate: GridV2Candidate, run: V2RunResult) -> GridV2ResultR
     )
 
 
-def _row_from_compiled_output(candidate: GridV2Candidate, values: Sequence[Any]) -> GridV2ResultRow:
+def _row_from_compiled_output(
+    plan: GridV2Plan,
+    candidate_index: int,
+    values: Sequence[Any],
+    *,
+    params: Mapping[str, Any] | None = None,
+) -> GridV2ResultRow:
+    table = plan.candidate_table
+    idx = int(candidate_index)
+    variant_name = table.variant_names[int(table.variant_codes[idx])]
+    semantic_key = (
+        table.semantic_keys_by_row[idx]
+        if table.semantic_keys_by_row is not None
+        else table.semantic_key_for_index(idx)
+    )
+    params = dict(params or table.params_for_index(candidate_index))
     guardrail_summary = {
         "invalid_stop_distance_count": int(values[OUTPUT_INVALID_STOP_DISTANCE_COUNT]),
         "zero_size_entry_count": int(values[OUTPUT_ZERO_SIZE_ENTRY_COUNT]),
@@ -1281,12 +1878,12 @@ def _row_from_compiled_output(candidate: GridV2Candidate, values: Sequence[Any])
         "flags": int(values[OUTPUT_FLAGS]),
     }
     return GridV2ResultRow(
-        candidate_id=candidate.candidate_id,
-        semantic_key=candidate.semantic_key,
-        canonical_identity=candidate.canonical_identity,
-        variant_name=candidate.variant_name,
-        modes=candidate.modes,
-        params=candidate.params,
+        candidate_id=idx + 1,
+        semantic_key=semantic_key,
+        canonical_identity=None,
+        variant_name=variant_name,
+        modes=table.profile.variants[variant_name].modes,
+        params=params,
         net_profit_pct=float(values[OUTPUT_NET_PROFIT_PCT]),
         max_drawdown_pct=float(values[OUTPUT_MAX_DRAWDOWN_PCT]),
         romad=float(values[OUTPUT_ROMAD]),
@@ -1304,14 +1901,15 @@ def _row_from_compiled_output(candidate: GridV2Candidate, values: Sequence[Any])
     )
 
 
-def _error_row(candidate: GridV2Candidate, exc: Exception) -> GridV2ResultRow:
+def _error_row(plan: GridV2Plan, candidate_index: int, exc: Exception) -> GridV2ResultRow:
+    table = plan.candidate_table
     return GridV2ResultRow(
-        candidate_id=candidate.candidate_id,
-        semantic_key=candidate.semantic_key,
-        canonical_identity=candidate.canonical_identity,
-        variant_name=candidate.variant_name,
-        modes=candidate.modes,
-        params=candidate.params,
+        candidate_id=table.candidate_id_for_index(candidate_index),
+        semantic_key=table.semantic_key_for_index(candidate_index),
+        canonical_identity=None,
+        variant_name=table.variant_name_for_index(candidate_index),
+        modes=table.modes_for_index(candidate_index),
+        params=table.params_for_index(candidate_index),
         net_profit_pct=float("nan"),
         max_drawdown_pct=float("nan"),
         romad=float("nan"),
@@ -1381,13 +1979,14 @@ def _slow_enrich_selected(
 ) -> GridV2SelectedResult:
     if row.status != "ok":
         return GridV2SelectedResult(row=row, metrics={}, guardrail_summary={})
-    candidate = plan.candidates[row.candidate_id - 1]
-    data_key = _dataprep_cache_key(plan, candidate, context, hooks)
+    candidate_index = plan.candidate_table.validate_candidate_id(row.candidate_id)
+    data_key = _dataprep_cache_key_for_index(plan, candidate_index, context, hooks)
     data = dataprep_cache[data_key]
+    params = plan.candidate_table.params_for_index(candidate_index)
     run = run_v2_strategy(
         data=data,
         profile=plan.profile,
-        params=_normalized_candidate_params(hooks, candidate.params),
+        params=_normalized_candidate_params(hooks, params),
         trade_start_idx=trade_start_idx,
     )
     strategy_result = run.strategy_result
@@ -1424,6 +2023,7 @@ __all__ = [
     "GridV2CacheEstimate",
     "GridV2CacheStats",
     "GridV2Candidate",
+    "GridV2CandidateTable",
     "GridV2CountPreview",
     "GridV2ParameterDomain",
     "GridV2Plan",

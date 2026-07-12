@@ -186,6 +186,13 @@ execution-data rows before sharing them as 1D market arrays. Signal and
 dataprep arrays are stacked internally and addressed by per-candidate row
 indices.
 
+Grid V2 candidate planning is also core-owned. Strategies do not build candidate
+objects or own Grid execution loops. The planner uses a typed candidate table
+internally and keeps the legacy `plan.candidates` tuple as a lazy debugging and
+test compatibility surface. Strategy authors only need accurate config/profile
+metadata and optional `SIGNAL_CACHE_PARAM_NAMES` / `DATAPREP_CACHE_PARAM_NAMES`
+declarations; no new Phase 2.6.3 hook is required.
+
 `grid_v2_max_cache_mb` overrides the signal/dataprep cache estimate limit. The
 default is `512`; custom values must be finite positive numbers. In the normal
 dispatcher, `worker_processes` caps Numba batch threads for compiled Grid V2
