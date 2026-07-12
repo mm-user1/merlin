@@ -19,6 +19,8 @@ from strategies.s06_r_trend_v02_b2.strategy import load_config
 
 from s06_b2_test_helpers import merged_reference_params, prepared_reference_dataset
 
+BYTES_PER_MB = 1024.0 * 1024.0
+
 
 @pytest.fixture(scope="module")
 def prepared_data():
@@ -156,6 +158,11 @@ def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hoo
     one = estimate_grid_v2_cache(plan, df, trade_start_idx, hooks, (0, 1))
     two = estimate_grid_v2_cache(doubled, df, trade_start_idx, hooks, (0, 1))
     assert two.estimated_total_mb == pytest.approx(one.estimated_total_mb * 2.0)
+    assert one.physical_signal_stack_rows == one.dataprep_combo_count
+    assert one.physical_dataprep_stack_rows == one.dataprep_combo_count
+    assert one.output_candidate_count == 2
+    assert one.estimated_output_mb > 0.0
+    assert one.estimated_shared_market_mb > 0.0
 
     tiny_limit = build_grid_v2_plan(
         load_config(),
@@ -178,6 +185,73 @@ def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hoo
     )
     with pytest.raises(MemoryError, match="cache estimate"):
         execute_grid_v2_candidates(tiny_limit, df, trade_start_idx, blocked_hooks)
+    assert build_calls == []
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled stacked path required for stack metadata.")
+def test_compiled_stack_estimate_covers_actual_allocation(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    settings = GridV2Settings(
+        enabled_variants=("bracket",),
+        enabled_axes=("stopX", "stopLP"),
+        top_n=0,
+        prefer_compiled=True,
+    )
+    plan = build_grid_v2_plan(
+        load_config(),
+        settings,
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, hooks)
+
+    assert result.metadata["compiled_execution_mode"] == "stacked"
+    assert result.metadata["stack_row_count"] == result.cache_estimate.dataprep_combo_count
+    assert result.metadata["stack_candidate_count"] == len(result.rows)
+    actual_nbytes = int(result.metadata["stack_total_nbytes"])
+    estimated_nbytes = result.cache_estimate.estimated_total_mb * BYTES_PER_MB
+    assert estimated_nbytes >= actual_nbytes
+
+
+def test_cache_limit_uses_true_stack_estimate_before_building_data(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    base_settings = GridV2Settings(
+        enabled_variants=("bracket",),
+        enabled_axes=("stopX", "stopLP"),
+        top_n=0,
+    )
+    plan = build_grid_v2_plan(
+        load_config(),
+        base_settings,
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+    estimate = estimate_grid_v2_cache(plan, df, trade_start_idx, hooks)
+    limited = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX", "stopLP"),
+            top_n=0,
+            max_signal_cache_mb=max(0.000001, estimate.estimated_total_mb - 0.000001),
+        ),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+    build_calls = []
+
+    def forbidden_build(*args, **kwargs):  # noqa: ARG001
+        build_calls.append(1)
+        raise AssertionError("build_execution_data must not run after a failed stack estimate")
+
+    blocked_hooks = GridV2StrategyHooks(
+        build_execution_data=forbidden_build,
+        normalize_params=hooks.normalize_params,
+        label=hooks.label,
+        signal_param_names=hooks.signal_param_names,
+        dataprep_param_names=hooks.dataprep_param_names,
+        function_fingerprint=hooks.function_fingerprint,
+    )
+    with pytest.raises(MemoryError, match="cache estimate"):
+        execute_grid_v2_candidates(limited, df, trade_start_idx, blocked_hooks)
     assert build_calls == []
 
 

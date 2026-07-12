@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 
 from .kernel import ExecutionData
-from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD
-from .runner import build_kernel_config
+from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD, validate_tick_size
+from .profile import active_mode_values
 
 
 try:  # pragma: no cover - exercised indirectly when Numba is absent
@@ -66,10 +66,66 @@ GUARDRAIL_FLAG_ZERO_SIZE_ENTRY = 8
 
 @dataclass(frozen=True)
 class CompiledBatchOutput:
-    """Fixed-width compiled metrics for one homogeneous execution-data group."""
+    """Fixed-width compiled metrics for one compiled batch."""
 
     outputs: np.ndarray
     backend_kind: str = COMPILED_BATCH_KIND
+    execution_mode: str = "grouped"
+
+
+@dataclass(frozen=True)
+class StackedExecutionData:
+    """Shared market arrays plus stacked signal/dataprep rows for compiled Grid V2."""
+
+    open: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    close: np.ndarray
+    timestamp_ns: np.ndarray
+    long_entries: np.ndarray
+    short_entries: np.ndarray
+    atr: np.ndarray
+    rolling_low: np.ndarray
+    rolling_high: np.ndarray
+    trail_long: np.ndarray
+    trail_short: np.ndarray
+    data_index: np.ndarray
+
+    @property
+    def row_count(self) -> int:
+        return int(self.long_entries.shape[0])
+
+    @property
+    def candidate_count(self) -> int:
+        return int(self.data_index.shape[0])
+
+    @property
+    def shared_market_nbytes(self) -> int:
+        return int(
+            self.open.nbytes
+            + self.high.nbytes
+            + self.low.nbytes
+            + self.close.nbytes
+            + self.timestamp_ns.nbytes
+        )
+
+    @property
+    def signal_nbytes(self) -> int:
+        return int(self.long_entries.nbytes + self.short_entries.nbytes)
+
+    @property
+    def dataprep_nbytes(self) -> int:
+        return int(
+            self.atr.nbytes
+            + self.rolling_low.nbytes
+            + self.rolling_high.nbytes
+            + self.trail_long.nbytes
+            + self.trail_short.nbytes
+        )
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.shared_market_nbytes + self.signal_nbytes + self.dataprep_nbytes)
 
 
 def compiled_batch_available() -> bool:
@@ -155,6 +211,162 @@ def evaluate_compiled_batch(
     return CompiledBatchOutput(outputs=outputs)
 
 
+def build_stacked_execution_data(
+    data_rows: Sequence[ExecutionData],
+    data_index: Sequence[int],
+) -> StackedExecutionData:
+    """Build and validate a stacked compiled payload from execution-data rows."""
+
+    rows = tuple(data_rows)
+    if not rows:
+        raise ValueError("Stacked compiled execution requires at least one ExecutionData row.")
+
+    first = rows[0]
+    open_values = _contiguous_1d(first.open, "open", np.float64)
+    high_values = _contiguous_1d(first.high, "high", np.float64)
+    low_values = _contiguous_1d(first.low, "low", np.float64)
+    close_values = _contiguous_1d(first.close, "close", np.float64)
+    timestamp_ns = _timestamps_ns(first.timestamps)
+
+    long_rows: list[np.ndarray] = []
+    short_rows: list[np.ndarray] = []
+    atr_rows: list[np.ndarray] = []
+    rolling_low_rows: list[np.ndarray] = []
+    rolling_high_rows: list[np.ndarray] = []
+    trail_long_rows: list[np.ndarray] = []
+    trail_short_rows: list[np.ndarray] = []
+
+    for row_number, data in enumerate(rows):
+        row_timestamps = _timestamps_ns(data.timestamps)
+        if row_timestamps.shape != timestamp_ns.shape or not np.array_equal(row_timestamps, timestamp_ns):
+            raise ValueError(
+                "Stacked compiled execution requires shared OHLC/timestamps across all ExecutionData rows; "
+                f"timestamp mismatch at row {row_number}."
+            )
+        for name, expected in (
+            ("open", open_values),
+            ("high", high_values),
+            ("low", low_values),
+            ("close", close_values),
+        ):
+            actual = _contiguous_1d(getattr(data, name), name, np.float64)
+            if actual.shape != expected.shape or not np.array_equal(actual, expected, equal_nan=True):
+                raise ValueError(
+                    "Stacked compiled execution requires shared OHLC/timestamps across all ExecutionData rows; "
+                    f"{name} mismatch at row {row_number}."
+                )
+        long_rows.append(_contiguous_1d(data.signals.long_entries, "signals.long_entries", np.bool_))
+        short_rows.append(_contiguous_1d(data.signals.short_entries, "signals.short_entries", np.bool_))
+        atr_rows.append(_contiguous_1d(data.atr, "atr", np.float64))
+        rolling_low_rows.append(_contiguous_1d(data.rolling_low, "rolling_low", np.float64))
+        rolling_high_rows.append(_contiguous_1d(data.rolling_high, "rolling_high", np.float64))
+        trail_long_rows.append(_contiguous_1d(data.trail_long, "trail_long", np.float64))
+        trail_short_rows.append(_contiguous_1d(data.trail_short, "trail_short", np.float64))
+
+    index_array = np.asarray(data_index, dtype=np.int64)
+    if index_array.ndim != 1:
+        raise ValueError("Stacked compiled execution data_index must be a 1D array.")
+    if index_array.size:
+        if int(index_array.min()) < 0 or int(index_array.max()) >= len(rows):
+            raise ValueError("Stacked compiled execution data_index contains an out-of-range row index.")
+
+    return StackedExecutionData(
+        open=open_values,
+        high=high_values,
+        low=low_values,
+        close=close_values,
+        timestamp_ns=timestamp_ns,
+        long_entries=np.ascontiguousarray(np.stack(long_rows, axis=0), dtype=np.bool_),
+        short_entries=np.ascontiguousarray(np.stack(short_rows, axis=0), dtype=np.bool_),
+        atr=np.ascontiguousarray(np.stack(atr_rows, axis=0), dtype=np.float64),
+        rolling_low=np.ascontiguousarray(np.stack(rolling_low_rows, axis=0), dtype=np.float64),
+        rolling_high=np.ascontiguousarray(np.stack(rolling_high_rows, axis=0), dtype=np.float64),
+        trail_long=np.ascontiguousarray(np.stack(trail_long_rows, axis=0), dtype=np.float64),
+        trail_short=np.ascontiguousarray(np.stack(trail_short_rows, axis=0), dtype=np.float64),
+        data_index=np.ascontiguousarray(index_array, dtype=np.int64),
+    )
+
+
+def evaluate_compiled_stacked_batch(
+    *,
+    stacked_data: StackedExecutionData,
+    profile: Any,
+    params_batch: Sequence[Mapping[str, Any]],
+    trade_start_idx: int,
+    n_workers: int = 1,
+) -> CompiledBatchOutput:
+    """Evaluate one stacked compiled batch with per-candidate data row indices."""
+
+    if not compiled_batch_available():
+        raise RuntimeError(compiled_unavailable_reason() or REFERENCE_UNAVAILABLE_REASON)
+    if not params_batch:
+        return CompiledBatchOutput(
+            outputs=np.empty((0, OUTPUT_COLUMN_COUNT), dtype=np.float64),
+            execution_mode="stacked",
+        )
+    if len(params_batch) != stacked_data.candidate_count:
+        raise ValueError("Stacked compiled params_batch length must match data_index length.")
+
+    packed = _pack_config_arrays(profile, params_batch, trade_start_idx)
+    outputs = np.empty((len(params_batch), OUTPUT_COLUMN_COUNT), dtype=np.float64)
+    worker_count = _validated_worker_count(n_workers)
+    previous_threads = numba.get_num_threads()
+    target_threads = max(1, min(worker_count, previous_threads))
+    try:
+        if target_threads != previous_threads:
+            numba.set_num_threads(target_threads)
+        _COMPILED_STACKED_BATCH_LOOP(
+            stacked_data.open,
+            stacked_data.high,
+            stacked_data.low,
+            stacked_data.close,
+            stacked_data.timestamp_ns,
+            stacked_data.long_entries,
+            stacked_data.short_entries,
+            stacked_data.atr,
+            stacked_data.rolling_low,
+            stacked_data.rolling_high,
+            stacked_data.trail_long,
+            stacked_data.trail_short,
+            stacked_data.data_index,
+            int(trade_start_idx),
+            packed["initial_capital"],
+            packed["commission_pct"],
+            packed["stop_x"],
+            packed["reward_risk"],
+            packed["max_stop_pct"],
+            packed["max_days"],
+            packed["risk_per_trade_pct"],
+            packed["contract_size"],
+            packed["trail_activation_rr"],
+            packed["tick_size"],
+            packed["start_ns"],
+            packed["end_ns"],
+            packed["enable_long"],
+            packed["enable_short"],
+            packed["target_enabled"],
+            packed["trail_enabled"],
+            packed["max_days_enabled"],
+            packed["use_date_filter"],
+            packed["strict_boundary"],
+            packed["boundary_none"],
+            packed["report_margin"],
+            packed["rounding_code"],
+            outputs,
+        )
+    finally:
+        if numba.get_num_threads() != previous_threads:
+            numba.set_num_threads(previous_threads)
+    return CompiledBatchOutput(outputs=outputs, execution_mode="stacked")
+
+
+def _contiguous_1d(values: Any, name: str, dtype: Any) -> np.ndarray:
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array for stacked compiled execution.")
+    return np.ascontiguousarray(array, dtype=dtype)
+
+
 def _validated_worker_count(value: Any) -> int:
     error = "Compiled Grid V2 n_workers must be a positive integer."
     if isinstance(value, (bool, np.bool_)):
@@ -208,31 +420,160 @@ def _pack_config_arrays(
         "report_margin": np.empty(count, dtype=np.bool_),
         "rounding_code": np.empty(count, dtype=np.int64),
     }
+    mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, bool, bool, bool, bool, bool, int]] = {}
+    start_ns_cache: dict[Any, int] = {}
+    end_ns_cache: dict[Any, int] = {}
     for index, params in enumerate(params_batch):
-        config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
-        arrays["initial_capital"][index] = config.initial_capital
-        arrays["commission_pct"][index] = config.commission_pct
-        arrays["stop_x"][index] = config.stop_x
-        arrays["reward_risk"][index] = config.reward_risk
-        arrays["max_stop_pct"][index] = config.max_stop_pct
-        arrays["max_days"][index] = config.max_days
-        arrays["risk_per_trade_pct"][index] = config.risk_per_trade_pct
-        arrays["contract_size"][index] = config.contract_size
-        arrays["trail_activation_rr"][index] = config.trail_activation_rr
-        arrays["tick_size"][index] = config.tick_size
-        arrays["start_ns"][index] = _timestamp_ns(config.start, np.iinfo(np.int64).min)
-        arrays["end_ns"][index] = _timestamp_ns(config.end, np.iinfo(np.int64).max)
-        arrays["enable_long"][index] = config.enable_long
-        arrays["enable_short"][index] = config.enable_short
-        arrays["target_enabled"][index] = config.target_mode == "rr"
-        arrays["trail_enabled"][index] = config.trail_mode == "ma"
-        arrays["max_days_enabled"][index] = config.max_days_enabled
-        arrays["use_date_filter"][index] = config.use_date_filter
-        arrays["strict_boundary"][index] = config.boundary_mode == "strict_close"
-        arrays["boundary_none"][index] = config.boundary_mode == "none"
-        arrays["report_margin"][index] = config.margin_mode == "report_only"
-        arrays["rounding_code"][index] = _rounding_code(config.price_rounding_mode)
+        modes = active_mode_values(profile, params)
+        mode_key = tuple(sorted((str(key), str(value)) for key, value in modes.items()))
+        mode_state = mode_cache.get(mode_key)
+        if mode_state is None:
+            mode_state = _compiled_mode_state(modes)
+            mode_cache[mode_key] = mode_state
+        (
+            target_enabled,
+            trail_enabled,
+            max_days_enabled,
+            strict_boundary,
+            boundary_none,
+            report_margin,
+            rounding_code,
+        ) = mode_state
+
+        arrays["initial_capital"][index] = float(params.get("initialCapital", 100.0))
+        arrays["commission_pct"][index] = float(params.get("commissionPct", 0.0))
+        arrays["stop_x"][index] = float(params.get("stopX", 2.0))
+        arrays["reward_risk"][index] = float(params.get("stopRR", 2.0))
+        arrays["max_stop_pct"][index] = float(params.get("stopMaxPct", math.inf))
+        arrays["max_days"][index] = float(params.get("stopMaxDays", math.inf))
+        arrays["risk_per_trade_pct"][index] = float(params.get("riskPerTrade", 2.0))
+        arrays["contract_size"][index] = float(params.get("contractSize", 0.01))
+        arrays["trail_activation_rr"][index] = float(params.get("trailRR", 1.0))
+        if rounding_code == ROUNDING_TICK_OUTWARD_CODE:
+            if "tickSize" not in params:
+                raise ValueError("tickSize is required when priceRounding='tick_outward'.")
+            arrays["tick_size"][index] = validate_tick_size(float(params["tickSize"]))
+        else:
+            arrays["tick_size"][index] = math.nan
+        arrays["start_ns"][index] = _cached_timestamp_ns(
+            params.get("start"),
+            np.iinfo(np.int64).min,
+            start_ns_cache,
+        )
+        arrays["end_ns"][index] = _cached_timestamp_ns(
+            params.get("end"),
+            np.iinfo(np.int64).max,
+            end_ns_cache,
+        )
+        arrays["enable_long"][index] = _coerce_bool(params.get("enableLong"), True)
+        arrays["enable_short"][index] = _coerce_bool(params.get("enableShort"), True)
+        arrays["target_enabled"][index] = target_enabled
+        arrays["trail_enabled"][index] = trail_enabled
+        arrays["max_days_enabled"][index] = max_days_enabled
+        arrays["use_date_filter"][index] = _coerce_bool(params.get("dateFilter"), True)
+        arrays["strict_boundary"][index] = strict_boundary
+        arrays["boundary_none"][index] = boundary_none
+        arrays["report_margin"][index] = report_margin
+        arrays["rounding_code"][index] = rounding_code
     return arrays
+
+
+def _compiled_mode_state(
+    modes: Mapping[str, str],
+) -> tuple[bool, bool, bool, bool, bool, bool, int]:
+    _require_mode(modes, "entryOrder", "market_next_open")
+    _require_mode(modes, "stop", "atr_swing")
+    _require_mode(modes, "sizing", "risk_per_trade")
+
+    margin_mode = modes.get("margin", "off")
+    if margin_mode not in {"off", "report_only"}:
+        raise ValueError(f"Unsupported Phase-1 margin mode: {margin_mode!r}.")
+
+    boundary_mode = modes.get("boundary", "strict_close")
+    if boundary_mode not in {"strict_close", "none"}:
+        raise ValueError(f"Unsupported Phase-1 boundary mode: {boundary_mode!r}.")
+
+    target_mode = modes.get("target", "none")
+    trail_mode = modes.get("trail", "none")
+    if target_mode not in {"rr", "none"}:
+        raise ValueError(f"Unsupported Phase-1 target mode: {target_mode!r}.")
+    if trail_mode not in {"ma", "none"}:
+        raise ValueError(f"Unsupported Phase-1 trail mode: {trail_mode!r}.")
+
+    trail_activation_mode = modes.get("trailActivation", "none")
+    if trail_activation_mode not in {"none", "rr"}:
+        raise ValueError(f"Unsupported Phase-1 trailActivation mode: {trail_activation_mode!r}.")
+    valid_target_exit = (
+        target_mode == "rr"
+        and trail_mode == "none"
+        and trail_activation_mode == "none"
+    )
+    valid_ma_exit = (
+        target_mode == "none"
+        and trail_mode == "ma"
+        and trail_activation_mode == "rr"
+    )
+    if not (valid_target_exit or valid_ma_exit):
+        raise ValueError(
+            "Phase 1 supports exactly one exit topology: target=rr with no trailing mode "
+            "or target=none with moving-average trailing mode and trailActivation=rr."
+        )
+
+    max_days_mode = modes.get("maxDays", "false")
+    if max_days_mode == "true":
+        max_days_enabled = True
+    elif max_days_mode == "false":
+        max_days_enabled = False
+    else:
+        raise ValueError(
+            f"Unsupported Phase-1 execution mode maxDays={max_days_mode!r}; "
+            "expected 'true' or 'false'."
+        )
+
+    return (
+        target_mode == "rr",
+        trail_mode == "ma",
+        max_days_enabled,
+        boundary_mode == "strict_close",
+        boundary_mode == "none",
+        margin_mode == "report_only",
+        _rounding_code(modes.get("priceRounding", PRICE_ROUNDING_NONE)),
+    )
+
+
+def _require_mode(modes: Mapping[str, str], name: str, expected: str) -> None:
+    actual = modes.get(name)
+    if actual != expected:
+        raise ValueError(f"Unsupported Phase-1 execution mode {name}={actual!r}; expected {expected!r}.")
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _cached_timestamp_ns(value: Any, default: int, cache: dict[Any, int]) -> int:
+    key = _hashable_cache_key(value)
+    if key not in cache:
+        cache[key] = _timestamp_ns(value, default)
+    return cache[key]
+
+
+def _hashable_cache_key(value: Any) -> Any:
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
 
 
 def _rounding_code(mode: str) -> int:
@@ -920,10 +1261,94 @@ def _batch_loop_impl(
         )
 
 
+def _stacked_batch_loop_impl(
+    open_values: np.ndarray,
+    high_values: np.ndarray,
+    low_values: np.ndarray,
+    close_values: np.ndarray,
+    timestamp_ns: np.ndarray,
+    long_entries: np.ndarray,
+    short_entries: np.ndarray,
+    atr_values: np.ndarray,
+    rolling_low: np.ndarray,
+    rolling_high: np.ndarray,
+    trail_long: np.ndarray,
+    trail_short: np.ndarray,
+    data_index: np.ndarray,
+    trade_start_idx: int,
+    initial_capital_values: np.ndarray,
+    commission_pct_values: np.ndarray,
+    stop_x_values: np.ndarray,
+    reward_risk_values: np.ndarray,
+    max_stop_pct_values: np.ndarray,
+    max_days_values: np.ndarray,
+    risk_per_trade_pct_values: np.ndarray,
+    contract_size_values: np.ndarray,
+    trail_activation_rr_values: np.ndarray,
+    tick_size_values: np.ndarray,
+    start_ns_values: np.ndarray,
+    end_ns_values: np.ndarray,
+    enable_long_values: np.ndarray,
+    enable_short_values: np.ndarray,
+    target_enabled_values: np.ndarray,
+    trail_enabled_values: np.ndarray,
+    max_days_enabled_values: np.ndarray,
+    use_date_filter_values: np.ndarray,
+    strict_boundary_values: np.ndarray,
+    boundary_none_values: np.ndarray,
+    report_margin_values: np.ndarray,
+    rounding_code_values: np.ndarray,
+    outputs: np.ndarray,
+) -> None:
+    for index in numba.prange(outputs.shape[0]):
+        row = data_index[index]
+        _compiled_loop_one(
+            index,
+            open_values,
+            high_values,
+            low_values,
+            close_values,
+            timestamp_ns,
+            long_entries[row],
+            short_entries[row],
+            atr_values[row],
+            rolling_low[row],
+            rolling_high[row],
+            trail_long[row],
+            trail_short[row],
+            trade_start_idx,
+            initial_capital_values,
+            commission_pct_values,
+            stop_x_values,
+            reward_risk_values,
+            max_stop_pct_values,
+            max_days_values,
+            risk_per_trade_pct_values,
+            contract_size_values,
+            trail_activation_rr_values,
+            tick_size_values,
+            start_ns_values,
+            end_ns_values,
+            enable_long_values,
+            enable_short_values,
+            target_enabled_values,
+            trail_enabled_values,
+            max_days_enabled_values,
+            use_date_filter_values,
+            strict_boundary_values,
+            boundary_none_values,
+            report_margin_values,
+            rounding_code_values,
+            outputs,
+        )
+
+
 if numba is not None:
     _COMPILED_BATCH_LOOP = numba.njit(cache=True, parallel=True)(_batch_loop_impl)
+    _COMPILED_STACKED_BATCH_LOOP = numba.njit(cache=True, parallel=True)(_stacked_batch_loop_impl)
 else:  # pragma: no cover
     _COMPILED_BATCH_LOOP = _batch_loop_impl
+    _COMPILED_STACKED_BATCH_LOOP = _stacked_batch_loop_impl
 
 
 __all__ = [
@@ -950,7 +1375,10 @@ __all__ = [
     "OUTPUT_WINNING_TRADES",
     "OUTPUT_WIN_RATE_PCT",
     "OUTPUT_ZERO_SIZE_ENTRY_COUNT",
+    "StackedExecutionData",
+    "build_stacked_execution_data",
     "compiled_batch_available",
     "compiled_unavailable_reason",
     "evaluate_compiled_batch",
+    "evaluate_compiled_stacked_batch",
 ]

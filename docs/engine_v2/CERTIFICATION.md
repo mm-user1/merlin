@@ -12,6 +12,9 @@ normal Grid dispatcher/storage workflow and adds a generic compiled batch
 evaluator for supported V2 execution profiles. WFA/Scout integration remains
 deferred. Phase 2.5.1 tightens dispatcher/storage behavior, runtime Grid
 settings, and compiled batch determinism without changing V1 runtime paths.
+Phase 2.6.2 changes the compiled Grid V2 plumbing to a generic stacked batch
+path while preserving the reference runner and grouped compiled path as
+certification oracles.
 
 ## Fields
 
@@ -71,11 +74,15 @@ Grid V2 has two execution tiers:
 
 - reference tier: loops candidates through the shared public V2 runner;
 - compiled tier: `src/core/engine_v2/compiled_kernel.py` packs primitive
-  candidate config arrays and evaluates candidates through a generic
-  Numba-compiled batch loop when Numba is available and JIT is not disabled.
-  The batch loop is compiled with `cache=True`, `parallel=True`, and `prange`;
-  evaluation saves and restores the process Numba thread count around each
-  compiled batch.
+  candidate config arrays and evaluates candidates through generic
+  Numba-compiled batch loops when Numba is available and JIT is not disabled.
+  The default compiled Grid V2 path is now stacked: it validates shared
+  OHLC/timestamps once, stacks signal/dataprep arrays as 2D rows, uses
+  per-candidate data-row indices, and calls the existing per-candidate bar-loop
+  body. The grouped compiled evaluator remains available for direct tests and
+  parity checks. Both compiled loops are built with `cache=True`,
+  `parallel=True`, and `prange`; evaluation saves and restores the process
+  Numba thread count around each compiled batch.
 
 `GridV2Settings.prefer_compiled` is live. `grid_v2_prefer_compiled` defaults to
 true in normal Grid dispatch. `grid_v2_max_cache_mb` overrides the default
@@ -88,15 +95,32 @@ not registered in `FAST_GRID_BACKENDS`.
 Selected V2 Grid candidates are persisted with `save_grid_study_to_db(...)`
 using the existing studies/trials schema. V2 compact metadata is stored in
 `grid_summary_json`, including engine, Grid V2 engine version, backend kind,
-compiled availability/use, candidate counts, per-variant counts, cache
-estimate/stats, timings, candidates/sec, optional-axis/variant settings, DSR
-deferred status, and aggregate guardrail counters.
+compiled availability/use, compiled execution mode, candidate counts,
+per-variant counts, cache estimate/stats, timings, candidates/sec,
+optional-axis/variant settings, DSR deferred status, and aggregate guardrail
+counters.
 
 The normal dispatcher does not duplicate slow enrichment from the generic Grid
 V2 runner. It executes the compiled/reference screening tier, then slow-reruns
 only the selected persisted rows through the public V2 reference runner. The
 per-result `guardrail_summary` stored on selected rows comes from that slow
 reference run, not from fast screening metadata.
+
+Phase 2.6.2 certification notes:
+
+- `compiled_execution_mode="stacked"` is additive metadata under the existing
+  `backend_kind="compiled_numba"` and `compiled_batch_used=true` contract.
+- The stacked path asserts that all execution-data rows share identical OHLC
+  and timestamps. A mismatch fails clearly instead of silently sharing the
+  wrong market arrays.
+- The cache estimate is physically tied to the stacked allocation: signal
+  stack bytes, dataprep stack bytes, output bytes, and shared OHLC/timestamp
+  bytes are included before any strategy `build_execution_data` calls.
+- Selected rows remain slow-reference enriched through the public
+  `run_v2_strategy` path.
+- The typed/lazy candidate table and row-level lazy full-population result
+  materialization remain deferred; `config.optuna_all_results` stays
+  full-population.
 
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,

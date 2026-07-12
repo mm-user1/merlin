@@ -1125,6 +1125,7 @@ class WalkForwardEngine:
             "engine": engine or "v2",
             "backend_kind": grid_summary.get("backend_kind"),
             "compiled_batch_used": grid_summary.get("compiled_batch_used"),
+            "compiled_execution_mode": grid_summary.get("compiled_execution_mode"),
             "compiled_workers": cls._safe_int(grid_summary.get("compiled_workers")),
             "candidate_count": cls._safe_int(
                 summary.get("candidate_count", grid_summary.get("candidate_count"))

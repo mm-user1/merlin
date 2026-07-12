@@ -47,9 +47,11 @@ from core.engine_v2.compiled_kernel import (
     OUTPUT_WINNING_TRADES,
     OUTPUT_WIN_RATE_PCT,
     OUTPUT_ZERO_SIZE_ENTRY_COUNT,
+    OUTPUT_COLUMN_COUNT,
+    build_stacked_execution_data,
     compiled_batch_available,
     compiled_unavailable_reason,
-    evaluate_compiled_batch,
+    evaluate_compiled_stacked_batch,
 )
 from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
 from core.engine_v2.profile import (
@@ -194,8 +196,18 @@ class GridV2CacheEstimate:
     bytes_per_dataprep_combo: int
     estimated_signal_mb: float
     estimated_dataprep_mb: float
+    estimated_output_mb: float
+    estimated_shared_market_mb: float
+    estimated_stack_signal_mb: float
+    estimated_stack_dataprep_mb: float
     estimated_total_mb: float
     max_signal_cache_mb: float
+    physical_signal_stack_rows: int = 0
+    physical_dataprep_stack_rows: int = 0
+    output_candidate_count: int = 0
+    output_column_count: int = OUTPUT_COLUMN_COUNT
+    bytes_per_output_candidate: int = OUTPUT_COLUMN_COUNT * np.dtype(np.float64).itemsize
+    bytes_per_shared_market_bar: int = 5 * np.dtype(np.float64).itemsize
 
 
 @dataclass
@@ -477,9 +489,23 @@ def _estimate_grid_v2_cache_from_keys(
     worker_multiplier = max(1, int(plan.settings.worker_multiplier))
     bytes_per_signal_combo = int(n_bars * _BOOL_SIGNAL_ARRAYS * np.dtype(np.bool_).itemsize)
     bytes_per_dataprep_combo = int(n_bars * _FLOAT_DATAPREP_ARRAYS * np.dtype(np.float64).itemsize)
-    estimated_signal_bytes = signal_combo_count * bytes_per_signal_combo
-    estimated_dataprep_bytes = dataprep_combo_count * bytes_per_dataprep_combo
-    estimated_total_bytes = (estimated_signal_bytes + estimated_dataprep_bytes) * worker_multiplier
+    physical_signal_stack_rows = dataprep_combo_count
+    physical_dataprep_stack_rows = dataprep_combo_count
+    output_candidate_count = len(cache_keys)
+    bytes_per_output_candidate = int(OUTPUT_COLUMN_COUNT * np.dtype(np.float64).itemsize)
+    bytes_per_shared_market_bar = int(
+        4 * np.dtype(np.float64).itemsize + np.dtype(np.int64).itemsize
+    )
+    estimated_signal_bytes = physical_signal_stack_rows * bytes_per_signal_combo
+    estimated_dataprep_bytes = physical_dataprep_stack_rows * bytes_per_dataprep_combo
+    estimated_output_bytes = output_candidate_count * bytes_per_output_candidate
+    estimated_shared_market_bytes = n_bars * bytes_per_shared_market_bar
+    estimated_total_bytes = (
+        estimated_signal_bytes
+        + estimated_dataprep_bytes
+        + estimated_output_bytes
+        + estimated_shared_market_bytes
+    ) * worker_multiplier
     return GridV2CacheEstimate(
         n_bars=n_bars,
         signal_combo_count=signal_combo_count,
@@ -489,8 +515,18 @@ def _estimate_grid_v2_cache_from_keys(
         bytes_per_dataprep_combo=bytes_per_dataprep_combo,
         estimated_signal_mb=estimated_signal_bytes / _BYTES_PER_MB,
         estimated_dataprep_mb=estimated_dataprep_bytes / _BYTES_PER_MB,
+        estimated_output_mb=estimated_output_bytes / _BYTES_PER_MB,
+        estimated_shared_market_mb=estimated_shared_market_bytes / _BYTES_PER_MB,
+        estimated_stack_signal_mb=estimated_signal_bytes / _BYTES_PER_MB,
+        estimated_stack_dataprep_mb=estimated_dataprep_bytes / _BYTES_PER_MB,
         estimated_total_mb=estimated_total_bytes / _BYTES_PER_MB,
         max_signal_cache_mb=float(plan.settings.max_signal_cache_mb),
+        physical_signal_stack_rows=physical_signal_stack_rows,
+        physical_dataprep_stack_rows=physical_dataprep_stack_rows,
+        output_candidate_count=output_candidate_count,
+        output_column_count=OUTPUT_COLUMN_COUNT,
+        bytes_per_output_candidate=bytes_per_output_candidate,
+        bytes_per_shared_market_bar=bytes_per_shared_market_bar,
     )
 
 
@@ -546,24 +582,50 @@ def execute_grid_v2_candidates(
     compiled_available = compiled_batch_available()
     use_compiled = bool(plan.settings.prefer_compiled and compiled_available)
     backend_kind = COMPILED_BATCH_KIND if use_compiled else REFERENCE_BATCH_KIND
+    compiled_execution_mode: str | None = None
+    stack_metadata: dict[str, Any] = {}
 
     if use_compiled:
-        for data_key, candidates in data_groups.items():
-            data = dataprep_cache[data_key]
-            params_batch = [_normalized_candidate_params(hooks, candidate.params) for candidate in candidates]
-            try:
-                batch = evaluate_compiled_batch(
-                    data=data,
-                    profile=plan.profile,
-                    params_batch=params_batch,
-                    trade_start_idx=trade_start_idx,
-                    n_workers=plan.settings.compiled_workers,
-                )
-            except Exception as exc:
-                rows.extend(_error_row(candidate, exc) for candidate in candidates)
+        data_keys = tuple(data_groups.keys())
+        data_key_to_stack_row = {key: index for index, key in enumerate(data_keys)}
+        compiled_candidates: list[GridV2Candidate] = []
+        params_batch: list[Mapping[str, Any]] = []
+        data_index: list[int] = []
+        for key_record in cache_keys:
+            data_key = key_record.dataprep_key
+            if data_key not in data_key_to_stack_row:
                 continue
-            for candidate, values in zip(candidates, batch.outputs):
+            candidate = key_record.candidate
+            compiled_candidates.append(candidate)
+            params_batch.append(_normalized_candidate_params(hooks, candidate.params))
+            data_index.append(data_key_to_stack_row[data_key])
+        if compiled_candidates:
+            stacked_data = build_stacked_execution_data(
+                [dataprep_cache[key] for key in data_keys],
+                data_index,
+            )
+            batch = evaluate_compiled_stacked_batch(
+                stacked_data=stacked_data,
+                profile=plan.profile,
+                params_batch=params_batch,
+                trade_start_idx=trade_start_idx,
+                n_workers=plan.settings.compiled_workers,
+            )
+            compiled_execution_mode = batch.execution_mode
+            stack_metadata = {
+                "stack_row_count": stacked_data.row_count,
+                "stack_candidate_count": stacked_data.candidate_count,
+                "stack_signal_nbytes": stacked_data.signal_nbytes,
+                "stack_dataprep_nbytes": stacked_data.dataprep_nbytes,
+                "stack_shared_market_nbytes": stacked_data.shared_market_nbytes,
+                "stack_output_nbytes": int(batch.outputs.nbytes),
+                "stack_total_nbytes": int(stacked_data.nbytes + batch.outputs.nbytes),
+                "stack_total_mb": (stacked_data.nbytes + batch.outputs.nbytes) / _BYTES_PER_MB,
+            }
+            for candidate, values in zip(compiled_candidates, batch.outputs):
                 rows.append(_row_from_compiled_output(candidate, values))
+        else:
+            compiled_execution_mode = "stacked"
     else:
         for data_key, candidates in data_groups.items():
             data = dataprep_cache[data_key]
@@ -598,6 +660,7 @@ def execute_grid_v2_candidates(
             "backend_kind": backend_kind,
             "compiled_batch_available": compiled_available,
             "compiled_batch_used": use_compiled,
+            "compiled_execution_mode": compiled_execution_mode,
             "compiled_unavailable_reason": compiled_unavailable_reason(),
             "metric_tier": "core_fast_rows_plus_selected_public_v2_enrichment",
             "executed_candidate_count": len(rows),
@@ -605,6 +668,7 @@ def execute_grid_v2_candidates(
             "compiled_workers": int(plan.settings.compiled_workers),
             "evaluation_seconds": evaluation_seconds,
             "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
+            **stack_metadata,
         },
     )
 

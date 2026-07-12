@@ -83,7 +83,12 @@ def test_grid_v2_dispatch_runs_before_v1_fast_backend_validation():
     assert study_id is None
     assert len(results) == 2
     assert config.grid_summary["engine"] == "v2"
+    assert len(config.optuna_all_results) == config.grid_summary["valid_candidate_count"]
+    assert len(config.optuna_all_results) > len(results)
     assert config.grid_summary["grid"]["backend_kind"] in {"compiled_numba", "reference"}
+    if compiled_batch_available():
+        assert config.grid_summary["grid"]["compiled_execution_mode"] == "stacked"
+        assert config.grid_summary["grid"]["stack_row_count"] is not None
     assert {result.engine for result in results} == {"v2"}
     assert all(result.grid_generation_mode == "full_enumeration_v2" for result in results)
     assert config.grid_summary["grid"]["cache_estimate"]["worker_multiplier"] == 1
@@ -115,6 +120,7 @@ def test_grid_v2_dispatch_slow_enriches_selected_rows_once(monkeypatch):
     assert len(results) == 2
     assert counts == {"grid_v2": 0, "runner": 2}
     assert config.grid_summary["grid"]["backend_kind"] == "compiled_numba"
+    assert config.grid_summary["grid"]["compiled_execution_mode"] == "stacked"
     assert config.grid_summary["grid"]["cache_estimate"]["worker_multiplier"] == 1
 
 
@@ -255,6 +261,8 @@ def test_grid_v2_storage_roundtrip_uses_existing_grid_schema():
     assert loaded["study"]["optimization_mode"] == "grid"
     assert loaded["study"]["grid_summary"]["engine"] == "v2"
     assert loaded["study"]["grid_summary"]["grid"]["compiled_batch_available"] in {True, False}
+    if compiled_batch_available():
+        assert loaded["study"]["grid_summary"]["grid"]["compiled_execution_mode"] == "stacked"
     assert len(loaded["trials"]) == 2
     assert all(trial["candidate_id"] for trial in loaded["trials"])
     assert all(trial["semantic_key"] for trial in loaded["trials"])

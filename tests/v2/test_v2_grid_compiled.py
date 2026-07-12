@@ -24,8 +24,10 @@ from core.engine_v2.compiled_kernel import (
     _validated_worker_count,
     _timestamp_ns,
     _timestamps_ns,
+    build_stacked_execution_data,
     compiled_batch_available,
     evaluate_compiled_batch,
+    evaluate_compiled_stacked_batch,
 )
 from core.engine_v2.contracts import Signals
 from core.engine_v2.kernel import ExecutionData
@@ -238,6 +240,77 @@ def test_compiled_grid_v2_worker_count_is_deterministic(prepared_data, hooks):
         _assert_rows_equal(left, right)
 
 
+def test_compiled_grid_v2_stacked_batch_matches_grouped_batch(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    base_params = merged_reference_params("reference_b_trend_bracket")
+    plan = build_grid_v2_plan(
+        _config_with_rounding("none"),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX", "stopLP"),
+            prefer_compiled=True,
+            top_n=0,
+        ),
+        base_params=base_params,
+    )
+    candidates = tuple(plan.candidates[:6])
+    params_batch = [
+        hooks.normalize_params(dict(candidate.params)) if hooks.normalize_params else candidate.params
+        for candidate in candidates
+    ]
+    data_rows = []
+    row_by_stop_lp = {}
+    data_index = []
+    for candidate, params in zip(candidates, params_batch):
+        stop_lp = candidate.params["stopLP"]
+        if stop_lp not in row_by_stop_lp:
+            row_by_stop_lp[stop_lp] = len(data_rows)
+            data_rows.append(hooks.build_execution_data(df, params))
+        data_index.append(row_by_stop_lp[stop_lp])
+
+    grouped_outputs = []
+    for params, row_index in zip(params_batch, data_index):
+        grouped_outputs.append(
+            evaluate_compiled_batch(
+                data=data_rows[row_index],
+                profile=plan.profile,
+                params_batch=[params],
+                trade_start_idx=trade_start_idx,
+            ).outputs[0]
+        )
+    grouped = np.vstack(grouped_outputs)
+    stacked_data = build_stacked_execution_data(data_rows, data_index)
+    stacked = evaluate_compiled_stacked_batch(
+        stacked_data=stacked_data,
+        profile=plan.profile,
+        params_batch=params_batch,
+        trade_start_idx=trade_start_idx,
+        n_workers=2,
+    )
+
+    assert stacked.execution_mode == "stacked"
+    assert stacked_data.row_count == 2
+    assert np.array_equal(stacked.outputs, grouped, equal_nan=True)
+
+
+def test_compiled_grid_v2_stacked_batch_rejects_shared_market_mismatch():
+    data_a = _data(
+        open_=[100.0, 101.0],
+        high=[101.0, 102.0],
+        low=[99.0, 100.0],
+        close=[100.5, 101.5],
+    )
+    data_b = _data(
+        open_=[100.0, 102.0],
+        high=[101.0, 102.0],
+        low=[99.0, 100.0],
+        close=[100.5, 101.5],
+    )
+
+    with pytest.raises(ValueError, match="shared OHLC/timestamps"):
+        build_stacked_execution_data([data_a, data_b], [0, 1])
+
+
 def _data(
     *,
     open_,
@@ -307,12 +380,20 @@ def _edge_params(**overrides):
 
 def _assert_compiled_matches_direct_reference(data: ExecutionData, params: dict):
     profile = parse_execution_profile(load_config())
-    compiled = evaluate_compiled_batch(
+    grouped = evaluate_compiled_batch(
         data=data,
         profile=profile,
         params_batch=[params],
         trade_start_idx=0,
     ).outputs[0]
+    stacked = evaluate_compiled_stacked_batch(
+        stacked_data=build_stacked_execution_data([data], [0]),
+        profile=profile,
+        params_batch=[params],
+        trade_start_idx=0,
+    ).outputs[0]
+    assert np.array_equal(grouped, stacked, equal_nan=True)
+    compiled = stacked
     reference = run_v2_strategy(
         data=data,
         profile=profile,

@@ -1628,6 +1628,7 @@ def _run_grid_v2_optimization(
         {
             "backend_kind": run_result.metadata.get("backend_kind"),
             "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
+            "compiled_execution_mode": run_result.metadata.get("compiled_execution_mode"),
         }
     )
     summary = {
@@ -1674,7 +1675,16 @@ def _run_grid_v2_optimization(
             "backend_kind": run_result.metadata.get("backend_kind"),
             "compiled_batch_available": bool(run_result.metadata.get("compiled_batch_available")),
             "compiled_batch_used": bool(run_result.metadata.get("compiled_batch_used")),
+            "compiled_execution_mode": run_result.metadata.get("compiled_execution_mode"),
             "compiled_workers": int(run_result.metadata.get("compiled_workers") or settings.compiled_workers),
+            "stack_row_count": run_result.metadata.get("stack_row_count"),
+            "stack_candidate_count": run_result.metadata.get("stack_candidate_count"),
+            "stack_signal_nbytes": run_result.metadata.get("stack_signal_nbytes"),
+            "stack_dataprep_nbytes": run_result.metadata.get("stack_dataprep_nbytes"),
+            "stack_shared_market_nbytes": run_result.metadata.get("stack_shared_market_nbytes"),
+            "stack_output_nbytes": run_result.metadata.get("stack_output_nbytes"),
+            "stack_total_nbytes": run_result.metadata.get("stack_total_nbytes"),
+            "stack_total_mb": run_result.metadata.get("stack_total_mb"),
             "candidate_count": plan.deduped_candidate_count,
             "valid_candidate_count": len(ranked_fast),
             "selected_candidate_count": len(ranked_selected),

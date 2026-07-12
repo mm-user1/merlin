@@ -178,12 +178,22 @@ The normal Grid dispatcher passes V2 runs into the generic Grid V2 planner and
 compiled evaluator when available. `grid_v2_prefer_compiled` defaults to `true`.
 Set it to `false` only when a reference-tier run is intentionally required.
 
+When compiled execution is available, Grid V2 uses a core-owned stacked batch
+path by default. Strategy code still only builds normal `ExecutionData` rows;
+it does not provide packed candidate arrays or a strategy-specific Grid loop.
+Core validates that the OHLC and timestamp arrays are identical across stacked
+execution-data rows before sharing them as 1D market arrays. Signal and
+dataprep arrays are stacked internally and addressed by per-candidate row
+indices.
+
 `grid_v2_max_cache_mb` overrides the signal/dataprep cache estimate limit. The
 default is `512`; custom values must be finite positive numbers. In the normal
 dispatcher, `worker_processes` caps Numba batch threads for compiled Grid V2
 evaluation. Signal/dataprep cache memory is estimated once per in-process run,
 so the dispatcher uses a cache worker multiplier of `1` even when multiple Numba
-threads are requested.
+threads are requested. The estimate includes the actual planned stacked
+signal/dataprep rows, compiled output arrays, and shared OHLC/timestamp arrays;
+the run fails before strategy data builds when the estimate exceeds the limit.
 
 When comparing candidate counts across tools or baselines, document the enabled
 axes, enabled variants, `{param}_options` subsets, budget, and whether the UI

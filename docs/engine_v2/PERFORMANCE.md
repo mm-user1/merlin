@@ -225,6 +225,64 @@ now visible in JSON; the two B2 studies report mean `total_seconds` of 12.700s
 and 12.764s per window, mean `fast_evaluation_seconds` of 8.397s and 8.407s,
 and mean candidates/sec of 5,774.4 and 5,767.5.
 
+## Phase 2.6.2 Windows After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_2_direct_grid_after.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_2_fresh_wfa_db_inspection_before_new_wfa.json
+```
+
+Implemented structural changes:
+
+- Grid V2 compiled runs now build one generic stacked execution payload per
+  run and evaluate all successful candidates through a single compiled batch
+  call. The grouped compiled evaluator remains available as a parity oracle.
+- The stacked payload keeps OHLC and timestamps shared as 1D arrays, stacks
+  signal/dataprep arrays as 2D rows, validates that every `ExecutionData` row
+  has identical OHLC/timestamps, and uses per-candidate data-row indices.
+- The compiled config packer now packs primitive arrays directly from generic
+  V2 profile modes and candidate params, with cached mode validation and
+  timestamp conversion. It does not add strategy-owned packing hooks.
+- The cache estimate now accounts for physical stack signal rows, dataprep
+  rows, output arrays, and shared OHLC/timestamps. For the SUI benchmark the
+  estimate and actual stack+output allocation both report `52.52260971069336`
+  MB with `162` stack rows.
+
+Deferred work:
+
+- The full typed/lazy candidate table was not enabled. `build_grid_v2_plan`
+  still materializes legacy `GridV2Candidate` rows and full semantic identity.
+- Full-population result materialization was kept unchanged so
+  `config.optuna_all_results` remains a normal full-population list for WFA and
+  route consumers.
+- Strategy-side dataprep memoization and indicator optimization remain deferred
+  to a later strategy-scoped phase.
+
+Same command, payload, candidate count, worker list, warmup count, measured run
+count, and Windows workstation as the Phase 2.6.1 direct after-run.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Fast Eval | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 17.122s | 16.989s | 3.243s | 12.344s | 0.624s | 3,927.8 |
+| 6 | 14.322s | 14.192s | 3.309s | 9.449s | 0.623s | 5,131.5 |
+
+Workers=6 mean wall improved from 17.861s to 14.322s, a 19.8% reduction.
+This narrowly missed the nominal 20% wall-time target by about 0.03s on this
+run, but did not regress the hard gate. Mean `fast_evaluation_seconds`
+improved from 13.193s to 9.449s, a 28.4% reduction, and candidates/sec
+increased from 3,674.8 to 5,131.5. Candidate generation time was effectively
+unchanged because the typed/lazy candidate table was deferred. The top selected
+candidate remained `18436` with `net_profit_pct=45.74422762364992`,
+`max_drawdown_pct=14.133826459897126`, and `total_trades=55`.
+
+The Phase 2.6.2 WFA DB inspection was run before any new WFA studies were
+created. It preserves the Phase 2.6.1 comparison table: V1 studies remain
+26s/26s with diagnostics absent, and the latest B2 studies remain 134s/134s
+with diagnostics present. A fresh WFA rerun after stacked execution was not
+performed during this coding pass.
+
 ## JSON Report Shape
 
 The benchmark helper writes schema version 1 JSON:
