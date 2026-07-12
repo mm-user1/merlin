@@ -243,6 +243,58 @@ Add focused tests for every new V2 strategy:
 When using a V1 or external oracle, document any process-global test settings
 such as `NUMBA_DISABLE_JIT`.
 
+Cache-declaration invariant tests are mandatory, not optional. Stale
+`SIGNAL_CACHE_PARAM_NAMES`/`DATAPREP_CACHE_PARAM_NAMES` declarations are the
+highest-risk silent failure mode for imports: Grid V2 would reuse cached arrays
+across parameter values that should differ. The proven mechanical shape (see
+`tests/v2/test_v2_s06_regime_tl_causality.py`):
+
+- `set(SIGNAL_CACHE_PARAM_NAMES)` equals the config params with
+  `role="signal"`;
+- `DATAPREP_CACHE_PARAM_NAMES` equals the signal names plus every param that
+  changes dataprep arrays;
+- neither tuple contains runtime/window fields (`dateFilter`, `start`, `end`,
+  `warmupBars`);
+- a behavioral backstop: varying each declared signal param changes the signal
+  arrays, and an axis over a signal param yields that many distinct
+  `signal_combo_count` groups in `estimate_grid_v2_cache`.
+
+## Pilot Import Lessons (S06 Regime-TL, B2-TZ 26)
+
+Learned from the first real Pine v5 pilot import
+(`s06_r_trend_v02_regime_trendlines_b2`); apply these to every future import:
+
+- **Pin TradingView properties in the baseline package**:
+  `process_orders_on_close=false`, `fill_orders_on_standard_ohlc=true`, zero
+  slippage, percent commission, and the chart timezone. Record them in
+  `dataset.json` so parity failures can be triaged against the pinned setup.
+- **Pin the exact compiled Pine source.** The committed pilot Pine file
+  referenced a variable whose declaration was commented out (stats-table code),
+  so it cannot have been the byte-exact compiled source. Harmless here, but
+  export the source *after* the reference run, from the same editor state.
+- **Expect three residual classes vs TradingView exports** (all bounded,
+  none code defects): exit prices rounded to the display grid (one tick),
+  sizes rounded to one contract step, and per-trade PnL rounded to 2 decimals
+  (accumulates into a ~0.03pp net-profit residual over ~45 trades). TradingView
+  UI drawdown uses an equity/open-excursion convention that Merlin does not
+  reproduce — pin Merlin-convention values and document the TV numbers.
+  `round(profit_factor, 3)` does not reliably reproduce the TV display.
+- **Fixed-per-study selector params**: a bool like `useRegime` that activates
+  same-role conditional params must be `"optimize": {"enabled": false}` and
+  varied per study through fixed params, because Grid V2 semantic identity does
+  not yet model same-role `depends_on` activation. Enabling it as an axis would
+  enumerate inert duplicates for the disabled state. Numeric companions may
+  carry `"optimize": {"enabled": true, "default_enabled": false, ...}` so they
+  are opt-in axes only.
+- **State-machine indicators need explicit warmup convergence checks.** A
+  regime/trendline state machine has unbounded memory in principle, unlike
+  bounded-lookback indicators. Lock the warmup recipe with a window-start
+  invariance test at a larger warmup; raise the warmup in the baseline recipe
+  if it diverges instead of touching core.
+- **JIT test process isolation**: never mix `NUMBA_DISABLE_JIT=1` oracle tests
+  with compiled Grid V2 assertions in one pytest process; run compiled parity
+  in a fresh JIT-on process.
+
 ## Baseline And Certification
 
 Use a TradingView or other external baseline when the strategy is meant to
