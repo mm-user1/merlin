@@ -38,6 +38,7 @@ from core.engine_v2.runner import run_v2_strategy
 from core.grid_v2 import (
     GridV2Settings,
     GridV2StrategyHooks,
+    _pack_table_config_arrays,
     build_grid_v2_plan,
     deterministic_candidate_subset_indices,
     execute_grid_v2_candidates,
@@ -191,16 +192,18 @@ def test_table_config_packer_matches_mapping_packer_for_certified_topologies(pri
     def get_modes(row_index: int):
         return plan.candidate_table.modes_for_index(indices[row_index])
 
-    actual = pack_compiled_config_arrays_from_rows(
+    callback_actual = pack_compiled_config_arrays_from_rows(
         row_count=len(indices),
         get_value=get_value,
         get_modes=get_modes,
         trade_start_idx=1000,
     )
+    actual = _pack_table_config_arrays(plan, indices, trade_start_idx=1000)
 
     assert expected.keys() == actual.keys()
     for name in expected:
         assert np.array_equal(actual[name], expected[name], equal_nan=True), name
+        assert np.array_equal(callback_actual[name], expected[name], equal_nan=True), name
 
 
 @pytest.mark.parametrize("price_rounding", ["none", "tick_outward"])

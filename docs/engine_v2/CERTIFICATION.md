@@ -145,6 +145,32 @@ Phase 2.6.3 certification notes:
   was slower on the Phase 2.6.3 benchmark. A vectorized table packer remains
   future work.
 
+Phase 2.6.3.1 certification notes:
+
+- Normal compiled Grid V2 dispatch uses vectorized table config packing by
+  default when the strategy normalizer preserves kernel-visible fields and mode
+  state. Mapping packing remains the fallback and parity oracle.
+- The vectorized table packer is parity-tested against mapping packing for both
+  certified topologies, date filter settings, tick rounding modes, max-day
+  fields, missing `stopMaxPct`/`stopMaxDays` defaults, timestamp conversion,
+  and boolean defaults.
+- Cache grouping is code-based from `variant_codes` and `axis_value_codes`.
+  Cache build, memory estimation, and selected-row slow enrichment share the
+  same cache-key semantics; the S06 B2 SUI baseline remains certified at one
+  signal group and `162` dataprep groups.
+- `params_by_row` is no longer eagerly populated. Full-population fast results
+  expose lazy params mappings, while selected slow-reference results remain
+  normal materialized params dicts for storage/UI compatibility.
+- `config.optuna_all_results` remains full-population and retains ranking
+  annotations. Fast-result metrics are eager; params and canonical identity are
+  lazy accessors.
+- Full-population semantic keys remain eager because the shared Grid ranker uses
+  `semantic_key` for deterministic tie-breaking. V1 ranking behavior is
+  unchanged.
+- The Phase 2.6.3.1 direct SUI benchmark preserved the selected top candidate
+  `18436` and core metrics while improving workers=6 mean wall from `14.871s`
+  to `12.822s`.
+
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
 resolved mode values, and active non-runtime parameter values. Runtime params

@@ -48,14 +48,20 @@ from core.engine_v2.compiled_kernel import (
     OUTPUT_WIN_RATE_PCT,
     OUTPUT_ZERO_SIZE_ENTRY_COUNT,
     OUTPUT_COLUMN_COUNT,
+    ROUNDING_TICK_OUTWARD_CODE,
     build_stacked_execution_data,
     compiled_batch_available,
     compiled_unavailable_reason,
     evaluate_compiled_stacked_batch,
-    pack_compiled_config_arrays_from_rows,
+    _cached_timestamp_ns,
+    _coerce_bool as _compiled_coerce_bool,
+    _compiled_mode_state,
+    _empty_config_arrays,
+    validate_tick_size,
 )
 from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
 from core.engine_v2.profile import (
+    active_mode_values,
     active_parameter_names,
     canonical_selector_key,
     inactive_parameter_names,
@@ -102,7 +108,7 @@ class GridV2Settings:
     enabled_axes: tuple[str, ...] | None = None
     price_rounding: str | None = None
     prefer_compiled: bool = True
-    compiled_config_packing: str = "mapping"
+    compiled_config_packing: str = "table"
     primary_metric: str = "net_profit_pct"
     include_inactive_axes_for_dedup: bool = False
 
@@ -166,6 +172,53 @@ class CandidateMappingRecord:
     axis_param_values: Mapping[str, Any]
 
 
+class _LazyCandidateParams(Mapping[str, Any]):
+    """Mapping view that decodes one candidate's params on first access."""
+
+    __slots__ = ("_table", "_index")
+
+    def __init__(self, table: "GridV2CandidateTable", index: int) -> None:
+        self._table = table
+        self._index = int(index)
+
+    def _params(self) -> Mapping[str, Any]:
+        return self._table.params_for_index(self._index)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._params()[key]
+
+    def __iter__(self):
+        return iter(self._params())
+
+    def __len__(self) -> int:
+        return len(self._params())
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._params().get(key, default)
+
+
+class _LazyCanonicalIdentity:
+    """String-like lazy canonical identity for full-population fast rows."""
+
+    __slots__ = ("_table", "_index")
+
+    def __init__(self, table: "GridV2CandidateTable", index: int) -> None:
+        self._table = table
+        self._index = int(index)
+
+    def _value(self) -> str:
+        return self._table.canonical_identity_for_index(self._index)
+
+    def __str__(self) -> str:
+        return self._value()
+
+    def __repr__(self) -> str:
+        return repr(self._value())
+
+    def __eq__(self, other: object) -> bool:
+        return self._value() == str(other)
+
+
 @dataclass(frozen=True)
 class GridV2Candidate:
     candidate_id: int
@@ -204,6 +257,7 @@ class GridV2CandidateTable:
     enumerated_candidate_count: int
     semantic_dedup_count: int
     per_variant_counts: Mapping[str, int]
+    _params_cache: dict[int, Mapping[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _semantic_key_cache: dict[int, str] = field(default_factory=dict, init=False, repr=False)
     _canonical_identity_cache: dict[int, str] = field(default_factory=dict, init=False, repr=False)
     _candidate_cache: dict[int, GridV2Candidate] = field(default_factory=dict, init=False, repr=False)
@@ -228,6 +282,12 @@ class GridV2CandidateTable:
     @property
     def legacy_candidates_materialized_count(self) -> int:
         return len(self._candidate_cache)
+
+    @property
+    def params_materialized_count(self) -> int:
+        if self.params_by_row is not None:
+            return len(self.params_by_row)
+        return len(self._params_cache)
 
     def validate_index(self, index: int) -> int:
         idx = int(index)
@@ -265,13 +325,18 @@ class GridV2CandidateTable:
         idx = self.validate_index(index)
         if self.params_by_row is not None:
             return self.params_by_row[idx]  # type: ignore[return-value]
+        cached = self._params_cache.get(idx)
+        if cached is not None:
+            return cached  # type: ignore[return-value]
         variant_name = self.variant_name_for_index(idx)
         params = dict(self.seed_params_by_variant[variant_name])
         for column, name in enumerate(self.axis_names):
             code = int(self.axis_value_codes[idx, column]) if self.axis_value_codes.shape[1] else -1
             if code >= 0:
                 params[name] = self.parameter_domains[name].values[code]
-        return _jsonable_mapping(params)
+        materialized = _jsonable_mapping(params)
+        self._params_cache[idx] = materialized
+        return materialized
 
     def param_value_for_index(self, index: int, name: str) -> Any:
         idx = self.validate_index(index)
@@ -539,6 +604,12 @@ class _CandidateCacheKeys:
     dataprep_key: Any
 
 
+@dataclass(frozen=True, slots=True)
+class _CacheGroupPlan:
+    codes: tuple[int, ...]
+    representatives: Mapping[int, int]
+
+
 def build_grid_v2_plan(
     config: Mapping[str, Any],
     settings: GridV2Settings | None = None,
@@ -622,7 +693,6 @@ def _build_candidate_table(
     per_variant_counts: dict[str, int] = {name: 0 for name in selected_variants}
     semantic_seen: set[tuple[Any, ...]] = set()
     semantic_keys: list[str] = []
-    params_by_row: list[dict[str, Any]] = []
     variant_codes: list[int] = []
     axis_value_codes: list[list[int]] = []
     raw_count = 0
@@ -664,7 +734,6 @@ def _build_candidate_table(
                 continue
             semantic_seen.add(semantic_identity)
             jsonable_params = _jsonable_mapping(params)
-            params_by_row.append(jsonable_params)
             semantic_keys.append(
                 _stable_json(
                     _semantic_payload(
@@ -704,7 +773,7 @@ def _build_candidate_table(
         variant_codes=np.asarray(variant_codes, dtype=np.int32),
         axis_value_codes=axis_code_array,
         semantic_keys_by_row=tuple(semantic_keys),
-        params_by_row=tuple(params_by_row),
+        params_by_row=None,
         seed_params_by_variant=seed_params_by_variant,
         active_names_by_variant=active_names_by_variant,
         inactive_names_by_variant=inactive_names_by_variant,
@@ -784,28 +853,24 @@ def _candidate_cache_keys(
     hooks: GridV2StrategyHooks,
     selected_indices: Sequence[int],
 ) -> tuple[_CandidateCacheKeys, ...]:
-    signal_cache: dict[tuple[Any, ...], Any] = {}
-    dataprep_cache: dict[tuple[Any, ...], Any] = {}
+    signal_groups = _cache_group_plan(plan, hooks, selected_indices, signal_only=True)
+    dataprep_groups = _cache_group_plan(plan, hooks, selected_indices, signal_only=False)
+    signal_cache = {
+        group_code: _signal_cache_key_for_index(plan, representative, context, hooks)
+        for group_code, representative in signal_groups.representatives.items()
+    }
+    dataprep_cache = {
+        group_code: _dataprep_cache_key_for_index(plan, representative, context, hooks)
+        for group_code, representative in dataprep_groups.representatives.items()
+    }
     records: list[_CandidateCacheKeys] = []
-    for index in selected_indices:
-        signal_signature = _cache_signature_for_index(plan, index, hooks, signal_only=True)
-        signal_key = signal_cache.get(signal_signature)
-        if signal_key is None:
-            signal_key = _signal_cache_key_for_index(plan, index, context, hooks)
-            signal_cache[signal_signature] = signal_key
-
-        dataprep_signature = _cache_signature_for_index(plan, index, hooks, signal_only=False)
-        dataprep_key = dataprep_cache.get(dataprep_signature)
-        if dataprep_key is None:
-            dataprep_key = _dataprep_cache_key_for_index(plan, index, context, hooks)
-            dataprep_cache[dataprep_signature] = dataprep_key
-
+    for position, index in enumerate(selected_indices):
         records.append(
             _CandidateCacheKeys(
                 candidate_index=index,
                 candidate_id=index + 1,
-                signal_key=signal_key,
-                dataprep_key=dataprep_key,
+                signal_key=signal_cache[signal_groups.codes[position]],
+                dataprep_key=dataprep_cache[dataprep_groups.codes[position]],
             )
         )
     return tuple(records)
@@ -1025,6 +1090,7 @@ def execute_grid_v2_candidates(
             "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
             "candidate_table_used": True,
             "legacy_candidates_materialized": plan.candidate_table.legacy_candidates_materialized_count,
+            "params_materialized": plan.candidate_table.params_materialized_count,
             "semantic_keys_materialized": plan.candidate_table.semantic_keys_materialized_count,
             "canonical_identities_materialized": plan.candidate_table.canonical_identities_materialized_count,
             **stack_metadata,
@@ -1537,6 +1603,153 @@ def _cache_key_context(
     )
 
 
+def _cache_group_plan(
+    plan: GridV2Plan,
+    hooks: GridV2StrategyHooks,
+    selected_indices: Sequence[int],
+    *,
+    signal_only: bool,
+) -> _CacheGroupPlan:
+    table = plan.candidate_table
+    if not selected_indices:
+        return _CacheGroupPlan(codes=(), representatives={})
+
+    selected = np.asarray(tuple(int(index) for index in selected_indices), dtype=np.int64)
+    selected_variant_codes = table.variant_codes[selected]
+    codes = np.empty(int(selected.shape[0]), dtype=np.int32)
+    group_codes: dict[tuple[Any, ...], int] = {}
+    representatives: dict[int, int] = {}
+    next_code = 0
+
+    for variant_code, variant_name in enumerate(table.variant_names):
+        positions = np.flatnonzero(selected_variant_codes == int(variant_code))
+        if positions.size == 0:
+            continue
+        row_indices = selected[positions]
+        descriptor, axis_columns = _cache_group_descriptor_for_variant(
+            plan,
+            hooks,
+            int(variant_code),
+            signal_only=signal_only,
+        )
+        if axis_columns:
+            matrix = table.axis_value_codes[row_indices][:, list(axis_columns)]
+            unique_rows, first_positions, inverse = np.unique(
+                matrix,
+                axis=0,
+                return_index=True,
+                return_inverse=True,
+            )
+        else:
+            unique_rows = np.empty((1, 0), dtype=np.int32)
+            first_positions = np.asarray([0], dtype=np.int64)
+            inverse = np.zeros(int(row_indices.shape[0]), dtype=np.int32)
+
+        local_to_global = np.empty(int(unique_rows.shape[0]), dtype=np.int32)
+        for local_code, unique_row in enumerate(unique_rows):
+            group_key = (
+                descriptor,
+                tuple(int(value) for value in unique_row),
+            )
+            group_code = group_codes.get(group_key)
+            if group_code is None:
+                group_code = next_code
+                group_codes[group_key] = group_code
+                representatives[group_code] = int(row_indices[int(first_positions[local_code])])
+                next_code += 1
+            local_to_global[local_code] = int(group_code)
+        codes[positions] = local_to_global[inverse]
+
+    return _CacheGroupPlan(
+        codes=tuple(int(code) for code in codes),
+        representatives=representatives,
+    )
+
+
+def _cache_group_descriptor_for_variant(
+    plan: GridV2Plan,
+    hooks: GridV2StrategyHooks,
+    variant_code: int,
+    *,
+    signal_only: bool,
+) -> tuple[tuple[Any, ...], tuple[int, ...]]:
+    table = plan.candidate_table
+    variant_name = table.variant_names[int(variant_code)]
+    param_names = _cache_param_names_for_variant(plan, hooks, variant_name, signal_only=signal_only)
+    variant_axis_names = set(table.axis_names_by_variant[variant_name])
+    constants: list[tuple[str, tuple[Any, ...]]] = []
+    axis_columns: list[int] = []
+    axis_names: list[str] = []
+    for name in param_names:
+        column = table.axis_column_by_name.get(name)
+        if column is not None and name in variant_axis_names:
+            axis_columns.append(int(column))
+            axis_names.append(name)
+            continue
+        if name in table.seed_params_by_variant[variant_name]:
+            constants.append(
+                (
+                    name,
+                    (
+                        "value",
+                        _hashable_jsonable_value(
+                            _jsonable_value(table.seed_params_by_variant[variant_name].get(name))
+                        ),
+                    ),
+                )
+            )
+        else:
+            constants.append((name, ("missing",)))
+    if signal_only:
+        descriptor = ("signal", tuple(constants), tuple(axis_names))
+    else:
+        descriptor = (
+            "dataprep",
+            variant_name,
+            table.mode_tuples_by_variant[int(variant_code)],
+            tuple(constants),
+            tuple(axis_names),
+        )
+    return descriptor, tuple(axis_columns)
+
+
+def _variant_has_param(table: GridV2CandidateTable, variant_name: str, name: str) -> bool:
+    return (
+        name in table.seed_params_by_variant[variant_name]
+        or name in table.axis_names_by_variant[variant_name]
+    )
+
+
+def _cache_param_names_for_variant(
+    plan: GridV2Plan,
+    hooks: GridV2StrategyHooks,
+    variant_name: str,
+    *,
+    signal_only: bool,
+) -> tuple[str, ...]:
+    table = plan.candidate_table
+    if signal_only and hooks.signal_param_names is not None:
+        return tuple(name for name in hooks.signal_param_names if _variant_has_param(table, variant_name, name))
+    if not signal_only and hooks.dataprep_param_names is not None:
+        return tuple(name for name in hooks.dataprep_param_names if _variant_has_param(table, variant_name, name))
+    active = set(table.active_names_by_variant[variant_name])
+    if signal_only:
+        return tuple(
+            name
+            for name in plan.profile.parameter_names
+            if name in active and plan.profile.parameter_roles.get(name) == "signal"
+        )
+    names: set[str] = set(_cache_param_names_for_variant(plan, hooks, variant_name, signal_only=True))
+    for mode_field, mode_value in table.profile.variants[variant_name].modes.items():
+        binding = mode_binding_for(mode_field, mode_value)
+        if binding is None or not binding.dataprep:
+            continue
+        names.update(name for name in binding.consumes_params if _variant_has_param(table, variant_name, name))
+    if not names:
+        names.update(active)
+    return tuple(name for name in plan.profile.parameter_names if name in names)
+
+
 def _cache_param_names(
     plan: GridV2Plan,
     candidate: GridV2Candidate,
@@ -1765,7 +1978,11 @@ def _can_use_table_config_packer(
     for position in sample_positions:
         candidate_index = int(candidate_indices[position])
         raw = plan.candidate_table.params_for_index(candidate_index)
-        normalized = hooks.normalize_params(dict(raw))
+        normalized = hooks.normalize_params(dict(raw)) if hooks.normalize_params else raw
+        if active_mode_values(plan.profile, normalized) != plan.candidate_table.modes_for_index(candidate_index):
+            return False
+        if hooks.normalize_params is None:
+            continue
         for name in _KERNEL_CONFIG_PARAM_NAMES:
             raw_has_value = name in raw and raw.get(name) is not None
             normalized_has_value = name in normalized and normalized.get(name) is not None
@@ -1782,23 +1999,180 @@ def _pack_table_config_arrays(
     trade_start_idx: int,
 ) -> dict[str, np.ndarray]:
     table = plan.candidate_table
-    packed_indices = tuple(int(index) for index in candidate_indices)
+    indices = np.asarray(tuple(int(index) for index in candidate_indices), dtype=np.int64)
+    arrays = _empty_config_arrays(int(indices.shape[0]))
+    if indices.size == 0:
+        return arrays
 
-    def get_value(row_index: int, name: str, default: Any) -> Any:
-        candidate_index = packed_indices[int(row_index)]
-        if table.has_param_for_index(candidate_index, name):
-            return table.param_value_for_index(candidate_index, name)
-        return default
-
-    def get_modes(row_index: int) -> Mapping[str, str]:
-        return table.modes_for_index(packed_indices[int(row_index)])
-
-    return pack_compiled_config_arrays_from_rows(
-        row_count=len(packed_indices),
-        get_value=get_value,
-        get_modes=get_modes,
-        trade_start_idx=trade_start_idx,
+    _fill_float_config_array(arrays["initial_capital"], table, indices, "initialCapital", 100.0)
+    _fill_float_config_array(arrays["commission_pct"], table, indices, "commissionPct", 0.0)
+    _fill_float_config_array(arrays["stop_x"], table, indices, "stopX", 2.0)
+    _fill_float_config_array(arrays["reward_risk"], table, indices, "stopRR", 2.0)
+    _fill_float_config_array(arrays["max_stop_pct"], table, indices, "stopMaxPct", math.inf)
+    _fill_float_config_array(arrays["max_days"], table, indices, "stopMaxDays", math.inf)
+    _fill_float_config_array(arrays["risk_per_trade_pct"], table, indices, "riskPerTrade", 2.0)
+    _fill_float_config_array(arrays["contract_size"], table, indices, "contractSize", 0.01)
+    _fill_float_config_array(arrays["trail_activation_rr"], table, indices, "trailRR", 1.0)
+    _fill_timestamp_config_array(
+        arrays["start_ns"],
+        table,
+        indices,
+        "start",
+        np.iinfo(np.int64).min,
     )
+    _fill_timestamp_config_array(
+        arrays["end_ns"],
+        table,
+        indices,
+        "end",
+        np.iinfo(np.int64).max,
+    )
+    _fill_bool_config_array(arrays["enable_long"], table, indices, "enableLong", True)
+    _fill_bool_config_array(arrays["enable_short"], table, indices, "enableShort", True)
+    _fill_bool_config_array(arrays["use_date_filter"], table, indices, "dateFilter", True)
+    _fill_mode_config_arrays(arrays, table, indices)
+    _fill_tick_size_config_array(arrays["tick_size"], arrays["rounding_code"], table, indices)
+    return arrays
+
+
+def _iter_variant_index_groups(
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+):
+    variant_codes = table.variant_codes[indices]
+    for variant_code, variant_name in enumerate(table.variant_names):
+        positions = np.flatnonzero(variant_codes == int(variant_code))
+        if positions.size:
+            yield variant_name, positions, indices[positions]
+
+
+def _fill_float_config_array(
+    output: np.ndarray,
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+    name: str,
+    default: float,
+) -> None:
+    output.fill(float(default))
+    column = table.axis_column_by_name.get(name)
+    domain_values = None
+    if column is not None:
+        domain_values = np.asarray(
+            [float(value) for value in table.parameter_domains[name].values],
+            dtype=np.float64,
+        )
+    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[variant_name]:
+            codes = table.axis_value_codes[row_indices, int(column)]
+            output[positions] = domain_values[codes]  # type: ignore[index]
+        elif name in table.seed_params_by_variant[variant_name]:
+            output[positions] = float(table.seed_params_by_variant[variant_name][name])
+
+
+def _fill_bool_config_array(
+    output: np.ndarray,
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+    name: str,
+    default: bool,
+) -> None:
+    output.fill(bool(default))
+    column = table.axis_column_by_name.get(name)
+    domain_values = None
+    if column is not None:
+        domain_values = np.asarray(
+            [_compiled_coerce_bool(value, default) for value in table.parameter_domains[name].values],
+            dtype=np.bool_,
+        )
+    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[variant_name]:
+            codes = table.axis_value_codes[row_indices, int(column)]
+            output[positions] = domain_values[codes]  # type: ignore[index]
+        elif name in table.seed_params_by_variant[variant_name]:
+            output[positions] = _compiled_coerce_bool(table.seed_params_by_variant[variant_name][name], default)
+
+
+def _fill_timestamp_config_array(
+    output: np.ndarray,
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+    name: str,
+    default: int,
+) -> None:
+    output.fill(int(default))
+    cache: dict[Any, int] = {}
+    column = table.axis_column_by_name.get(name)
+    domain_values = None
+    if column is not None:
+        domain_values = np.asarray(
+            [
+                _cached_timestamp_ns(value, int(default), cache)
+                for value in table.parameter_domains[name].values
+            ],
+            dtype=np.int64,
+        )
+    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[variant_name]:
+            codes = table.axis_value_codes[row_indices, int(column)]
+            output[positions] = domain_values[codes]  # type: ignore[index]
+        elif name in table.seed_params_by_variant[variant_name]:
+            output[positions] = _cached_timestamp_ns(
+                table.seed_params_by_variant[variant_name][name],
+                int(default),
+                cache,
+            )
+
+
+def _fill_mode_config_arrays(
+    arrays: Mapping[str, np.ndarray],
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+) -> None:
+    for variant_name, positions, _row_indices in _iter_variant_index_groups(table, indices):
+        (
+            target_enabled,
+            trail_enabled,
+            max_days_enabled,
+            strict_boundary,
+            boundary_none,
+            report_margin,
+            rounding_code,
+        ) = _compiled_mode_state(table.profile.variants[variant_name].modes)
+        arrays["target_enabled"][positions] = target_enabled
+        arrays["trail_enabled"][positions] = trail_enabled
+        arrays["max_days_enabled"][positions] = max_days_enabled
+        arrays["strict_boundary"][positions] = strict_boundary
+        arrays["boundary_none"][positions] = boundary_none
+        arrays["report_margin"][positions] = report_margin
+        arrays["rounding_code"][positions] = rounding_code
+
+
+def _fill_tick_size_config_array(
+    output: np.ndarray,
+    rounding_codes: np.ndarray,
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+) -> None:
+    output.fill(math.nan)
+    column = table.axis_column_by_name.get("tickSize")
+    domain_values = None
+    if column is not None:
+        domain_values = np.asarray(
+            [validate_tick_size(float(value)) for value in table.parameter_domains["tickSize"].values],
+            dtype=np.float64,
+        )
+    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
+        tick_positions = positions[rounding_codes[positions] == ROUNDING_TICK_OUTWARD_CODE]
+        if tick_positions.size == 0:
+            continue
+        if column is not None and "tickSize" in table.axis_names_by_variant[variant_name]:
+            tick_rows = row_indices[rounding_codes[positions] == ROUNDING_TICK_OUTWARD_CODE]
+            codes = table.axis_value_codes[tick_rows, int(column)]
+            output[tick_positions] = domain_values[codes]  # type: ignore[index]
+        elif "tickSize" in table.seed_params_by_variant[variant_name]:
+            output[tick_positions] = validate_tick_size(float(table.seed_params_by_variant[variant_name]["tickSize"]))
+        else:
+            raise ValueError("tickSize is required when priceRounding='tick_outward'.")
 
 
 def _normalized_candidate_params(
@@ -1865,7 +2239,8 @@ def _row_from_compiled_output(
         if table.semantic_keys_by_row is not None
         else table.semantic_key_for_index(idx)
     )
-    params = dict(params or table.params_for_index(candidate_index))
+    if params is None:
+        params = _LazyCandidateParams(table, idx)
     guardrail_summary = {
         "invalid_stop_distance_count": int(values[OUTPUT_INVALID_STOP_DISTANCE_COUNT]),
         "zero_size_entry_count": int(values[OUTPUT_ZERO_SIZE_ENTRY_COUNT]),
@@ -1880,7 +2255,7 @@ def _row_from_compiled_output(
     return GridV2ResultRow(
         candidate_id=idx + 1,
         semantic_key=semantic_key,
-        canonical_identity=None,
+        canonical_identity=_LazyCanonicalIdentity(table, idx),
         variant_name=variant_name,
         modes=table.profile.variants[variant_name].modes,
         params=params,

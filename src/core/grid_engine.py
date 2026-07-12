@@ -1312,7 +1312,7 @@ def _resolve_csv_path_for_storage(csv_file: Any) -> str:
 def _grid_v2_result_from_row(row: Any, *, metric_tier: str) -> OptimizationResult:
     profit_factor = float(row.profit_factor)
     result = OptimizationResult(
-        params=dict(row.params),
+        params=row.params,
         net_profit_pct=float(row.net_profit_pct),
         max_drawdown_pct=float(row.max_drawdown_pct),
         total_trades=int(row.total_trades),
@@ -1433,7 +1433,10 @@ def _grid_v2_slow_result(
     ):
         if hasattr(fast_result, attr):
             setattr(result, attr, getattr(fast_result, attr))
-    if getattr(result, "canonical_identity", None) is None and hasattr(plan, "candidate_table"):
+    if (
+        getattr(result, "canonical_identity", None) is None
+        or not isinstance(getattr(result, "canonical_identity", None), str)
+    ) and hasattr(plan, "candidate_table"):
         setattr(
             result,
             "canonical_identity",
@@ -1694,6 +1697,7 @@ def _run_grid_v2_optimization(
             "candidate_table_unique_signal_rows": cache_estimate.get("signal_combo_count"),
             "candidate_table_unique_dataprep_rows": cache_estimate.get("dataprep_combo_count"),
             "legacy_candidates_materialized": run_result.metadata.get("legacy_candidates_materialized"),
+            "params_materialized": run_result.metadata.get("params_materialized"),
             "semantic_keys_materialized": run_result.metadata.get("semantic_keys_materialized"),
             "canonical_identities_materialized": run_result.metadata.get("canonical_identities_materialized"),
             "stack_row_count": run_result.metadata.get("stack_row_count"),

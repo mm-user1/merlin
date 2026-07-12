@@ -90,11 +90,12 @@ def test_grid_v2_dispatch_runs_before_v1_fast_backend_validation():
     assert config.grid_summary["grid"]["candidate_table_row_count"] == config.grid_summary["candidate_count"]
     assert config.grid_summary["grid"]["candidate_table_unique_signal_rows"] == 1
     assert config.grid_summary["grid"]["legacy_candidates_materialized"] == 0
+    assert 0 < config.grid_summary["grid"]["params_materialized"] <= config.grid_summary["candidate_count"]
     assert config.grid_summary["grid"]["canonical_identities_materialized"] == 0
     assert config.grid_summary["grid"]["semantic_keys_materialized"] == config.grid_summary["candidate_count"]
     if compiled_batch_available():
         assert config.grid_summary["grid"]["compiled_execution_mode"] == "stacked"
-        assert config.grid_summary["grid"]["compiled_config_packing"] == "mapping"
+        assert config.grid_summary["grid"]["compiled_config_packing"] == "table"
         assert config.grid_summary["grid"]["stack_row_count"] is not None
     assert {result.engine for result in results} == {"v2"}
     assert all(result.grid_generation_mode == "full_enumeration_v2" for result in results)
@@ -102,6 +103,10 @@ def test_grid_v2_dispatch_runs_before_v1_fast_backend_validation():
     assert all(getattr(result, "grid_rank", None) for result in config.optuna_all_results)
     assert all(getattr(result, "objective_values", None) for result in config.optuna_all_results)
     assert config.optuna_all_results[0].semantic_key
+    assert dict(config.optuna_all_results[0].params)
+    assert config.optuna_all_results[0].params.get("initialCapital") == pytest.approx(100.0)
+    assert "stopX" in config.optuna_all_results[0].params
+    assert str(config.optuna_all_results[0].canonical_identity).startswith("{")
     assert str(results[0].canonical_identity).startswith("{")
 
 

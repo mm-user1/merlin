@@ -172,6 +172,8 @@ def test_candidate_table_lazily_decodes_identity_subset_without_full_legacy_tupl
 
     assert plan._candidates_cache is None
     assert table.legacy_candidates_materialized_count == 0
+    assert table.params_by_row is None
+    assert table.params_materialized_count == 0
     assert table.semantic_keys_materialized_count == plan.deduped_candidate_count
     assert table.canonical_identities_materialized_count == 0
 
@@ -179,7 +181,7 @@ def test_candidate_table_lazily_decodes_identity_subset_without_full_legacy_tupl
     for index in subset:
         candidate = plan.candidate_for_index(index)
         assert candidate.candidate_id == index + 1
-        assert table.params_for_index(index) == candidate.params
+        assert dict(table.params_for_index(index)) == dict(candidate.params)
         assert table.active_names_for_index(index) == candidate.active_param_names
         assert table.inactive_names_for_index(index) == candidate.inactive_param_names
         assert table.axis_names_for_index(index) == candidate.axis_param_names
@@ -188,9 +190,25 @@ def test_candidate_table_lazily_decodes_identity_subset_without_full_legacy_tupl
         assert table.canonical_identity_for_index(index) == candidate.canonical_identity
 
     assert table.legacy_candidates_materialized_count == len(subset)
+    assert table.params_materialized_count == len(subset)
     assert table.semantic_keys_materialized_count == plan.deduped_candidate_count
     assert table.canonical_identities_materialized_count == len(subset)
     assert plan._candidates_cache is None
+
+
+def test_candidate_table_lazy_params_match_legacy_values_for_deterministic_rows():
+    plan = build_grid_v2_plan(load_config(), base_params=_v2_base_params())
+    table = plan.candidate_table
+    assert table.params_by_row is None
+
+    for candidate_id in (1, 480, 481, 18_436, 48_480):
+        index = candidate_id - 1
+        decoded = dict(table.params_for_index(index))
+        candidate = plan.candidate_for_index(index)
+        assert decoded == dict(candidate.params)
+        assert candidate.candidate_id == candidate_id
+
+    assert table.params_materialized_count == 5
 
 
 def test_candidate_table_compatibility_candidates_materialize_on_explicit_access():

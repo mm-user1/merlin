@@ -179,12 +179,17 @@ def test_compiled_execution_uses_table_without_legacy_or_canonical_materializati
     assert result.metadata["candidate_table_used"] is True
     assert result.metadata["legacy_candidates_materialized"] == 0
     assert result.metadata["canonical_identities_materialized"] == 0
+    assert 0 < result.metadata["params_materialized"] < len(result.rows)
     assert result.metadata["semantic_keys_materialized"] == len(result.rows)
     assert result.metadata["compiled_execution_mode"] == "stacked"
-    assert result.metadata["compiled_config_packing"] == "mapping"
+    assert result.metadata["compiled_config_packing"] == "table"
     assert plan._candidates_cache is None
     assert plan.candidate_table.legacy_candidates_materialized_count == 0
     assert plan.candidate_table.canonical_identities_materialized_count == 0
+    assert dict(result.rows[0].params)["initialCapital"] == pytest.approx(100.0)
+    assert result.rows[0].params.get("stopX") is not None
+    assert "stopX" in result.rows[0].params
+    assert str(result.rows[0].canonical_identity).startswith("{")
 
 
 @pytest.mark.skipif(not compiled_batch_available(), reason="Compiled path required for table config packing.")
@@ -207,6 +212,78 @@ def test_compiled_execution_can_use_table_config_packing_when_requested(prepared
     assert result.metadata["compiled_execution_mode"] == "stacked"
     assert result.metadata["compiled_config_packing"] == "table"
     assert [row.candidate_id for row in result.rows] == [1, 2]
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled path required for table packing fallback.")
+def test_compiled_execution_falls_back_to_mapping_when_normalizer_changes_kernel_fields(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+
+    def normalize_with_kernel_change(params):
+        payload = dict(hooks.normalize_params(params) if hooks.normalize_params else params or {})
+        payload["stopX"] = float(payload.get("stopX", 2.0)) + 0.25
+        return payload
+
+    changed_hooks = GridV2StrategyHooks(
+        build_execution_data=hooks.build_execution_data,
+        normalize_params=normalize_with_kernel_change,
+        label=hooks.label,
+        signal_param_names=hooks.signal_param_names,
+        dataprep_param_names=hooks.dataprep_param_names,
+        function_fingerprint=hooks.function_fingerprint,
+    )
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX",),
+            top_n=0,
+            prefer_compiled=True,
+            compiled_config_packing="table",
+        ),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, changed_hooks, candidate_indices=(0, 1))
+
+    assert result.metadata["compiled_execution_mode"] == "stacked"
+    assert result.metadata["compiled_config_packing"] == "mapping"
+    assert result.metadata["params_materialized"] == 2
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled path required for slow enrichment cache check.")
+def test_execute_selected_slow_enrichment_reuses_dataprep_cache(prepared_data, hooks):
+    df, trade_start_idx = prepared_data
+    build_calls = 0
+
+    def counted_build(dataframe, params):
+        nonlocal build_calls
+        build_calls += 1
+        return hooks.build_execution_data(dataframe, params)
+
+    counted_hooks = GridV2StrategyHooks(
+        build_execution_data=counted_build,
+        normalize_params=hooks.normalize_params,
+        label=hooks.label,
+        signal_param_names=hooks.signal_param_names,
+        dataprep_param_names=hooks.dataprep_param_names,
+        function_fingerprint=hooks.function_fingerprint,
+    )
+    plan = build_grid_v2_plan(
+        load_config(),
+        GridV2Settings(
+            enabled_variants=("bracket",),
+            enabled_axes=("stopX", "stopRR", "stopLP"),
+            top_n=2,
+            prefer_compiled=True,
+        ),
+        base_params=merged_reference_params("reference_b_trend_bracket"),
+    )
+
+    result = execute_grid_v2_candidates(plan, df, trade_start_idx, counted_hooks)
+
+    assert len(result.selected) == 2
+    assert build_calls == result.cache_stats.dataprep_misses
+    assert result.cache_stats.dataprep_misses == result.cache_estimate.dataprep_combo_count
 
 
 def test_cache_estimate_uses_worker_multiplier_and_hard_limit(prepared_data, hooks):

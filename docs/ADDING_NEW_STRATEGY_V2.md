@@ -191,7 +191,9 @@ objects or own Grid execution loops. The planner uses a typed candidate table
 internally and keeps the legacy `plan.candidates` tuple as a lazy debugging and
 test compatibility surface. Strategy authors only need accurate config/profile
 metadata and optional `SIGNAL_CACHE_PARAM_NAMES` / `DATAPREP_CACHE_PARAM_NAMES`
-declarations; no new Phase 2.6.3 hook is required.
+declarations. Compiled Grid V2 config packing is also core-owned and table
+driven when compatible with the strategy normalizer; no new Phase 2.6.3 or
+Phase 2.6.3.1 strategy hook is required.
 
 `grid_v2_max_cache_mb` overrides the signal/dataprep cache estimate limit. The
 default is `512`; custom values must be finite positive numbers. In the normal

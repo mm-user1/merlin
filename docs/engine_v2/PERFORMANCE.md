@@ -338,6 +338,68 @@ latest B2 studies at 117s/117s with diagnostics present. The stitched OOS
 metrics remain unchanged for the stored comparable studies. A fresh WFA rerun
 after Phase 2.6.3 was not performed during this coding pass.
 
+## Phase 2.6.3.1 Windows After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_3_1_direct_grid_after.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_3_1_fresh_wfa_db_inspection_before_new_wfa.json
+```
+
+Implemented rescue changes:
+
+- Stage A completed: cache grouping now derives compact group codes from the
+  typed candidate table and builds full cache keys only for unique group
+  representatives. The SUI benchmark remains at one signal group and `162`
+  dataprep groups.
+- Stage A also removed avoidable full-population params dict copies from
+  compiled result rows and Grid V2 fast `OptimizationResult` conversion.
+- Stage B completed: normal compiled dispatch uses a vectorized table packer
+  by default when the strategy normalizer preserves kernel-visible fields and
+  mode state. Mapping packing remains the compatibility fallback/oracle.
+- `params_by_row` is no longer eagerly populated in the normal table build
+  path. The SUI benchmark reported `params_materialized=173`, not `48,480`.
+- Full-population semantic keys remain materialized because shared Grid ranking
+  still uses `semantic_key` as a deterministic tie-break.
+- Canonical identities remain lazy for fast-screening rows and are materialized
+  for selected slow-reference rows or explicit access.
+- `config.optuna_all_results` remains full-population. Fast rows now carry lazy
+  params/canonical mappings with eager metrics and ranking annotations.
+
+Same command, payload, candidate count, worker list, warmup count, measured run
+count, and Windows workstation as the Phase 2.6.2 and Phase 2.6.3 direct
+after-runs. Wall and total are primary; bucket deltas are diagnostic.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Fast Eval | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 15.500s | 15.440s | 3.385s | 10.609s | 0.645s | 4,569.6 |
+| 6 | 12.822s | 12.759s | 3.367s | 7.952s | 0.667s | 6,101.1 |
+
+Workers=6 mean wall improved from the Phase 2.6.2 baseline `14.322s` to
+`12.822s`, and from the Phase 2.6.3 regressed baseline `14.871s` to `12.822s`.
+This passes both the hard gate (`<=14.608s`) and the target gate (faster than
+Phase 2.6.2). Mean total improved from `14.192s` in Phase 2.6.2 and `14.788s`
+in Phase 2.6.3 to `12.759s`. Mean fast evaluation improved from `9.449s` in
+Phase 2.6.2 and `10.279s` in Phase 2.6.3 to `7.952s`.
+
+Candidate generation did not improve versus Phase 2.6.2 because semantic keys
+remain full-population for ranking. The removed costs are in cache grouping,
+compiled config packing, and params/result materialization, so wall/total are
+the honest success metrics.
+
+The top selected candidate remained `18436` with
+`net_profit_pct=45.74422762364992`, `max_drawdown_pct=14.133826459897126`,
+and `total_trades=55`.
+
+The WFA DB inspection before any new WFA rerun preserved the stored comparison:
+V1 studies remain 26s/26s with diagnostics absent; stored B2 rows show the
+Phase 2.6.2 117s/117s baseline and the Phase 2.6.3 124s/124s regression with
+unchanged stitched OOS metrics. A fresh WFA rerun after Phase 2.6.3.1 was not
+performed during this coding pass. Based on the direct Grid V2 gate, proceed to
+Phase 2.6.4; use a fresh Windows UI WFA rerun to close the WFA timing row if
+needed.
+
 ## JSON Report Shape
 
 The benchmark helper writes schema version 1 JSON:
