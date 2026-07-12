@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "strategy_id": "s06_r_trend_v02_regime_trendlines",
+  "strategy_name": "S_06 R-Trend v02 Regime-TL",
+  "purpose": "Merlin Backtester V2 TradingView parity baseline for the S06 R-Trend v02 Trendline Regime pilot import.",
+  "market_data": {
+    "symbol": "SUIUSDT.P",
+    "exchange": "OKX",
+    "instrument": "perpetual_swap_contract",
+    "quote_currency": "USDT",
+    "timeframe": "30m",
+    "path": "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv",
+    "sha256": "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae",
+    "timezone": "UTC"
+  },
+  "instrument": {
+    "tick_size": 0.0001
+  },
+  "canonical_period": {
+    "start_utc": "2025-08-01T00:00:00Z",
+    "end_utc": "2025-12-01T00:00:00Z",
+    "tradingview_timezone": "UTC+8",
+    "tradingview_start": "2025-08-01 08:00",
+    "tradingview_end": "2025-12-01 08:00"
+  },
+  "pine_source": {
+    "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/pine/S_06-R-Trend_v02_Regime-Trendlines.pine",
+    "sha256": "2a319f7b20738986647b10a81cddc96a7a13c73b94e18784d1f2fec492d8886e",
+    "force_end_date_close": true,
+    "force_end_date_close_semantics": "close_all_after_leaving_time_range",
+    "final_boundary_exercised": false,
+    "process_orders_on_close": false,
+    "fill_orders_on_standard_ohlc": true,
+    "notes": [
+      "The strategy creates normal market orders for next-tick execution.",
+      "The Pine source contains a date-filter close_all after the time range is left.",
+      "This reference pair does not exercise a boundary close because all positions close before the end date.",
+      "The baseline pair differs only by useRegime; all other strategy inputs are identical."
+    ]
+  },
+  "tradingview_execution_profile": {
+    "initial_capital": 100.0,
+    "currency": "USDT",
+    "default_order_size": 100.0,
+    "default_order_size_type": "cash",
+    "pyramiding": 0,
+    "bar_detailization": "default_4_ticks_per_bar",
+    "script_execution": {
+      "on_bar_close": true,
+      "on_order_fill": true,
+      "on_realtime_bar_tick": true
+    },
+    "commission": {
+      "value": 0.05,
+      "type": "percent"
+    },
+    "long_leverage": "Infinity",
+    "short_leverage": "Infinity",
+    "slippage_ticks": 0,
+    "limit_order_execution": "requested_price",
+    "order_execution_delay": "one_tick"
+  },
+  "references": [
+    {
+      "reference_id": "reference_a_trend_square_bracket_no_regime",
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_a_trend_square_bracket_no_regime",
+      "entry_mode": "Trend @ Square",
+      "use_trail_ma": false,
+      "use_regime": false,
+      "regime_params": {
+        "regimePivotLen": 15,
+        "regimeSlopeFactor": 0.25,
+        "regimeBreakBufferX": 0.5
+      },
+      "total_trades": 45,
+      "role": "control_no_regime"
+    },
+    {
+      "reference_id": "reference_b_trend_square_bracket_regime_tl",
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_b_trend_square_bracket_regime_tl",
+      "entry_mode": "Trend @ Square",
+      "use_trail_ma": false,
+      "use_regime": true,
+      "regime_params": {
+        "regimePivotLen": 15,
+        "regimeSlopeFactor": 0.25,
+        "regimeBreakBufferX": 0.5
+      },
+      "total_trades": 43,
+      "role": "primary_regime_trendline_pilot_target"
+    }
+  ],
+  "asset_hashes": [
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_a_trend_square_bracket_no_regime/tradingview_trades.csv",
+      "sha256": "f2e4a0c26c5d54a15496dac954d9d6c409bc60ec686f3a37b2a51acc377504cd"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_a_trend_square_bracket_no_regime/trades_normalized_utc.csv",
+      "sha256": "48240f5cba7c670c2f6fb5d0a0ae7c3873883d40a3230d48e96f5ddc240f7597"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_b_trend_square_bracket_regime_tl/tradingview_trades.csv",
+      "sha256": "840e586e63a843034885e4ed1cd452046ded34f1aab789952e2e7c391db77324"
+    },
+    {
+      "path": "data/baseline_v2/s06_r_trend_v02_regime_trendlines/reference_b_trend_square_bracket_regime_tl/trades_normalized_utc.csv",
+      "sha256": "574dea6f74714bfa89eac6b7991fdf19d578ed84d0f7faaf87c4ccbbdc38ad40"
+    }
+  ]
+}

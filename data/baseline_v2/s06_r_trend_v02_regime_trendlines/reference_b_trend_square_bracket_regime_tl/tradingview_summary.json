@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "reference_id": "reference_b_trend_square_bracket_regime_tl",
+  "source": "TradingView Strategy Tester metrics screenshot and raw trades export.",
+  "timezone_note": "TradingView UI/export timestamps use UTC+8. Normalized machine-readable trades use UTC.",
+  "metrics": {
+    "net_profit_usdt": 22.33,
+    "net_profit_pct": 22.33,
+    "max_drawdown_usdt": 13.85,
+    "max_drawdown_pct": 13.19,
+    "profitable_trades": 17,
+    "total_trades": 43,
+    "win_rate_pct": 39.53,
+    "profit_factor": 1.405
+  },
+  "raw_export": {
+    "rows": 86,
+    "closed_trades": 43,
+    "last_trade_number": 43,
+    "last_exit_signal": "Close entry(s) order Long",
+    "last_exit_time_tradingview": "2025-11-29 03:30",
+    "last_exit_time_utc": "2025-11-28T19:30:00Z",
+    "last_exit_price_usdt": 1.5321
+  }
+}
