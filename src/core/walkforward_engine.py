@@ -14,7 +14,7 @@ import pandas as pd
 
 from . import metrics
 from .backtest_engine import StrategyResult, prepare_dataset_with_warmup
-from .grid_engine import build_grid_dsr_results, run_grid_optimization
+from .grid_engine import build_grid_dsr_results, run_grid_optimization, supports_grid_v2
 from .optuna_engine import OptunaConfig, OptimizationConfig, SamplerConfig, run_optuna_optimization
 from .param_identity import create_display_param_id
 from .storage import save_wfa_study_to_db
@@ -304,6 +304,7 @@ class WalkForwardEngine:
         self.base_config_template = deepcopy(base_config_template)
         self.optuna_settings = deepcopy(optuna_settings)
         self.csv_file_path = csv_file_path
+        self._grid_v2_plan_cache = None
 
         from strategies import get_strategy
 
@@ -1146,14 +1147,38 @@ class WalkForwardEngine:
         }
         for key in (
             "candidate_generation_seconds",
+            "plan_build_seconds",
+            "plan_reuse_lookup_seconds",
+            "runtime_rebase_seconds",
             "data_prepare_seconds",
             "fast_evaluation_seconds",
+            "fast_result_materialization_seconds",
+            "ranking_seconds",
             "slow_validation_seconds",
+            "slow_refinement_seconds",
             "total_seconds",
         ):
             diagnostic[key] = cls._safe_float(timings.get(key))
         diagnostic["candidates_per_second"] = cls._safe_float(
             grid_summary.get("candidates_per_second")
+        )
+        diagnostic["plan_reuse_enabled"] = (
+            bool(grid_summary.get("plan_reuse_enabled"))
+            if grid_summary.get("plan_reuse_enabled") is not None
+            else None
+        )
+        diagnostic["plan_reuse_hit"] = (
+            bool(grid_summary.get("plan_reuse_hit"))
+            if grid_summary.get("plan_reuse_hit") is not None
+            else None
+        )
+        diagnostic["plan_cache_key_hash"] = grid_summary.get("plan_cache_key_hash")
+        diagnostic["plan_build_count"] = cls._safe_int(grid_summary.get("plan_build_count"))
+        diagnostic["plan_reuse_hit_count"] = cls._safe_int(
+            grid_summary.get("plan_reuse_hit_count")
+        )
+        diagnostic["plan_reuse_miss_count"] = cls._safe_int(
+            grid_summary.get("plan_reuse_miss_count")
         )
         return diagnostic
 
@@ -2691,7 +2716,18 @@ class WalkForwardEngine:
         )
 
         if optimizer_mode == "grid":
-            results, _study_id = run_grid_optimization(base_config, save_study=False)
+            grid_v2_plan_cache = None
+            if supports_grid_v2(base_config.strategy_id):
+                if self._grid_v2_plan_cache is None:
+                    from .grid_v2 import GridV2PlanReuseCache
+
+                    self._grid_v2_plan_cache = GridV2PlanReuseCache()
+                grid_v2_plan_cache = self._grid_v2_plan_cache
+            results, _study_id = run_grid_optimization(
+                base_config,
+                save_study=False,
+                grid_v2_plan_cache=grid_v2_plan_cache,
+            )
             all_results = list(getattr(base_config, "optuna_all_results", []))
             self._last_grid_summary = getattr(base_config, "grid_summary", None)
             return results, all_results

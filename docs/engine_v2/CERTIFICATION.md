@@ -173,6 +173,34 @@ Phase 2.6.3.1 certification notes:
   `18436` and core metrics while improving workers=6 mean wall from `14.871s`
   to `12.822s`.
 
+Phase 2.6.4 certification notes:
+
+- WFA Grid V2 uses a WFA-local `GridV2PlanReuseCache`. There is no global cache
+  and no persisted `OptimizationConfig` cache field.
+- The cache key includes the Grid V2 engine version, effective strategy config,
+  all `GridV2Settings`, and fixed params with only `start`, `end`, and
+  `dateFilter` removed. Defensive hit validation checks the candidate-shaping
+  domain, variant, active/inactive, and axis layout before reuse.
+- Cache hits reuse the immutable candidate identity/table core, then create a
+  fresh rebased plan/table view with current-window `seed_params_by_variant`.
+  Cached plan/table objects are not mutated in place, and rebased lazy caches
+  start empty.
+- Signal/dataprep arrays, market data, execution outputs, selected slow
+  enrichment, and `config.optuna_all_results` remain per-run surfaces. No
+  data-dependent arrays are reused across WFA windows.
+- Grid V2 summaries and WFA `module_status.grid_v2` diagnostics now expose
+  optional plan-reuse counters plus additional timing buckets:
+  `plan_build_seconds`, `plan_reuse_lookup_seconds`,
+  `runtime_rebase_seconds`, `fast_result_materialization_seconds`, and
+  `ranking_seconds`. Existing timing keys and `candidates_per_second` keep
+  their prior meanings.
+- Storage schema and `GRID_V2_ENGINE_VERSION` are unchanged.
+- The Phase 2.6.4 direct SUI benchmark preserved `48,480` candidates, selected
+  top candidate `18436`, and core selected metrics. A focused real S06 B2 WFA
+  Grid V2 test verifies reuse-enabled and cache-disabled selected/full
+  population results match for two windows and that the first window's
+  materialized runtime dates are not mutated by the second window.
+
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
 resolved mode values, and active non-runtime parameter values. Runtime params

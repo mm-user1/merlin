@@ -61,7 +61,10 @@ redefine V2 grid granularity.
 
 `inspect-wfa-db` opens frozen benchmark DB snapshots with SQLite
 `mode=ro&immutable=1`, which avoids read sidecars. Do not use that mode for a
-live DB that may still have uncheckpointed WAL frames.
+live DB that may still have uncheckpointed WAL frames. Newer WFA Grid V2 rows
+may include optional Phase 2.6.4 timing buckets and plan-reuse counters; older
+rows without those fields still inspect as valid, and the stable diagnostics
+status is based only on the original required timing keys.
 
 ### run_pytest.ps1
 

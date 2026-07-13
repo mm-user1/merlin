@@ -1490,6 +1490,7 @@ def _run_grid_v2_optimization(
     config: OptimizationConfig,
     *,
     save_study: bool,
+    grid_v2_plan_cache: Any | None = None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
     if bool(getattr(config, "grid_needs_dsr", False)):
         raise ValueError("V2 Grid DSR is unavailable in Phase 2.5; disable DSR for engine='v2'.")
@@ -1530,11 +1531,43 @@ def _run_grid_v2_optimization(
     timings: Dict[str, float] = {}
 
     plan_started = time.time()
-    plan = build_grid_v2_plan(
-        strategy_config,
-        settings=settings,
-        base_params=getattr(config, "fixed_params", {}) or {},
-    )
+    plan_reuse_metadata: Dict[str, Any] = {
+        "plan_reuse_enabled": False,
+        "plan_reuse_hit": False,
+        "plan_cache_key_hash": None,
+        "plan_build_count": 0,
+        "plan_reuse_hit_count": 0,
+        "plan_reuse_miss_count": 0,
+    }
+    if grid_v2_plan_cache is not None:
+        reuse_result = grid_v2_plan_cache.get_or_build(
+            strategy_config,
+            settings=settings,
+            base_params=getattr(config, "fixed_params", {}) or {},
+        )
+        plan = reuse_result.plan
+        reuse_stats = reuse_result.stats
+        timings["plan_build_seconds"] = float(reuse_result.plan_build_seconds)
+        timings["plan_reuse_lookup_seconds"] = float(reuse_result.plan_reuse_lookup_seconds)
+        timings["runtime_rebase_seconds"] = float(reuse_result.runtime_rebase_seconds)
+        plan_reuse_metadata = {
+            "plan_reuse_enabled": bool(reuse_result.enabled),
+            "plan_reuse_hit": bool(reuse_result.hit),
+            "plan_cache_key_hash": reuse_result.cache_key,
+            "plan_build_count": int(reuse_stats.build_count),
+            "plan_reuse_hit_count": int(reuse_stats.hit_count),
+            "plan_reuse_miss_count": int(reuse_stats.miss_count),
+        }
+    else:
+        build_started = time.time()
+        plan = build_grid_v2_plan(
+            strategy_config,
+            settings=settings,
+            base_params=getattr(config, "fixed_params", {}) or {},
+        )
+        timings["plan_build_seconds"] = time.time() - build_started
+        timings["plan_reuse_lookup_seconds"] = 0.0
+        timings["runtime_rebase_seconds"] = 0.0
     timings["candidate_generation_seconds"] = time.time() - plan_started
 
     data_started = time.time()
@@ -1555,10 +1588,14 @@ def _run_grid_v2_optimization(
         if bool(run_result.metadata.get("compiled_batch_used"))
         else "reference_fast"
     )
+    fast_materialization_started = time.time()
     all_fast_results = [
         _grid_v2_result_from_row(row, metric_tier=metric_tier)
         for row in run_result.rows
     ]
+    timings["fast_result_materialization_seconds"] = time.time() - fast_materialization_started
+
+    ranking_started = time.time()
     ranked_fast = rank_grid_results(
         all_fast_results,
         objectives=selection_config.fast_objectives,
@@ -1572,6 +1609,7 @@ def _run_grid_v2_optimization(
         enabled=bool(getattr(config, "grid_diversity_enabled", True)),
         max_per_group=max(1, int(getattr(config, "grid_diversity_max_per_group", 2) or 2)),
     )
+    timings["ranking_seconds"] = time.time() - ranking_started
     objective_selected_count = len(selected_fast)
 
     row_by_id = {int(row.candidate_id): row for row in run_result.rows}
@@ -1708,6 +1746,7 @@ def _run_grid_v2_optimization(
             "stack_output_nbytes": run_result.metadata.get("stack_output_nbytes"),
             "stack_total_nbytes": run_result.metadata.get("stack_total_nbytes"),
             "stack_total_mb": run_result.metadata.get("stack_total_mb"),
+            **plan_reuse_metadata,
             "candidate_count": plan.deduped_candidate_count,
             "valid_candidate_count": len(ranked_fast),
             "selected_candidate_count": len(ranked_selected),
@@ -1804,9 +1843,14 @@ def run_grid_optimization(
     config: OptimizationConfig,
     *,
     save_study: bool = True,
+    grid_v2_plan_cache: Any | None = None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
     if supports_grid_v2(config.strategy_id):
-        return _run_grid_v2_optimization(config, save_study=save_study)
+        return _run_grid_v2_optimization(
+            config,
+            save_study=save_study,
+            grid_v2_plan_cache=grid_v2_plan_cache,
+        )
 
     validate_grid_config(config)
     backend = _load_backend(config.strategy_id)

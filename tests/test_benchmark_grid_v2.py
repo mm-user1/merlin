@@ -117,12 +117,22 @@ def _create_wfa_fixture_db(path: Path) -> None:
                 "valid_candidate_count": 48480,
                 "selected_candidate_count": 10,
                 "candidate_generation_seconds": 0.1,
+                "plan_build_seconds": 0.08,
+                "plan_reuse_lookup_seconds": 0.01,
+                "runtime_rebase_seconds": 0.0,
                 "data_prepare_seconds": 0.2,
                 "fast_evaluation_seconds": 0.3,
+                "fast_result_materialization_seconds": 0.04,
+                "ranking_seconds": 0.05,
                 "slow_validation_seconds": 0.4,
                 "slow_refinement_seconds": 0.05,
                 "total_seconds": 1.0,
                 "candidates_per_second": 1234.5,
+                "plan_reuse_enabled": True,
+                "plan_reuse_hit": False,
+                "plan_build_count": 1,
+                "plan_reuse_hit_count": 0,
+                "plan_reuse_miss_count": 1,
             }
         }
         diagnostics_2 = {
@@ -135,12 +145,22 @@ def _create_wfa_fixture_db(path: Path) -> None:
                 "valid_candidate_count": 48480,
                 "selected_candidate_count": 10,
                 "candidate_generation_seconds": 0.3,
+                "plan_build_seconds": 0.0,
+                "plan_reuse_lookup_seconds": 0.02,
+                "runtime_rebase_seconds": 0.03,
                 "data_prepare_seconds": 0.4,
                 "fast_evaluation_seconds": 0.7,
+                "fast_result_materialization_seconds": 0.06,
+                "ranking_seconds": 0.07,
                 "slow_validation_seconds": 0.8,
                 "slow_refinement_seconds": 0.07,
                 "total_seconds": 2.2,
                 "candidates_per_second": 2469.0,
+                "plan_reuse_enabled": True,
+                "plan_reuse_hit": True,
+                "plan_build_count": 1,
+                "plan_reuse_hit_count": 1,
+                "plan_reuse_miss_count": 1,
             }
         }
         conn.execute(
@@ -284,8 +304,13 @@ def test_direct_benchmark_reads_summary_from_config_and_top_selected_result(monk
                 "cache_stats": {"signal_misses": 1, "dataprep_misses": 2},
                 "timings": {
                     "candidate_generation_seconds": 0.1,
+                    "plan_build_seconds": 0.08,
+                    "plan_reuse_lookup_seconds": 0.0,
+                    "runtime_rebase_seconds": 0.0,
                     "data_prepare_seconds": 0.2,
                     "fast_evaluation_seconds": 0.3,
+                    "fast_result_materialization_seconds": 0.04,
+                    "ranking_seconds": 0.05,
                     "slow_validation_seconds": 0.4,
                     "slow_refinement_seconds": 0.05,
                     "total_seconds": 1.0,
@@ -327,6 +352,9 @@ def test_direct_benchmark_reads_summary_from_config_and_top_selected_result(monk
     assert report["schema_version"] == 1
     assert run["candidate_count"] == 48_480
     assert run["timings"]["slow_refinement_seconds"] == pytest.approx(0.05)
+    assert run["timing_fields"]["plan_build_seconds"] == pytest.approx(0.08)
+    assert run["timing_fields"]["fast_result_materialization_seconds"] == pytest.approx(0.04)
+    assert run["timing_fields"]["ranking_seconds"] == pytest.approx(0.05)
     assert run["candidates_per_second"] == pytest.approx(1234.5)
     assert run["grid_summary"]["grid"]["cache_stats"]["dataprep_misses"] == 2
     assert run["top_result"]["candidate_id"] == 7
@@ -373,9 +401,21 @@ def test_inspect_wfa_db_fixture_detects_absent_present_and_partial_diagnostics(t
     assert aggregates["fast_evaluation_seconds"]["sum"] == pytest.approx(1.0)
     assert aggregates["total_seconds"]["sum"] == pytest.approx(3.2)
     assert aggregates["slow_refinement_seconds"]["sum"] == pytest.approx(0.12)
+    assert aggregates["plan_build_seconds"]["sum"] == pytest.approx(0.08)
+    assert aggregates["plan_reuse_lookup_seconds"]["sum"] == pytest.approx(0.03)
+    assert aggregates["runtime_rebase_seconds"]["sum"] == pytest.approx(0.03)
+    assert aggregates["fast_result_materialization_seconds"]["sum"] == pytest.approx(0.10)
+    assert aggregates["ranking_seconds"]["sum"] == pytest.approx(0.12)
     assert aggregates["candidates_per_second"]["count"] == 2
     assert aggregates["candidates_per_second"]["mean"] == pytest.approx(1851.75)
     assert "sum" not in aggregates["candidates_per_second"]
+    plan_reuse = by_id["new-study"]["diagnostics"]["plan_reuse"]
+    assert plan_reuse["windows_with_fields"] == 2
+    assert plan_reuse["hit_windows"] == 1
+    assert plan_reuse["miss_windows"] == 1
+    assert plan_reuse["count_aggregates"]["plan_build_count"]["max"] == pytest.approx(1.0)
+    assert plan_reuse["count_aggregates"]["plan_reuse_hit_count"]["max"] == pytest.approx(1.0)
+    assert plan_reuse["count_aggregates"]["plan_reuse_miss_count"]["max"] == pytest.approx(1.0)
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0] == 3

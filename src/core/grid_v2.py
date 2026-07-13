@@ -15,7 +15,7 @@ import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
@@ -76,6 +76,7 @@ REFERENCE_BATCH_KIND = "reference"
 _BOOL_SIGNAL_ARRAYS = 2
 _FLOAT_DATAPREP_ARRAYS = 5
 _BYTES_PER_MB = 1024.0 * 1024.0
+_PLAN_REUSE_RUNTIME_PARAM_NAMES = frozenset({"start", "end", "dateFilter"})
 _KERNEL_CONFIG_PARAM_NAMES = (
     "initialCapital",
     "commissionPct",
@@ -590,6 +591,134 @@ class GridV2RunResult:
 
 
 @dataclass(frozen=True)
+class GridV2PlanReuseStats:
+    enabled: bool
+    build_count: int
+    hit_count: int
+    miss_count: int
+
+
+@dataclass(frozen=True)
+class GridV2PlanReuseResult:
+    plan: GridV2Plan
+    enabled: bool
+    hit: bool
+    cache_key: str | None
+    plan_build_seconds: float
+    plan_reuse_lookup_seconds: float
+    runtime_rebase_seconds: float
+    stats: GridV2PlanReuseStats
+
+
+@dataclass(frozen=True)
+class _GridV2PlanPrelude:
+    config: Mapping[str, Any]
+    settings: GridV2Settings
+    profile: ExecutionProfile
+    fixed_params: Mapping[str, Any]
+    domains: Mapping[str, GridV2ParameterDomain]
+    selector_values: Mapping[str, Any]
+    selected_variants: tuple[str, ...]
+    axis_names: tuple[str, ...]
+    axis_column_by_name: Mapping[str, int]
+    seed_params_by_variant: Mapping[str, Mapping[str, Any]]
+    active_names_by_variant: Mapping[str, tuple[str, ...]]
+    inactive_names_by_variant: Mapping[str, tuple[str, ...]]
+    axis_names_by_variant: Mapping[str, tuple[str, ...]]
+    per_variant_counts: Mapping[str, int]
+    raw_candidate_count: int
+
+
+@dataclass(frozen=True)
+class _GridV2CachedPlan:
+    plan: GridV2Plan
+    identity_signature: Any
+
+
+class GridV2PlanReuseCache:
+    """WFA-local immutable Grid V2 plan cache with per-window runtime rebasing."""
+
+    def __init__(self, *, enabled: bool = True) -> None:
+        self.enabled = bool(enabled)
+        self._entries: dict[str, _GridV2CachedPlan] = {}
+        self._build_count = 0
+        self._hit_count = 0
+        self._miss_count = 0
+
+    @property
+    def stats(self) -> GridV2PlanReuseStats:
+        return GridV2PlanReuseStats(
+            enabled=self.enabled,
+            build_count=self._build_count,
+            hit_count=self._hit_count,
+            miss_count=self._miss_count,
+        )
+
+    def get_or_build(
+        self,
+        config: Mapping[str, Any],
+        *,
+        settings: GridV2Settings | None = None,
+        base_params: Mapping[str, Any] | None = None,
+    ) -> GridV2PlanReuseResult:
+        settings = settings or GridV2Settings()
+        if not self.enabled:
+            build_started = time.time()
+            plan = build_grid_v2_plan(config, settings=settings, base_params=base_params)
+            return GridV2PlanReuseResult(
+                plan=plan,
+                enabled=False,
+                hit=False,
+                cache_key=None,
+                plan_build_seconds=time.time() - build_started,
+                plan_reuse_lookup_seconds=0.0,
+                runtime_rebase_seconds=0.0,
+                stats=self.stats,
+            )
+
+        lookup_started = time.time()
+        cache_key = _grid_v2_plan_reuse_key(config, settings, base_params)
+        prelude = _grid_v2_plan_prelude(config, settings, base_params)
+        fresh_signature = _grid_v2_prelude_identity_signature(prelude)
+        entry = self._entries.get(cache_key)
+        lookup_seconds = time.time() - lookup_started
+        if entry is not None and entry.identity_signature == fresh_signature:
+            rebase_started = time.time()
+            rebased = _rebase_grid_v2_plan(entry.plan, prelude)
+            self._hit_count += 1
+            return GridV2PlanReuseResult(
+                plan=rebased,
+                enabled=True,
+                hit=True,
+                cache_key=cache_key,
+                plan_build_seconds=0.0,
+                plan_reuse_lookup_seconds=lookup_seconds,
+                runtime_rebase_seconds=time.time() - rebase_started,
+                stats=self.stats,
+            )
+
+        self._miss_count += 1
+        build_started = time.time()
+        plan = build_grid_v2_plan(config, settings=settings, base_params=base_params)
+        build_seconds = time.time() - build_started
+        self._build_count += 1
+        self._entries[cache_key] = _GridV2CachedPlan(
+            plan=plan,
+            identity_signature=_grid_v2_plan_identity_signature(plan),
+        )
+        return GridV2PlanReuseResult(
+            plan=plan,
+            enabled=True,
+            hit=False,
+            cache_key=cache_key,
+            plan_build_seconds=build_seconds,
+            plan_reuse_lookup_seconds=lookup_seconds,
+            runtime_rebase_seconds=0.0,
+            stats=self.stats,
+        )
+
+
+@dataclass(frozen=True)
 class _CacheKeyContext:
     data_fingerprint: str
     trade_start_idx: int
@@ -670,6 +799,212 @@ def build_grid_v2_plan(
         enumerated_candidate_count=candidate_table.enumerated_candidate_count,
         deduped_candidate_count=candidate_table.deduped_candidate_count,
         per_variant_counts=candidate_table.per_variant_counts,
+        metadata=metadata,
+    )
+
+
+def _grid_v2_plan_reuse_key(
+    config: Mapping[str, Any],
+    settings: GridV2Settings,
+    base_params: Mapping[str, Any] | None,
+) -> str:
+    payload = {
+        "engine": GRID_V2_ENGINE_VERSION,
+        "config": _jsonable_mapping(_config_with_settings(config, settings)),
+        "settings": _jsonable_mapping(asdict(settings)),
+        "base_params": _jsonable_mapping(_without_plan_reuse_runtime_params(base_params or {})),
+    }
+    return hashlib.blake2b(_stable_json(payload).encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _grid_v2_plan_prelude(
+    config: Mapping[str, Any],
+    settings: GridV2Settings,
+    base_params: Mapping[str, Any] | None,
+) -> _GridV2PlanPrelude:
+    config_copy = _config_with_settings(config, settings)
+    profile = parse_execution_profile(config_copy)
+    params_spec = _parameters(config_copy)
+    defaults = _parameter_defaults(params_spec)
+    fixed_params = dict(defaults)
+    fixed_params.update(dict(base_params or {}))
+    domains = _build_parameter_domains(config_copy, settings, fixed_params, profile)
+    selector_values = _selector_values_by_variant(config_copy, profile)
+    selected_variants = _selected_variants(profile, settings)
+    return _grid_v2_plan_prelude_from_parts(
+        config=config_copy,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=selected_variants,
+    )
+
+
+def _grid_v2_plan_prelude_from_parts(
+    *,
+    config: Mapping[str, Any],
+    settings: GridV2Settings,
+    profile: ExecutionProfile,
+    fixed_params: Mapping[str, Any],
+    domains: Mapping[str, GridV2ParameterDomain],
+    selector_values: Mapping[str, Any],
+    selected_variants: Sequence[str],
+) -> _GridV2PlanPrelude:
+    axis_names = tuple(name for name in profile.parameter_names if domains[name].is_axis)
+    axis_columns = {name: index for index, name in enumerate(axis_names)}
+    seed_params_by_variant: dict[str, dict[str, Any]] = {}
+    active_names_by_variant: dict[str, tuple[str, ...]] = {}
+    inactive_names_by_variant: dict[str, tuple[str, ...]] = {}
+    axis_names_by_variant: dict[str, tuple[str, ...]] = {}
+    per_variant_counts: dict[str, int] = {}
+    raw_count = 0
+
+    for variant_name in selected_variants:
+        seed_params = _candidate_seed_params(fixed_params)
+        if profile.variant_selector is not None:
+            seed_params[profile.variant_selector.param] = selector_values[variant_name]
+        active_names = _ordered_active_names(profile, seed_params)
+        inactive_names = _ordered_inactive_names(profile, seed_params)
+        variant_axis_names = _variant_axis_names(
+            profile=profile,
+            domains=domains,
+            active_names=active_names,
+            settings=settings,
+        )
+        count = _product_size(domains[name].values for name in variant_axis_names)
+        seed_params_by_variant[variant_name] = seed_params
+        active_names_by_variant[variant_name] = active_names
+        inactive_names_by_variant[variant_name] = inactive_names
+        axis_names_by_variant[variant_name] = variant_axis_names
+        per_variant_counts[variant_name] = count
+        raw_count += count
+
+    return _GridV2PlanPrelude(
+        config=config,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=tuple(selected_variants),
+        axis_names=axis_names,
+        axis_column_by_name=axis_columns,
+        seed_params_by_variant=seed_params_by_variant,
+        active_names_by_variant=active_names_by_variant,
+        inactive_names_by_variant=inactive_names_by_variant,
+        axis_names_by_variant=axis_names_by_variant,
+        per_variant_counts=per_variant_counts,
+        raw_candidate_count=raw_count,
+    )
+
+
+def _grid_v2_prelude_identity_signature(prelude: _GridV2PlanPrelude) -> Any:
+    return (
+        GRID_V2_ENGINE_VERSION,
+        str(prelude.config.get("id", prelude.profile.strategy_id)),
+        str(prelude.config.get("version", "")),
+        tuple(prelude.selected_variants),
+        tuple(prelude.axis_names),
+        _domain_identity_signature(prelude.domains),
+        tuple(
+            (
+                name,
+                tuple(prelude.active_names_by_variant[name]),
+                tuple(prelude.inactive_names_by_variant[name]),
+                tuple(prelude.axis_names_by_variant[name]),
+                int(prelude.per_variant_counts[name]),
+                _stable_json(
+                    _jsonable_mapping(
+                        _without_plan_reuse_runtime_params(prelude.seed_params_by_variant[name])
+                    )
+                ),
+            )
+            for name in prelude.selected_variants
+        ),
+    )
+
+
+def _grid_v2_plan_identity_signature(plan: GridV2Plan) -> Any:
+    table = plan.candidate_table
+    return (
+        GRID_V2_ENGINE_VERSION,
+        plan.strategy_id,
+        plan.strategy_version,
+        tuple(table.variant_names),
+        tuple(table.axis_names),
+        _domain_identity_signature(plan.parameter_domains),
+        tuple(
+            (
+                name,
+                tuple(table.active_names_by_variant[name]),
+                tuple(table.inactive_names_by_variant[name]),
+                tuple(table.axis_names_by_variant[name]),
+                int(_product_size(plan.parameter_domains[param].values for param in table.axis_names_by_variant[name])),
+                _stable_json(
+                    _jsonable_mapping(
+                        _without_plan_reuse_runtime_params(table.seed_params_by_variant[name])
+                    )
+                ),
+            )
+            for name in table.variant_names
+        ),
+    )
+
+
+def _domain_identity_signature(domains: Mapping[str, GridV2ParameterDomain]) -> tuple[Any, ...]:
+    return tuple(
+        (
+            name,
+            str(domain.role) if domain.role is not None else None,
+            ()
+            if name in _PLAN_REUSE_RUNTIME_PARAM_NAMES
+            else tuple(_jsonable_value(value) for value in domain.values),
+            None if name in _PLAN_REUSE_RUNTIME_PARAM_NAMES else _jsonable_value(domain.default),
+            bool(domain.is_axis),
+            bool(domain.is_runtime),
+            str(domain.source),
+        )
+        for name, domain in domains.items()
+    )
+
+
+def _without_plan_reuse_runtime_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        str(name): value
+        for name, value in params.items()
+        if str(name) not in _PLAN_REUSE_RUNTIME_PARAM_NAMES
+    }
+
+
+def _rebase_grid_v2_plan(cached_plan: GridV2Plan, prelude: _GridV2PlanPrelude) -> GridV2Plan:
+    cached_table = cached_plan.candidate_table
+    rebased_table = replace(
+        cached_table,
+        profile=prelude.profile,
+        parameter_domains=prelude.domains,
+        axis_names=prelude.axis_names,
+        axis_column_by_name=prelude.axis_column_by_name,
+        seed_params_by_variant=prelude.seed_params_by_variant,
+        active_names_by_variant=prelude.active_names_by_variant,
+        inactive_names_by_variant=prelude.inactive_names_by_variant,
+        axis_names_by_variant=prelude.axis_names_by_variant,
+    )
+    metadata = dict(cached_plan.metadata)
+    metadata["select_option_subsets"] = {
+        name: list(domain.values)
+        for name, domain in prelude.domains.items()
+        if domain.is_axis and str(domain.source).endswith(".runtime_options")
+    }
+    return replace(
+        cached_plan,
+        settings=prelude.settings,
+        strategy_id=prelude.profile.strategy_id,
+        strategy_version=str(prelude.config.get("version", "")),
+        profile=prelude.profile,
+        parameter_domains=prelude.domains,
+        candidate_table=rebased_table,
         metadata=metadata,
     )
 
@@ -2402,6 +2737,9 @@ __all__ = [
     "GridV2CountPreview",
     "GridV2ParameterDomain",
     "GridV2Plan",
+    "GridV2PlanReuseCache",
+    "GridV2PlanReuseResult",
+    "GridV2PlanReuseStats",
     "GridV2ResultRow",
     "GridV2RunResult",
     "GridV2SelectedResult",

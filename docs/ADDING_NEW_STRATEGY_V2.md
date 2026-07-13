@@ -195,6 +195,11 @@ declarations. Compiled Grid V2 config packing is also core-owned and table
 driven when compatible with the strategy normalizer; no new Phase 2.6.3 or
 Phase 2.6.3.1 strategy hook is required.
 
+WFA Grid V2 plan reuse is also core-owned. Strategy authors do not add a
+Phase 2.6.4 hook or cache object. Keep `start`, `end`, and `dateFilter`
+declared and treated as runtime-only date-filter params so the WFA engine can
+reuse candidate identity while rebasing those values per window.
+
 `grid_v2_max_cache_mb` overrides the signal/dataprep cache estimate limit. The
 default is `512`; custom values must be finite positive numbers. In the normal
 dispatcher, `worker_processes` caps Numba batch threads for compiled Grid V2

@@ -155,9 +155,10 @@ def test_s06_grid_wfa_threads_full_enumeration_modes(monkeypatch):
         optuna_trial_number=1,
     )
 
-    def fake_run_grid(config, save_study=False):
+    def fake_run_grid(config, save_study=False, grid_v2_plan_cache=None):
         captured["config"] = config
         captured["save_study"] = save_study
+        captured["grid_v2_plan_cache"] = grid_v2_plan_cache
         config.grid_summary = {"grid": {"backend": {"profile": "full_enumeration"}}}
         config.optuna_all_results = []
         return [result], None
@@ -208,12 +209,100 @@ def test_s06_grid_wfa_threads_full_enumeration_modes(monkeypatch):
     assert selected == [result]
     assert all_results == []
     assert captured["save_study"] is False
+    assert captured["grid_v2_plan_cache"] is None
+    assert engine._grid_v2_plan_cache is None
     assert captured["config"].strategy_id == "s06_r_trend_v02"
     assert captured["config"].grid_enabled_modes == ["bracket"]
     assert captured["config"].grid_v2_prefer_compiled is False
     assert captured["config"].grid_v2_max_cache_mb == 2048.0
     assert captured["config"].fixed_params["start"] == index[20].isoformat()
     assert captured["config"].fixed_params["end"] == index[-1].isoformat()
+
+
+def test_s06_b2_grid_wfa_plan_reuse_matches_cache_disabled_windows():
+    from core.grid_v2 import GridV2PlanReuseCache
+
+    data_path = (
+        Path(__file__).resolve().parents[1]
+        / "data"
+        / "raw"
+        / "OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv"
+    )
+    if not data_path.exists():
+        pytest.skip("S06 B2 raw data is not present in this checkout.")
+
+    df = load_data(str(data_path)).iloc[:460]
+    if len(df) < 430:
+        pytest.skip("S06 B2 raw data fixture is too short for the WFA reuse smoke test.")
+
+    base_template = {
+        "enabled_params": {"stopX": True},
+        "param_ranges": {},
+        "param_types": {},
+        "fixed_params": {"dateFilter": False},
+        "worker_processes": 1,
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0005,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "optimization_mode": "grid",
+        "objectives": ["net_profit_pct"],
+        "primary_objective": "net_profit_pct",
+        "constraints": [],
+        "score_config": {},
+        "grid_top_candidates": 2,
+        "grid_enabled_modes": ["bracket"],
+        "grid_diversity_enabled": False,
+        "grid_slow_refinement_enabled": False,
+        "grid_v2_prefer_compiled": False,
+    }
+    wf_config = WFConfig(strategy_id="s06_r_trend_v02_b2", warmup_bars=200)
+    reuse_engine = WalkForwardEngine(wf_config, base_template, {})
+    no_reuse_engine = WalkForwardEngine(wf_config, base_template, {})
+    no_reuse_engine._grid_v2_plan_cache = GridV2PlanReuseCache(enabled=False)
+
+    first_start, first_end = df.index[220], df.index[310]
+    second_start, second_end = df.index[310], df.index[420]
+    reuse_first, reuse_first_all = reuse_engine._run_optuna_on_window(df, first_start, first_end)
+    first_summary = reuse_engine._last_grid_summary
+    first_materialized_start = reuse_first_all[0].params["start"]
+    reuse_second, reuse_second_all = reuse_engine._run_optuna_on_window(df, second_start, second_end)
+    second_summary = reuse_engine._last_grid_summary
+    no_reuse_first, no_reuse_first_all = no_reuse_engine._run_optuna_on_window(
+        df, first_start, first_end
+    )
+    no_reuse_second, no_reuse_second_all = no_reuse_engine._run_optuna_on_window(
+        df, second_start, second_end
+    )
+
+    assert first_summary["grid"]["plan_reuse_enabled"] is True
+    assert first_summary["grid"]["plan_reuse_hit"] is False
+    assert second_summary["grid"]["plan_reuse_enabled"] is True
+    assert second_summary["grid"]["plan_reuse_hit"] is True
+    assert second_summary["grid"]["plan_build_count"] == 1
+    assert second_summary["grid"]["plan_reuse_hit_count"] == 1
+    assert second_summary["grid"]["plan_reuse_miss_count"] == 1
+    assert reuse_first_all[0].params["start"] == first_materialized_start
+    assert reuse_first_all[0].params["start"] == first_start.isoformat()
+    assert reuse_second_all[0].params["start"] == second_start.isoformat()
+    assert reuse_second_all[0].params["end"] == second_end.isoformat()
+    assert no_reuse_engine._last_grid_summary["grid"]["plan_reuse_enabled"] is False
+
+    def assert_same_results(left, right):
+        assert len(left) == len(right)
+        for lhs, rhs in zip(left, right):
+            assert lhs.candidate_id == rhs.candidate_id
+            assert lhs.params.get("start") == rhs.params.get("start")
+            assert lhs.params.get("end") == rhs.params.get("end")
+            assert lhs.total_trades == rhs.total_trades
+            assert lhs.net_profit_pct == pytest.approx(rhs.net_profit_pct)
+            assert lhs.max_drawdown_pct == pytest.approx(rhs.max_drawdown_pct)
+
+    assert_same_results(reuse_first, no_reuse_first)
+    assert_same_results(reuse_second, no_reuse_second)
+    assert_same_results(reuse_first_all, no_reuse_first_all)
+    assert_same_results(reuse_second_all, no_reuse_second_all)
 
 
 def test_split_data_rolls_forward():
@@ -699,11 +788,23 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
                 "cache_estimate": {"estimated_total_mb": 11.5},
                 "cache_stats": {"signal_misses": 1, "dataprep_misses": 3},
                 "candidates_per_second": 1234.5,
+                "plan_reuse_enabled": True,
+                "plan_reuse_hit": True,
+                "plan_cache_key_hash": "abc123",
+                "plan_build_count": 1,
+                "plan_reuse_hit_count": 2,
+                "plan_reuse_miss_count": 1,
                 "timings": {
                     "candidate_generation_seconds": 0.11,
+                    "plan_build_seconds": 0.0,
+                    "plan_reuse_lookup_seconds": 0.01,
+                    "runtime_rebase_seconds": 0.02,
                     "data_prepare_seconds": 0.22,
                     "fast_evaluation_seconds": 0.33,
+                    "fast_result_materialization_seconds": 0.04,
+                    "ranking_seconds": 0.05,
                     "slow_validation_seconds": 0.44,
+                    "slow_refinement_seconds": 0.06,
                     "total_seconds": 1.10,
                 },
                 "dsr": {
@@ -767,11 +868,23 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
         assert diagnostics["cache_stats"]["signal_misses"] == 1
         assert diagnostics["cache_stats"]["dataprep_misses"] == 3
         assert diagnostics["candidate_generation_seconds"] == pytest.approx(0.11)
+        assert diagnostics["plan_build_seconds"] == pytest.approx(0.0)
+        assert diagnostics["plan_reuse_lookup_seconds"] == pytest.approx(0.01)
+        assert diagnostics["runtime_rebase_seconds"] == pytest.approx(0.02)
         assert diagnostics["data_prepare_seconds"] == pytest.approx(0.22)
         assert diagnostics["fast_evaluation_seconds"] == pytest.approx(0.33)
+        assert diagnostics["fast_result_materialization_seconds"] == pytest.approx(0.04)
+        assert diagnostics["ranking_seconds"] == pytest.approx(0.05)
         assert diagnostics["slow_validation_seconds"] == pytest.approx(0.44)
+        assert diagnostics["slow_refinement_seconds"] == pytest.approx(0.06)
         assert diagnostics["total_seconds"] == pytest.approx(1.10)
         assert diagnostics["candidates_per_second"] == pytest.approx(1234.5)
+        assert diagnostics["plan_reuse_enabled"] is True
+        assert diagnostics["plan_reuse_hit"] is True
+        assert diagnostics["plan_cache_key_hash"] == "abc123"
+        assert diagnostics["plan_build_count"] == 1
+        assert diagnostics["plan_reuse_hit_count"] == 2
+        assert diagnostics["plan_reuse_miss_count"] == 1
         assert window.grid_dsr_enabled is True
         assert window.grid_dsr_top_k == 2
         assert window.grid_dsr_n_trials == 10
@@ -792,6 +905,7 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
     persisted = loaded["windows"][0]["module_status"]["grid_v2"]
     assert persisted["backend_kind"] == "compiled_numba"
     assert persisted["candidate_generation_seconds"] == pytest.approx(0.11)
+    assert persisted["plan_reuse_hit"] is True
 
 
 def test_grid_v2_diagnostics_uses_sibling_candidates_per_second():
@@ -804,11 +918,22 @@ def test_grid_v2_diagnostics_uses_sibling_candidates_per_second():
             "backend_kind": "compiled_numba",
             "compiled_batch_used": True,
             "compiled_workers": 6,
+            "plan_reuse_enabled": True,
+            "plan_reuse_hit": False,
+            "plan_build_count": 1,
+            "plan_reuse_hit_count": 0,
+            "plan_reuse_miss_count": 1,
             "timings": {
                 "candidate_generation_seconds": 0.1,
+                "plan_build_seconds": 0.08,
+                "plan_reuse_lookup_seconds": 0.01,
+                "runtime_rebase_seconds": 0.0,
                 "data_prepare_seconds": 0.2,
                 "fast_evaluation_seconds": 0.3,
+                "fast_result_materialization_seconds": 0.04,
+                "ranking_seconds": 0.05,
                 "slow_validation_seconds": 0.4,
+                "slow_refinement_seconds": 0.06,
                 "total_seconds": 1.0,
                 "candidates_per_second": 999.0,
             },
@@ -819,7 +944,18 @@ def test_grid_v2_diagnostics_uses_sibling_candidates_per_second():
     diagnostics = WalkForwardEngine._grid_v2_diagnostics_from_summary(summary)
 
     assert diagnostics["fast_evaluation_seconds"] == pytest.approx(0.3)
+    assert diagnostics["plan_build_seconds"] == pytest.approx(0.08)
+    assert diagnostics["plan_reuse_lookup_seconds"] == pytest.approx(0.01)
+    assert diagnostics["runtime_rebase_seconds"] == pytest.approx(0.0)
+    assert diagnostics["fast_result_materialization_seconds"] == pytest.approx(0.04)
+    assert diagnostics["ranking_seconds"] == pytest.approx(0.05)
+    assert diagnostics["slow_refinement_seconds"] == pytest.approx(0.06)
     assert diagnostics["candidates_per_second"] == pytest.approx(1234.5)
+    assert diagnostics["plan_reuse_enabled"] is True
+    assert diagnostics["plan_reuse_hit"] is False
+    assert diagnostics["plan_build_count"] == 1
+    assert diagnostics["plan_reuse_hit_count"] == 0
+    assert diagnostics["plan_reuse_miss_count"] == 1
 
 
 def test_grid_wfa_dsr_disabled_leaves_replay_dsr_fields_empty(monkeypatch):

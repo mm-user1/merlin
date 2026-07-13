@@ -59,8 +59,18 @@ STABLE_WFA_GRID_V2_TIMING_KEYS = (
 )
 OPTIONAL_WFA_GRID_V2_TIMING_KEYS = (
     "slow_refinement_seconds",
+    "plan_build_seconds",
+    "plan_reuse_lookup_seconds",
+    "runtime_rebase_seconds",
+    "fast_result_materialization_seconds",
+    "ranking_seconds",
 )
 WFA_RATE_TIMING_KEYS = {"candidates_per_second"}
+WFA_GRID_V2_PLAN_REUSE_COUNT_KEYS = (
+    "plan_build_count",
+    "plan_reuse_hit_count",
+    "plan_reuse_miss_count",
+)
 
 TOP_RESULT_METRICS = (
     "net_profit_pct",
@@ -420,8 +430,13 @@ def _build_direct_run_record(
             key: timings.get(key)
             for key in (
                 "candidate_generation_seconds",
+                "plan_build_seconds",
+                "plan_reuse_lookup_seconds",
+                "runtime_rebase_seconds",
                 "data_prepare_seconds",
                 "fast_evaluation_seconds",
+                "fast_result_materialization_seconds",
+                "ranking_seconds",
                 "slow_validation_seconds",
                 "slow_refinement_seconds",
                 "total_seconds",
@@ -628,6 +643,12 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
     compiled_workers: set[int] = set()
     aggregate_keys = (*STABLE_WFA_GRID_V2_TIMING_KEYS, *OPTIONAL_WFA_GRID_V2_TIMING_KEYS)
     timing_values: dict[str, list[float]] = {key: [] for key in aggregate_keys}
+    plan_reuse_windows = 0
+    plan_reuse_hit_windows = 0
+    plan_reuse_miss_windows = 0
+    plan_reuse_count_values: dict[str, list[float]] = {
+        key: [] for key in WFA_GRID_V2_PLAN_REUSE_COUNT_KEYS
+    }
     for row in rows:
         module_status = _parse_json_object(row["module_status_json"])
         grid_v2 = module_status.get("grid_v2")
@@ -652,6 +673,18 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
             numeric = _finite_float(grid_v2.get(key))
             if numeric is not None:
                 timing_values[key].append(numeric)
+        plan_reuse_enabled = grid_v2.get("plan_reuse_enabled")
+        if plan_reuse_enabled is not None:
+            plan_reuse_windows += 1
+        if plan_reuse_enabled is True:
+            if grid_v2.get("plan_reuse_hit") is True:
+                plan_reuse_hit_windows += 1
+            elif grid_v2.get("plan_reuse_hit") is False:
+                plan_reuse_miss_windows += 1
+        for key in WFA_GRID_V2_PLAN_REUSE_COUNT_KEYS:
+            numeric = _finite_float(grid_v2.get(key))
+            if numeric is not None:
+                plan_reuse_count_values[key].append(numeric)
 
     if windows_with_grid_v2 == 0:
         status = "absent"
@@ -668,6 +701,11 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
         )
         if aggregate is not None:
             timing_aggregates[key] = aggregate
+    plan_reuse_count_aggregates = {}
+    for key, values in plan_reuse_count_values.items():
+        aggregate = _numeric_aggregate(values, include_sum=False)
+        if aggregate is not None:
+            plan_reuse_count_aggregates[key] = aggregate
 
     return {
         "status": status,
@@ -678,6 +716,12 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
         "optional_timing_keys": list(OPTIONAL_WFA_GRID_V2_TIMING_KEYS),
         "stable_keys_missing": sorted(missing_keys),
         "timing_aggregates": timing_aggregates,
+        "plan_reuse": {
+            "windows_with_fields": plan_reuse_windows,
+            "hit_windows": plan_reuse_hit_windows,
+            "miss_windows": plan_reuse_miss_windows,
+            "count_aggregates": plan_reuse_count_aggregates,
+        },
         "backend_kinds": sorted(backend_kinds),
         "compiled_workers": sorted(compiled_workers),
     }
@@ -913,6 +957,14 @@ def print_wfa_report(report: Mapping[str, Any]) -> None:
                 f"total={_format_mean_seconds(aggregates.get('total_seconds'))} "
                 f"fast={_format_mean_seconds(aggregates.get('fast_evaluation_seconds'))} "
                 f"cps={_format_mean_rate(aggregates.get('candidates_per_second'))}"
+            )
+        plan_reuse = diagnostics.get("plan_reuse")
+        if isinstance(plan_reuse, dict) and int(plan_reuse.get("windows_with_fields") or 0):
+            print(
+                "  grid_v2 plan reuse: "
+                f"fields={plan_reuse.get('windows_with_fields')} "
+                f"hits={plan_reuse.get('hit_windows')} "
+                f"misses={plan_reuse.get('miss_windows')}"
             )
     for comparison in report.get("comparisons", []):
         print(

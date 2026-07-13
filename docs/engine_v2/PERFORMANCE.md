@@ -400,6 +400,77 @@ performed during this coding pass. Based on the direct Grid V2 gate, proceed to
 Phase 2.6.4; use a fresh Windows UI WFA rerun to close the WFA timing row if
 needed.
 
+## Phase 2.6.4 Windows After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_2_6_4_direct_grid_after.json
+docs/_work/backtester_V2/benchmarks/phase_2_6_4_fresh_wfa_db_inspection_before_new_wfa.json
+```
+
+Implemented WFA-local plan reuse:
+
+- `GridV2PlanReuseCache` reuses only the immutable candidate identity/table
+  core across WFA windows: variant order/codes, axis value codes, semantic keys,
+  candidate IDs/order, and domain/layout metadata.
+- Each WFA hit rebases runtime seeds into a fresh table/plan view using the
+  current window's `start`, `end`, and `dateFilter`. Cached plan/table objects
+  are not mutated in place, and lazy params/candidate/canonical caches are
+  fresh per rebased view.
+- The reuse key includes `GRID_V2_ENGINE_VERSION`, the effective strategy
+  config, all `GridV2Settings`, and fixed params with only `start`, `end`, and
+  `dateFilter` removed. Axis/domain/variant layout is defensively validated on
+  hit; mismatches rebuild.
+- Signal/dataprep arrays and market data are not reused across windows. Normal
+  cache keys and compiled/reference execution stay per-run.
+- Direct Grid V2 is not expected to improve materially from WFA-local plan
+  reuse because direct runs do not pass a reuse cache.
+
+Same direct benchmark command, payload, candidate count, worker list, warmup
+count, measured run count, and Windows workstation as Phase 2.6.3.1.
+
+| Workers | Mean Wall | Mean Total | Candidate Gen | Plan Build | Runtime Rebase | Fast Eval | Fast Materialize | Ranking | Slow Validation | Mean CPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 14.922s | 14.864s | 3.259s | 3.259s | 0.000s | 10.172s | 0.442s | 0.329s | 0.640s | 4,766.0 |
+| 6 | 12.364s | 12.301s | 3.251s | 3.251s | 0.000s | 7.718s | 0.277s | 0.396s | 0.639s | 6,281.6 |
+
+Workers=6 mean wall changed from the Phase 2.6.3.1 baseline `12.822s` to
+`12.364s`, a 3.6% improvement. This is within normal direct-run noise and is
+not attributed to WFA plan reuse. Mean total changed from `12.759s` to
+`12.301s`; mean fast evaluation changed from `7.952s` to `7.718s`.
+Candidate generation/setup remained a plan-build bucket for direct runs:
+`candidate_generation_seconds=3.251s` and `plan_build_seconds=3.251s` at
+workers=6, with no runtime rebase.
+
+The top selected candidate remained `18436` with
+`net_profit_pct=45.74422762364992`, `max_drawdown_pct=14.133826459897126`,
+`total_trades=55`, and the same selected core metrics as the Phase 2.6.3.1
+run. The S06 B2 benchmark stayed at `48,480` candidates.
+
+The WFA DB inspection was run before any new WFA studies were created. Existing
+old rows inspect cleanly with the new optional timing/reuse fields absent. The
+latest stored B2 studies in
+`src/storage/2026-07-11_184902_backtester-v2-phase-2-6-baseline.db` have
+diagnostics present, `48,480` valid candidates and `10` selected candidates per
+window, stitched OOS metrics unchanged from their stored rows, and no
+`plan_reuse` fields because they predate Phase 2.6.4. The last two stored B2
+rows report optimization times `94s` and `93s`, mean total `7.593s` and
+`7.466s`, and mean fast evaluation `3.338s` and `3.233s`.
+
+A fresh full 48,480-candidate x 12-window WFA rerun was not performed during
+this coding pass. Focused tests prove WFA plan reuse vs cache-disabled
+equivalence for a constrained real S06 B2 Grid V2 window pair; use a fresh
+Windows UI WFA rerun to close full wall-time confirmation if needed.
+
+Remaining performance targets:
+
+- semantic-key/ranking tie-break redesign to reduce candidate generation/setup;
+- multi-objective Pareto optimization and ranking allocations;
+- signal/dataprep stack splitting when data prep is the bottleneck;
+- strategy-side dataprep optimization;
+- WFA window parallelism.
+
 ## JSON Report Shape
 
 The benchmark helper writes schema version 1 JSON:
