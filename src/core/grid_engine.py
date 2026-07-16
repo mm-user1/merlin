@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 GRID_MODE = "grid"
 FAST_GRID_BACKENDS = {
     "s03_reversal_v10": "strategies.s03_reversal_v10.fast_grid",
+    "s03_reversal_v11": "strategies.s03_reversal_v11.fast_grid",
     "s06_r_trend_v02": "strategies.s06_r_trend_v02.fast_grid",
 }
 GRID_SUPPORTED_FAST_OBJECTIVES = {

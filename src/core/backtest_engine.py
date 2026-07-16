@@ -21,6 +21,7 @@ class TradeRecord:
     net_pnl: float = 0.0
     profit_pct: Optional[float] = None
     side: Optional[str] = None
+    exit_reason: Optional[str] = None
 
 
 @dataclass
