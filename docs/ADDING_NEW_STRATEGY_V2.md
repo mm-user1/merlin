@@ -169,6 +169,36 @@ target=rr, trail=none, trailActivation=none
 target=none, trail=ma, trailActivation=rr
 ```
 
+Commit A of the `signal_reversal` topology adds reference-runner support for
+S03-like signal systems:
+
+```text
+topology=signal_reversal
+entryOrder=market_next_open
+sizing=fixed_pct_equity
+exitOnSignal=true
+stop=none or emergency_pct
+boundary=strict_close or none
+priceRounding=none
+```
+
+`target`, `trail`, `trailActivation`, `maxDays`, and `margin` must be absent or
+their inert values (`none`, `false`, `off`). Sizing is
+`floor((realized_balance * positionPct / 100 / signal_bar_close) /
+contractSize) * contractSize`, planned at bar close and filled at the next
+open. Optional Emergency SL is a generic protective stop selected with
+`stop=emergency_pct`: it seeds from the actual next-open fill, cannot trigger on
+the fill bar, becomes eligible from `fill_index + 1`, fills long stops at
+`min(open, stop)` and short stops at `max(open, stop)`, and ratchets only on
+favorable close-based updates after `emergencySlUpdateBars`.
+
+Flat or close-all behavior is data-driven. Strategies should populate
+`Signals.long_exits` and `Signals.short_exits`; there is no separate `flatExit`
+execution mode. Direction or regime gates belong inside `long_entries` and
+`short_entries`, so opposite-signal reversal exits naturally follow the gated
+entry conditions. Commit B adds the compiled/Grid tier for this topology; that
+path uses mapping config packing, not the vectorized table packer.
+
 If the next strategy fits these modes, add only the strategy package, config,
 hooks, and tests. Do not add a new Grid backend.
 

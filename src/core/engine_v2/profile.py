@@ -16,8 +16,11 @@ class ProfileValidationError(ValueError):
 VALID_PARAMETER_ROLES = {"signal", "execution", "runtime"}
 
 MODE_PARAMETER_BINDINGS: tuple[ModeBinding, ...] = (
+    ModeBinding("topology", "signal_reversal", "phase34"),
     ModeBinding("entryOrder", "market_next_open", "phase1"),
     ModeBinding("stop", "atr_swing", "phase1", ("stopX", "stopLP", "stopMaxPct"), ("atr", "rolling_low_high")),
+    ModeBinding("stop", "none", "phase34"),
+    ModeBinding("stop", "emergency_pct", "phase34", ("emergencySlPct", "emergencySlUpdateBars")),
     ModeBinding("target", "rr", "phase1", ("stopRR",)),
     ModeBinding("target", "none", "phase1"),
     ModeBinding(
@@ -51,8 +54,8 @@ MODE_PARAMETER_BINDINGS: tuple[ModeBinding, ...] = (
     ModeBinding("stop", "swing", "later", ("stopLP", "stopMaxPct"), ("rolling_low_high",)),
     ModeBinding("stop", "pct", "later", ("stopPct", "stopMaxPct")),
     ModeBinding("trail", "atr", "later", ("trailRR", "trailAtrMult"), ("atr",)),
-    ModeBinding("sizing", "fixed_pct_equity", "later", ("positionPct",)),
-    ModeBinding("exitOnSignal", "true", "later"),
+    ModeBinding("sizing", "fixed_pct_equity", "phase34", ("positionPct", "contractSize")),
+    ModeBinding("exitOnSignal", "true", "phase34"),
 )
 
 _BINDINGS_BY_KEY = {

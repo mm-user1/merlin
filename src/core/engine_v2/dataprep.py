@@ -11,6 +11,18 @@ from .contracts import Signals
 from .kernel import ExecutionData
 
 
+_SIGNAL_NAN_CACHE: dict[int, np.ndarray] = {}
+
+
+def _shared_nan_array(length: int) -> np.ndarray:
+    cached = _SIGNAL_NAN_CACHE.get(length)
+    if cached is None:
+        cached = np.full(length, np.nan, dtype=float)
+        cached.setflags(write=False)
+        _SIGNAL_NAN_CACHE[length] = cached
+    return cached
+
+
 def build_execution_data(
     df: pd.DataFrame,
     *,
@@ -40,4 +52,28 @@ def build_execution_data(
     )
 
 
-__all__ = ["build_execution_data"]
+def build_signal_execution_data(
+    df: pd.DataFrame,
+    *,
+    signals: Signals,
+) -> ExecutionData:
+    """Pack OHLC plus signal arrays for signal-only execution profiles."""
+
+    length = len(df)
+    empty_float = _shared_nan_array(length)
+    return ExecutionData(
+        timestamps=tuple(df.index),
+        open=np.asarray(df["Open"].to_numpy(copy=False), dtype=float),
+        high=np.asarray(df["High"].to_numpy(copy=False), dtype=float),
+        low=np.asarray(df["Low"].to_numpy(copy=False), dtype=float),
+        close=np.asarray(df["Close"].to_numpy(copy=False), dtype=float),
+        signals=signals,
+        atr=empty_float,
+        rolling_low=empty_float,
+        rolling_high=empty_float,
+        trail_long=empty_float,
+        trail_short=empty_float,
+    )
+
+
+__all__ = ["build_execution_data", "build_signal_execution_data"]

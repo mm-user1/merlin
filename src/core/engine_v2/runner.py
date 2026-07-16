@@ -12,6 +12,7 @@ from core.backtest_engine import StrategyResult
 
 from .contracts import GuardrailSummary, StandingState
 from .kernel import ExecutionData, KernelConfig, KernelResult, run_reference_kernel
+from .kernel_signal import SignalKernelConfig, run_signal_reversal_kernel
 from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD, validate_tick_size
 from .profile import active_mode_values
 
@@ -53,6 +54,22 @@ def _require_mode(modes: Mapping[str, str], name: str, expected: str) -> None:
     actual = modes.get(name)
     if actual != expected:
         raise ValueError(f"Unsupported Phase-1 execution mode {name}={actual!r}; expected {expected!r}.")
+
+
+def _require_signal_mode(modes: Mapping[str, str], name: str, expected: str) -> None:
+    actual = modes.get(name)
+    if actual != expected:
+        raise ValueError(f"Unsupported signal_reversal execution mode {name}={actual!r}; expected {expected!r}.")
+
+
+def _require_signal_absent_or(modes: Mapping[str, str], name: str, allowed: set[str]) -> str:
+    actual = modes.get(name)
+    if actual is None:
+        return ""
+    if actual not in allowed:
+        expected = ", ".join(repr(value) for value in sorted(allowed))
+        raise ValueError(f"Unsupported signal_reversal execution mode {name}={actual!r}; expected one of {expected}.")
+    return actual
 
 
 def _validate_bool_mode(name: str, value: str) -> bool:
@@ -167,6 +184,54 @@ def build_kernel_config(
     )
 
 
+def build_signal_kernel_config(
+    *,
+    profile: Any,
+    params: Mapping[str, Any],
+    trade_start_idx: int = 0,
+) -> SignalKernelConfig:
+    """Convert a signal_reversal profile and params into kernel settings."""
+
+    modes = active_mode_values(profile, params)
+    _require_signal_mode(modes, "topology", "signal_reversal")
+    _require_signal_mode(modes, "entryOrder", "market_next_open")
+    _require_signal_mode(modes, "sizing", "fixed_pct_equity")
+    _require_signal_mode(modes, "exitOnSignal", "true")
+
+    stop_mode = modes.get("stop", "none")
+    if stop_mode not in {"none", "emergency_pct"}:
+        raise ValueError(
+            f"Unsupported signal_reversal execution mode stop={stop_mode!r}; "
+            "expected 'none' or 'emergency_pct'."
+        )
+    boundary_mode = modes.get("boundary", "strict_close")
+    if boundary_mode not in {"strict_close", "none"}:
+        raise ValueError(f"Unsupported signal_reversal boundary mode: {boundary_mode!r}.")
+    _require_signal_mode(modes, "priceRounding", PRICE_ROUNDING_NONE)
+    _require_signal_absent_or(modes, "target", {"none"})
+    _require_signal_absent_or(modes, "trail", {"none"})
+    _require_signal_absent_or(modes, "trailActivation", {"none"})
+    _require_signal_absent_or(modes, "maxDays", {"false"})
+    _require_signal_absent_or(modes, "margin", {"off"})
+
+    return SignalKernelConfig(
+        initial_capital=float(params.get("initialCapital", 100.0)),
+        commission_pct=float(params.get("commissionPct", 0.0)),
+        position_pct=float(params.get("positionPct", 100.0)),
+        contract_size=float(params.get("contractSize", 0.01)),
+        enable_long=_coerce_bool(params.get("enableLong"), True),
+        enable_short=_coerce_bool(params.get("enableShort"), True),
+        emergency_stop_enabled=stop_mode == "emergency_pct",
+        emergency_sl_pct=float(params.get("emergencySlPct", 20.0)),
+        emergency_sl_update_bars=int(params.get("emergencySlUpdateBars", 16)),
+        boundary_mode=boundary_mode,
+        trade_start_idx=trade_start_idx,
+        use_date_filter=_coerce_bool(params.get("dateFilter"), True),
+        start=_timestamp(params.get("start")),
+        end=_timestamp(params.get("end")),
+    )
+
+
 def run_v2_strategy(
     *,
     data: ExecutionData,
@@ -176,8 +241,18 @@ def run_v2_strategy(
 ) -> V2RunResult:
     """Run V2 execution and return an enriched Merlin strategy result."""
 
-    config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
-    kernel_result = run_reference_kernel(data, config)
+    modes = active_mode_values(profile, params)
+    topology = modes.get("topology")
+    if topology == "signal_reversal":
+        config = build_signal_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
+        kernel_result = run_signal_reversal_kernel(data, config)
+        initial_balance = config.initial_capital
+    elif topology is None:
+        config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
+        kernel_result = run_reference_kernel(data, config)
+        initial_balance = config.initial_capital
+    else:
+        raise ValueError(f"Unsupported V2 execution topology: {topology!r}.")
     strategy_result = StrategyResult(
         trades=kernel_result.trades,
         equity_curve=kernel_result.equity_curve,
@@ -186,7 +261,7 @@ def run_v2_strategy(
     )
     metrics.enrich_strategy_result(
         strategy_result,
-        initial_balance=config.initial_capital,
+        initial_balance=initial_balance,
         risk_free_rate=0.02,
     )
     return V2RunResult(
@@ -197,4 +272,4 @@ def run_v2_strategy(
     )
 
 
-__all__ = ["V2RunResult", "build_kernel_config", "run_v2_strategy"]
+__all__ = ["V2RunResult", "build_kernel_config", "build_signal_kernel_config", "run_v2_strategy"]
