@@ -169,8 +169,8 @@ target=rr, trail=none, trailActivation=none
 target=none, trail=ma, trailActivation=rr
 ```
 
-Commit A of the `signal_reversal` topology adds reference-runner support for
-S03-like signal systems:
+The `signal_reversal` topology supports S03-like signal systems on both the
+direct reference runner and the compiled Grid V2 stacked path:
 
 ```text
 topology=signal_reversal
@@ -196,8 +196,8 @@ Flat or close-all behavior is data-driven. Strategies should populate
 `Signals.long_exits` and `Signals.short_exits`; there is no separate `flatExit`
 execution mode. Direction or regime gates belong inside `long_entries` and
 `short_entries`, so opposite-signal reversal exits naturally follow the gated
-entry conditions. Commit B adds the compiled/Grid tier for this topology; that
-path uses mapping config packing, not the vectorized table packer.
+entry conditions. The compiled/Grid tier for this topology uses mapping config
+packing, not the vectorized table packer.
 
 If the next strategy fits these modes, add only the strategy package, config,
 hooks, and tests. Do not add a new Grid backend.
@@ -214,7 +214,9 @@ it does not provide packed candidate arrays or a strategy-specific Grid loop.
 Core validates that the OHLC and timestamp arrays are identical across stacked
 execution-data rows before sharing them as 1D market arrays. Signal and
 dataprep arrays are stacked internally and addressed by per-candidate row
-indices.
+indices. For `topology=signal_reversal`, the compiled stack contains
+`long_entries`, `short_entries`, optional `long_exits`, and optional
+`short_exits` normalized to boolean rows, with no float dataprep rows.
 
 Grid V2 candidate planning is also core-owned. Strategies do not build candidate
 objects or own Grid execution loops. The planner uses a typed candidate table

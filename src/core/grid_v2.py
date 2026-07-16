@@ -59,6 +59,10 @@ from core.engine_v2.compiled_kernel import (
     _empty_config_arrays,
     validate_tick_size,
 )
+from core.engine_v2.compiled_kernel_signal import (
+    build_signal_stacked_execution_data,
+    evaluate_compiled_signal_stacked_batch,
+)
 from core.engine_v2.metrics_kernel import compute_core_metrics_from_balance_and_trades
 from core.engine_v2.profile import (
     active_mode_values,
@@ -74,6 +78,7 @@ from core.engine_v2.runner import V2RunResult, run_v2_strategy
 GRID_V2_ENGINE_VERSION = "grid_v2_phase2_5"
 REFERENCE_BATCH_KIND = "reference"
 _BOOL_SIGNAL_ARRAYS = 2
+_SIGNAL_TOPOLOGY_BOOL_SIGNAL_ARRAYS = 4
 _FLOAT_DATAPREP_ARRAYS = 5
 _BYTES_PER_MB = 1024.0 * 1024.0
 _PLAN_REUSE_RUNTIME_PARAM_NAMES = frozenset({"start", "end", "dateFilter"})
@@ -1216,13 +1221,16 @@ def _estimate_grid_v2_cache_from_keys(
     n_bars: int,
     cache_keys: Sequence[_CandidateCacheKeys],
 ) -> GridV2CacheEstimate:
+    topology = _grid_v2_execution_topology(plan)
     signal_combo_count = len({item.signal_key for item in cache_keys})
     dataprep_combo_count = len({item.dataprep_key for item in cache_keys})
     worker_multiplier = max(1, int(plan.settings.worker_multiplier))
-    bytes_per_signal_combo = int(n_bars * _BOOL_SIGNAL_ARRAYS * np.dtype(np.bool_).itemsize)
-    bytes_per_dataprep_combo = int(n_bars * _FLOAT_DATAPREP_ARRAYS * np.dtype(np.float64).itemsize)
+    bool_signal_arrays = _SIGNAL_TOPOLOGY_BOOL_SIGNAL_ARRAYS if topology == "signal_reversal" else _BOOL_SIGNAL_ARRAYS
+    float_dataprep_arrays = 0 if topology == "signal_reversal" else _FLOAT_DATAPREP_ARRAYS
+    bytes_per_signal_combo = int(n_bars * bool_signal_arrays * np.dtype(np.bool_).itemsize)
+    bytes_per_dataprep_combo = int(n_bars * float_dataprep_arrays * np.dtype(np.float64).itemsize)
     physical_signal_stack_rows = dataprep_combo_count
-    physical_dataprep_stack_rows = dataprep_combo_count
+    physical_dataprep_stack_rows = 0 if topology == "signal_reversal" else dataprep_combo_count
     output_candidate_count = len(cache_keys)
     bytes_per_output_candidate = int(OUTPUT_COLUMN_COUNT * np.dtype(np.float64).itemsize)
     bytes_per_shared_market_bar = int(
@@ -1260,6 +1268,21 @@ def _estimate_grid_v2_cache_from_keys(
         bytes_per_output_candidate=bytes_per_output_candidate,
         bytes_per_shared_market_bar=bytes_per_shared_market_bar,
     )
+
+
+def _grid_v2_execution_topology(plan: GridV2Plan) -> str | None:
+    topologies = {
+        plan.profile.variants[variant_name].modes.get("topology")
+        for variant_name in plan.candidate_table.variant_names
+    }
+    if len(topologies) > 1:
+        raise ValueError("Grid V2 requires all enabled variants to share one execution topology.")
+    topology = next(iter(topologies), None)
+    if topology in (None, ""):
+        return None
+    if topology == "signal_reversal":
+        return topology
+    raise ValueError(f"Unsupported Grid V2 execution topology: {topology!r}.")
 
 
 def execute_grid_v2_candidates(
@@ -1312,6 +1335,7 @@ def execute_grid_v2_candidates(
             dataprep_cache[data_key] = data
         data_groups.setdefault(data_key, []).append(candidate_index)
 
+    topology = _grid_v2_execution_topology(plan)
     compiled_available = compiled_batch_available()
     use_compiled = bool(plan.settings.prefer_compiled and compiled_available)
     backend_kind = COMPILED_BATCH_KIND if use_compiled else REFERENCE_BATCH_KIND
@@ -1332,20 +1356,11 @@ def execute_grid_v2_candidates(
             compiled_indices.append(candidate_index)
             data_index.append(data_key_to_stack_row[data_key])
         if compiled_indices:
-            stacked_data = build_stacked_execution_data(
-                [dataprep_cache[key] for key in data_keys],
-                data_index,
-            )
-            params_batch: list[Mapping[str, Any]] | None = None
-            row_params_batch: list[Mapping[str, Any]] | None = None
-            packed_config_arrays: Mapping[str, np.ndarray] | None = None
-            requested_packing = str(plan.settings.compiled_config_packing or "mapping").strip().lower()
-            if requested_packing not in {"mapping", "table"}:
-                raise ValueError("Grid V2 compiled_config_packing must be 'mapping' or 'table'.")
-            if requested_packing == "table" and _can_use_table_config_packer(plan, hooks, compiled_indices):
-                packed_config_arrays = _pack_table_config_arrays(plan, compiled_indices, trade_start_idx)
-                compiled_config_packing = "table"
-            else:
+            if topology == "signal_reversal":
+                stacked_data = build_signal_stacked_execution_data(
+                    [dataprep_cache[key] for key in data_keys],
+                    data_index,
+                )
                 row_params_batch = [
                     plan.candidate_table.params_for_index(candidate_index)
                     for candidate_index in compiled_indices
@@ -1355,14 +1370,45 @@ def execute_grid_v2_candidates(
                     for params in row_params_batch
                 ]
                 compiled_config_packing = "mapping"
-            batch = evaluate_compiled_stacked_batch(
-                stacked_data=stacked_data,
-                profile=plan.profile,
-                params_batch=params_batch,
-                trade_start_idx=trade_start_idx,
-                n_workers=plan.settings.compiled_workers,
-                packed_config_arrays=packed_config_arrays,
-            )
+                batch = evaluate_compiled_signal_stacked_batch(
+                    stacked_data=stacked_data,
+                    profile=plan.profile,
+                    params_batch=params_batch,
+                    trade_start_idx=trade_start_idx,
+                    n_workers=plan.settings.compiled_workers,
+                )
+            else:
+                stacked_data = build_stacked_execution_data(
+                    [dataprep_cache[key] for key in data_keys],
+                    data_index,
+                )
+                params_batch: list[Mapping[str, Any]] | None = None
+                row_params_batch: list[Mapping[str, Any]] | None = None
+                packed_config_arrays: Mapping[str, np.ndarray] | None = None
+                requested_packing = str(plan.settings.compiled_config_packing or "mapping").strip().lower()
+                if requested_packing not in {"mapping", "table"}:
+                    raise ValueError("Grid V2 compiled_config_packing must be 'mapping' or 'table'.")
+                if requested_packing == "table" and _can_use_table_config_packer(plan, hooks, compiled_indices):
+                    packed_config_arrays = _pack_table_config_arrays(plan, compiled_indices, trade_start_idx)
+                    compiled_config_packing = "table"
+                else:
+                    row_params_batch = [
+                        plan.candidate_table.params_for_index(candidate_index)
+                        for candidate_index in compiled_indices
+                    ]
+                    params_batch = [
+                        _normalized_candidate_params(hooks, params)
+                        for params in row_params_batch
+                    ]
+                    compiled_config_packing = "mapping"
+                batch = evaluate_compiled_stacked_batch(
+                    stacked_data=stacked_data,
+                    profile=plan.profile,
+                    params_batch=params_batch,
+                    trade_start_idx=trade_start_idx,
+                    n_workers=plan.settings.compiled_workers,
+                    packed_config_arrays=packed_config_arrays,
+                )
             compiled_execution_mode = batch.execution_mode
             stack_metadata = {
                 "stack_row_count": stacked_data.row_count,
@@ -2538,7 +2584,7 @@ def _row_from_run(
     return GridV2ResultRow(
         candidate_id=table.candidate_id_for_index(candidate_index),
         semantic_key=table.semantic_key_for_index(candidate_index),
-        canonical_identity=None,
+        canonical_identity=_LazyCanonicalIdentity(table, candidate_index),
         variant_name=table.variant_name_for_index(candidate_index),
         modes=table.modes_for_index(candidate_index),
         params=params,
