@@ -32,6 +32,16 @@ TV_TRADES_PATH = (
 TRADING_START = pd.Timestamp("2025-02-01T00:00:00Z")
 TRADING_END = pd.Timestamp("2026-02-01T00:00:00Z")
 WARMUP_BARS = 1000
+FAST_VALIDATION_TOLERANCES = {
+    "net_profit_pct_abs": 0.001,
+    "max_drawdown_pct_abs": 0.001,
+    "romad_abs": 0.005,
+    "win_rate_abs": 0.001,
+    "total_trades_abs": 0.0,
+    "winning_trades_abs": 0.0,
+    "losing_trades_abs": 0.0,
+    "max_consecutive_losses_abs": 0.0,
+}
 
 
 @pytest.fixture(scope="module")
@@ -129,6 +139,47 @@ def _trade_tuple(trade) -> tuple:
     )
 
 
+def _grid_candidate(params: dict, *, candidate_id: int = 1, mode: str = "both") -> v11_fast_grid.GridCandidate:
+    return v11_fast_grid.GridCandidate(
+        candidate_id=candidate_id,
+        mode=mode,
+        params=params,
+        semantic_key=v11_fast_grid.candidate_semantic_key(mode, params),
+        generation_mode="test",
+        diversity_group=f"{mode}|{params.get('maType3', 'SMA')}|{int(params.get('maLength3', 75))}",
+    )
+
+
+def _validate_fast_grid_candidate(
+    df: pd.DataFrame,
+    trade_start_idx: int,
+    params: dict,
+    *,
+    candidate_id: int = 1,
+    mode: str = "both",
+) -> tuple:
+    candidate = _grid_candidate(params, candidate_id=candidate_id, mode=mode)
+    data = v11_fast_grid.prepare_fast_data(df, trade_start_idx, [candidate])
+    fast_result = v11_fast_grid.evaluate_candidates(data, [candidate])[0]
+    validated = v11_fast_grid.validate_selected_candidates(
+        df,
+        trade_start_idx,
+        [fast_result],
+        tolerances=FAST_VALIDATION_TOLERANCES,
+        fail_on_error=True,
+    )[0]
+
+    assert validated.validation_status == "passed"
+    assert fast_result.net_profit_pct == pytest.approx(validated.net_profit_pct, abs=0.001)
+    assert fast_result.max_drawdown_pct == pytest.approx(validated.max_drawdown_pct, abs=0.001)
+    assert fast_result.total_trades == validated.total_trades
+    assert fast_result.winning_trades == validated.winning_trades
+    assert fast_result.losing_trades == validated.losing_trades
+    assert fast_result.profit_factor == pytest.approx(validated.profit_factor, abs=0.001)
+    assert fast_result.romad == pytest.approx(validated.romad, abs=0.005)
+    return fast_result, validated
+
+
 def test_s03_v11_registration_and_default_params():
     config = get_strategy_config("s03_reversal_v11")
 
@@ -157,6 +208,42 @@ def test_s03_v11_disabled_emergency_matches_v10_trade_for_trade(sui_prepared):
     assert v11_result.balance_curve == pytest.approx(v10_result.balance_curve)
     assert v11_result.timestamps == v10_result.timestamps
     assert v11_result.to_dict() == v10_result.to_dict()
+
+
+def test_s03_v11_disabled_invalid_emergency_params_are_inert(sui_prepared):
+    parsed = S03Params.from_dict(
+        {
+            "useEmergencySL": False,
+            "emergencySlPct": 0.0,
+            "emergencySlUpdateBars": 0,
+        }
+    )
+    assert parsed.useEmergencySL is False
+    assert parsed.emergencySlPct == 0.0
+    assert parsed.emergencySlUpdateBars == 0
+
+    df_prepared, trade_start_idx = sui_prepared
+    v10_result = S03ReversalV10.run(df_prepared, _default_s03_params(), trade_start_idx)
+    v11_result = S03ReversalV11.run(
+        df_prepared,
+        _default_s03_params(useEmergencySL=False, emergencySlPct=0.0, emergencySlUpdateBars=0),
+        trade_start_idx,
+    )
+
+    assert [_trade_tuple(t) for t in v11_result.trades] == [_trade_tuple(t) for t in v10_result.trades]
+    assert v11_result.to_dict() == v10_result.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"emergencySlPct": 0.0}, "emergencySlPct"),
+        ({"emergencySlUpdateBars": 0}, "emergencySlUpdateBars"),
+    ],
+)
+def test_s03_v11_enabled_invalid_emergency_params_raise(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        S03Params.from_dict(_synthetic_params(useEmergencySL=True, **overrides))
 
 
 def test_s03_v11_emergency_sl_10pct_tradingview_parity(sui_prepared):
@@ -375,6 +462,83 @@ def test_s03_v11_fast_grid_emergency_axis_and_semantic_identity():
 
 @pytest.mark.skipif(not v11_fast_grid.NUMBA_AVAILABLE, reason="Numba is required for S03 v11 fast Grid parity")
 @pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"emergencySlPct": 0.0}, "emergencySlPct"),
+        ({"emergencySlUpdateBars": 0}, "emergencySlUpdateBars"),
+    ],
+)
+def test_s03_v11_fast_grid_rejects_enabled_invalid_emergency_params(overrides, message):
+    df = _synthetic_df([100.0, 110.0, 111.0, 112.0])
+    params = _synthetic_params(useEmergencySL=True, **overrides)
+    candidate = _grid_candidate(params, mode="cc_only")
+    data = v11_fast_grid.prepare_fast_data(df, 0, [candidate])
+
+    with pytest.raises(ValueError, match=message):
+        v11_fast_grid.evaluate_candidates(data, [candidate])
+
+
+@pytest.mark.skipif(not v11_fast_grid.NUMBA_AVAILABLE, reason="Numba is required for S03 v11 fast Grid parity")
+def test_s03_v11_fast_grid_disabled_invalid_emergency_params_are_inert():
+    df = _synthetic_df(
+        [100.0, 110.0, 111.0, 112.0, 113.0],
+        opens=[100.0, 110.0, 111.0, 98.0, 113.0],
+        highs=[100.0, 111.0, 112.0, 113.0, 114.0],
+        lows=[100.0, 109.0, 90.0, 98.0, 112.0],
+    )
+    params = _synthetic_params(useEmergencySL=False, emergencySlPct=0.0, emergencySlUpdateBars=0)
+
+    fast_result, validated = _validate_fast_grid_candidate(df, 0, params, mode="cc_only")
+
+    assert validated.validation_status == "passed"
+    assert fast_result.total_trades == validated.total_trades
+
+
+@pytest.mark.skipif(not v11_fast_grid.NUMBA_AVAILABLE, reason="Numba is required for S03 v11 fast Grid parity")
+@pytest.mark.parametrize(
+    ("pct", "expected_trades", "expected_wins", "expected_emergency_exits"),
+    [
+        (10.0, 222, 82, 12),
+        (5.0, None, None, None),
+    ],
+)
+def test_s03_v11_real_data_fast_grid_matches_slow_for_emergency_ratchets(
+    sui_prepared,
+    pct,
+    expected_trades,
+    expected_wins,
+    expected_emergency_exits,
+):
+    df_prepared, trade_start_idx = sui_prepared
+    params = _default_s03_params(useEmergencySL=True, emergencySlPct=pct, emergencySlUpdateBars=16)
+
+    slow_result = S03ReversalV11.run(df_prepared, params, trade_start_idx)
+    fast_result, validated = _validate_fast_grid_candidate(
+        df_prepared,
+        trade_start_idx,
+        params,
+        candidate_id=int(pct * 10),
+        mode="both",
+    )
+    emergency_exits = [t for t in slow_result.trades if getattr(t, "exit_reason", None) == "Emergency SL"]
+
+    assert fast_result.total_trades == validated.total_trades
+    assert fast_result.winning_trades == validated.winning_trades
+    assert fast_result.losing_trades == validated.losing_trades
+    assert validated.total_trades == slow_result.total_trades
+    assert validated.winning_trades == slow_result.winning_trades
+    assert validated.losing_trades == slow_result.losing_trades
+    if expected_trades is not None:
+        assert slow_result.total_trades == expected_trades
+        assert slow_result.winning_trades == expected_wins
+        assert len(emergency_exits) == expected_emergency_exits
+    else:
+        assert slow_result.total_trades >= 250
+        assert len(emergency_exits) >= 100
+
+
+@pytest.mark.skipif(not v11_fast_grid.NUMBA_AVAILABLE, reason="Numba is required for S03 v11 fast Grid parity")
+@pytest.mark.parametrize(
     ("use_emergency", "pct"),
     [(False, 10.0), (True, 10.0), (True, 20.0)],
 )
@@ -386,32 +550,7 @@ def test_s03_v11_fast_grid_matches_slow_for_emergency_candidates(use_emergency, 
         lows=[100.0, 109.0, 90.0, 98.0, 112.0],
     )
     params = _synthetic_params(useEmergencySL=use_emergency, emergencySlPct=pct)
-    candidate = v11_fast_grid.GridCandidate(
-        candidate_id=1,
-        mode="cc_only",
-        params=params,
-        semantic_key=v11_fast_grid.candidate_semantic_key("cc_only", params),
-        generation_mode="test",
-        diversity_group="cc_only|SMA|2",
-    )
-    data = v11_fast_grid.prepare_fast_data(df, 0, [candidate])
-    fast_result = v11_fast_grid.evaluate_candidates(data, [candidate])[0]
-    validated = v11_fast_grid.validate_selected_candidates(
-        df,
-        0,
-        [fast_result],
-        tolerances={
-            "net_profit_pct_abs": 0.001,
-            "max_drawdown_pct_abs": 0.001,
-            "romad_abs": 0.005,
-            "win_rate_abs": 0.001,
-            "total_trades_abs": 0.0,
-            "winning_trades_abs": 0.0,
-            "losing_trades_abs": 0.0,
-            "max_consecutive_losses_abs": 0.0,
-        },
-        fail_on_error=True,
-    )[0]
+    fast_result, validated = _validate_fast_grid_candidate(df, 0, params, mode="cc_only")
 
     assert validated.validation_status == "passed"
     assert validated.total_trades == fast_result.total_trades

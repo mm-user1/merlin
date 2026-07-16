@@ -27,6 +27,7 @@ project-root/
 |   |-- test_regression_s01.py # S01 baseline regression
 |   |-- test_s01_migration.py  # S01 migration validation
 |   |-- test_s03_reversal_v10.py # S03 strategy tests
+|   |-- test_s03_reversal_v11.py # S03 v11 Emergency SL tests
 |   |-- test_s04_stochrsi.py   # S04 strategy tests
 |   |-- test_s06_r_trend_v02.py # S06 execution and reference tests
 |   |-- test_s06_fast_grid.py # S06 full-enumeration Grid/parity tests
@@ -76,6 +77,10 @@ project-root/
     |   |   |-- config.json    # Parameter schema
     |   |   `-- strategy.py    # Strategy implementation
     |   |-- s03_reversal_v10/  # Reversal strategy (T-Bands + close counts)
+    |   |   |-- config.json
+    |   |   |-- strategy.py
+    |   |   `-- fast_grid.py   # Numba-accelerated Grid fast backend
+    |   |-- s03_reversal_v11/  # v10-based V1 strategy with optional Emergency SL
     |   |   |-- config.json
     |   |   |-- strategy.py
     |   |   `-- fast_grid.py   # Numba-accelerated Grid fast backend
@@ -149,7 +154,7 @@ project-root/
 
 3. **Data Structure Ownership**
    - Structures live where they're populated:
-     - `TradeRecord`, `StrategyResult` -> `backtest_engine.py`
+     - `TradeRecord`, `StrategyResult` -> `backtest_engine.py` (`TradeRecord.exit_reason` is optional; S03 v11 Emergency SL exits use `"Emergency SL"`)
      - `BasicMetrics`, `AdvancedMetrics`, `WFAMetrics` -> `metrics.py`
      - `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` -> `optuna_engine.py`
      - `GridSelectionConfig`, `GridAllocation` (and per-strategy `GridParameterSpace`/`GridCandidate`/`FastGridData`) -> `grid_engine.py` and `strategies/.../fast_grid.py`
@@ -159,7 +164,7 @@ project-root/
 4. **Dual Optimizer Modes (Optuna + Grid)**
    - Two optimization modes share constraints, objectives, scoring, and the `trials` table:
      - **Optuna** (Bayesian/evolutionary): single- and multi-objective (1-6 objectives), Pareto front, soft constraints, samplers (Random, TPE/MOTPE, NSGA-II, NSGA-III), budgets (n_trials/timeout/patience), pruning (single-objective only), Initial Search Coverage, trial deduplication.
-     - **Grid** (deterministic): shared discovery/ranking/storage dispatches to a strategy-owned `fast_grid.py`. Backend metadata (`get_fast_grid_backend_metadata`) supplies ordered modes (with `default_enabled`, used to default a missing `grid_enabled_modes` — no per-strategy server hardcode) and a `diversity_group_fields` shape preserved end-to-end (`normalize_diversity_group_fields`). S03 retains budgeted seeded LHS/full generation for `cc_only`/`tbands_only`/`both`. S06 uses 100% enumeration for selectable `bracket`/`trail` modes: 48,480 default combinations and up to 436,320 with optional Threshold OS/OB axes (`20, 30, 40`). Selected candidates always pass through the slow strategy; WFA OOS is also slow-authoritative. Soft constraints are shared with Optuna and surfaced in the Grid Settings sidebar on Results and Analytics. The multi-objective/Pareto Grid path is supported but can be substantially more expensive than single-objective ranking.
+     - **Grid** (deterministic): shared discovery/ranking/storage dispatches to a strategy-owned `fast_grid.py`. Backend metadata (`get_fast_grid_backend_metadata`) supplies ordered modes (with `default_enabled`, used to default a missing `grid_enabled_modes` — no per-strategy server hardcode) and a `diversity_group_fields` shape preserved end-to-end (`normalize_diversity_group_fields`). S03 v10/v11 retain budgeted seeded LHS/full generation for `cc_only`/`tbands_only`/`both`; v11 adds optional Emergency SL and V1 fast Grid support. S06 uses 100% enumeration for selectable `bracket`/`trail` modes: 48,480 default combinations and up to 436,320 with optional Threshold OS/OB axes (`20, 30, 40`). Selected candidates always pass through the slow strategy; WFA OOS is also slow-authoritative. Soft constraints are shared with Optuna and surfaced in the Grid Settings sidebar on Results and Analytics. The multi-objective/Pareto Grid path is supported but can be substantially more expensive than single-objective ranking.
    - **Bool group rules**: strategy `config.json` can declare invalid boolean combinations (e.g., `at_least_one_true`) to reduce wasted trials
    - **Parameter dependencies**: numeric params can declare `depends_on` to be skipped when a parent bool is false
    - **In-memory backend**: `InMemoryJournalBackend` replaces file-based journal storage for faster multiprocess Optuna optimization
@@ -489,8 +494,11 @@ pytest tests/ -v
 |----|------|-------------|
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA strategy with 11 MA types, close counts, ATR stops |
 | `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis |
+| `s03_reversal_v11` | S03 Reversal | Backtester V1 v10 variant with optional Emergency SL; V1 fast Grid enabled; Emergency SL exits set `TradeRecord.exit_reason="Emergency SL"` |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
 | `s06_r_trend_v02` | S06 R-Trend | Williams %R Reversal/Trend entries with Bracket or ratcheting MA-Trail execution; Backtest/Optuna/WFA plus deterministic full-enumeration Fast Grid |
+
+S03 v11 behavior note: Emergency SL same-bar re-entry is intentionally Pine-compatible. Normal signal exits preserve existing S03 V1 reversal timing. Do not restore older delayed Emergency SL re-entry text; that variant failed the TradingView parity gate.
 
 ## Adding New Strategies
 

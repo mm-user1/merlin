@@ -86,10 +86,11 @@ class S03Params:
             initialCapital=float(d.get("initialCapital", cls.initialCapital)),
             commissionPct=float(d.get("commissionPct", cls.commissionPct)),
         )
-        if params.emergencySlPct <= 0:
-            raise ValueError("emergencySlPct must be > 0.")
-        if params.emergencySlUpdateBars < 1:
-            raise ValueError("emergencySlUpdateBars must be >= 1.")
+        if params.useEmergencySL:
+            if params.emergencySlPct <= 0:
+                raise ValueError("emergencySlPct must be > 0 when useEmergencySL=true.")
+            if params.emergencySlUpdateBars < 1:
+                raise ValueError("emergencySlUpdateBars must be >= 1 when useEmergencySL=true.")
         return params
 
 

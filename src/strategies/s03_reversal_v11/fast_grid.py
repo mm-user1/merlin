@@ -143,6 +143,55 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _validate_emergency_params(params: Dict[str, Any]) -> None:
+    if not _coerce_bool(params.get("useEmergencySL"), False):
+        return
+    try:
+        pct = float(params.get("emergencySlPct", 20.0))
+        update_bars = int(params.get("emergencySlUpdateBars", 16))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid Emergency SL parameters.") from exc
+    if pct <= 0:
+        raise ValueError("emergencySlPct must be > 0 when useEmergencySL=true.")
+    if update_bars < 1:
+        raise ValueError("emergencySlUpdateBars must be >= 1 when useEmergencySL=true.")
+
+
+def _validate_emergency_axes(
+    fixed_values: Dict[str, Any],
+    axes: Dict[str, List[Any]],
+    optimized: Dict[str, bool],
+) -> None:
+    if not _coerce_bool(fixed_values.get("useEmergencySL"), False):
+        return
+    pct_values = (
+        axes["emergencySlPct"]
+        if optimized.get("emergencySlPct", False)
+        else [fixed_values.get("emergencySlPct")]
+    )
+    update_values = (
+        axes["emergencySlUpdateBars"]
+        if optimized.get("emergencySlUpdateBars", False)
+        else [fixed_values.get("emergencySlUpdateBars")]
+    )
+    for pct in pct_values:
+        _validate_emergency_params(
+            {
+                "useEmergencySL": True,
+                "emergencySlPct": pct,
+                "emergencySlUpdateBars": update_values[0],
+            }
+        )
+    for update_bars in update_values:
+        _validate_emergency_params(
+            {
+                "useEmergencySL": True,
+                "emergencySlPct": pct_values[0],
+                "emergencySlUpdateBars": update_bars,
+            }
+        )
+
+
 def _decimal_places(value: Any) -> int:
     try:
         dec = Decimal(str(value))
@@ -404,6 +453,7 @@ def build_parameter_space(config: OptimizationConfig) -> GridParameterSpace:
             "emergencySlUpdateBars",
             axes["emergencySlUpdateBars"][0],
         )
+    _validate_emergency_axes(fixed_values, axes, optimized)
 
     placeholder = GridParameterSpace(
         axes=axes,
@@ -476,6 +526,7 @@ def _hydrate_params(space: GridParameterSpace, mode: str, active_values: Dict[st
     params.setdefault("emergencySlUpdateBars", 16)
     params.setdefault("initialCapital", 100.0)
     params.setdefault("commissionPct", 0.05)
+    _validate_emergency_params(params)
     return params
 
 
@@ -769,9 +820,6 @@ def _s03_fast_loop_impl(
     up_multiplier = 1.0 + t_band_long_pct / 100.0
     down_multiplier = 1.0 - t_band_short_pct / 100.0
     commission_rate = commission_pct / 100.0
-    if emergency_sl_update_bars < 1:
-        emergency_sl_update_bars = 1
-
     balance = initial_capital
     running_max_balance = balance
     max_drawdown_pct = 0.0
@@ -1315,6 +1363,7 @@ def _result_from_values(
 
 def _evaluate_one(data: FastGridData, candidate: GridCandidate, *, needs_dsr: bool = False) -> OptimizationResult:
     params = candidate.params
+    _validate_emergency_params(params)
     ma_key = (_clean_ma_type(params.get("maType3")), int(params.get("maLength3")))
     ma_values = data.ma_cache[ma_key]
     if _S03_FAST_LOOP is None:
@@ -1385,6 +1434,7 @@ def evaluate_candidates(
 
     for idx, candidate in enumerate(candidates):
         params = candidate.params
+        _validate_emergency_params(params)
         ma_key = (_clean_ma_type(params.get("maType3")), int(params.get("maLength3")))
         ma_indices[idx] = ma_index_by_key[ma_key]
         date_filters[idx] = _coerce_bool(params.get("dateFilter"), False)

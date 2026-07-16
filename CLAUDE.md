@@ -39,7 +39,7 @@ Key: Flask, pandas, numpy, matplotlib, optuna==4.6.0
 1. **Config-driven design** - Parameter schemas in `config.json`, UI renders dynamically
 2. **camelCase naming** - End-to-end: Pine Script -> config.json -> Python -> CSV
 3. **Dual optimizer modes** - Optuna (Bayesian/evolutionary) and Grid (deterministic; per-strategy backend chooses generation: S03 = LHS/full by mode, S06 = complete enumeration); both share constraints/objectives/storage. Optuna offers optional Initial Search Coverage for systematic parameter exploration.
-4. **Strategy isolation** - Each strategy owns its params dataclass; optional Numba-accelerated fast Grid backend per strategy (`s03_reversal_v10/fast_grid.py`, `s06_r_trend_v02/fast_grid.py`)
+4. **Strategy isolation** - Each strategy owns its params dataclass; optional Numba-accelerated fast Grid backend per strategy (`s03_reversal_v10/fast_grid.py`, `s03_reversal_v11/fast_grid.py`, `s06_r_trend_v02/fast_grid.py`)
 5. **Rolling WFA** - Calendar-based IS/OOS windows, stitched OOS equity, annualized WFE, adaptive re-optimization triggers, optional cooldown after triggers, per-module top-N trial retention
 6. **In-memory backend** - RAM-based Optuna journal storage for faster multiprocess optimization
 7. **Trial deduplication** - Automatic detection/skipping of duplicate parameter sets with search space exhaustion early stopping
@@ -72,6 +72,7 @@ src/
 |   |-- base.py               # BaseStrategy class
 |   |-- s01_trailing_ma/
 |   |-- s03_reversal_v10/     # Includes fast_grid.py (LHS/full by-mode Numba Grid backend)
+|   |-- s03_reversal_v11/     # V1 v10 clone with optional Emergency SL + fast_grid.py
 |   |-- s04_stochrsi/
 |   `-- s06_r_trend_v02/      # Includes fast_grid.py (full-enumeration Numba Grid backend)
 |-- storage/                  # Database storage (gitignored)
@@ -121,11 +122,11 @@ src/
 
 | Structure | Module |
 |-----------|--------|
-| `TradeRecord`, `StrategyResult` | `backtest_engine.py` |
+| `TradeRecord`, `StrategyResult` | `backtest_engine.py` (`TradeRecord.exit_reason` is optional; S03 v11 Emergency SL exits use `"Emergency SL"`) |
 | `BasicMetrics`, `AdvancedMetrics` | `metrics.py` |
 | `OptimizationResult`, `OptunaConfig`, `OptimizationConfig`, `InMemoryJournalBackend` | `optuna_engine.py` |
 | `GridSelectionConfig`, `GridAllocation`, grid preview/dispatch, backend metadata normalization | `grid_engine.py` |
-| `GridParameterSpace`, `GridCandidate`, `FastGridData` (S03 LHS/full fast backend) | `strategies/s03_reversal_v10/fast_grid.py` |
+| `GridParameterSpace`, `GridCandidate`, `FastGridData` (S03 LHS/full fast backend) | `strategies/s03_reversal_v10/fast_grid.py`, `strategies/s03_reversal_v11/fast_grid.py` |
 | `GridParameterSpace`, `GridCandidate`, `CandidateSequence`, `FastGridData` (S06 full-enumeration fast backend) | `strategies/s06_r_trend_v02/fast_grid.py` |
 | `WFConfig`, `WFResult`, `WindowResult`, `WindowSplit`, `StitchWindow`, `TriggerResult`, `ISPipelineResult`, `WindowExecutionPlan`, `OOSStitchedResult` | `walkforward_engine.py` |
 | Lancelot partial bundle builder | `bundle_export.py` |
@@ -392,9 +393,16 @@ backend advertises capability via `get_backend_metadata()` (normalized by
     use canonical integer counts.
 
 - **Strategy coverage**
-  - Grid is enabled for `s03_reversal_v10` and `s06_r_trend_v02`. A new strategy
-    participates by adding its own `fast_grid.py` backend (and metadata); no
-    shared-code or server changes are required.
+  - Grid is enabled for `s03_reversal_v10`, `s03_reversal_v11`, and
+    `s06_r_trend_v02`. A new strategy participates by adding its own
+    `fast_grid.py` backend (and metadata); no shared-code or server changes are
+    required.
+  - `s03_reversal_v11` is a Backtester V1 strategy based on v10 with optional
+    Emergency SL. Emergency SL exits set `TradeRecord.exit_reason` to
+    `"Emergency SL"`. Same-bar re-entry after Emergency SL is intentionally
+    Pine-compatible; normal signal exits preserve existing S03 V1 reversal
+    timing. Do not restore older delayed Emergency SL re-entry text because that
+    variant failed the TradingView parity gate.
 
 ## Lancelot Bundle Export
 
@@ -581,6 +589,7 @@ backend advertises capability via `get_backend_metadata()` (normalized by
 |----|------|-------------|
 | `s01_trailing_ma` | S01 Trailing MA | Complex trailing MA with 11 MA types, close counts, ATR stops |
 | `s03_reversal_v10` | S03 Reversal | Reversal strategy using close-count confirmation and T-Bands hysteresis (LHS/full Grid backend) |
+| `s03_reversal_v11` | S03 Reversal | Backtester V1 v10 variant with optional Emergency SL and LHS/full Grid backend |
 | `s04_stochrsi` | S04 StochRSI | StochRSI swing strategy with swing-based stops |
 | `s06_r_trend_v02` | S06 R-Trend | Williams %R trend/reversal entries with Bracket or Trail exits (full-enumeration Grid backend) |
 
@@ -604,8 +613,10 @@ backend advertises capability via `get_backend_metadata()` (normalized by
 | Flask run routes | `src/ui/server_routes_run.py` |
 | Flask analytics routes | `src/ui/server_routes_analytics.py` |
 | S03 example | `src/strategies/s03_reversal_v10/strategy.py` |
+| S03 v11 Emergency SL | `src/strategies/s03_reversal_v11/strategy.py` |
 | S04 example | `src/strategies/s04_stochrsi/strategy.py` |
 | S03 Grid backend (LHS/full) | `src/strategies/s03_reversal_v10/fast_grid.py` |
+| S03 v11 Grid backend (LHS/full) | `src/strategies/s03_reversal_v11/fast_grid.py` |
 | S06 Grid backend (full enumeration) | `src/strategies/s06_r_trend_v02/fast_grid.py` |
 | config.json example | `src/strategies/s04_stochrsi/config.json` |
 | Test baseline | `data/baseline/` |
