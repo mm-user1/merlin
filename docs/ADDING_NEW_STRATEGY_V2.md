@@ -332,6 +332,35 @@ Learned from the first real Pine v5 pilot import
   with compiled Grid V2 assertions in one pytest process; run compiled parity
   in a fresh JIT-on process.
 
+## Pilot Import Lessons (S03 Regime-ER, B2-TZ 36)
+
+Learned from importing `s03_reversal_v11_regime_er_b2`, the first production
+strategy on the `signal_reversal` topology:
+
+- **Map Pine `close_all` to exit arrays, not a new mode.** Regime-flat exits are
+  expressed as both `Signals.long_exits` and `Signals.short_exits`. The generic
+  topology then closes the active position at the next open and leaves
+  non-Emergency-SL exit reasons as `None`.
+- **Keep `useRegime` fixed per study.** The Regime-ER numeric params are signal
+  params, but `useRegime` itself is not a default Grid axis because disabled
+  regime would make those numeric params inert. Use fixed study params and opt
+  into numeric regime axes explicitly.
+- **Do not infer config defaults from one baseline.** The Regime-ER reference
+  uses `maOffset3=0.0`, `regimeErLength=30`, `regimeErThresh=0.40`, and
+  `emergencySlPct=10.0`; the Pine defaults remain `0.2`, `20`, `0.30`, and
+  `20.0` respectively. Baseline tests inject the reference params.
+- **Date-expiry `close_all` can require post-end bars.** The S03 Regime-ER
+  TradingView reference emits the final close after leaving the date range and
+  fills it at `2026-02-01T01:00:00Z`. The production B2 adapter follows the
+  established truncation-at-`end` pattern and closes at the strict boundary
+  `2026-02-01T00:00:00Z`; keep this as a documented residual unless core date
+  boundary semantics are deliberately reopened.
+- **Emergency SL export prices can be display-rounded.** The reference B
+  Emergency SL event matches in time and behavior; the TradingView CSV rounds
+  the computed fill price to the 4-decimal display grid. Use a one-tick
+  exit-price tolerance for that exported field, while keeping entry prices and
+  timestamps exact.
+
 ## Baseline And Certification
 
 Use a TradingView or other external baseline when the strategy is meant to
