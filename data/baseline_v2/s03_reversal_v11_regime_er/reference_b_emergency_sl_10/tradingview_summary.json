@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "reference_id": "reference_b_emergency_sl_10",
+  "source": "TradingView Strategy Tester metrics screenshot and raw trades export.",
+  "timezone_note": "TradingView UI/export timestamps use UTC+8. Normalized machine-readable trades use UTC.",
+  "metrics": {
+    "net_profit_usdt": 154.02,
+    "net_profit_pct": 154.02,
+    "max_drawdown_usdt": 23.90,
+    "max_drawdown_pct": 20.84,
+    "profitable_trades": 63,
+    "total_trades": 152,
+    "win_rate_pct": 41.45,
+    "profit_factor": 1.802,
+    "emergency_sl_exits": 1
+  },
+  "raw_export": {
+    "rows": 304,
+    "entry_rows": 152,
+    "exit_rows": 152,
+    "closed_trades": 152,
+    "winning_exit_rows": 63,
+    "emergency_sl_exit_rows": 1,
+    "exit_signal_counts": {
+      "Regime Flat": 150,
+      "Emergency SL": 1,
+      "Close": 1
+    },
+    "last_trade_number": 152,
+    "last_exit_signal": "Close",
+    "last_exit_time_tradingview": "2026-02-01 09:00",
+    "last_exit_time_utc": "2026-02-01T01:00:00Z",
+    "last_exit_price_usdt": 1.1608
+  }
+}

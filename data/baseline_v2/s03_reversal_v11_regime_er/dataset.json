@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "strategy_id": "s03_reversal_v11_regime_er",
+  "strategy_name": "S_03 Reversal v11 Regime-ER",
+  "purpose": "Merlin Backtester V2 TradingView parity baseline for the S03 Reversal v11 Regime-ER pilot import.",
+  "market_data": {
+    "symbol": "SUIUSDT.P",
+    "exchange": "OKX",
+    "instrument": "perpetual_swap_contract",
+    "quote_currency": "USDT",
+    "timeframe": "30m",
+    "path": "data/raw/OKX_SUIUSDT.P, 30 2025.01.01-2026.02.01.csv",
+    "sha256": "d664bbae2903828f84b19e7af548fdc744b970a17f56846ad77882a9ca786aae",
+    "timezone": "UTC"
+  },
+  "instrument": {
+    "tick_size": 0.0001
+  },
+  "canonical_period": {
+    "start_utc": "2025-02-01T00:00:00Z",
+    "end_utc": "2026-02-01T00:00:00Z",
+    "tradingview_timezone": "UTC+8",
+    "tradingview_start": "2025-02-01 08:00",
+    "tradingview_end": "2026-02-01 08:00",
+    "last_reference_exit_utc": "2026-02-01T01:00:00Z",
+    "last_reference_exit_tradingview": "2026-02-01 09:00"
+  },
+  "pine_source": {
+    "path": "data/baseline_v2/s03_reversal_v11_regime_er/pine/S_03-Reversal_v11_Regime-ER.pine",
+    "sha256": "86562f57372c4727ceb3330b1744fc82b550bb394f71a6c09b5a84f58551432d",
+    "force_end_date_close": true,
+    "force_end_date_close_semantics": "close_all_after_leaving_time_range_then_next_tick_open_fill",
+    "final_boundary_exercised": true,
+    "process_orders_on_close": false,
+    "fill_orders_on_standard_ohlc": true,
+    "notes": [
+      "The strategy creates normal market orders for next-tick execution.",
+      "The Pine source calls strategy.close_all(\"Close\") after the date-filter range is left.",
+      "The final date-expiry close fills at 2026-02-01T01:00:00Z, after the canonical end timestamp.",
+      "The reference pair differs only by useEmergencySL; all other strategy inputs are identical."
+    ]
+  },
+  "tradingview_execution_profile": {
+    "initial_capital": 100.0,
+    "currency": "USDT",
+    "default_order_size": 100.0,
+    "default_order_size_type": "percent_of_equity",
+    "pyramiding": 0,
+    "bar_detailization": "default_4_ticks_per_bar",
+    "script_execution": {
+      "on_bar_close": true,
+      "on_order_fill": false,
+      "on_realtime_bar_tick": false
+    },
+    "commission": {
+      "value": 0.05,
+      "type": "percent"
+    },
+    "long_leverage": "Infinity",
+    "short_leverage": "Infinity",
+    "slippage_ticks": 0,
+    "limit_order_execution": "requested_price",
+    "order_execution_delay": "one_tick"
+  },
+  "shared_strategy_inputs": {
+    "maType3": "SMA",
+    "maLength3": 75,
+    "maOffset3": 0.0,
+    "useCloseCount": true,
+    "closeCountLong": 7,
+    "closeCountShort": 5,
+    "useTBands": true,
+    "tBandLongPct": 1.0,
+    "tBandShortPct": 1.3,
+    "contractSize": 0.01,
+    "useRegime": true,
+    "regimeErLength": 30,
+    "regimeErThresh": 0.4,
+    "emergencySlPct": 10.0,
+    "emergencySlUpdateBars": 16
+  },
+  "references": [
+    {
+      "reference_id": "reference_a_no_emergency_sl",
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_a_no_emergency_sl",
+      "use_regime": true,
+      "use_emergency_sl": false,
+      "emergency_sl_pct": 10.0,
+      "total_trades": 151,
+      "role": "control_regime_er_without_emergency_sl"
+    },
+    {
+      "reference_id": "reference_b_emergency_sl_10",
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_b_emergency_sl_10",
+      "use_regime": true,
+      "use_emergency_sl": true,
+      "emergency_sl_pct": 10.0,
+      "total_trades": 152,
+      "emergency_sl_exits": 1,
+      "role": "primary_regime_er_emergency_sl_pilot_target"
+    }
+  ],
+  "asset_hashes": [
+    {
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_a_no_emergency_sl/tradingview_trades.csv",
+      "sha256": "aacd035addace1cbfd58589a18c1c83402399db342d9a605e4e8cb7fd1301a29"
+    },
+    {
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_a_no_emergency_sl/trades_normalized_utc.csv",
+      "sha256": "b738a19e7f2475932819bcec2ddcc2165ac70131ecc1d48e1da58bacca9b5c42"
+    },
+    {
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_b_emergency_sl_10/tradingview_trades.csv",
+      "sha256": "b9a7eb45fdc2aa8a9eb311b5a58f77f8003ce19f1e64b9554cc76d799201563b"
+    },
+    {
+      "path": "data/baseline_v2/s03_reversal_v11_regime_er/reference_b_emergency_sl_10/trades_normalized_utc.csv",
+      "sha256": "1cac00eb2a49fa194eea6b2f08f0181edf670dac4c25f40a5dfaca13dda62508"
+    }
+  ]
+}

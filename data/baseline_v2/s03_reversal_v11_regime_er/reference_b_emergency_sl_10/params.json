@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "reference_id": "reference_b_emergency_sl_10",
+  "description": "S03 Reversal v11 Regime-ER TradingView reference with Regime-ER enabled and Emergency SL enabled at 10%.",
+  "source_files": {
+    "raw_tradingview_trades": {
+      "path": "tradingview_trades.csv",
+      "sha256": "b9a7eb45fdc2aa8a9eb311b5a58f77f8003ce19f1e64b9554cc76d799201563b",
+      "timezone": "UTC+8"
+    },
+    "normalized_trades": {
+      "path": "trades_normalized_utc.csv",
+      "sha256": "1cac00eb2a49fa194eea6b2f08f0181edf670dac4c25f40a5dfaca13dda62508",
+      "timezone": "UTC"
+    },
+    "inputs_screenshot": "tradingview_inputs.PNG",
+    "properties_screenshot": "tradingview_properties.PNG",
+    "metrics_screenshot": "tradingview_metrics.PNG"
+  },
+  "time_filter": {
+    "dateFilter": true,
+    "forceCloseOnEndDate": true,
+    "forceCloseImplementation": "close_all_after_leaving_time_range_then_next_tick_open_fill",
+    "finalBoundaryExercised": true,
+    "backtester": true,
+    "table": true,
+    "start_utc": "2025-02-01T00:00:00Z",
+    "end_utc": "2026-02-01T00:00:00Z",
+    "last_exit_utc": "2026-02-01T01:00:00Z",
+    "tradingview_timezone": "UTC+8",
+    "tradingview_start": "2025-02-01 08:00",
+    "tradingview_end": "2026-02-01 08:00",
+    "last_exit_tradingview": "2026-02-01 09:00"
+  },
+  "strategy_inputs": {
+    "maType3": "SMA",
+    "maLength3": 75,
+    "maOffset3": 0.0,
+    "useCloseCount": true,
+    "closeCountLong": 7,
+    "closeCountShort": 5,
+    "useTBands": true,
+    "tBandLongPct": 1.0,
+    "tBandShortPct": 1.3,
+    "contractSize": 0.01,
+    "useRegime": true,
+    "regimeErLength": 30,
+    "regimeErThresh": 0.4,
+    "useEmergencySL": true,
+    "emergencySlPct": 10.0,
+    "emergencySlUpdateBars": 16
+  },
+  "execution_semantics": {
+    "normal_market_orders": "next_tick_open",
+    "sizing": "fixed_pct_equity",
+    "regime_filter": "kaufman_efficiency_ratio_state_machine",
+    "regime_flat_exit": "close_all_next_tick_open",
+    "date_expiry_exit": "close_all_next_tick_open_after_time_range",
+    "emergency_sl": "enabled_at_10_pct"
+  }
+}
