@@ -5,6 +5,12 @@
 
 window.currentStrategyId = null;
 window.currentStrategyConfig = null;
+const DYNAMIC_BACKTEST_GLOBAL_PARAM_NAMES = new Set(['dateFilter', 'start', 'end', 'warmupBars']);
+
+function shouldRenderDynamicBacktestParam(paramName, paramDef = {}) {
+  void paramDef;
+  return !DYNAMIC_BACKTEST_GLOBAL_PARAM_NAMES.has(String(paramName || ''));
+}
 
 async function loadStrategiesList() {
   try {
@@ -118,6 +124,7 @@ function generateBacktestForm(config) {
   const groups = {};
 
   for (const [paramName, paramDef] of Object.entries(params)) {
+    if (!shouldRenderDynamicBacktestParam(paramName, paramDef)) continue;
     const group = paramDef.group || 'Other';
     if (!groups[group]) {
       groups[group] = [];

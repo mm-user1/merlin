@@ -172,6 +172,7 @@ class GridV2ParameterDomain:
 class CandidateMappingRecord:
     candidate_id: int
     variant_name: str
+    grid_mode_name: str
     semantic_key: str
     canonical_identity: str
     active_param_values: Mapping[str, Any]
@@ -229,6 +230,7 @@ class _LazyCanonicalIdentity:
 class GridV2Candidate:
     candidate_id: int
     variant_name: str
+    grid_mode_name: str
     modes: Mapping[str, str]
     params: Mapping[str, Any]
     active_param_names: tuple[str, ...]
@@ -250,8 +252,12 @@ class GridV2CandidateTable:
     axis_names: tuple[str, ...]
     axis_column_by_name: Mapping[str, int]
     variant_names: tuple[str, ...]
+    grid_mode_names: tuple[str, ...]
+    grid_mode_labels: Mapping[str, str]
+    variant_name_by_grid_mode: Mapping[str, str]
     mode_tuples_by_variant: tuple[tuple[tuple[str, str], ...], ...]
     variant_codes: np.ndarray = field(repr=False)
+    grid_mode_codes: np.ndarray = field(repr=False)
     axis_value_codes: np.ndarray = field(repr=False)
     semantic_keys_by_row: tuple[str, ...] | None = field(repr=False)
     params_by_row: tuple[Mapping[str, Any], ...] | None = field(repr=False)
@@ -314,18 +320,22 @@ class GridV2CandidateTable:
         idx = self.validate_index(index)
         return self.variant_names[int(self.variant_codes[idx])]
 
+    def grid_mode_name_for_index(self, index: int) -> str:
+        idx = self.validate_index(index)
+        return self.grid_mode_names[int(self.grid_mode_codes[idx])]
+
     def modes_for_index(self, index: int) -> dict[str, str]:
         variant_name = self.variant_name_for_index(index)
         return dict(self.profile.variants[variant_name].modes)
 
     def active_names_for_index(self, index: int) -> tuple[str, ...]:
-        return self.active_names_by_variant[self.variant_name_for_index(index)]
+        return self.active_names_by_variant[self.grid_mode_name_for_index(index)]
 
     def inactive_names_for_index(self, index: int) -> tuple[str, ...]:
-        return self.inactive_names_by_variant[self.variant_name_for_index(index)]
+        return self.inactive_names_by_variant[self.grid_mode_name_for_index(index)]
 
     def axis_names_for_index(self, index: int) -> tuple[str, ...]:
-        return self.axis_names_by_variant[self.variant_name_for_index(index)]
+        return self.axis_names_by_variant[self.grid_mode_name_for_index(index)]
 
     def params_for_index(self, index: int) -> dict[str, Any]:
         idx = self.validate_index(index)
@@ -334,8 +344,8 @@ class GridV2CandidateTable:
         cached = self._params_cache.get(idx)
         if cached is not None:
             return cached  # type: ignore[return-value]
-        variant_name = self.variant_name_for_index(idx)
-        params = dict(self.seed_params_by_variant[variant_name])
+        grid_mode_name = self.grid_mode_name_for_index(idx)
+        params = dict(self.seed_params_by_variant[grid_mode_name])
         for column, name in enumerate(self.axis_names):
             code = int(self.axis_value_codes[idx, column]) if self.axis_value_codes.shape[1] else -1
             if code >= 0:
@@ -348,20 +358,20 @@ class GridV2CandidateTable:
         idx = self.validate_index(index)
         if self.params_by_row is not None:
             return _jsonable_value(self.params_by_row[idx].get(name))
-        variant_name = self.variant_name_for_index(idx)
+        grid_mode_name = self.grid_mode_name_for_index(idx)
         column = self.axis_column_by_name.get(name)
         if column is not None:
             code = int(self.axis_value_codes[idx, column]) if self.axis_value_codes.shape[1] else -1
             if code >= 0:
                 return _jsonable_value(self.parameter_domains[name].values[code])
-        return _jsonable_value(self.seed_params_by_variant[variant_name].get(name))
+        return _jsonable_value(self.seed_params_by_variant[grid_mode_name].get(name))
 
     def has_param_for_index(self, index: int, name: str) -> bool:
         idx = self.validate_index(index)
         if self.params_by_row is not None:
             return name in self.params_by_row[idx]
-        variant_name = self.variant_name_for_index(idx)
-        if name in self.seed_params_by_variant[variant_name]:
+        grid_mode_name = self.grid_mode_name_for_index(idx)
+        if name in self.seed_params_by_variant[grid_mode_name]:
             return True
         column = self.axis_column_by_name.get(name)
         if column is None:
@@ -386,10 +396,12 @@ class GridV2CandidateTable:
 
     def semantic_payload_for_index(self, index: int) -> dict[str, Any]:
         variant_name = self.variant_name_for_index(index)
+        grid_mode_name = self.grid_mode_name_for_index(index)
         return _semantic_payload(
             config={"id": self.strategy_id, "version": self.strategy_version},
             profile=self.profile,
             variant=self.profile.variants[variant_name],
+            grid_mode_name=grid_mode_name,
             params=self.params_for_index(index),
             active_names=self.active_names_for_index(index),
         )
@@ -410,6 +422,7 @@ class GridV2CandidateTable:
         if identity is None:
             identity = _canonical_identity(
                 variant_name=self.variant_name_for_index(idx),
+                grid_mode_name=self.grid_mode_name_for_index(idx),
                 params=self.params_for_index(idx),
                 names=self.active_names_for_index(idx),
             )
@@ -423,6 +436,7 @@ class GridV2CandidateTable:
             candidate = GridV2Candidate(
                 candidate_id=idx + 1,
                 variant_name=self.variant_name_for_index(idx),
+                grid_mode_name=self.grid_mode_name_for_index(idx),
                 modes=self.modes_for_index(idx),
                 params=self.params_for_index(idx),
                 active_param_names=self.active_names_for_index(idx),
@@ -443,6 +457,7 @@ class GridV2CandidateTable:
         return CandidateMappingRecord(
             candidate_id=idx + 1,
             variant_name=self.variant_name_for_index(idx),
+            grid_mode_name=self.grid_mode_name_for_index(idx),
             semantic_key=self.semantic_key_for_index(idx),
             canonical_identity=self.canonical_identity_for_index(idx),
             active_param_values=self.active_param_values_for_index(idx),
@@ -509,6 +524,7 @@ class GridV2CountPreview:
     deduped_candidate_count: int | None
     per_variant_counts: Mapping[str, int]
     axis_names_by_variant: Mapping[str, tuple[str, ...]]
+    mode_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -549,6 +565,7 @@ class GridV2ResultRow:
     semantic_key: str
     canonical_identity: Any
     variant_name: str
+    grid_mode_name: str
     modes: Mapping[str, str]
     params: Mapping[str, Any]
     net_profit_pct: float
@@ -616,6 +633,17 @@ class GridV2PlanReuseResult:
 
 
 @dataclass(frozen=True)
+class _GridV2PlanBlock:
+    name: str
+    label: str
+    variant_name: str
+    seed_params: Mapping[str, Any]
+    active_names: tuple[str, ...]
+    inactive_names: tuple[str, ...]
+    axis_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _GridV2PlanPrelude:
     config: Mapping[str, Any]
     settings: GridV2Settings
@@ -624,6 +652,7 @@ class _GridV2PlanPrelude:
     domains: Mapping[str, GridV2ParameterDomain]
     selector_values: Mapping[str, Any]
     selected_variants: tuple[str, ...]
+    blocks: tuple[_GridV2PlanBlock, ...]
     axis_names: tuple[str, ...]
     axis_column_by_name: Mapping[str, int]
     seed_params_by_variant: Mapping[str, Mapping[str, Any]]
@@ -631,6 +660,7 @@ class _GridV2PlanPrelude:
     inactive_names_by_variant: Mapping[str, tuple[str, ...]]
     axis_names_by_variant: Mapping[str, tuple[str, ...]]
     per_variant_counts: Mapping[str, int]
+    mode_labels: Mapping[str, str]
     raw_candidate_count: int
 
 
@@ -760,7 +790,7 @@ def build_grid_v2_plan(
     fixed_params.update(dict(base_params or {}))
     domains = _build_parameter_domains(config_copy, settings, fixed_params, profile)
     selector_values = _selector_values_by_variant(config_copy, profile)
-    selected_variants = _selected_variants(profile, settings)
+    selected_variants = _selected_variants(profile, settings, fixed_params)
     candidate_table = _build_candidate_table(
         config=config_copy,
         settings=settings,
@@ -785,12 +815,16 @@ def build_grid_v2_plan(
             if domain.is_axis and str(domain.source).endswith(".runtime_options")
         },
         "variant_order": list(selected_variants),
+        "grid_mode_order": list(candidate_table.grid_mode_names),
+        "grid_mode_labels": dict(candidate_table.grid_mode_labels),
+        "resolved_internal_variants": dict(candidate_table.variant_name_by_grid_mode),
         "semantic_dedup_count": candidate_table.semantic_dedup_count,
         "candidate_table": {
             "enabled": True,
             "layout": "typed_lazy",
             "axis_count": len(candidate_table.axis_names),
             "variant_count": len(candidate_table.variant_names),
+            "grid_mode_count": len(candidate_table.grid_mode_names),
         },
     }
     return GridV2Plan(
@@ -835,7 +869,7 @@ def _grid_v2_plan_prelude(
     fixed_params.update(dict(base_params or {}))
     domains = _build_parameter_domains(config_copy, settings, fixed_params, profile)
     selector_values = _selector_values_by_variant(config_copy, profile)
-    selected_variants = _selected_variants(profile, settings)
+    selected_variants = _selected_variants(profile, settings, fixed_params)
     return _grid_v2_plan_prelude_from_parts(
         config=config_copy,
         settings=settings,
@@ -859,31 +893,31 @@ def _grid_v2_plan_prelude_from_parts(
 ) -> _GridV2PlanPrelude:
     axis_names = tuple(name for name in profile.parameter_names if domains[name].is_axis)
     axis_columns = {name: index for index, name in enumerate(axis_names)}
+    blocks = _build_planning_blocks(
+        config=config,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=selected_variants,
+    )
     seed_params_by_variant: dict[str, dict[str, Any]] = {}
     active_names_by_variant: dict[str, tuple[str, ...]] = {}
     inactive_names_by_variant: dict[str, tuple[str, ...]] = {}
     axis_names_by_variant: dict[str, tuple[str, ...]] = {}
     per_variant_counts: dict[str, int] = {}
+    mode_labels: dict[str, str] = {}
     raw_count = 0
 
-    for variant_name in selected_variants:
-        seed_params = _candidate_seed_params(fixed_params)
-        if profile.variant_selector is not None:
-            seed_params[profile.variant_selector.param] = selector_values[variant_name]
-        active_names = _ordered_active_names(profile, seed_params)
-        inactive_names = _ordered_inactive_names(profile, seed_params)
-        variant_axis_names = _variant_axis_names(
-            profile=profile,
-            domains=domains,
-            active_names=active_names,
-            settings=settings,
-        )
-        count = _product_size(domains[name].values for name in variant_axis_names)
-        seed_params_by_variant[variant_name] = seed_params
-        active_names_by_variant[variant_name] = active_names
-        inactive_names_by_variant[variant_name] = inactive_names
-        axis_names_by_variant[variant_name] = variant_axis_names
-        per_variant_counts[variant_name] = count
+    for block in blocks:
+        count = _product_size(domains[name].values for name in block.axis_names)
+        seed_params_by_variant[block.name] = dict(block.seed_params)
+        active_names_by_variant[block.name] = block.active_names
+        inactive_names_by_variant[block.name] = block.inactive_names
+        axis_names_by_variant[block.name] = block.axis_names
+        per_variant_counts[block.name] = count
+        mode_labels[block.name] = block.label
         raw_count += count
 
     return _GridV2PlanPrelude(
@@ -894,6 +928,7 @@ def _grid_v2_plan_prelude_from_parts(
         domains=domains,
         selector_values=selector_values,
         selected_variants=tuple(selected_variants),
+        blocks=blocks,
         axis_names=axis_names,
         axis_column_by_name=axis_columns,
         seed_params_by_variant=seed_params_by_variant,
@@ -901,6 +936,7 @@ def _grid_v2_plan_prelude_from_parts(
         inactive_names_by_variant=inactive_names_by_variant,
         axis_names_by_variant=axis_names_by_variant,
         per_variant_counts=per_variant_counts,
+        mode_labels=mode_labels,
         raw_candidate_count=raw_count,
     )
 
@@ -911,22 +947,25 @@ def _grid_v2_prelude_identity_signature(prelude: _GridV2PlanPrelude) -> Any:
         str(prelude.config.get("id", prelude.profile.strategy_id)),
         str(prelude.config.get("version", "")),
         tuple(prelude.selected_variants),
+        tuple(block.name for block in prelude.blocks),
         tuple(prelude.axis_names),
         _domain_identity_signature(prelude.domains),
         tuple(
             (
-                name,
-                tuple(prelude.active_names_by_variant[name]),
-                tuple(prelude.inactive_names_by_variant[name]),
-                tuple(prelude.axis_names_by_variant[name]),
-                int(prelude.per_variant_counts[name]),
+                block.name,
+                block.variant_name,
+                block.label,
+                tuple(block.active_names),
+                tuple(block.inactive_names),
+                tuple(block.axis_names),
+                int(prelude.per_variant_counts[block.name]),
                 _stable_json(
                     _jsonable_mapping(
-                        _without_plan_reuse_runtime_params(prelude.seed_params_by_variant[name])
+                        _without_plan_reuse_runtime_params(prelude.seed_params_by_variant[block.name])
                     )
                 ),
             )
-            for name in prelude.selected_variants
+            for block in prelude.blocks
         ),
     )
 
@@ -938,22 +977,25 @@ def _grid_v2_plan_identity_signature(plan: GridV2Plan) -> Any:
         plan.strategy_id,
         plan.strategy_version,
         tuple(table.variant_names),
+        tuple(table.grid_mode_names),
         tuple(table.axis_names),
         _domain_identity_signature(plan.parameter_domains),
         tuple(
             (
                 name,
+                table.variant_name_by_grid_mode[name],
+                table.grid_mode_labels.get(name, name),
                 tuple(table.active_names_by_variant[name]),
                 tuple(table.inactive_names_by_variant[name]),
                 tuple(table.axis_names_by_variant[name]),
-                int(_product_size(plan.parameter_domains[param].values for param in table.axis_names_by_variant[name])),
+                int(plan.per_variant_counts[name]),
                 _stable_json(
                     _jsonable_mapping(
                         _without_plan_reuse_runtime_params(table.seed_params_by_variant[name])
                     )
                 ),
             )
-            for name in table.variant_names
+            for name in table.grid_mode_names
         ),
     )
 
@@ -991,6 +1033,9 @@ def _rebase_grid_v2_plan(cached_plan: GridV2Plan, prelude: _GridV2PlanPrelude) -
         parameter_domains=prelude.domains,
         axis_names=prelude.axis_names,
         axis_column_by_name=prelude.axis_column_by_name,
+        grid_mode_names=tuple(block.name for block in prelude.blocks),
+        grid_mode_labels=prelude.mode_labels,
+        variant_name_by_grid_mode={block.name: block.variant_name for block in prelude.blocks},
         seed_params_by_variant=prelude.seed_params_by_variant,
         active_names_by_variant=prelude.active_names_by_variant,
         inactive_names_by_variant=prelude.inactive_names_by_variant,
@@ -1001,6 +1046,11 @@ def _rebase_grid_v2_plan(cached_plan: GridV2Plan, prelude: _GridV2PlanPrelude) -
         name: list(domain.values)
         for name, domain in prelude.domains.items()
         if domain.is_axis and str(domain.source).endswith(".runtime_options")
+    }
+    metadata["grid_mode_order"] = [block.name for block in prelude.blocks]
+    metadata["grid_mode_labels"] = dict(prelude.mode_labels)
+    metadata["resolved_internal_variants"] = {
+        block.name: block.variant_name for block in prelude.blocks
     }
     return replace(
         cached_plan,
@@ -1026,49 +1076,51 @@ def _build_candidate_table(
 ) -> GridV2CandidateTable:
     axis_names = tuple(name for name in profile.parameter_names if domains[name].is_axis)
     axis_columns = {name: index for index, name in enumerate(axis_names)}
+    blocks = _build_planning_blocks(
+        config=config,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=selected_variants,
+    )
+    variant_code_by_name = {name: index for index, name in enumerate(selected_variants)}
     seed_params_by_variant: dict[str, dict[str, Any]] = {}
     active_names_by_variant: dict[str, tuple[str, ...]] = {}
     inactive_names_by_variant: dict[str, tuple[str, ...]] = {}
     axis_names_by_variant: dict[str, tuple[str, ...]] = {}
-    per_variant_counts: dict[str, int] = {name: 0 for name in selected_variants}
+    per_variant_counts: dict[str, int] = {block.name: 0 for block in blocks}
+    mode_labels: dict[str, str] = {block.name: block.label for block in blocks}
+    variant_name_by_mode: dict[str, str] = {block.name: block.variant_name for block in blocks}
     semantic_seen: set[tuple[Any, ...]] = set()
     semantic_keys: list[str] = []
     variant_codes: list[int] = []
+    grid_mode_codes: list[int] = []
     axis_value_codes: list[list[int]] = []
     raw_count = 0
     enumerated_count = 0
 
-    for variant_code, variant_name in enumerate(selected_variants):
-        variant = profile.variants[variant_name]
-        seed_params = _candidate_seed_params(fixed_params)
-        if profile.variant_selector is not None:
-            seed_params[profile.variant_selector.param] = selector_values[variant_name]
-        active_names = _ordered_active_names(profile, seed_params)
-        inactive_names = _ordered_inactive_names(profile, seed_params)
-        variant_axis_names = _variant_axis_names(
-            profile=profile,
-            domains=domains,
-            active_names=active_names,
-            settings=settings,
-        )
-        seed_params_by_variant[variant_name] = seed_params
-        active_names_by_variant[variant_name] = active_names
-        inactive_names_by_variant[variant_name] = inactive_names
-        axis_names_by_variant[variant_name] = variant_axis_names
+    for block_code, block in enumerate(blocks):
+        variant = profile.variants[block.variant_name]
+        seed_params_by_variant[block.name] = dict(block.seed_params)
+        active_names_by_variant[block.name] = block.active_names
+        inactive_names_by_variant[block.name] = block.inactive_names
+        axis_names_by_variant[block.name] = block.axis_names
 
-        value_groups = tuple(domains[name].values for name in variant_axis_names)
-        code_groups = tuple(range(len(domains[name].values)) for name in variant_axis_names)
+        value_groups = tuple(domains[name].values for name in block.axis_names)
+        code_groups = tuple(range(len(domains[name].values)) for name in block.axis_names)
         raw_count += _product_size(value_groups)
         for values, codes in zip(itertools.product(*value_groups), itertools.product(*code_groups)):
             enumerated_count += 1
-            params = dict(seed_params)
-            params.update(zip(variant_axis_names, values))
+            params = dict(block.seed_params)
+            params.update(zip(block.axis_names, values))
             semantic_identity = _semantic_identity_tuple(
                 config=config,
                 profile=profile,
                 variant=variant,
                 params=params,
-                active_names=active_names,
+                active_names=block.active_names,
             )
             if semantic_identity in semantic_seen:
                 continue
@@ -1080,17 +1132,19 @@ def _build_candidate_table(
                         config=config,
                         profile=profile,
                         variant=variant,
+                        grid_mode_name=block.name,
                         params=jsonable_params,
-                        active_names=active_names,
+                        active_names=block.active_names,
                     )
                 )
             )
             row_codes = [-1] * len(axis_names)
-            for name, code in zip(variant_axis_names, codes):
+            for name, code in zip(block.axis_names, codes):
                 row_codes[axis_columns[name]] = int(code)
-            variant_codes.append(int(variant_code))
+            variant_codes.append(int(variant_code_by_name[block.variant_name]))
+            grid_mode_codes.append(int(block_code))
             axis_value_codes.append(row_codes)
-            per_variant_counts[variant_name] += 1
+            per_variant_counts[block.name] += 1
 
     axis_code_array = np.asarray(axis_value_codes, dtype=np.int32)
     if not axis_value_codes:
@@ -1106,11 +1160,15 @@ def _build_candidate_table(
         axis_names=axis_names,
         axis_column_by_name=axis_columns,
         variant_names=tuple(selected_variants),
+        grid_mode_names=tuple(block.name for block in blocks),
+        grid_mode_labels=mode_labels,
+        variant_name_by_grid_mode=variant_name_by_mode,
         mode_tuples_by_variant=tuple(
             tuple(sorted((str(name), str(value)) for name, value in profile.variants[variant].modes.items()))
             for variant in selected_variants
         ),
         variant_codes=np.asarray(variant_codes, dtype=np.int32),
+        grid_mode_codes=np.asarray(grid_mode_codes, dtype=np.int32),
         axis_value_codes=axis_code_array,
         semantic_keys_by_row=tuple(semantic_keys),
         params_by_row=None,
@@ -1141,24 +1199,25 @@ def preview_grid_v2_counts(
     fixed_params.update(dict(base_params or {}))
     domains = _build_parameter_domains(config_copy, settings, fixed_params, profile)
     selector_values = _selector_values_by_variant(config_copy, profile)
-    selected_variants = _selected_variants(profile, settings)
+    selected_variants = _selected_variants(profile, settings, fixed_params)
+    blocks = _build_planning_blocks(
+        config=config_copy,
+        settings=settings,
+        profile=profile,
+        fixed_params=fixed_params,
+        domains=domains,
+        selector_values=selector_values,
+        selected_variants=selected_variants,
+    )
     per_variant: dict[str, int] = {}
     axis_names_by_variant: dict[str, tuple[str, ...]] = {}
+    mode_labels: dict[str, str] = {}
     total = 0
-    for variant_name in selected_variants:
-        seed_params = _candidate_seed_params(fixed_params)
-        if profile.variant_selector is not None:
-            seed_params[profile.variant_selector.param] = selector_values[variant_name]
-        active_names = _ordered_active_names(profile, seed_params)
-        axis_names = _variant_axis_names(
-            profile=profile,
-            domains=domains,
-            active_names=active_names,
-            settings=settings,
-        )
-        count = _product_size(domains[name].values for name in axis_names)
-        per_variant[variant_name] = count
-        axis_names_by_variant[variant_name] = axis_names
+    for block in blocks:
+        count = _product_size(domains[name].values for name in block.axis_names)
+        per_variant[block.name] = count
+        axis_names_by_variant[block.name] = block.axis_names
+        mode_labels[block.name] = block.label
         total += count
     deduped = None if settings.include_inactive_axes_for_dedup else total
     return GridV2CountPreview(
@@ -1167,6 +1226,7 @@ def preview_grid_v2_counts(
         deduped_candidate_count=deduped,
         per_variant_counts=per_variant,
         axis_names_by_variant=axis_names_by_variant,
+        mode_labels=mode_labels,
     )
 
 
@@ -1766,8 +1826,32 @@ def _selector_values_by_variant(
     return values
 
 
-def _selected_variants(profile: ExecutionProfile, settings: GridV2Settings) -> tuple[str, ...]:
+def _selected_variants(
+    profile: ExecutionProfile,
+    settings: GridV2Settings,
+    fixed_params: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
     variant_order = tuple(profile.variants.keys())
+    selector = profile.variant_selector
+    if selector is not None and selector.user_facing is False:
+        requested = tuple(settings.enabled_variants or ())
+        if requested:
+            raise ValueError(
+                "Grid V2 enabled_variants/grid_enabled_modes cannot be used for "
+                f"internal variant selector '{selector.param}'. Configure the selector "
+                "parameter itself instead."
+            )
+        params = dict(profile.parameter_defaults)
+        params.update(dict(fixed_params or {}))
+        raw_value = params.get(selector.param, profile.parameter_defaults.get(selector.param))
+        key = canonical_selector_key(raw_value)
+        variant_name = selector.mapping.get(key)
+        if variant_name is None:
+            raise ValueError(
+                f"Grid V2 selector parameter '{selector.param}' value {raw_value!r} "
+                f"maps to '{key}', which is not in variantSelector.mapping."
+            )
+        return (variant_name,)
     if settings.enabled_variants is None:
         return variant_order
     requested = tuple(settings.enabled_variants)
@@ -1775,6 +1859,216 @@ def _selected_variants(profile: ExecutionProfile, settings: GridV2Settings) -> t
     if unknown:
         raise ValueError(f"Grid V2 enabled_variants contains unknown variant(s): {unknown}.")
     return tuple(name for name in variant_order if name in set(requested))
+
+
+def _dependency_names(depends_on: Any) -> tuple[str, ...]:
+    if depends_on in (None, ""):
+        return ()
+    if isinstance(depends_on, str):
+        return (depends_on,)
+    if isinstance(depends_on, Sequence) and not isinstance(depends_on, (str, bytes, bytearray)):
+        return tuple(str(item) for item in depends_on)
+    raise ValueError("Grid V2 depends_on must be a string or list of strings.")
+
+
+def _inactive_dependency_children(
+    config: Mapping[str, Any],
+    params: Mapping[str, Any],
+) -> set[str]:
+    specs = _parameters(config)
+    inactive: set[str] = set()
+    for raw_name, raw_spec in specs.items():
+        if not isinstance(raw_spec, Mapping):
+            continue
+        parents = _dependency_names(raw_spec.get("depends_on"))
+        if not parents:
+            continue
+        for parent in parents:
+            parent_spec = specs.get(parent, {})
+            param_type = (
+                str(parent_spec.get("type", "bool")).strip().lower()
+                if isinstance(parent_spec, Mapping)
+                else "bool"
+            )
+            if param_type != "bool":
+                raise ValueError(
+                    f"Grid V2 depends_on parent '{parent}' for '{raw_name}' must be a bool parameter."
+                )
+            parent_default = parent_spec.get("default") if isinstance(parent_spec, Mapping) else False
+            if not _coerce_bool(params.get(parent, parent_default)):
+                inactive.add(str(raw_name))
+                break
+    return inactive
+
+
+def _ordered_active_names_for_block(
+    config: Mapping[str, Any],
+    profile: ExecutionProfile,
+    params: Mapping[str, Any],
+) -> tuple[str, ...]:
+    active = active_parameter_names(profile, params) - _inactive_dependency_children(config, params)
+    return tuple(name for name in profile.parameter_names if name in active)
+
+
+def _ordered_inactive_names_for_block(
+    config: Mapping[str, Any],
+    profile: ExecutionProfile,
+    params: Mapping[str, Any],
+) -> tuple[str, ...]:
+    inactive = inactive_parameter_names(profile, params) | _inactive_dependency_children(config, params)
+    return tuple(
+        name
+        for name in profile.parameter_names
+        if name in inactive and profile.parameter_roles.get(name) != "runtime"
+    )
+
+
+def _optimization_bool_groups(config: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    rules = config.get("optimization_rules", {})
+    if not isinstance(rules, Mapping):
+        return ()
+    groups = rules.get("bool_groups", ())
+    if not isinstance(groups, (list, tuple)):
+        return ()
+    return tuple(group for group in groups if isinstance(group, Mapping))
+
+
+def _logical_mode_metadata(
+    group: Mapping[str, Any],
+    values: Mapping[str, bool],
+) -> tuple[str, str]:
+    logical_modes = group.get("logical_modes")
+    if isinstance(logical_modes, Mapping):
+        for raw_key, raw_meta in logical_modes.items():
+            if not isinstance(raw_meta, Mapping):
+                continue
+            raw_values = raw_meta.get("values")
+            if not isinstance(raw_values, Mapping):
+                continue
+            matched = True
+            for name, expected in values.items():
+                if name not in raw_values or _coerce_bool(raw_values[name]) != bool(expected):
+                    matched = False
+                    break
+            if matched:
+                label = str(raw_meta.get("label") or raw_key)
+                return str(raw_key), label
+
+    if set(values) == {"useCloseCount", "useTBands"}:
+        use_cc = bool(values["useCloseCount"])
+        use_tbands = bool(values["useTBands"])
+        if use_cc and not use_tbands:
+            return "cc_only", "Close Count only"
+        if use_tbands and not use_cc:
+            return "tbands_only", "T Bands only"
+        if use_cc and use_tbands:
+            return "both", "Both"
+
+    key = "_".join(f"{name}_{str(value).lower()}" for name, value in sorted(values.items()))
+    return key, key
+
+
+def _bool_group_value_blocks(
+    config: Mapping[str, Any],
+    domains: Mapping[str, GridV2ParameterDomain],
+    seed_params: Mapping[str, Any],
+) -> tuple[tuple[str, str, Mapping[str, bool]], ...]:
+    groups = _optimization_bool_groups(config)
+    if not groups:
+        return (("", "", {}),)
+    if len(groups) > 1:
+        raise ValueError("Grid V2 currently supports one optimization_rules.bool_groups entry.")
+    group = groups[0]
+    if str(group.get("mode", "")).strip().lower() != "at_least_one_true":
+        raise ValueError("Grid V2 currently supports bool_groups mode='at_least_one_true'.")
+    raw_params = group.get("params")
+    if not isinstance(raw_params, (list, tuple)) or len(raw_params) != 2:
+        raise ValueError("Grid V2 bool_groups currently require exactly two bool params.")
+    group_params = tuple(str(name) for name in raw_params)
+    specs = _parameters(config)
+    for name in group_params:
+        spec = specs.get(name, {})
+        param_type = str(spec.get("type", "bool")).strip().lower() if isinstance(spec, Mapping) else "bool"
+        if param_type != "bool":
+            raise ValueError(f"Grid V2 bool_group parameter '{name}' must be bool.")
+
+    value_groups: list[tuple[bool, ...]] = []
+    for name in group_params:
+        domain = domains[name]
+        if domain.is_axis:
+            value_groups.append(tuple(_coerce_bool(value) for value in domain.values))
+        else:
+            value_groups.append((_coerce_bool(seed_params.get(name, domain.default)),))
+
+    blocks: list[tuple[str, str, Mapping[str, bool]]] = []
+    for raw_values in itertools.product(*value_groups):
+        values = dict(zip(group_params, (bool(value) for value in raw_values)))
+        if not any(values.values()):
+            continue
+        key, label = _logical_mode_metadata(group, values)
+        blocks.append((key, label, values))
+    if not blocks:
+        names = ", ".join(group_params)
+        raise ValueError(f"Grid V2 bool group has no valid logical modes for params: {names}.")
+    logical_modes = group.get("logical_modes")
+    if isinstance(logical_modes, Mapping):
+        order = {str(name): index for index, name in enumerate(logical_modes)}
+        blocks.sort(key=lambda item: order.get(item[0], len(order)))
+    return tuple(blocks)
+
+
+def _build_planning_blocks(
+    *,
+    config: Mapping[str, Any],
+    settings: GridV2Settings,
+    profile: ExecutionProfile,
+    fixed_params: Mapping[str, Any],
+    domains: Mapping[str, GridV2ParameterDomain],
+    selector_values: Mapping[str, Any],
+    selected_variants: Sequence[str],
+) -> tuple[_GridV2PlanBlock, ...]:
+    used_names: set[str] = set()
+    blocks: list[_GridV2PlanBlock] = []
+    has_bool_groups = bool(_optimization_bool_groups(config))
+    for variant_name in selected_variants:
+        seed_params = _candidate_seed_params(fixed_params)
+        if profile.variant_selector is not None:
+            seed_params[profile.variant_selector.param] = selector_values[variant_name]
+        bool_blocks = _bool_group_value_blocks(config, domains, seed_params)
+        for raw_mode_name, raw_label, bool_values in bool_blocks:
+            block_seed = dict(seed_params)
+            block_seed.update(bool_values)
+            if has_bool_groups:
+                block_name = raw_mode_name
+                block_label = raw_label
+            else:
+                block_name = variant_name
+                block_label = variant_name
+            if block_name in used_names:
+                block_name = f"{variant_name}_{block_name}"
+                block_label = f"{variant_name} {block_label}"
+            used_names.add(block_name)
+            active_names = _ordered_active_names_for_block(config, profile, block_seed)
+            inactive_names = _ordered_inactive_names_for_block(config, profile, block_seed)
+            variant_axis_names = _variant_axis_names(
+                profile=profile,
+                domains=domains,
+                active_names=active_names,
+                settings=settings,
+                block_fixed_names=tuple(bool_values),
+            )
+            blocks.append(
+                _GridV2PlanBlock(
+                    name=block_name,
+                    label=block_label,
+                    variant_name=variant_name,
+                    seed_params=block_seed,
+                    active_names=active_names,
+                    inactive_names=inactive_names,
+                    axis_names=variant_axis_names,
+                )
+            )
+    return tuple(blocks)
 
 
 def _ordered_active_names(profile: ExecutionProfile, params: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1793,12 +2087,16 @@ def _variant_axis_names(
     domains: Mapping[str, GridV2ParameterDomain],
     active_names: Sequence[str],
     settings: GridV2Settings,
+    block_fixed_names: Sequence[str] = (),
 ) -> tuple[str, ...]:
     active = set(active_names)
+    fixed = set(block_fixed_names)
     names: list[str] = []
     for name in profile.parameter_names:
         domain = domains[name]
         if not domain.is_axis:
+            continue
+        if name in fixed:
             continue
         if settings.include_inactive_axes_for_dedup or name in active:
             names.append(name)
@@ -1817,6 +2115,7 @@ def _semantic_payload(
     config: Mapping[str, Any],
     profile: ExecutionProfile,
     variant: VariantSpec,
+    grid_mode_name: str,
     params: Mapping[str, Any],
     active_names: Sequence[str],
 ) -> dict[str, Any]:
@@ -1832,6 +2131,7 @@ def _semantic_payload(
             "version": str(config.get("version", "")),
         },
         "variant": variant.name,
+        **({"grid_mode": grid_mode_name} if grid_mode_name != variant.name else {}),
         "modes": {name: _jsonable_value(value) for name, value in sorted(variant.modes.items())},
         "params": active_params,
     }
@@ -1871,15 +2171,17 @@ def _semantic_identity_tuple(
 def _canonical_identity(
     *,
     variant_name: str,
+    grid_mode_name: str,
     params: Mapping[str, Any],
     names: Sequence[str],
 ) -> str:
-    return _stable_json(
-        {
-            "variant": variant_name,
-            "params": {name: _jsonable_value(params[name]) for name in names if name in params},
-        }
-    )
+    payload = {
+        "variant": variant_name,
+        "params": {name: _jsonable_value(params[name]) for name in names if name in params},
+    }
+    if grid_mode_name != variant_name:
+        payload["grid_mode"] = grid_mode_name
+    return _stable_json(payload)
 
 
 def _stable_json(payload: Any) -> str:
@@ -1996,21 +2298,21 @@ def _cache_group_plan(
         return _CacheGroupPlan(codes=(), representatives={})
 
     selected = np.asarray(tuple(int(index) for index in selected_indices), dtype=np.int64)
-    selected_variant_codes = table.variant_codes[selected]
+    selected_grid_mode_codes = table.grid_mode_codes[selected]
     codes = np.empty(int(selected.shape[0]), dtype=np.int32)
     group_codes: dict[tuple[Any, ...], int] = {}
     representatives: dict[int, int] = {}
     next_code = 0
 
-    for variant_code, variant_name in enumerate(table.variant_names):
-        positions = np.flatnonzero(selected_variant_codes == int(variant_code))
+    for grid_mode_code, grid_mode_name in enumerate(table.grid_mode_names):
+        positions = np.flatnonzero(selected_grid_mode_codes == int(grid_mode_code))
         if positions.size == 0:
             continue
         row_indices = selected[positions]
-        descriptor, axis_columns = _cache_group_descriptor_for_variant(
+        descriptor, axis_columns = _cache_group_descriptor_for_grid_mode(
             plan,
             hooks,
-            int(variant_code),
+            int(grid_mode_code),
             signal_only=signal_only,
         )
         if axis_columns:
@@ -2047,17 +2349,19 @@ def _cache_group_plan(
     )
 
 
-def _cache_group_descriptor_for_variant(
+def _cache_group_descriptor_for_grid_mode(
     plan: GridV2Plan,
     hooks: GridV2StrategyHooks,
-    variant_code: int,
+    grid_mode_code: int,
     *,
     signal_only: bool,
 ) -> tuple[tuple[Any, ...], tuple[int, ...]]:
     table = plan.candidate_table
-    variant_name = table.variant_names[int(variant_code)]
-    param_names = _cache_param_names_for_variant(plan, hooks, variant_name, signal_only=signal_only)
-    variant_axis_names = set(table.axis_names_by_variant[variant_name])
+    grid_mode_name = table.grid_mode_names[int(grid_mode_code)]
+    variant_name = table.variant_name_by_grid_mode[grid_mode_name]
+    variant_code = table.variant_names.index(variant_name)
+    param_names = _cache_param_names_for_grid_mode(plan, hooks, grid_mode_name, signal_only=signal_only)
+    variant_axis_names = set(table.axis_names_by_variant[grid_mode_name])
     constants: list[tuple[str, tuple[Any, ...]]] = []
     axis_columns: list[int] = []
     axis_names: list[str] = []
@@ -2067,14 +2371,14 @@ def _cache_group_descriptor_for_variant(
             axis_columns.append(int(column))
             axis_names.append(name)
             continue
-        if name in table.seed_params_by_variant[variant_name]:
+        if name in table.seed_params_by_variant[grid_mode_name]:
             constants.append(
                 (
                     name,
                     (
                         "value",
                         _hashable_jsonable_value(
-                            _jsonable_value(table.seed_params_by_variant[variant_name].get(name))
+                            _jsonable_value(table.seed_params_by_variant[grid_mode_name].get(name))
                         ),
                     ),
                 )
@@ -2087,6 +2391,7 @@ def _cache_group_descriptor_for_variant(
         descriptor = (
             "dataprep",
             variant_name,
+            *(() if grid_mode_name == variant_name else (grid_mode_name,)),
             table.mode_tuples_by_variant[int(variant_code)],
             tuple(constants),
             tuple(axis_names),
@@ -2094,38 +2399,51 @@ def _cache_group_descriptor_for_variant(
     return descriptor, tuple(axis_columns)
 
 
-def _variant_has_param(table: GridV2CandidateTable, variant_name: str, name: str) -> bool:
+def _grid_mode_has_param(table: GridV2CandidateTable, grid_mode_name: str, name: str) -> bool:
     return (
-        name in table.seed_params_by_variant[variant_name]
-        or name in table.axis_names_by_variant[variant_name]
+        name in table.seed_params_by_variant[grid_mode_name]
+        or name in table.axis_names_by_variant[grid_mode_name]
     )
 
 
-def _cache_param_names_for_variant(
+def _cache_param_names_for_grid_mode(
     plan: GridV2Plan,
     hooks: GridV2StrategyHooks,
-    variant_name: str,
+    grid_mode_name: str,
     *,
     signal_only: bool,
 ) -> tuple[str, ...]:
     table = plan.candidate_table
+    active = set(table.active_names_by_variant[grid_mode_name])
     if signal_only and hooks.signal_param_names is not None:
-        return tuple(name for name in hooks.signal_param_names if _variant_has_param(table, variant_name, name))
+        return tuple(
+            name
+            for name in hooks.signal_param_names
+            if name in active and _grid_mode_has_param(table, grid_mode_name, name)
+        )
     if not signal_only and hooks.dataprep_param_names is not None:
-        return tuple(name for name in hooks.dataprep_param_names if _variant_has_param(table, variant_name, name))
-    active = set(table.active_names_by_variant[variant_name])
+        return tuple(
+            name
+            for name in hooks.dataprep_param_names
+            if name in active and _grid_mode_has_param(table, grid_mode_name, name)
+        )
     if signal_only:
         return tuple(
             name
             for name in plan.profile.parameter_names
             if name in active and plan.profile.parameter_roles.get(name) == "signal"
         )
-    names: set[str] = set(_cache_param_names_for_variant(plan, hooks, variant_name, signal_only=True))
+    names: set[str] = set(_cache_param_names_for_grid_mode(plan, hooks, grid_mode_name, signal_only=True))
+    variant_name = table.variant_name_by_grid_mode[grid_mode_name]
     for mode_field, mode_value in table.profile.variants[variant_name].modes.items():
         binding = mode_binding_for(mode_field, mode_value)
         if binding is None or not binding.dataprep:
             continue
-        names.update(name for name in binding.consumes_params if _variant_has_param(table, variant_name, name))
+        names.update(
+            name
+            for name in binding.consumes_params
+            if name in active and _grid_mode_has_param(table, grid_mode_name, name)
+        )
     if not names:
         names.update(active)
     return tuple(name for name in plan.profile.parameter_names if name in names)
@@ -2138,11 +2456,11 @@ def _cache_param_names(
     *,
     signal_only: bool,
 ) -> tuple[str, ...]:
-    if signal_only and hooks.signal_param_names is not None:
-        return tuple(name for name in hooks.signal_param_names if name in candidate.params)
-    if not signal_only and hooks.dataprep_param_names is not None:
-        return tuple(name for name in hooks.dataprep_param_names if name in candidate.params)
     active = set(candidate.active_param_names)
+    if signal_only and hooks.signal_param_names is not None:
+        return tuple(name for name in hooks.signal_param_names if name in active and name in candidate.params)
+    if not signal_only and hooks.dataprep_param_names is not None:
+        return tuple(name for name in hooks.dataprep_param_names if name in active and name in candidate.params)
     if signal_only:
         return tuple(
             name
@@ -2168,11 +2486,19 @@ def _cache_param_names_for_index(
     signal_only: bool,
 ) -> tuple[str, ...]:
     table = plan.candidate_table
-    if signal_only and hooks.signal_param_names is not None:
-        return tuple(name for name in hooks.signal_param_names if table.has_param_for_index(candidate_index, name))
-    if not signal_only and hooks.dataprep_param_names is not None:
-        return tuple(name for name in hooks.dataprep_param_names if table.has_param_for_index(candidate_index, name))
     active = set(table.active_names_for_index(candidate_index))
+    if signal_only and hooks.signal_param_names is not None:
+        return tuple(
+            name
+            for name in hooks.signal_param_names
+            if name in active and table.has_param_for_index(candidate_index, name)
+        )
+    if not signal_only and hooks.dataprep_param_names is not None:
+        return tuple(
+            name
+            for name in hooks.dataprep_param_names
+            if name in active and table.has_param_for_index(candidate_index, name)
+        )
     if signal_only:
         return tuple(
             name
@@ -2199,6 +2525,7 @@ def _cache_signature_for_index(
 ) -> tuple[Any, ...]:
     table = plan.candidate_table
     variant_code = int(table.variant_codes[candidate_index])
+    grid_mode_name = table.grid_mode_name_for_index(candidate_index)
     param_names = _cache_param_names_for_index(plan, candidate_index, hooks, signal_only=signal_only)
     params = tuple(
         (name, _cache_signature_param_value(table, candidate_index, name))
@@ -2209,6 +2536,7 @@ def _cache_signature_for_index(
     return (
         "dataprep",
         table.variant_names[variant_code],
+        *(() if grid_mode_name == table.variant_names[variant_code] else (grid_mode_name,)),
         table.mode_tuples_by_variant[variant_code],
         params,
     )
@@ -2304,6 +2632,8 @@ def _dataprep_cache_key(
 ) -> str:
     payload = _cache_key_payload(plan, candidate, context, hooks, signal_only=False)
     payload["variant"] = candidate.variant_name
+    if candidate.grid_mode_name != candidate.variant_name:
+        payload["grid_mode"] = candidate.grid_mode_name
     payload["modes"] = dict(candidate.modes)
     return _stable_json(payload)
 
@@ -2316,10 +2646,13 @@ def _dataprep_cache_key_for_index(
 ) -> tuple[Any, ...]:
     table = plan.candidate_table
     variant_code = int(table.variant_codes[candidate_index])
+    variant_name = table.variant_names[variant_code]
+    grid_mode_name = table.grid_mode_name_for_index(candidate_index)
     payload = _cache_key_payload_for_index(plan, candidate_index, context, hooks, signal_only=False)
     return (
         payload,
-        ("variant", table.variant_names[variant_code]),
+        ("variant", variant_name),
+        *(() if grid_mode_name == variant_name else (("grid_mode", grid_mode_name),)),
         ("modes", table.mode_tuples_by_variant[variant_code]),
     )
 
@@ -2427,6 +2760,17 @@ def _iter_variant_index_groups(
             yield variant_name, positions, indices[positions]
 
 
+def _iter_grid_mode_index_groups(
+    table: GridV2CandidateTable,
+    indices: np.ndarray,
+):
+    grid_mode_codes = table.grid_mode_codes[indices]
+    for grid_mode_code, grid_mode_name in enumerate(table.grid_mode_names):
+        positions = np.flatnonzero(grid_mode_codes == int(grid_mode_code))
+        if positions.size:
+            yield grid_mode_name, positions, indices[positions]
+
+
 def _fill_float_config_array(
     output: np.ndarray,
     table: GridV2CandidateTable,
@@ -2442,12 +2786,12 @@ def _fill_float_config_array(
             [float(value) for value in table.parameter_domains[name].values],
             dtype=np.float64,
         )
-    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
-        if column is not None and name in table.axis_names_by_variant[variant_name]:
+    for grid_mode_name, positions, row_indices in _iter_grid_mode_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[grid_mode_name]:
             codes = table.axis_value_codes[row_indices, int(column)]
             output[positions] = domain_values[codes]  # type: ignore[index]
-        elif name in table.seed_params_by_variant[variant_name]:
-            output[positions] = float(table.seed_params_by_variant[variant_name][name])
+        elif name in table.seed_params_by_variant[grid_mode_name]:
+            output[positions] = float(table.seed_params_by_variant[grid_mode_name][name])
 
 
 def _fill_bool_config_array(
@@ -2465,12 +2809,12 @@ def _fill_bool_config_array(
             [_compiled_coerce_bool(value, default) for value in table.parameter_domains[name].values],
             dtype=np.bool_,
         )
-    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
-        if column is not None and name in table.axis_names_by_variant[variant_name]:
+    for grid_mode_name, positions, row_indices in _iter_grid_mode_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[grid_mode_name]:
             codes = table.axis_value_codes[row_indices, int(column)]
             output[positions] = domain_values[codes]  # type: ignore[index]
-        elif name in table.seed_params_by_variant[variant_name]:
-            output[positions] = _compiled_coerce_bool(table.seed_params_by_variant[variant_name][name], default)
+        elif name in table.seed_params_by_variant[grid_mode_name]:
+            output[positions] = _compiled_coerce_bool(table.seed_params_by_variant[grid_mode_name][name], default)
 
 
 def _fill_timestamp_config_array(
@@ -2492,13 +2836,13 @@ def _fill_timestamp_config_array(
             ],
             dtype=np.int64,
         )
-    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
-        if column is not None and name in table.axis_names_by_variant[variant_name]:
+    for grid_mode_name, positions, row_indices in _iter_grid_mode_index_groups(table, indices):
+        if column is not None and name in table.axis_names_by_variant[grid_mode_name]:
             codes = table.axis_value_codes[row_indices, int(column)]
             output[positions] = domain_values[codes]  # type: ignore[index]
-        elif name in table.seed_params_by_variant[variant_name]:
+        elif name in table.seed_params_by_variant[grid_mode_name]:
             output[positions] = _cached_timestamp_ns(
-                table.seed_params_by_variant[variant_name][name],
+                table.seed_params_by_variant[grid_mode_name][name],
                 int(default),
                 cache,
             )
@@ -2542,16 +2886,16 @@ def _fill_tick_size_config_array(
             [validate_tick_size(float(value)) for value in table.parameter_domains["tickSize"].values],
             dtype=np.float64,
         )
-    for variant_name, positions, row_indices in _iter_variant_index_groups(table, indices):
+    for grid_mode_name, positions, row_indices in _iter_grid_mode_index_groups(table, indices):
         tick_positions = positions[rounding_codes[positions] == ROUNDING_TICK_OUTWARD_CODE]
         if tick_positions.size == 0:
             continue
-        if column is not None and "tickSize" in table.axis_names_by_variant[variant_name]:
+        if column is not None and "tickSize" in table.axis_names_by_variant[grid_mode_name]:
             tick_rows = row_indices[rounding_codes[positions] == ROUNDING_TICK_OUTWARD_CODE]
             codes = table.axis_value_codes[tick_rows, int(column)]
             output[tick_positions] = domain_values[codes]  # type: ignore[index]
-        elif "tickSize" in table.seed_params_by_variant[variant_name]:
-            output[tick_positions] = validate_tick_size(float(table.seed_params_by_variant[variant_name]["tickSize"]))
+        elif "tickSize" in table.seed_params_by_variant[grid_mode_name]:
+            output[tick_positions] = validate_tick_size(float(table.seed_params_by_variant[grid_mode_name]["tickSize"]))
         else:
             raise ValueError("tickSize is required when priceRounding='tick_outward'.")
 
@@ -2586,6 +2930,7 @@ def _row_from_run(
         semantic_key=table.semantic_key_for_index(candidate_index),
         canonical_identity=_LazyCanonicalIdentity(table, candidate_index),
         variant_name=table.variant_name_for_index(candidate_index),
+        grid_mode_name=table.grid_mode_name_for_index(candidate_index),
         modes=table.modes_for_index(candidate_index),
         params=params,
         net_profit_pct=core.net_profit_pct,
@@ -2638,7 +2983,8 @@ def _row_from_compiled_output(
         semantic_key=semantic_key,
         canonical_identity=_LazyCanonicalIdentity(table, idx),
         variant_name=variant_name,
-        modes=table.profile.variants[variant_name].modes,
+        grid_mode_name=table.grid_mode_name_for_index(idx),
+        modes=table.modes_for_index(idx),
         params=params,
         net_profit_pct=float(values[OUTPUT_NET_PROFIT_PCT]),
         max_drawdown_pct=float(values[OUTPUT_MAX_DRAWDOWN_PCT]),
@@ -2664,6 +3010,7 @@ def _error_row(plan: GridV2Plan, candidate_index: int, exc: Exception) -> GridV2
         semantic_key=table.semantic_key_for_index(candidate_index),
         canonical_identity=None,
         variant_name=table.variant_name_for_index(candidate_index),
+        grid_mode_name=table.grid_mode_name_for_index(candidate_index),
         modes=table.modes_for_index(candidate_index),
         params=table.params_for_index(candidate_index),
         net_profit_pct=float("nan"),

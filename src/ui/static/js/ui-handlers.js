@@ -68,8 +68,14 @@ const GRID_SUPPORTED_CONSTRAINTS = new Set([
   'win_rate',
   'max_consecutive_losses'
 ]);
+const GLOBAL_RUNTIME_PARAM_NAMES = new Set(['dateFilter', 'start', 'end']);
+const GLOBAL_BACKTEST_CONTROL_PARAM_NAMES = new Set([...GLOBAL_RUNTIME_PARAM_NAMES, 'warmupBars']);
 let gridPreviewTimer = null;
 let gridPreviewSeq = 0;
+
+function isGlobalBacktestControlParam(paramName) {
+  return GLOBAL_BACKTEST_CONTROL_PARAM_NAMES.has(String(paramName || ''));
+}
 
 function normalizeScoreBounds(rawBounds = {}) {
   const normalized = {};
@@ -818,6 +824,7 @@ function collectDynamicBacktestParams() {
   }
 
   Object.entries(window.currentStrategyConfig.parameters).forEach(([name, def]) => {
+    if (isGlobalBacktestControlParam(name)) return;
     const input = document.getElementById(`backtest_${name}`);
     if (!input) return;
 
@@ -840,6 +847,7 @@ function applyDynamicBacktestParams(params) {
   if (!window.currentStrategyConfig || !window.currentStrategyConfig.parameters) return;
 
   Object.entries(window.currentStrategyConfig.parameters).forEach(([name]) => {
+    if (isGlobalBacktestControlParam(name)) return;
     if (!Object.prototype.hasOwnProperty.call(params, name)) return;
 
     const input = document.getElementById(`backtest_${name}`);
@@ -1072,6 +1080,16 @@ function isFullEnumerationProfile(profile) {
   return profile === 'full_enumeration' || profile === 'full_enumeration_v2';
 }
 
+function getUserFacingGridModes(metadata) {
+  return (Array.isArray(metadata?.modes) ? metadata.modes : []).filter((mode) => {
+    return String(mode?.id || '').trim();
+  });
+}
+
+function hasUserFacingGridModes(metadata) {
+  return getUserFacingGridModes(metadata).length > 0;
+}
+
 function getSelectedGridModes() {
   return Array.from(document.querySelectorAll('input[name="gridEnabledMode"]'))
     .filter((checkbox) => checkbox.checked)
@@ -1082,6 +1100,8 @@ function getSelectedGridModes() {
 function syncGridProfileUi() {
   const metadata = getEnabledGridMetadata();
   const fullEnumeration = isFullEnumerationProfile(metadata.profile);
+  const userFacingModes = getUserFacingGridModes(metadata);
+  const hasModes = userFacingModes.length > 0;
   const modeSection = document.getElementById('gridProfileModesSection');
   const modeContainer = document.getElementById('gridEnabledModes');
   const budgetRow = document.getElementById('gridBudgetRow');
@@ -1100,13 +1120,20 @@ function syncGridProfileUi() {
       : 'Max per MA group';
   }
 
-  if (modeSection) modeSection.style.display = fullEnumeration ? 'block' : 'none';
+  if (modeSection) modeSection.style.display = fullEnumeration && hasModes ? 'block' : 'none';
   if (!modeContainer) return;
-  const profileKey = `${window.currentStrategyId || ''}:${metadata.profile}`;
+  const profileKey = `${window.currentStrategyId || ''}:${metadata.profile}:${userFacingModes
+    .map((mode) => String(mode?.id || '').trim())
+    .join('|')}`;
+  if (!hasModes) {
+    modeContainer.dataset.profileKey = profileKey;
+    modeContainer.innerHTML = '';
+    return;
+  }
   if (modeContainer.dataset.profileKey === profileKey) return;
   modeContainer.dataset.profileKey = profileKey;
   modeContainer.innerHTML = '';
-  metadata.modes.forEach((mode) => {
+  userFacingModes.forEach((mode) => {
     const modeId = String(mode?.id || '').trim();
     if (!modeId) return;
     const label = document.createElement('label');
@@ -1118,7 +1145,7 @@ function syncGridProfileUi() {
     checkbox.value = modeId;
     checkbox.checked = mode.default_enabled !== false;
     checkbox.addEventListener('change', () => {
-      if (!getSelectedGridModes().length) {
+      if (hasModes && !getSelectedGridModes().length) {
         checkbox.checked = true;
         setGridPreviewError('At least one Grid mode must remain enabled.');
       }
@@ -1218,10 +1245,11 @@ function validateOptimizerForm(config) {
 
   if (optimizerMode === 'grid') {
     const gridMeta = getEnabledGridMetadata();
+    const hasGridModes = hasUserFacingGridModes(gridMeta);
     if (!gridMeta.available) {
       errors.push(gridMeta.reason || 'Grid mode is unavailable for this strategy.');
     }
-    if (isFullEnumerationProfile(gridMeta.profile) && !getSelectedGridModes().length) {
+    if (isFullEnumerationProfile(gridMeta.profile) && hasGridModes && !getSelectedGridModes().length) {
       errors.push('Enable at least one Grid mode.');
     }
 
@@ -1434,12 +1462,14 @@ function buildOptimizationConfig(state, optimizerMode = 'optuna') {
         }
       }
     } else {
+      if (isGlobalBacktestControlParam(name)) return;
       fixedParams[name] = getBacktestParamValue(name, paramDef, dynamicParams);
     }
   });
 
   Object.entries(paramsDef).forEach(([name, def]) => {
     if (optimizableNames.has(name)) return;
+    if (isGlobalBacktestControlParam(name)) return;
     fixedParams[name] = getBacktestParamValue(name, def, dynamicParams);
   });
 
@@ -1568,6 +1598,7 @@ function buildGridConfig(state) {
   const gridBaseConfig = buildOptimizationConfig(state, 'grid');
   const metadata = getEnabledGridMetadata();
   const fullEnumeration = isFullEnumerationProfile(metadata.profile);
+  const hasGridModes = hasUserFacingGridModes(metadata);
   const previewBudget = Number(window.lastGridPreview?.actual_budget);
   const budget = fullEnumeration && Number.isFinite(previewBudget) && previewBudget > 0
     ? previewBudget
@@ -1591,7 +1622,7 @@ function buildGridConfig(state) {
     grid_budget: budget,
     grid_seed: Number.isFinite(seedRaw) ? Math.max(0, Math.round(seedRaw)) : 42,
     grid_top_candidates: Number.isFinite(topRaw) ? Math.max(1, Math.min(500, Math.round(topRaw))) : 10,
-    grid_enabled_modes: fullEnumeration ? getSelectedGridModes() : [],
+    grid_enabled_modes: fullEnumeration && hasGridModes ? getSelectedGridModes() : [],
     grid_allocation_method: allocationMethod,
     grid_min_quota: Number.isFinite(minQuotaRaw) ? Math.max(0, Math.min(0.33, minQuotaRaw)) : 0.10,
     grid_manual_percents: {

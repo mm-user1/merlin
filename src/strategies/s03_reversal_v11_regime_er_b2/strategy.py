@@ -69,9 +69,10 @@ def load_profile() -> ExecutionProfile:
 
 
 def normalized_params(params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    raw = normalize_parameter_aliases(params or {})
     merged = default_params_from_config()
-    merged.update(dict(params or {}))
-    return normalize_parameter_aliases(merged)
+    merged.update(raw)
+    return merged
 
 
 def _truncate_at_end(df: pd.DataFrame, parsed: S03RegimeERParams) -> pd.DataFrame:
@@ -123,4 +124,3 @@ __all__ = [
     "load_profile",
     "normalized_params",
 ]
-

@@ -32,16 +32,20 @@ def _first_mismatch(rows, trades):
     if len(rows) != len(trades):
         return f"count expected={len(rows)} actual={len(trades)}"
     for index, (row, trade) in enumerate(zip(rows, trades), start=1):
-        expected_reason = row["exit_signal"]
+        tv_exit_signal = row["exit_signal"]
+        expected_reason = tv_exit_signal
         actual_reason = trade.exit_reason
         if expected_reason != EMERGENCY_SL_EXIT_REASON:
             expected_reason = None
+        exit_price_tolerance = (
+            EXIT_PRICE_TOLERANCE if tv_exit_signal == EMERGENCY_SL_EXIT_REASON else ENTRY_PRICE_TOLERANCE
+        )
         checks = [
             ("direction", row["direction"], trade.direction, None),
             ("entry_time", row["entry_time_utc"], iso_timestamp(trade.entry_time), None),
             ("exit_time", row["exit_time_utc"], iso_timestamp(trade.exit_time), None),
             ("entry_price", float(row["entry_price_usdt"]), trade.entry_price, ENTRY_PRICE_TOLERANCE),
-            ("exit_price", float(row["exit_price_usdt"]), trade.exit_price, EXIT_PRICE_TOLERANCE),
+            ("exit_price", float(row["exit_price_usdt"]), trade.exit_price, exit_price_tolerance),
             ("exit_reason", expected_reason, actual_reason, None),
         ]
         for field, expected, actual, tolerance in checks:
@@ -96,8 +100,17 @@ def test_final_trade_is_only_documented_date_expiry_residual(reference_id):
     assert trade.exit_reason is None
 
 
-@pytest.mark.parametrize("reference_id", [REFERENCE_A, REFERENCE_B])
-def test_untruncated_kernel_replay_matches_tradingview_date_expiry_close(reference_id):
+@pytest.mark.parametrize(
+    ("reference_id", "expected_net_profit_pct"),
+    [
+        (REFERENCE_A, 150.8911260100),
+        (REFERENCE_B, 154.0231148748),
+    ],
+)
+def test_untruncated_kernel_replay_matches_tradingview_date_expiry_close(
+    reference_id,
+    expected_net_profit_pct,
+):
     """This proof does not change production adapter truncation behavior."""
 
     result = run_reference_without_adapter_truncation(reference_id).strategy_result
@@ -105,6 +118,7 @@ def test_untruncated_kernel_replay_matches_tradingview_date_expiry_close(referen
 
     assert iso_timestamp(trade.exit_time) == "2026-02-01T01:00:00Z"
     assert trade.exit_price == pytest.approx(1.1608, abs=EXIT_PRICE_TOLERANCE)
+    assert result.net_profit_pct == pytest.approx(expected_net_profit_pct)
 
 
 def test_reference_a_merlin_metrics_are_pinned_with_boundary_residual():

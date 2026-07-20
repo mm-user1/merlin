@@ -164,6 +164,8 @@ def get_grid_v2_backend_metadata(strategy_id: str) -> Dict[str, Any]:
     if str(strategy_config.get("engine", "v1")).strip().lower() != "v2":
         raise ValueError(f"Grid V2 is not supported for strategy '{strategy_id}'.")
     profile = parse_execution_profile(strategy_config)
+    selector = profile.variant_selector
+    user_facing_variants = selector is None or selector.user_facing is not False
     compiled_available = compiled_batch_available()
     return {
         "profile": "full_enumeration_v2",
@@ -181,8 +183,8 @@ def get_grid_v2_backend_metadata(strategy_id: str) -> Dict[str, Any]:
         "modes": [
             {"id": name, "label": name, "default_enabled": True}
             for name in profile.variants
-        ],
-        "diversity_group_fields": ["variant_name"],
+        ] if user_facing_variants else [],
+        "diversity_group_fields": ["variant_name"] if user_facing_variants else ["grid_mode_name"],
     }
 
 
@@ -489,6 +491,40 @@ def _grid_v2_max_cache_mb_from_config(config: OptimizationConfig) -> float:
     return value
 
 
+def _grid_v2_strategy_config_with_range_overrides(
+    strategy_config: Mapping[str, Any],
+    config: OptimizationConfig,
+) -> Dict[str, Any]:
+    """Apply UI/runtime numeric range overrides to a Grid V2 config copy."""
+
+    config_copy: Dict[str, Any] = deepcopy(dict(strategy_config))
+    param_ranges = getattr(config, "param_ranges", {}) or {}
+    if not param_ranges:
+        return config_copy
+
+    params = config_copy.get("parameters")
+    if not isinstance(params, dict):
+        return config_copy
+
+    for raw_name, raw_range in param_ranges.items():
+        name = str(raw_name)
+        spec = params.get(name)
+        if not isinstance(spec, dict):
+            continue
+        if not isinstance(raw_range, (list, tuple)) or len(raw_range) != 3:
+            continue
+        optimize = spec.get("optimize")
+        if not isinstance(optimize, dict):
+            optimize = {}
+            spec["optimize"] = optimize
+        start, stop, step = raw_range
+        optimize["min"] = start
+        optimize["max"] = stop
+        optimize["step"] = step
+
+    return config_copy
+
+
 def _load_backend(strategy_id: str):
     normalized = str(strategy_id or "").strip().lower()
     module_name = FAST_GRID_BACKENDS.get(normalized)
@@ -743,7 +779,10 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
 
     from .grid_v2 import GridV2Settings, preview_grid_v2_counts
 
-    strategy_config = get_strategy_config(config.strategy_id)
+    strategy_config = _grid_v2_strategy_config_with_range_overrides(
+        get_strategy_config(config.strategy_id),
+        config,
+    )
     settings = _grid_v2_settings_from_config(config)
     preview = preview_grid_v2_counts(
         strategy_config,
@@ -751,7 +790,7 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
         base_params=getattr(config, "fixed_params", {}) or {},
     )
     total = int(preview.deduped_candidate_count or preview.enumerated_candidate_count)
-    modes = _grid_v2_preview_modes(preview.per_variant_counts)
+    modes = _grid_v2_preview_modes(preview.per_variant_counts, preview.mode_labels)
     return {
         "engine": "v2",
         "profile": "full_enumeration_v2",
@@ -769,20 +808,25 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
         "mode_space_sizes": dict(preview.per_variant_counts),
         "mode_budgets": dict(preview.per_variant_counts),
         "mode_coverage_pct": {name: 100.0 for name in preview.per_variant_counts},
+        "mode_labels": dict(preview.mode_labels),
         "axis_names_by_variant": {
             name: list(values) for name, values in preview.axis_names_by_variant.items()
         },
     }
 
 
-def _grid_v2_preview_modes(per_variant_counts: Mapping[str, int]) -> List[Dict[str, Any]]:
+def _grid_v2_preview_modes(
+    per_variant_counts: Mapping[str, int],
+    mode_labels: Mapping[str, str] | None = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    labels = mode_labels or {}
     for name, count_raw in per_variant_counts.items():
         count = int(count_raw)
         rows.append(
             {
                 "mode": name,
-                "label": name,
+                "label": labels.get(name, name),
                 "space_size": count,
                 "space_label": format_compact_count(count),
                 "budget": count,
@@ -1335,7 +1379,8 @@ def _grid_v2_result_from_row(row: Any, *, metric_tier: str) -> OptimizationResul
     setattr(result, "param_key", row.semantic_key)
     setattr(result, "canonical_identity", row.canonical_identity)
     setattr(result, "variant_name", row.variant_name)
-    setattr(result, "grid_mode_name", row.variant_name)
+    setattr(result, "grid_mode_name", row.grid_mode_name)
+    setattr(result, "diversity_group", row.grid_mode_name)
     setattr(result, "grid_generation_mode", "full_enumeration_v2")
     setattr(result, "grid_backend_kind", row.backend_kind)
     setattr(result, "grid_v2_engine_version", "grid_v2_phase2_5")
@@ -1427,6 +1472,7 @@ def _grid_v2_slow_result(
         "canonical_identity",
         "variant_name",
         "grid_mode_name",
+        "diversity_group",
         "grid_generation_mode",
         "grid_backend_kind",
         "grid_v2_engine_version",
@@ -1500,7 +1546,10 @@ def _run_grid_v2_optimization(
 
     from .grid_v2 import GridV2StrategyHooks, build_grid_v2_plan, execute_grid_v2_candidates
 
-    strategy_config = get_strategy_config(config.strategy_id)
+    strategy_config = _grid_v2_strategy_config_with_range_overrides(
+        get_strategy_config(config.strategy_id),
+        config,
+    )
     strategy_class = get_strategy(config.strategy_id)
     strategy_module = importlib.import_module(strategy_class.__module__)
     hooks = GridV2StrategyHooks.from_strategy(strategy_module)
@@ -1752,6 +1801,8 @@ def _run_grid_v2_optimization(
             "valid_candidate_count": len(ranked_fast),
             "selected_candidate_count": len(ranked_selected),
             "per_variant_counts": dict(plan.per_variant_counts),
+            "mode_labels": dict(plan.metadata.get("grid_mode_labels") or {}),
+            "resolved_internal_variants": dict(plan.metadata.get("resolved_internal_variants") or {}),
             "cache_estimate": cache_estimate,
             "max_signal_cache_mb": float(settings.max_signal_cache_mb),
             "cache_stats": cache_stats,
@@ -1773,6 +1824,7 @@ def _run_grid_v2_optimization(
                 "mode_space_sizes": dict(plan.per_variant_counts),
                 "mode_budgets": dict(plan.per_variant_counts),
                 "mode_coverage_pct": {name: 100.0 for name in plan.per_variant_counts},
+                "mode_labels": dict(plan.metadata.get("grid_mode_labels") or {}),
                 "allocation_method": "full_enumeration_v2",
             },
             "optional_axis_settings": {

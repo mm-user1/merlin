@@ -14,6 +14,7 @@ from strategies.s06_r_trend_v02_b2.signals import (
     pine_rma,
     trail_ma,
 )
+from strategies.s06_r_trend_v02_b2.strategy import normalized_params
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,24 @@ def test_alias_mapper_handles_baseline_and_v1_names():
     assert mapped["slowSmooth"] == 4
     assert mapped["trailMAOffsetEx"] == 0.5
     assert mapped["stopLP"] == 2
+
+
+def test_adapter_normalized_params_applies_aliases_before_defaults():
+    mapped = normalized_params(
+        {
+            "fastSmoothing": 8,
+            "slowSmoothing": 4,
+            "trailMAOffsetPct": 0.5,
+            "stopLP": 2.0,
+        }
+    )
+    canonical = normalized_params({"fastSmooth": 9, "fastSmoothing": 8})
+
+    assert mapped["fastSmooth"] == 8
+    assert mapped["slowSmooth"] == 4
+    assert mapped["trailMAOffsetEx"] == 0.5
+    assert mapped["stopLP"] == 2
+    assert canonical["fastSmooth"] == 9
 
 
 def test_generated_arrays_match_prepared_dataframe_length_for_references():

@@ -92,6 +92,7 @@ class VariantSelector:
 
     param: str
     mapping: Mapping[str, str]
+    user_facing: bool = True
 
 
 @dataclass(frozen=True)

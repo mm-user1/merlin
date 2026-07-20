@@ -284,7 +284,11 @@ def _parse_selector(
                 f"execution.variantSelector maps '{key}' to unknown variant '{variant_name}'."
             )
         mapping[key] = variant_name
-    return VariantSelector(param=str(selector_param), mapping=mapping)
+    return VariantSelector(
+        param=str(selector_param),
+        mapping=mapping,
+        user_facing=raw_selector.get("userFacing", True) is not False,
+    )
 
 
 def _binding_for(mode_field: str, mode_value: Any) -> Optional[ModeBinding]:

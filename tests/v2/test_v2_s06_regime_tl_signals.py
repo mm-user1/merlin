@@ -38,6 +38,24 @@ def test_params_parse_baseline_aliases_and_regime_fields():
     assert parsed.useTrailMA is False
 
 
+def test_adapter_normalized_params_applies_aliases_before_defaults():
+    merged = normalized_params(
+        {
+            "fastSmoothing": 8,
+            "slowSmoothing": 4,
+            "trailMAOffsetPct": 0.5,
+            "stopLP": 2.0,
+        }
+    )
+    canonical = normalized_params({"trailMAOffsetEx": 0.7, "trailMAOffsetPct": 0.5})
+
+    assert merged["fastSmooth"] == 8
+    assert merged["slowSmooth"] == 4
+    assert merged["trailMAOffsetEx"] == 0.5
+    assert merged["stopLP"] == 2
+    assert canonical["trailMAOffsetEx"] == 0.7
+
+
 def test_params_defaults_preserve_pine_source_defaults():
     parsed = S06RegimeTLParams.from_dict(normalized_params({}))
 

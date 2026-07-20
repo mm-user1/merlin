@@ -72,9 +72,10 @@ def load_profile() -> ExecutionProfile:
 
 
 def normalized_params(params: Dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = normalize_parameter_aliases(params or {})
     merged = default_params_from_config()
-    merged.update(params or {})
-    return normalize_parameter_aliases(merged)
+    merged.update(raw)
+    return merged
 
 
 def build_v2_execution_data(df: pd.DataFrame, params: Mapping[str, Any]) -> ExecutionData:
@@ -101,9 +102,7 @@ class S06RTrendV02RegimeTLB2(BaseStrategy):
         params: Dict[str, Any],
         trade_start_idx: int = 0,
     ) -> StrategyResult:
-        merged_params = default_params_from_config()
-        merged_params.update(params or {})
-        merged_params = normalize_parameter_aliases(merged_params)
+        merged_params = normalized_params(params)
         parsed = S06RegimeTLParams.from_dict(merged_params)
 
         if parsed.dateFilter and parsed.end is not None and not df.empty:

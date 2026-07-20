@@ -17,6 +17,9 @@ path while preserving the reference runner and grouped compiled path as
 certification oracles. Phase 2.6.3 moves Grid V2 planning/execution onto a
 typed candidate table while keeping legacy candidates as a lazy compatibility
 surface.
+The TZ37 follow-up adds metadata-driven internal execution variants and same-role
+boolean dependency collapse for S03-like Grid V2 planning without changing V1
+runtime paths.
 
 ## Fields
 
@@ -208,13 +211,17 @@ Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
 resolved mode values, and active non-runtime parameter values. Runtime params
 such as date filters and start/end values are excluded. Parameters inactive for
-the resolved variant are excluded from semantic identity and deduplication.
+the resolved variant or for a false same-role boolean `depends_on` parent are
+excluded from semantic identity and deduplication.
 
 Optional axes use `optimize.default_enabled`: optimized params are axes by
 default unless `default_enabled=false`; `GridV2Settings.enabled_axes` can
 override the default set explicitly. Variant selector params are not normal
 axes. Grid V2 enumerates variants from `execution.variants` and derives the
 selector param value from the inverse `execution.variantSelector.mapping`.
+`variantSelector.userFacing=false` resolves one internal variant from fixed
+params and publishes no selectable `grid_enabled_modes`; user-facing logical
+mode identity is stored in `grid_mode_name`.
 `select`/`options` axes can be narrowed at runtime by passing
 `{param}_options`; values must be a non-empty subset of the declared config
 options. The subset preserves config order and is recorded in Grid V2 metadata.
@@ -230,6 +237,27 @@ signal/dataprep cache, so the cache estimate uses worker multiplier `1` while
 `worker_processes` is passed separately as the compiled batch thread cap.
 Diagnostics expose signal/dataprep hits and misses, combo counts, estimated MB,
 compiled worker count, and the configured cache limit.
+
+S03 Regime-ER B2 TZ37 Grid gates:
+
+- `plain` and `emergency` are internal execution variants selected by
+  `useEmergencySL`; new Grid metadata publishes no selectable internal modes and
+  rejects stale non-empty `grid_enabled_modes`.
+- User-facing Grid rows are logical S03 modes stored as `grid_mode_name`:
+  `cc_only`, `tbands_only`, and `both`. `variant_name` remains the resolved
+  internal execution variant for debugging/certification.
+- With Regime off, Emergency SL off, 10 MA types excluding `VWAP`, 20 MA
+  lengths, Close Count 2..7, and T Bands 0.2..2.0, corrected full-enumeration
+  counts are `cc_only=7,200`, `tbands_only=20,000`, `both=720,000`,
+  `total=747,200`.
+- Boolean `depends_on` collapse keeps disabled Close Count, T Bands, Regime-ER,
+  and Emergency SL child axes out of counts and semantic/cache identity.
+  Enabling `emergencySlPct` while `useEmergencySL=false` is inert; enabling it
+  while `useEmergencySL=true` doubles the counts to `1,494,400`. Enabling
+  `regimeErLength` over three values while `useRegime=true` yields `2,241,600`.
+- This is a planning/usability certification, not a performance certification.
+  Full S03-scale Grid V2 execution remains signal-cache heavy and can exceed
+  the default `grid_v2_max_cache_mb=512` guardrail on the SUI pilot dataset.
 
 S06 B2 Phase 2.5 gates:
 
@@ -294,9 +322,10 @@ mandatory signal/dataprep cache-declaration invariants), and
 `tests/v2/test_v2_grid_s06_regime_tl_gate.py` (generic Grid V2 plan identity,
 fixed-per-study `useRegime`, opt-in regime axes with distinct signal cache
 identities, compiled-vs-reference subset parity for both `useRegime` studies —
-run the compiled tests without `NUMBA_DISABLE_JIT=1`). `useRegime` is a fixed
-per-study parameter, never a Grid axis, because Grid V2 semantic identity does
-not yet model same-role conditional activation.
+run the compiled tests without `NUMBA_DISABLE_JIT=1`). `useRegime` remains a
+fixed per-study parameter for this certification target. Later strategies may
+use same-role boolean `depends_on` axes, but they need explicit count,
+identity, and cache tests.
 
 Tests that import the V1 fast-grid oracle set `NUMBA_DISABLE_JIT=1` before any
 Numba-importing modules are loaded. This keeps the V1 oracle practical in this

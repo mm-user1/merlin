@@ -19,6 +19,7 @@ from strategies.s03_reversal_v11_regime_er_b2.strategy import (
 
 from s03_regime_er_test_helpers import (
     BASELINE_START,
+    REFERENCE_A,
     REFERENCE_B,
     merged_reference_params,
     prepared_reference_dataset,
@@ -40,6 +41,22 @@ def test_params_parse_baseline_values_and_preserve_pine_defaults():
     assert defaults.regimeErLength == 20
     assert defaults.regimeErThresh == 0.3
     assert defaults.emergencySlPct == 20.0
+
+
+def test_normalized_params_applies_aliases_before_defaults_and_preserves_canonical_wins():
+    aliased = normalized_params(
+        {
+            "useDateFilter": False,
+            "startDate": "2025-02-01T00:00:00Z",
+            "endDate": "2026-02-01T00:00:00Z",
+        }
+    )
+    canonical = normalized_params({"dateFilter": True, "useDateFilter": False})
+
+    assert aliased["dateFilter"] is False
+    assert aliased["start"] == "2025-02-01T00:00:00Z"
+    assert aliased["end"] == "2026-02-01T00:00:00Z"
+    assert canonical["dateFilter"] is True
 
 
 @pytest.mark.parametrize(
@@ -234,8 +251,8 @@ def test_signal_axis_produces_distinct_grid_signal_cache_groups():
     prepared, trade_start_idx = prepared_reference_dataset()
     plan = build_grid_v2_plan(
         load_config(),
-        GridV2Settings(enabled_variants=("plain",), enabled_axes=("regimeErLength",)),
-        base_params=merged_reference_params(REFERENCE_B),
+        GridV2Settings(enabled_axes=("regimeErLength",)),
+        base_params=merged_reference_params(REFERENCE_A),
     )
     hooks = GridV2StrategyHooks.from_strategy(s03_regime_er_strategy)
     estimate = estimate_grid_v2_cache(plan, prepared, trade_start_idx, hooks)

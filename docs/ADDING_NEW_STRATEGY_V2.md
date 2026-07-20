@@ -100,11 +100,47 @@ Declare `execution` with:
 - optional axes through normal `optimize.enabled` and `optimize.default_enabled`
   metadata.
 
+`variantSelector.userFacing` defaults to `true` for backward compatibility.
+Set it to `false` only when variants are internal execution variants controlled
+by a normal strategy parameter, not user-selectable Grid modes. For example,
+S03-like Emergency SL strategies map `useEmergencySL=false/true` to internal
+`plain`/`emergency` variants, while the Start page exposes only the normal
+`Use Emergency SL` and Emergency SL parameter controls. With
+`userFacing=false`, Grid V2 resolves exactly one internal variant from fixed
+params, publishes no selectable `grid_enabled_modes`, rejects stale non-empty
+mode selections, and stores user-facing logical mode identity separately in
+`grid_mode_name`.
+
 For `select`/`options` Grid axes, a runtime config may restrict the enumerated
 values with `{param}_options`. The value must be a non-empty subset of the
 declared config options. Grid V2 preserves the strategy config order and rejects
 unknown runtime options. Use this for apples-to-apples candidate count checks
 instead of editing the strategy config.
+
+Same-role boolean `depends_on` is part of the Grid V2 planning contract. If a
+boolean parent is false, dependent child axes are inactive, do not multiply
+candidate counts, and are omitted from semantic identity/cache keys. Inactive
+children are passed to execution at their fixed/default value. Cross-role
+dependencies remain invalid.
+
+Use `optimization_rules.bool_groups` for small declarative logical mode groups.
+The supported production shape is a two-parameter `at_least_one_true` group with
+optional `logical_modes` metadata:
+
+```json
+{
+  "params": ["useCloseCount", "useTBands"],
+  "mode": "at_least_one_true",
+  "logical_modes": {
+    "cc_only": {"values": {"useCloseCount": true, "useTBands": false}, "label": "Close Count only"},
+    "tbands_only": {"values": {"useCloseCount": false, "useTBands": true}, "label": "T Bands only"},
+    "both": {"values": {"useCloseCount": true, "useTBands": true}, "label": "Both"}
+  }
+}
+```
+
+These logical mode keys are user-facing Grid modes for S03-like planning. They
+are not execution variants and must not be encoded as core strategy branches.
 
 ## Signals.py Requirements
 
@@ -192,6 +228,11 @@ the fill bar, becomes eligible from `fill_index + 1`, fills long stops at
 `min(open, stop)` and short stops at `max(open, stop)`, and ratchets only on
 favorable close-based updates after `emergencySlUpdateBars`.
 
+Emergency SL should remain a normal strategy parameter. If it also selects an
+internal execution variant, mark the `variantSelector` as `userFacing=false` so
+Grid/UI mode controls do not expose internal names such as `plain` or
+`emergency`.
+
 Flat or close-all behavior is data-driven. Strategies should populate
 `Signals.long_exits` and `Signals.short_exits`; there is no separate `flatExit`
 execution mode. Direction or regime gates belong inside `long_entries` and
@@ -227,6 +268,14 @@ declarations. Compiled Grid V2 config packing is also core-owned and table
 driven when compatible with the strategy normalizer; no new Phase 2.6.3 or
 Phase 2.6.3.1 strategy hook is required.
 
+Candidate rows have both `variant_name` and `grid_mode_name`. For user-facing
+variant strategies such as S06 B2, both are normally the same values
+(`bracket`/`trail`). For internal-variant strategies such as S03 Regime-ER B2,
+`variant_name` stores the resolved execution variant (`plain`/`emergency`) and
+`grid_mode_name` stores the user-facing logical mode
+(`cc_only`/`tbands_only`/`both`). Diversity grouping for internal variants uses
+`grid_mode_name`.
+
 WFA Grid V2 plan reuse is also core-owned. Strategy authors do not add a
 Phase 2.6.4 hook or cache object. Keep `start`, `end`, and `dateFilter`
 declared and treated as runtime-only date-filter params so the WFA engine can
@@ -240,6 +289,23 @@ so the dispatcher uses a cache worker multiplier of `1` even when multiple Numba
 threads are requested. The estimate includes the actual planned stacked
 signal/dataprep rows, compiled output arrays, and shared OHLC/timestamp arrays;
 the run fails before strategy data builds when the estimate exceeds the limit.
+
+Correct planning can still produce a grid that is too large to run under the
+default cache budget. The S03 Regime-ER B2 S03-like count with Regime off,
+Emergency SL off, 10 MA types excluding `VWAP`, 20 MA lengths, Close Count
+2..7, and T Bands 0.2..2.0 is:
+
+```text
+cc_only      = 7,200
+tbands_only = 20,000
+both        = 720,000
+total       = 747,200
+```
+
+Every candidate is signal-role heavy, so even a corrected full-enumeration run
+can exceed `grid_v2_max_cache_mb=512` on the SUI pilot dataset. Do not hide that
+by raising defaults, weakening estimates, or adding sampling in a strategy
+import patch.
 
 When comparing candidate counts across tools or baselines, document the enabled
 axes, enabled variants, `{param}_options` subsets, budget, and whether the UI
@@ -316,13 +382,14 @@ Learned from the first real Pine v5 pilot import
   UI drawdown uses an equity/open-excursion convention that Merlin does not
   reproduce — pin Merlin-convention values and document the TV numbers.
   `round(profit_factor, 3)` does not reliably reproduce the TV display.
-- **Fixed-per-study selector params**: a bool like `useRegime` that activates
-  same-role conditional params must be `"optimize": {"enabled": false}` and
-  varied per study through fixed params, because Grid V2 semantic identity does
-  not yet model same-role `depends_on` activation. Enabling it as an axis would
-  enumerate inert duplicates for the disabled state. Numeric companions may
-  carry `"optimize": {"enabled": true, "default_enabled": false, ...}` so they
-  are opt-in axes only.
+- **Fixed-per-study selector params**: a bool like `useRegime` can stay
+  `"optimize": {"enabled": false}` and be varied per study through fixed params
+  when the certification target is one explicit regime state. Grid V2 now
+  models same-role boolean `depends_on` activation for planning, but selector
+  axes should still be added only with explicit count, identity, and cache tests.
+  Numeric companions may carry
+  `"optimize": {"enabled": true, "default_enabled": false, ...}` so they are
+  opt-in axes only.
 - **State-machine indicators need explicit warmup convergence checks.** A
   regime/trendline state machine has unbounded memory in principle, unlike
   bounded-lookback indicators. Lock the warmup recipe with a window-start
@@ -360,6 +427,12 @@ strategy on the `signal_reversal` topology:
   the computed fill price to the 4-decimal display grid. Use a one-tick
   exit-price tolerance for that exported field, while keeping entry prices and
   timestamps exact.
+- **S03-like Grid modes are logical modes, not Emergency variants.**
+  `plain`/`emergency` are internal execution variants selected by
+  `useEmergencySL`. User-facing Grid planning uses `cc_only`, `tbands_only`,
+  and `both`, with same-role boolean `depends_on` collapse so inactive Close
+  Count, T Bands, Regime-ER, and Emergency SL child axes do not multiply the
+  parameter space.
 
 ## Baseline And Certification
 
