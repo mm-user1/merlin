@@ -21,6 +21,7 @@ from strategies.base import BaseStrategy
 from .signals import (
     S03RegimeERParams,
     build_s03_regime_er_execution_data,
+    build_s03_regime_er_execution_data_batch,
     normalize_parameter_aliases,
 )
 
@@ -80,8 +81,18 @@ def _truncate_at_end(df: pd.DataFrame, parsed: S03RegimeERParams) -> pd.DataFram
         eligible = np.flatnonzero(df.index <= parsed.end)
         if eligible.size == 0:
             return df.iloc[0:0].copy()
-        return df.iloc[: int(eligible[-1]) + 1]
+        last_index = int(eligible[-1])
+        if last_index >= len(df) - 1:
+            return df
+        return df.iloc[: last_index + 1]
     return df
+
+
+def _truncation_key(parsed: S03RegimeERParams) -> tuple[Any, Any]:
+    if not parsed.dateFilter:
+        return False, None
+    end = parsed.end.isoformat() if parsed.end is not None else None
+    return True, end
 
 
 def build_v2_execution_data(df: pd.DataFrame, params: Mapping[str, Any]) -> ExecutionData:
@@ -90,6 +101,30 @@ def build_v2_execution_data(df: pd.DataFrame, params: Mapping[str, Any]) -> Exec
     merged = normalized_params(dict(params or {}))
     parsed = S03RegimeERParams.from_dict(merged)
     return build_s03_regime_er_execution_data(_truncate_at_end(df, parsed), parsed)
+
+
+def build_v2_execution_data_batch(
+    df: pd.DataFrame,
+    params_list: Any,
+) -> list[ExecutionData]:
+    """Build S03 Regime-ER signal-only execution arrays for a batch of params."""
+
+    parsed_list = [
+        S03RegimeERParams.from_dict(normalized_params(dict(params or {})))
+        for params in params_list
+    ]
+    if not parsed_list:
+        return []
+    first_key = _truncation_key(parsed_list[0])
+    if all(_truncation_key(parsed) == first_key for parsed in parsed_list):
+        return build_s03_regime_er_execution_data_batch(
+            _truncate_at_end(df, parsed_list[0]),
+            parsed_list,
+        )
+    return [
+        build_s03_regime_er_execution_data(_truncate_at_end(df, parsed), parsed)
+        for parsed in parsed_list
+    ]
 
 
 class S03ReversalV11RegimeERB2(BaseStrategy):
@@ -119,6 +154,7 @@ __all__ = [
     "S03ReversalV11RegimeERB2",
     "SIGNAL_CACHE_PARAM_NAMES",
     "build_v2_execution_data",
+    "build_v2_execution_data_batch",
     "default_params_from_config",
     "load_config",
     "load_profile",

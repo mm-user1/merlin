@@ -38,7 +38,7 @@ def build_execution_data(
     length = len(df)
     empty_float = np.full(length, np.nan, dtype=float)
     return ExecutionData(
-        timestamps=tuple(df.index),
+        timestamps=df.index,
         open=np.asarray(df["Open"].to_numpy(copy=False), dtype=float),
         high=np.asarray(df["High"].to_numpy(copy=False), dtype=float),
         low=np.asarray(df["Low"].to_numpy(copy=False), dtype=float),
@@ -62,7 +62,7 @@ def build_signal_execution_data(
     length = len(df)
     empty_float = _shared_nan_array(length)
     return ExecutionData(
-        timestamps=tuple(df.index),
+        timestamps=df.index,
         open=np.asarray(df["Open"].to_numpy(copy=False), dtype=float),
         high=np.asarray(df["High"].to_numpy(copy=False), dtype=float),
         low=np.asarray(df["Low"].to_numpy(copy=False), dtype=float),

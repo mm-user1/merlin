@@ -62,6 +62,10 @@ OPTIONAL_WFA_GRID_V2_TIMING_KEYS = (
     "plan_build_seconds",
     "plan_reuse_lookup_seconds",
     "runtime_rebase_seconds",
+    "cache_key_build_seconds",
+    "signal_build_seconds",
+    "stack_build_seconds",
+    "compiled_batch_seconds",
     "fast_result_materialization_seconds",
     "ranking_seconds",
 )

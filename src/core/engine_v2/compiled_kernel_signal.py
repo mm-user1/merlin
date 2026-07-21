@@ -138,12 +138,13 @@ def build_signal_stacked_execution_data(
     short_exit_rows: list[np.ndarray] = []
 
     for row_number, data in enumerate(rows):
-        row_timestamps = _base._timestamps_ns(data.timestamps)
-        if row_timestamps.shape != timestamp_ns.shape or not np.array_equal(row_timestamps, timestamp_ns):
-            raise ValueError(
-                "Signal stacked compiled execution requires shared OHLC/timestamps across all ExecutionData rows; "
-                f"timestamp mismatch at row {row_number}."
-            )
+        if data.timestamps is not first.timestamps:
+            row_timestamps = _base._timestamps_ns(data.timestamps)
+            if row_timestamps.shape != timestamp_ns.shape or not np.array_equal(row_timestamps, timestamp_ns):
+                raise ValueError(
+                    "Signal stacked compiled execution requires shared OHLC/timestamps across all ExecutionData rows; "
+                    f"timestamp mismatch at row {row_number}."
+                )
         for name, expected in (
             ("open", open_values),
             ("high", high_values),

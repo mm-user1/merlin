@@ -785,8 +785,18 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
                 "candidate_count": 48_480,
                 "valid_candidate_count": 2,
                 "selected_candidate_count": 2,
-                "cache_estimate": {"estimated_total_mb": 11.5},
+                "cache_estimate": {"estimated_total_mb": 11.5, "estimated_signal_mb": 9.25},
                 "cache_stats": {"signal_misses": 1, "dataprep_misses": 3},
+                "chunk_count": 3,
+                "max_chunk_candidates": 16_160,
+                "max_chunk_estimated_mb": 4.2,
+                "chunk_estimated_mb": 4.2,
+                "full_run_estimated_signal_mb": 9.25,
+                "configured_limit_mb": 512.0,
+                "signal_stack_rows_built": 12,
+                "signal_stack_rows_peak": 4,
+                "compiled_config_packing": "mapping",
+                "full_population_result_object_note": "Full-population materialization remains deferred.",
                 "candidates_per_second": 1234.5,
                 "plan_reuse_enabled": True,
                 "plan_reuse_hit": True,
@@ -800,6 +810,10 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
                     "plan_reuse_lookup_seconds": 0.01,
                     "runtime_rebase_seconds": 0.02,
                     "data_prepare_seconds": 0.22,
+                    "cache_key_build_seconds": 0.07,
+                    "signal_build_seconds": 0.08,
+                    "stack_build_seconds": 0.09,
+                    "compiled_batch_seconds": 0.10,
                     "fast_evaluation_seconds": 0.33,
                     "fast_result_materialization_seconds": 0.04,
                     "ranking_seconds": 0.05,
@@ -865,6 +879,7 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
         assert diagnostics["valid_candidate_count"] == 2
         assert diagnostics["selected_candidate_count"] == 2
         assert diagnostics["cache_estimate"]["estimated_total_mb"] == pytest.approx(11.5)
+        assert diagnostics["cache_estimate"]["estimated_signal_mb"] == pytest.approx(9.25)
         assert diagnostics["cache_stats"]["signal_misses"] == 1
         assert diagnostics["cache_stats"]["dataprep_misses"] == 3
         assert diagnostics["candidate_generation_seconds"] == pytest.approx(0.11)
@@ -872,6 +887,10 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
         assert diagnostics["plan_reuse_lookup_seconds"] == pytest.approx(0.01)
         assert diagnostics["runtime_rebase_seconds"] == pytest.approx(0.02)
         assert diagnostics["data_prepare_seconds"] == pytest.approx(0.22)
+        assert diagnostics["cache_key_build_seconds"] == pytest.approx(0.07)
+        assert diagnostics["signal_build_seconds"] == pytest.approx(0.08)
+        assert diagnostics["stack_build_seconds"] == pytest.approx(0.09)
+        assert diagnostics["compiled_batch_seconds"] == pytest.approx(0.10)
         assert diagnostics["fast_evaluation_seconds"] == pytest.approx(0.33)
         assert diagnostics["fast_result_materialization_seconds"] == pytest.approx(0.04)
         assert diagnostics["ranking_seconds"] == pytest.approx(0.05)
@@ -879,6 +898,16 @@ def test_grid_wfa_threads_window_dsr_summary_and_candidate_moments(monkeypatch):
         assert diagnostics["slow_refinement_seconds"] == pytest.approx(0.06)
         assert diagnostics["total_seconds"] == pytest.approx(1.10)
         assert diagnostics["candidates_per_second"] == pytest.approx(1234.5)
+        assert diagnostics["chunk_count"] == 3
+        assert diagnostics["max_chunk_candidates"] == 16_160
+        assert diagnostics["max_chunk_estimated_mb"] == pytest.approx(4.2)
+        assert diagnostics["chunk_estimated_mb"] == pytest.approx(4.2)
+        assert diagnostics["full_run_estimated_signal_mb"] == pytest.approx(9.25)
+        assert diagnostics["configured_limit_mb"] == pytest.approx(512.0)
+        assert diagnostics["signal_stack_rows_built"] == 12
+        assert diagnostics["signal_stack_rows_peak"] == 4
+        assert diagnostics["compiled_config_packing"] == "mapping"
+        assert diagnostics["full_population_result_object_note"] == "Full-population materialization remains deferred."
         assert diagnostics["plan_reuse_enabled"] is True
         assert diagnostics["plan_reuse_hit"] is True
         assert diagnostics["plan_cache_key_hash"] == "abc123"

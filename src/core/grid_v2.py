@@ -130,6 +130,7 @@ class GridV2StrategyHooks:
     """Strategy-specific data hooks consumed by the generic backend."""
 
     build_execution_data: Callable[[pd.DataFrame, Mapping[str, Any]], ExecutionData]
+    build_execution_data_batch: Callable[[pd.DataFrame, Sequence[Mapping[str, Any]]], Sequence[ExecutionData]] | None = None
     normalize_params: Callable[[Mapping[str, Any] | None], Mapping[str, Any]] | None = None
     label: str = ""
     signal_param_names: tuple[str, ...] | None = None
@@ -143,6 +144,11 @@ class GridV2StrategyHooks:
             builder = getattr(strategy, "build_execution_data", None)
         if builder is None or not callable(builder):
             raise TypeError("Grid V2 strategy hooks require a callable build_v2_execution_data.")
+        batch_builder = getattr(strategy, "build_v2_execution_data_batch", None)
+        if batch_builder is None:
+            batch_builder = getattr(strategy, "build_execution_data_batch", None)
+        if batch_builder is not None and not callable(batch_builder):
+            batch_builder = None
         normalizer = getattr(strategy, "normalized_params", None)
         if normalizer is not None and not callable(normalizer):
             normalizer = None
@@ -150,6 +156,7 @@ class GridV2StrategyHooks:
         dataprep_names = _optional_name_tuple(getattr(strategy, "DATAPREP_CACHE_PARAM_NAMES", None))
         return cls(
             build_execution_data=builder,
+            build_execution_data_batch=batch_builder,
             normalize_params=normalizer,
             label=str(getattr(strategy, "__name__", getattr(strategy, "__class__", type(strategy)).__name__)),
             signal_param_names=signal_names,
@@ -774,6 +781,12 @@ class _CacheGroupPlan:
     representatives: Mapping[int, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _CacheKeyChunk:
+    records: tuple[_CandidateCacheKeys, ...]
+    estimate: GridV2CacheEstimate
+
+
 def build_grid_v2_plan(
     config: Mapping[str, Any],
     settings: GridV2Settings | None = None,
@@ -1345,6 +1358,125 @@ def _grid_v2_execution_topology(plan: GridV2Plan) -> str | None:
     raise ValueError(f"Unsupported Grid V2 execution topology: {topology!r}.")
 
 
+def _raise_cache_estimate_error(estimate: GridV2CacheEstimate) -> None:
+    raise MemoryError(
+        "Grid V2 cache estimate exceeds max_signal_cache_mb "
+        f"({estimate.estimated_total_mb:.3f} MB > {estimate.max_signal_cache_mb:.3f} MB)."
+    )
+
+
+def _signal_chunk_estimated_mb(
+    plan: GridV2Plan,
+    n_bars: int,
+    *,
+    signal_row_count: int,
+    candidate_count: int,
+) -> float:
+    worker_multiplier = max(1, int(plan.settings.worker_multiplier))
+    signal_bytes = (
+        int(signal_row_count)
+        * int(n_bars)
+        * _SIGNAL_TOPOLOGY_BOOL_SIGNAL_ARRAYS
+        * np.dtype(np.bool_).itemsize
+    )
+    output_bytes = int(candidate_count) * OUTPUT_COLUMN_COUNT * np.dtype(np.float64).itemsize
+    shared_market_bytes = int(n_bars) * (
+        4 * np.dtype(np.float64).itemsize + np.dtype(np.int64).itemsize
+    )
+    return ((signal_bytes + output_bytes + shared_market_bytes) * worker_multiplier) / _BYTES_PER_MB
+
+
+def _signal_cache_key_chunks(
+    plan: GridV2Plan,
+    n_bars: int,
+    cache_keys: Sequence[_CandidateCacheKeys],
+) -> tuple[_CacheKeyChunk, ...]:
+    if not cache_keys:
+        return (_CacheKeyChunk((), _estimate_grid_v2_cache_from_keys(plan, n_bars, ())),)
+
+    chunks: list[_CacheKeyChunk] = []
+    current: list[_CandidateCacheKeys] = []
+    current_data_keys: set[Any] = set()
+    limit_mb = float(plan.settings.max_signal_cache_mb)
+
+    for record in cache_keys:
+        next_data_key_count = len(current_data_keys) + (0 if record.dataprep_key in current_data_keys else 1)
+        next_candidate_count = len(current) + 1
+        next_estimated_mb = _signal_chunk_estimated_mb(
+            plan,
+            n_bars,
+            signal_row_count=next_data_key_count,
+            candidate_count=next_candidate_count,
+        )
+        if current and next_estimated_mb > limit_mb:
+            chunk_records = tuple(current)
+            chunks.append(
+                _CacheKeyChunk(
+                    chunk_records,
+                    _estimate_grid_v2_cache_from_keys(plan, n_bars, chunk_records),
+                )
+            )
+            current = []
+            current_data_keys = set()
+
+        current.append(record)
+        current_data_keys.add(record.dataprep_key)
+        single_chunk_mb = _signal_chunk_estimated_mb(
+            plan,
+            n_bars,
+            signal_row_count=len(current_data_keys),
+            candidate_count=len(current),
+        )
+        if single_chunk_mb > limit_mb:
+            chunk_estimate = _estimate_grid_v2_cache_from_keys(plan, n_bars, tuple(current))
+            _raise_cache_estimate_error(chunk_estimate)
+
+    if current:
+        chunk_records = tuple(current)
+        chunks.append(
+            _CacheKeyChunk(
+                chunk_records,
+                _estimate_grid_v2_cache_from_keys(plan, n_bars, chunk_records),
+            )
+        )
+    return tuple(chunks)
+
+
+def _build_execution_data_rows(
+    plan: GridV2Plan,
+    df: pd.DataFrame,
+    hooks: GridV2StrategyHooks,
+    candidate_indices: Sequence[int],
+) -> tuple[ExecutionData, ...]:
+    params_batch = tuple(
+        _normalized_candidate_params(hooks, plan.candidate_table.params_for_index(candidate_index))
+        for candidate_index in candidate_indices
+    )
+    if hooks.build_execution_data_batch is not None:
+        rows = tuple(hooks.build_execution_data_batch(df, params_batch))
+        if len(rows) != len(params_batch):
+            raise ValueError(
+                "Grid V2 build_execution_data_batch returned "
+                f"{len(rows)} rows for {len(params_batch)} parameter mappings."
+            )
+        return rows
+    return tuple(hooks.build_execution_data(df, params) for params in params_batch)
+
+
+def _stack_metadata_from_batch(stacked_data: Any, outputs: np.ndarray) -> dict[str, Any]:
+    total_nbytes = int(stacked_data.nbytes + outputs.nbytes)
+    return {
+        "stack_row_count": stacked_data.row_count,
+        "stack_candidate_count": stacked_data.candidate_count,
+        "stack_signal_nbytes": stacked_data.signal_nbytes,
+        "stack_dataprep_nbytes": stacked_data.dataprep_nbytes,
+        "stack_shared_market_nbytes": stacked_data.shared_market_nbytes,
+        "stack_output_nbytes": int(outputs.nbytes),
+        "stack_total_nbytes": total_nbytes,
+        "stack_total_mb": total_nbytes / _BYTES_PER_MB,
+    }
+
+
 def execute_grid_v2_candidates(
     plan: GridV2Plan,
     df: pd.DataFrame,
@@ -1357,159 +1489,233 @@ def execute_grid_v2_candidates(
     hooks = _coerce_hooks(hooks)
     selected_indices = _selected_candidate_indices(plan, candidate_indices)
     context = _cache_key_context(df, trade_start_idx, hooks)
+    cache_key_started = time.time()
     cache_keys = _candidate_cache_keys(plan, context, hooks, selected_indices)
+    cache_key_build_seconds = time.time() - cache_key_started
+    topology = _grid_v2_execution_topology(plan)
     estimate = _estimate_grid_v2_cache_from_keys(plan, int(len(df)), cache_keys)
-    if estimate.estimated_total_mb > estimate.max_signal_cache_mb:
-        raise MemoryError(
-            "Grid V2 cache estimate exceeds max_signal_cache_mb "
-            f"({estimate.estimated_total_mb:.3f} MB > {estimate.max_signal_cache_mb:.3f} MB)."
-        )
+    if estimate.estimated_total_mb > estimate.max_signal_cache_mb and topology != "signal_reversal":
+        _raise_cache_estimate_error(estimate)
+    chunks = (
+        _signal_cache_key_chunks(plan, int(len(df)), cache_keys)
+        if topology == "signal_reversal" and estimate.estimated_total_mb > estimate.max_signal_cache_mb
+        else (_CacheKeyChunk(cache_keys, estimate),)
+    )
 
     eval_started = time.time()
     stats = GridV2CacheStats()
     signal_seen: set[Any] = set()
-    dataprep_cache: dict[Any, ExecutionData] = {}
-    data_groups: dict[Any, list[int]] = {}
+    dataprep_seen: set[Any] = set()
+    selected_dataprep_cache: dict[Any, ExecutionData] = {}
     rows: list[GridV2ResultRow] = []
-
-    for key_record in cache_keys:
-        candidate_index = key_record.candidate_index
-        signal_key = key_record.signal_key
-        if signal_key in signal_seen:
-            stats.signal_hits += 1
-        else:
-            stats.signal_misses += 1
-            signal_seen.add(signal_key)
-
-        data_key = key_record.dataprep_key
-        if data_key in dataprep_cache:
-            stats.dataprep_hits += 1
-        else:
-            stats.dataprep_misses += 1
-            try:
-                params = plan.candidate_table.params_for_index(candidate_index)
-                data = hooks.build_execution_data(df, _normalized_candidate_params(hooks, params))
-            except Exception as exc:
-                rows.append(_error_row(plan, candidate_index, exc))
-                continue
-            dataprep_cache[data_key] = data
-        data_groups.setdefault(data_key, []).append(candidate_index)
-
-    topology = _grid_v2_execution_topology(plan)
     compiled_available = compiled_batch_available()
     use_compiled = bool(plan.settings.prefer_compiled and compiled_available)
     backend_kind = COMPILED_BATCH_KIND if use_compiled else REFERENCE_BATCH_KIND
     compiled_execution_mode: str | None = None
     compiled_config_packing: str | None = None
-    stack_metadata: dict[str, Any] = {}
+    signal_build_seconds = 0.0
+    stack_build_seconds = 0.0
+    compiled_batch_seconds = 0.0
+    peak_stack_metadata: dict[str, Any] = {}
+    signal_stack_rows_built = 0
+    signal_stack_rows_peak = 0
 
-    if use_compiled:
-        data_keys = tuple(data_groups.keys())
-        data_key_to_stack_row = {key: index for index, key in enumerate(data_keys)}
-        compiled_indices: list[int] = []
-        data_index: list[int] = []
-        for key_record in cache_keys:
-            data_key = key_record.dataprep_key
-            if data_key not in data_key_to_stack_row:
-                continue
-            candidate_index = key_record.candidate_index
-            compiled_indices.append(candidate_index)
-            data_index.append(data_key_to_stack_row[data_key])
-        if compiled_indices:
-            if topology == "signal_reversal":
-                stacked_data = build_signal_stacked_execution_data(
-                    [dataprep_cache[key] for key in data_keys],
-                    data_index,
-                )
-                row_params_batch = [
-                    plan.candidate_table.params_for_index(candidate_index)
-                    for candidate_index in compiled_indices
-                ]
-                params_batch = [
-                    _normalized_candidate_params(hooks, params)
-                    for params in row_params_batch
-                ]
-                compiled_config_packing = "mapping"
-                batch = evaluate_compiled_signal_stacked_batch(
-                    stacked_data=stacked_data,
-                    profile=plan.profile,
-                    params_batch=params_batch,
-                    trade_start_idx=trade_start_idx,
-                    n_workers=plan.settings.compiled_workers,
-                )
+    for chunk in chunks:
+        data_groups: dict[Any, list[int]] = {}
+        representatives: dict[Any, int] = {}
+        for key_record in chunk.records:
+            signal_key = key_record.signal_key
+            if signal_key in signal_seen:
+                stats.signal_hits += 1
             else:
-                stacked_data = build_stacked_execution_data(
-                    [dataprep_cache[key] for key in data_keys],
-                    data_index,
-                )
-                params_batch: list[Mapping[str, Any]] | None = None
-                row_params_batch: list[Mapping[str, Any]] | None = None
-                packed_config_arrays: Mapping[str, np.ndarray] | None = None
-                requested_packing = str(plan.settings.compiled_config_packing or "mapping").strip().lower()
-                if requested_packing not in {"mapping", "table"}:
-                    raise ValueError("Grid V2 compiled_config_packing must be 'mapping' or 'table'.")
-                if requested_packing == "table" and _can_use_table_config_packer(plan, hooks, compiled_indices):
-                    packed_config_arrays = _pack_table_config_arrays(plan, compiled_indices, trade_start_idx)
-                    compiled_config_packing = "table"
-                else:
-                    row_params_batch = [
-                        plan.candidate_table.params_for_index(candidate_index)
+                stats.signal_misses += 1
+                signal_seen.add(signal_key)
+
+            data_key = key_record.dataprep_key
+            if data_key in dataprep_seen:
+                stats.dataprep_hits += 1
+            else:
+                stats.dataprep_misses += 1
+                dataprep_seen.add(data_key)
+            representatives.setdefault(data_key, key_record.candidate_index)
+            data_groups.setdefault(data_key, []).append(key_record.candidate_index)
+
+        data_keys = tuple(data_groups.keys())
+        dataprep_cache: dict[Any, ExecutionData] = {}
+        data_errors: dict[Any, Exception] = {}
+        signal_build_started = time.time()
+        if data_keys:
+            representative_indices = tuple(representatives[key] for key in data_keys)
+            try:
+                data_rows = _build_execution_data_rows(plan, df, hooks, representative_indices)
+                dataprep_cache = dict(zip(data_keys, data_rows))
+            except Exception:
+                for data_key, candidate_index in zip(data_keys, representative_indices):
+                    try:
+                        params = _normalized_candidate_params(
+                            hooks,
+                            plan.candidate_table.params_for_index(candidate_index),
+                        )
+                        dataprep_cache[data_key] = hooks.build_execution_data(df, params)
+                    except Exception as exc:  # pragma: no cover - exercised by existing error row tests indirectly
+                        data_errors[data_key] = exc
+        signal_build_seconds += time.time() - signal_build_started
+
+        if data_errors:
+            for key_record in chunk.records:
+                exc = data_errors.get(key_record.dataprep_key)
+                if exc is not None:
+                    rows.append(_error_row(plan, key_record.candidate_index, exc))
+            data_groups = {
+                data_key: candidate_group
+                for data_key, candidate_group in data_groups.items()
+                if data_key not in data_errors
+            }
+
+        if not data_groups:
+            continue
+
+        if topology != "signal_reversal" or len(chunks) == 1:
+            selected_dataprep_cache.update(dataprep_cache)
+
+        if use_compiled:
+            data_keys = tuple(data_groups.keys())
+            data_key_to_stack_row = {key: index for index, key in enumerate(data_keys)}
+            compiled_indices: list[int] = []
+            data_index: list[int] = []
+            for key_record in chunk.records:
+                data_key = key_record.dataprep_key
+                if data_key not in data_key_to_stack_row:
+                    continue
+                candidate_index = key_record.candidate_index
+                compiled_indices.append(candidate_index)
+                data_index.append(data_key_to_stack_row[data_key])
+            if compiled_indices:
+                if topology == "signal_reversal":
+                    stack_started = time.time()
+                    stacked_data = build_signal_stacked_execution_data(
+                        [dataprep_cache[key] for key in data_keys],
+                        data_index,
+                    )
+                    stack_build_seconds += time.time() - stack_started
+                    compiled_started = time.time()
+                    params_batch = [
+                        _normalized_candidate_params(
+                            hooks,
+                            plan.candidate_table.params_for_index(candidate_index),
+                        )
                         for candidate_index in compiled_indices
                     ]
-                    params_batch = [
-                        _normalized_candidate_params(hooks, params)
-                        for params in row_params_batch
-                    ]
+                    row_params_batch: list[Mapping[str, Any]] | None = None
                     compiled_config_packing = "mapping"
-                batch = evaluate_compiled_stacked_batch(
-                    stacked_data=stacked_data,
-                    profile=plan.profile,
-                    params_batch=params_batch,
-                    trade_start_idx=trade_start_idx,
-                    n_workers=plan.settings.compiled_workers,
-                    packed_config_arrays=packed_config_arrays,
-                )
-            compiled_execution_mode = batch.execution_mode
-            stack_metadata = {
-                "stack_row_count": stacked_data.row_count,
-                "stack_candidate_count": stacked_data.candidate_count,
-                "stack_signal_nbytes": stacked_data.signal_nbytes,
-                "stack_dataprep_nbytes": stacked_data.dataprep_nbytes,
-                "stack_shared_market_nbytes": stacked_data.shared_market_nbytes,
-                "stack_output_nbytes": int(batch.outputs.nbytes),
-                "stack_total_nbytes": int(stacked_data.nbytes + batch.outputs.nbytes),
-                "stack_total_mb": (stacked_data.nbytes + batch.outputs.nbytes) / _BYTES_PER_MB,
-            }
-            for output_index, (candidate_index, values) in enumerate(zip(compiled_indices, batch.outputs)):
-                params = row_params_batch[output_index] if row_params_batch is not None else None
-                rows.append(_row_from_compiled_output(plan, candidate_index, values, params=params))
-        else:
-            compiled_execution_mode = "stacked"
-    else:
-        for data_key, candidate_indices_for_data in data_groups.items():
-            data = dataprep_cache[data_key]
-            for candidate_index in candidate_indices_for_data:
-                params = plan.candidate_table.params_for_index(candidate_index)
-                try:
-                    run = run_v2_strategy(
-                        data=data,
+                    batch = evaluate_compiled_signal_stacked_batch(
+                        stacked_data=stacked_data,
                         profile=plan.profile,
-                        params=_normalized_candidate_params(hooks, params),
+                        params_batch=params_batch,
                         trade_start_idx=trade_start_idx,
+                        n_workers=plan.settings.compiled_workers,
                     )
-                except Exception as exc:
-                    rows.append(_error_row(plan, candidate_index, exc))
-                    continue
-                rows.append(_row_from_run(plan, candidate_index, run, params=params))
+                    compiled_batch_seconds += time.time() - compiled_started
+                else:
+                    stack_started = time.time()
+                    stacked_data = build_stacked_execution_data(
+                        [dataprep_cache[key] for key in data_keys],
+                        data_index,
+                    )
+                    stack_build_seconds += time.time() - stack_started
+                    compiled_started = time.time()
+                    params_batch = None
+                    row_params_batch = None
+                    packed_config_arrays: Mapping[str, np.ndarray] | None = None
+                    requested_packing = str(plan.settings.compiled_config_packing or "mapping").strip().lower()
+                    if requested_packing not in {"mapping", "table"}:
+                        raise ValueError("Grid V2 compiled_config_packing must be 'mapping' or 'table'.")
+                    if requested_packing == "table" and _can_use_table_config_packer(plan, hooks, compiled_indices):
+                        packed_config_arrays = _pack_table_config_arrays(plan, compiled_indices, trade_start_idx)
+                        compiled_config_packing = "table"
+                    else:
+                        row_params_batch = [
+                            plan.candidate_table.params_for_index(candidate_index)
+                            for candidate_index in compiled_indices
+                        ]
+                        params_batch = [
+                            _normalized_candidate_params(hooks, params)
+                            for params in row_params_batch
+                        ]
+                        compiled_config_packing = "mapping"
+                    batch = evaluate_compiled_stacked_batch(
+                        stacked_data=stacked_data,
+                        profile=plan.profile,
+                        params_batch=params_batch,
+                        trade_start_idx=trade_start_idx,
+                        n_workers=plan.settings.compiled_workers,
+                        packed_config_arrays=packed_config_arrays,
+                    )
+                    compiled_batch_seconds += time.time() - compiled_started
+                compiled_execution_mode = batch.execution_mode
+                chunk_stack_metadata = _stack_metadata_from_batch(stacked_data, batch.outputs)
+                if (
+                    not peak_stack_metadata
+                    or int(chunk_stack_metadata["stack_total_nbytes"]) > int(peak_stack_metadata["stack_total_nbytes"])
+                ):
+                    peak_stack_metadata = chunk_stack_metadata
+                if topology == "signal_reversal":
+                    signal_stack_rows_built += int(stacked_data.row_count)
+                    signal_stack_rows_peak = max(signal_stack_rows_peak, int(stacked_data.row_count))
+                for output_index, (candidate_index, values) in enumerate(zip(compiled_indices, batch.outputs)):
+                    params = row_params_batch[output_index] if row_params_batch is not None else None
+                    rows.append(_row_from_compiled_output(plan, candidate_index, values, params=params))
+            else:
+                compiled_execution_mode = "stacked"
+        else:
+            for data_key, candidate_indices_for_data in data_groups.items():
+                data = dataprep_cache[data_key]
+                for candidate_index in candidate_indices_for_data:
+                    params = plan.candidate_table.params_for_index(candidate_index)
+                    try:
+                        run = run_v2_strategy(
+                            data=data,
+                            profile=plan.profile,
+                            params=_normalized_candidate_params(hooks, params),
+                            trade_start_idx=trade_start_idx,
+                        )
+                    except Exception as exc:
+                        rows.append(_error_row(plan, candidate_index, exc))
+                        continue
+                    rows.append(_row_from_run(plan, candidate_index, run, params=params))
+
+        if topology == "signal_reversal":
+            dataprep_cache.clear()
+            plan.candidate_table._params_cache.clear()
 
     rows.sort(key=lambda row: row.candidate_id)
     selected = ()
     if plan.settings.slow_enrich_selected:
         selected = tuple(
-            _slow_enrich_selected(plan, context, trade_start_idx, hooks, row, dataprep_cache)
+            _slow_enrich_selected(plan, df, context, trade_start_idx, hooks, row, selected_dataprep_cache)
             for row in _rank_rows(rows, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
         )
     evaluation_seconds = time.time() - eval_started
+    chunk_estimates = tuple(chunk.estimate for chunk in chunks)
+    max_chunk_estimated_mb = max(
+        (float(chunk_estimate.estimated_total_mb) for chunk_estimate in chunk_estimates),
+        default=0.0,
+    )
+    max_chunk_candidates = max((len(chunk.records) for chunk in chunks), default=0)
+    chunk_metadata = {
+        "chunk_count": len(chunks),
+        "max_chunk_candidates": max_chunk_candidates,
+        "max_chunk_estimated_mb": max_chunk_estimated_mb,
+        "chunk_estimated_mb": max_chunk_estimated_mb,
+        "full_run_estimated_signal_mb": float(estimate.estimated_signal_mb),
+        "configured_limit_mb": float(estimate.max_signal_cache_mb),
+        "signal_stack_rows_built": signal_stack_rows_built,
+        "signal_stack_rows_peak": signal_stack_rows_peak,
+        "full_population_result_object_note": (
+            "Full-population OptimizationResult materialization remains outside the Grid V2 "
+            "compiled execution kernel."
+        ),
+    }
     return GridV2RunResult(
         plan=plan,
         rows=tuple(rows),
@@ -1519,9 +1725,9 @@ def execute_grid_v2_candidates(
         metadata={
             "backend_kind": backend_kind,
             "compiled_batch_available": compiled_available,
-        "compiled_batch_used": use_compiled,
-        "compiled_execution_mode": compiled_execution_mode,
-        "compiled_config_packing": compiled_config_packing,
+            "compiled_batch_used": use_compiled,
+            "compiled_execution_mode": compiled_execution_mode,
+            "compiled_config_packing": compiled_config_packing,
             "compiled_unavailable_reason": compiled_unavailable_reason(),
             "metric_tier": "core_fast_rows_plus_selected_public_v2_enrichment",
             "executed_candidate_count": len(rows),
@@ -1529,12 +1735,17 @@ def execute_grid_v2_candidates(
             "compiled_workers": int(plan.settings.compiled_workers),
             "evaluation_seconds": evaluation_seconds,
             "candidates_per_second": (len(rows) / evaluation_seconds) if evaluation_seconds > 0.0 else None,
+            "cache_key_build_seconds": cache_key_build_seconds,
+            "signal_build_seconds": signal_build_seconds,
+            "stack_build_seconds": stack_build_seconds,
+            "compiled_batch_seconds": compiled_batch_seconds,
             "candidate_table_used": True,
             "legacy_candidates_materialized": plan.candidate_table.legacy_candidates_materialized_count,
             "params_materialized": plan.candidate_table.params_materialized_count,
             "semantic_keys_materialized": plan.candidate_table.semantic_keys_materialized_count,
             "canonical_identities_materialized": plan.candidate_table.canonical_identities_materialized_count,
-            **stack_metadata,
+            **peak_stack_metadata,
+            **chunk_metadata,
         },
     )
 
@@ -2237,6 +2448,7 @@ def _coerce_hooks(hooks: GridV2StrategyHooks | Any) -> GridV2StrategyHooks:
             return hooks
         return GridV2StrategyHooks(
             build_execution_data=hooks.build_execution_data,
+            build_execution_data_batch=hooks.build_execution_data_batch,
             normalize_params=hooks.normalize_params,
             label=hooks.label,
             signal_param_names=hooks.signal_param_names,
@@ -3074,22 +3286,26 @@ def _rank_rows(rows: Sequence[GridV2ResultRow], metric: str) -> list[GridV2Resul
 
 def _slow_enrich_selected(
     plan: GridV2Plan,
+    df: pd.DataFrame,
     context: _CacheKeyContext,
     trade_start_idx: int,
     hooks: GridV2StrategyHooks,
     row: GridV2ResultRow,
-    dataprep_cache: Mapping[str, ExecutionData],
+    dataprep_cache: Mapping[Any, ExecutionData],
 ) -> GridV2SelectedResult:
     if row.status != "ok":
         return GridV2SelectedResult(row=row, metrics={}, guardrail_summary={})
     candidate_index = plan.candidate_table.validate_candidate_id(row.candidate_id)
     data_key = _dataprep_cache_key_for_index(plan, candidate_index, context, hooks)
-    data = dataprep_cache[data_key]
     params = plan.candidate_table.params_for_index(candidate_index)
+    normalized_params = _normalized_candidate_params(hooks, params)
+    data = dataprep_cache.get(data_key)
+    if data is None:
+        data = hooks.build_execution_data(df, normalized_params)
     run = run_v2_strategy(
         data=data,
         profile=plan.profile,
-        params=_normalized_candidate_params(hooks, params),
+        params=normalized_params,
         trade_start_idx=trade_start_idx,
     )
     strategy_result = run.strategy_result

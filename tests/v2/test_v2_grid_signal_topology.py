@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import math
+from dataclasses import replace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from core.engine_v2.compiled_kernel import (
@@ -111,13 +113,14 @@ def _require_compiled_available():
         pytest.skip("Compiled signal path is unavailable in this process.")
 
 
-def _grid_plan(*, prefer_compiled: bool, top_n: int = 0):
+def _grid_plan(*, prefer_compiled: bool, top_n: int = 0, max_signal_cache_mb: float = 512.0):
     return build_grid_v2_plan(
         fixture_config(),
         GridV2Settings(
             enabled_axes=("maType3", "emergencySlPct"),
             top_n=top_n,
             prefer_compiled=prefer_compiled,
+            max_signal_cache_mb=max_signal_cache_mb,
         ),
         base_params=_base_params(),
     )
@@ -289,31 +292,51 @@ def test_signal_grid_cache_estimate_uses_exit_signal_rows_and_no_float_dataprep(
     assert estimate.bytes_per_dataprep_combo == 0
     assert estimate.estimated_dataprep_mb == 0.0
 
-    build_calls = []
-
-    def forbidden_build(*args, **kwargs):  # noqa: ARG001
-        build_calls.append(1)
-        raise AssertionError("build_execution_data must not run after a failed cache estimate")
-
-    blocked_hooks = GridV2StrategyHooks(
-        build_execution_data=forbidden_build,
-        normalize_params=hooks.normalize_params,
-        label=hooks.label,
-        signal_param_names=hooks.signal_param_names,
-        dataprep_param_names=hooks.dataprep_param_names,
-        function_fingerprint=hooks.function_fingerprint,
-    )
+    single_estimate = estimate_grid_v2_cache(plan, signal_df, 0, hooks, candidate_indices=(0,))
+    limit_mb = (single_estimate.estimated_total_mb + estimate.estimated_total_mb) / 2.0
     limited_plan = build_grid_v2_plan(
         fixture_config(),
         GridV2Settings(
             enabled_axes=("maType3", "emergencySlPct"),
-            max_signal_cache_mb=max(0.000001, estimate.estimated_total_mb - 0.000001),
+            max_signal_cache_mb=limit_mb,
         ),
         base_params=_base_params(),
     )
-    with pytest.raises(MemoryError, match="cache estimate"):
-        execute_grid_v2_candidates(limited_plan, signal_df, 0, blocked_hooks)
-    assert build_calls == []
+    result = execute_grid_v2_candidates(limited_plan, signal_df, 0, hooks)
+
+    assert len(result.rows) == plan.deduped_candidate_count
+    assert result.metadata["chunk_count"] > 1
+    assert result.metadata["max_chunk_estimated_mb"] <= limit_mb + 1e-12
+    assert result.metadata["signal_stack_rows_built"] >= result.metadata["signal_stack_rows_peak"]
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled signal path required.")
+def test_signal_grid_chunked_compiled_rows_match_monolithic_and_selected_enrichment(signal_df, hooks):
+    _require_compiled_available()
+    monolithic_plan = _grid_plan(prefer_compiled=True, top_n=2)
+    estimate = estimate_grid_v2_cache(monolithic_plan, signal_df, 0, hooks)
+    single_estimate = estimate_grid_v2_cache(monolithic_plan, signal_df, 0, hooks, candidate_indices=(0,))
+    limit_mb = (single_estimate.estimated_total_mb + estimate.estimated_total_mb) / 2.0
+    chunked_plan = _grid_plan(
+        prefer_compiled=True,
+        top_n=2,
+        max_signal_cache_mb=limit_mb,
+    )
+
+    monolithic = execute_grid_v2_candidates(monolithic_plan, signal_df, 0, hooks)
+    chunked = execute_grid_v2_candidates(chunked_plan, signal_df, 0, hooks)
+
+    assert chunked.metadata["chunk_count"] > 1
+    assert chunked.metadata["max_chunk_estimated_mb"] <= limit_mb + 1e-12
+    assert chunked.metadata["compiled_config_packing"] == "mapping"
+    assert chunked.metadata["params_materialized"] < len(chunked.rows)
+    for chunked_row, monolithic_row in zip(chunked.rows, monolithic.rows):
+        _assert_rows_equal(chunked_row, monolithic_row)
+    assert [item.row.candidate_id for item in chunked.selected] == [
+        item.row.candidate_id for item in monolithic.selected
+    ]
+    for chunked_item, monolithic_item in zip(chunked.selected, monolithic.selected):
+        assert chunked_item.metrics == monolithic_item.metrics
 
 
 def test_signal_stacked_payload_defaults_absent_exits_and_validates_shared_market():
@@ -343,6 +366,24 @@ def test_signal_stacked_payload_defaults_absent_exits_and_validates_shared_marke
         build_signal_stacked_execution_data([data, mismatched], [0, 1])
     with pytest.raises(ValueError, match="out-of-range"):
         build_signal_stacked_execution_data([data], [1])
+
+
+def test_signal_execution_data_preserves_datetime_index_and_tuple_timestamps_still_stack():
+    data = _signal_data(
+        open_=[100.0, 101.0],
+        high=[100.0, 101.0],
+        low=[100.0, 101.0],
+        close=[100.0, 101.0],
+        long=[True, False],
+    )
+
+    assert isinstance(data.timestamps, pd.DatetimeIndex)
+
+    tuple_data = replace(data, timestamps=tuple(data.timestamps))
+    stacked = build_signal_stacked_execution_data([tuple_data], [0])
+
+    assert stacked.row_count == 1
+    assert stacked.candidate_count == 1
 
 
 def test_signal_mode_state_and_config_packer_validation():

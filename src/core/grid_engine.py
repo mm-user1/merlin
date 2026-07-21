@@ -1632,6 +1632,15 @@ def _run_grid_v2_optimization(
         hooks,
     )
     timings["fast_evaluation_seconds"] = time.time() - eval_started
+    for key in (
+        "cache_key_build_seconds",
+        "signal_build_seconds",
+        "stack_build_seconds",
+        "compiled_batch_seconds",
+    ):
+        value = run_result.metadata.get(key)
+        if value is not None:
+            timings[key] = float(value)
 
     metric_tier = (
         "compiled_fast"
@@ -1796,6 +1805,15 @@ def _run_grid_v2_optimization(
             "stack_output_nbytes": run_result.metadata.get("stack_output_nbytes"),
             "stack_total_nbytes": run_result.metadata.get("stack_total_nbytes"),
             "stack_total_mb": run_result.metadata.get("stack_total_mb"),
+            "chunk_count": run_result.metadata.get("chunk_count"),
+            "max_chunk_candidates": run_result.metadata.get("max_chunk_candidates"),
+            "max_chunk_estimated_mb": run_result.metadata.get("max_chunk_estimated_mb"),
+            "chunk_estimated_mb": run_result.metadata.get("chunk_estimated_mb"),
+            "full_run_estimated_signal_mb": run_result.metadata.get("full_run_estimated_signal_mb"),
+            "configured_limit_mb": run_result.metadata.get("configured_limit_mb"),
+            "signal_stack_rows_built": run_result.metadata.get("signal_stack_rows_built"),
+            "signal_stack_rows_peak": run_result.metadata.get("signal_stack_rows_peak"),
+            "full_population_result_object_note": run_result.metadata.get("full_population_result_object_note"),
             **plan_reuse_metadata,
             "candidate_count": plan.deduped_candidate_count,
             "valid_candidate_count": len(ranked_fast),

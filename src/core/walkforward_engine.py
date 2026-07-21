@@ -1139,6 +1139,7 @@ class WalkForwardEngine:
             ),
             "cache_estimate": {
                 "estimated_total_mb": cls._safe_float(cache_estimate.get("estimated_total_mb")),
+                "estimated_signal_mb": cls._safe_float(cache_estimate.get("estimated_signal_mb")),
             },
             "cache_stats": {
                 "signal_misses": cls._safe_int(cache_stats.get("signal_misses")),
@@ -1151,6 +1152,10 @@ class WalkForwardEngine:
             "plan_reuse_lookup_seconds",
             "runtime_rebase_seconds",
             "data_prepare_seconds",
+            "cache_key_build_seconds",
+            "signal_build_seconds",
+            "stack_build_seconds",
+            "compiled_batch_seconds",
             "fast_evaluation_seconds",
             "fast_result_materialization_seconds",
             "ranking_seconds",
@@ -1161,6 +1166,26 @@ class WalkForwardEngine:
             diagnostic[key] = cls._safe_float(timings.get(key))
         diagnostic["candidates_per_second"] = cls._safe_float(
             grid_summary.get("candidates_per_second")
+        )
+        for key in (
+            "chunk_count",
+            "max_chunk_candidates",
+            "max_chunk_estimated_mb",
+            "chunk_estimated_mb",
+            "full_run_estimated_signal_mb",
+            "configured_limit_mb",
+            "signal_stack_rows_built",
+            "signal_stack_rows_peak",
+        ):
+            value = grid_summary.get(key)
+            diagnostic[key] = (
+                cls._safe_float(value)
+                if key.endswith("_mb") or key in {"chunk_estimated_mb", "configured_limit_mb"}
+                else cls._safe_int(value)
+            )
+        diagnostic["compiled_config_packing"] = grid_summary.get("compiled_config_packing")
+        diagnostic["full_population_result_object_note"] = grid_summary.get(
+            "full_population_result_object_note"
         )
         diagnostic["plan_reuse_enabled"] = (
             bool(grid_summary.get("plan_reuse_enabled"))

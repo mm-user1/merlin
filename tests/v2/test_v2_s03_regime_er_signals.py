@@ -7,7 +7,10 @@ from core.grid_v2 import GridV2Settings, GridV2StrategyHooks, build_grid_v2_plan
 from strategies.s03_reversal_v11_regime_er_b2 import strategy as s03_regime_er_strategy
 from strategies.s03_reversal_v11_regime_er_b2.signals import (
     S03RegimeERParams,
+    build_s03_regime_er_execution_data_batch,
+    build_s03_regime_er_execution_data,
     build_signal_state_arrays,
+    build_signal_state_arrays_reference,
     regime_er_state,
 )
 from strategies.s03_reversal_v11_regime_er_b2.strategy import (
@@ -164,6 +167,62 @@ def test_regime_state_and_signals_are_prefix_invariant():
 
     for name in ("regime_state", "long_entries", "short_entries", "long_exits", "short_exits"):
         np.testing.assert_array_equal(prefix_arrays[name], full_arrays[name][:prefix_len])
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        merged_reference_params(REFERENCE_A),
+        merged_reference_params(REFERENCE_B),
+        merged_reference_params(REFERENCE_B, {"useRegime": False}),
+        merged_reference_params(REFERENCE_B, {"useCloseCount": False, "useTBands": True}),
+        merged_reference_params(REFERENCE_B, {"useCloseCount": True, "useTBands": False}),
+        merged_reference_params(REFERENCE_B, {"regimeErLength": 20, "regimeErThresh": 0.2}),
+    ],
+)
+def test_optimized_signal_builder_matches_reference_state_machine(params):
+    prepared, _ = prepared_reference_dataset()
+
+    optimized = build_signal_state_arrays(prepared, params)
+    reference = build_signal_state_arrays_reference(prepared, params)
+
+    for name in (
+        "t_band_state",
+        "count_close_long",
+        "count_close_short",
+        "base_long",
+        "base_short",
+        "regime_state",
+        "long_entries",
+        "short_entries",
+        "long_exits",
+        "short_exits",
+    ):
+        np.testing.assert_array_equal(optimized[name], reference[name])
+    for name in ("ma3", "ma3_up_band", "ma3_down_band", "regime_er", "regime_er_net", "regime_er_path"):
+        np.testing.assert_allclose(optimized[name], reference[name], equal_nan=True)
+
+
+def test_batch_execution_data_matches_single_builder_signals():
+    prepared, _ = prepared_reference_dataset()
+    params_list = [
+        merged_reference_params(REFERENCE_B),
+        merged_reference_params(REFERENCE_B, {"regimeErLength": 20, "regimeErThresh": 0.2}),
+    ]
+
+    batch = build_s03_regime_er_execution_data_batch(prepared, params_list)
+    singles = [
+        build_s03_regime_er_execution_data(prepared, params)
+        for params in params_list
+    ]
+
+    assert len(batch) == len(singles)
+    for batched, single in zip(batch, singles):
+        assert batched.timestamps is prepared.index
+        np.testing.assert_array_equal(batched.signals.long_entries, single.signals.long_entries)
+        np.testing.assert_array_equal(batched.signals.short_entries, single.signals.short_entries)
+        np.testing.assert_array_equal(batched.signals.long_exits, single.signals.long_exits)
+        np.testing.assert_array_equal(batched.signals.short_exits, single.signals.short_exits)
 
 
 def test_window_start_invariance_with_larger_warmup_for_reference_b():
