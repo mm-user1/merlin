@@ -154,6 +154,44 @@ def _assert_rows_equal(compiled_row, reference_row):
     _assert_float_equal(compiled_row.final_balance, reference_row.final_balance)
 
 
+def _assert_rows_exact(left, right):
+    assert left.candidate_id == right.candidate_id
+    assert left.semantic_key == right.semantic_key
+    assert str(left.canonical_identity) == str(right.canonical_identity)
+    assert left.variant_name == right.variant_name
+    assert left.grid_mode_name == right.grid_mode_name
+    assert dict(left.modes) == dict(right.modes)
+    assert dict(left.params) == dict(right.params)
+    assert left.status == right.status
+    assert left.error == right.error
+    assert left.backend_kind == right.backend_kind
+    assert left.net_profit_pct == right.net_profit_pct
+    assert left.max_drawdown_pct == right.max_drawdown_pct
+    assert left.romad == right.romad
+    assert left.profit_factor == right.profit_factor
+    assert left.win_rate_pct == right.win_rate_pct
+    assert left.total_trades == right.total_trades
+    assert left.winning_trades == right.winning_trades
+    assert left.losing_trades == right.losing_trades
+    assert left.gross_profit == right.gross_profit
+    assert left.gross_loss == right.gross_loss
+    assert left.max_consecutive_losses == right.max_consecutive_losses
+    assert left.final_balance == right.final_balance
+    assert dict(left.guardrail_summary) == dict(right.guardrail_summary)
+
+
+def _ranked_candidate_ids(result):
+    def key(row):
+        if row.status != "ok":
+            return (1, 0.0, row.candidate_id)
+        value = float(row.net_profit_pct)
+        if not math.isfinite(value):
+            return (1, 0.0, row.candidate_id)
+        return (0, -value, row.candidate_id)
+
+    return [row.candidate_id for row in sorted(result.rows, key=key)]
+
+
 def _assert_output_matches_reference(data, params):
     profile = parse_execution_profile(fixture_config())
     stacked = build_signal_stacked_execution_data([data], [0])
@@ -331,12 +369,39 @@ def test_signal_grid_chunked_compiled_rows_match_monolithic_and_selected_enrichm
     assert chunked.metadata["compiled_config_packing"] == "mapping"
     assert chunked.metadata["params_materialized"] < len(chunked.rows)
     for chunked_row, monolithic_row in zip(chunked.rows, monolithic.rows):
-        _assert_rows_equal(chunked_row, monolithic_row)
+        _assert_rows_exact(chunked_row, monolithic_row)
+    assert _ranked_candidate_ids(chunked) == _ranked_candidate_ids(monolithic)
     assert [item.row.candidate_id for item in chunked.selected] == [
         item.row.candidate_id for item in monolithic.selected
     ]
     for chunked_item, monolithic_item in zip(chunked.selected, monolithic.selected):
+        _assert_rows_exact(chunked_item.row, monolithic_item.row)
         assert chunked_item.metrics == monolithic_item.metrics
+        assert dict(chunked_item.guardrail_summary) == dict(monolithic_item.guardrail_summary)
+
+
+@pytest.mark.skipif(not compiled_batch_available(), reason="Compiled signal path required.")
+def test_signal_grid_timing_buckets_reconcile_with_fast_evaluation(signal_df, hooks):
+    _require_compiled_available()
+    plan = _grid_plan(prefer_compiled=True, top_n=0)
+
+    result = execute_grid_v2_candidates(plan, signal_df, 0, hooks)
+
+    fast_seconds = float(result.metadata["evaluation_seconds"])
+    total_fast_seconds = fast_seconds + float(result.metadata["cache_key_build_seconds"])
+    bucket_sum = sum(
+        float(result.metadata[key])
+        for key in (
+            "cache_key_build_seconds",
+            "signal_build_seconds",
+            "stack_build_seconds",
+            "compiled_batch_seconds",
+        )
+    )
+    assert bucket_sum <= total_fast_seconds + 0.05
+    residual = total_fast_seconds - bucket_sum
+    assert residual >= -0.05
+    assert residual <= max(1.0, total_fast_seconds * 0.5)
 
 
 def test_signal_stacked_payload_defaults_absent_exits_and_validates_shared_market():

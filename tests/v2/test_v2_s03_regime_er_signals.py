@@ -203,6 +203,66 @@ def test_optimized_signal_builder_matches_reference_state_machine(params):
         np.testing.assert_allclose(optimized[name], reference[name], equal_nan=True)
 
 
+def test_optimized_signal_builder_matches_reference_for_random_and_threshold_edge_shapes():
+    rng = np.random.default_rng(20260723)
+    random_close = 1.0 + np.cumsum(rng.normal(0.0, 0.015, size=180))
+    threshold_edge = np.array(
+        [
+            1.00,
+            1.01,
+            1.00,
+            1.01,
+            1.00,
+            1.02,
+            1.00,
+            1.02,
+            1.00,
+            1.03,
+            1.00,
+            1.03,
+            1.00,
+            1.04,
+            1.00,
+            1.04,
+        ]
+        * 8,
+        dtype=float,
+    )
+    datasets = [synthetic_ohlc(random_close.tolist()), synthetic_ohlc(threshold_edge.tolist())]
+    params_list = [
+        merged_reference_params(
+            REFERENCE_B,
+            {
+                "maType3": ma_type,
+                "maLength3": ma_length,
+                "maOffset3": offset,
+                "useCloseCount": use_close_count,
+                "closeCountLong": close_count,
+                "closeCountShort": close_count,
+                "useTBands": use_tbands,
+                "tBandLongPct": band_pct,
+                "tBandShortPct": band_pct,
+                "useRegime": use_regime,
+                "regimeErLength": regime_length,
+                "regimeErThresh": threshold,
+            },
+        )
+        for ma_type, ma_length, offset, use_close_count, close_count, use_tbands, band_pct, use_regime, regime_length, threshold in (
+            ("EMA", 8, 0.0, True, 1, False, 0.5, True, 6, 0.5),
+            ("SMA", 12, 0.2, False, 2, True, 1.0, True, 8, 0.4),
+            ("HMA", 16, 0.1, True, 3, True, 1.5, False, 10, 0.3),
+            ("WMA", 20, 0.0, True, 2, True, 0.8, True, 12, 0.25),
+        )
+    ]
+
+    for df in datasets:
+        for params in params_list:
+            optimized = build_signal_state_arrays(df, params)
+            reference = build_signal_state_arrays_reference(df, params)
+            for name in ("regime_state", "long_entries", "short_entries", "long_exits", "short_exits"):
+                np.testing.assert_array_equal(optimized[name], reference[name])
+
+
 def test_batch_execution_data_matches_single_builder_signals():
     prepared, _ = prepared_reference_dataset()
     params_list = [

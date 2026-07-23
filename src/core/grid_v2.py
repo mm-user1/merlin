@@ -308,6 +308,11 @@ class GridV2CandidateTable:
             return len(self.params_by_row)
         return len(self._params_cache)
 
+    def release_params_cache(self) -> None:
+        """Release currently retained lazy params without changing plan identity."""
+
+        self._params_cache.clear()
+
     def validate_index(self, index: int) -> int:
         idx = int(index)
         if idx < 0 or idx >= len(self):
@@ -1686,7 +1691,7 @@ def execute_grid_v2_candidates(
 
         if topology == "signal_reversal":
             dataprep_cache.clear()
-            plan.candidate_table._params_cache.clear()
+            plan.candidate_table.release_params_cache()
 
     rows.sort(key=lambda row: row.candidate_id)
     selected = ()

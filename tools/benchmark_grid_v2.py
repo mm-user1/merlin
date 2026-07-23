@@ -75,6 +75,16 @@ WFA_GRID_V2_PLAN_REUSE_COUNT_KEYS = (
     "plan_reuse_hit_count",
     "plan_reuse_miss_count",
 )
+WFA_GRID_V2_CHUNK_KEYS = (
+    "chunk_count",
+    "max_chunk_candidates",
+    "max_chunk_estimated_mb",
+    "chunk_estimated_mb",
+    "configured_limit_mb",
+    "full_run_estimated_signal_mb",
+    "signal_stack_rows_built",
+    "signal_stack_rows_peak",
+)
 
 TOP_RESULT_METRICS = (
     "net_profit_pct",
@@ -446,6 +456,20 @@ def _build_direct_run_record(
                 "total_seconds",
             )
         },
+        "chunk_fields": {
+            key: grid_summary.get(key)
+            for key in (
+                "chunk_count",
+                "max_chunk_candidates",
+                "max_chunk_estimated_mb",
+                "chunk_estimated_mb",
+                "configured_limit_mb",
+                "full_run_estimated_signal_mb",
+                "signal_stack_rows_built",
+                "signal_stack_rows_peak",
+                "full_population_result_object_note",
+            )
+        },
         "candidates_per_second": grid_summary.get("candidates_per_second"),
         "selected_result_count": len(selected_results),
         "top_result": _top_result_summary(top_result),
@@ -653,6 +677,8 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
     plan_reuse_count_values: dict[str, list[float]] = {
         key: [] for key in WFA_GRID_V2_PLAN_REUSE_COUNT_KEYS
     }
+    chunk_values: dict[str, list[float]] = {key: [] for key in WFA_GRID_V2_CHUNK_KEYS}
+    full_population_note_windows = 0
     for row in rows:
         module_status = _parse_json_object(row["module_status_json"])
         grid_v2 = module_status.get("grid_v2")
@@ -689,6 +715,12 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
             numeric = _finite_float(grid_v2.get(key))
             if numeric is not None:
                 plan_reuse_count_values[key].append(numeric)
+        for key in WFA_GRID_V2_CHUNK_KEYS:
+            numeric = _finite_float(grid_v2.get(key))
+            if numeric is not None:
+                chunk_values[key].append(numeric)
+        if grid_v2.get("full_population_result_object_note"):
+            full_population_note_windows += 1
 
     if windows_with_grid_v2 == 0:
         status = "absent"
@@ -710,6 +742,11 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
         aggregate = _numeric_aggregate(values, include_sum=False)
         if aggregate is not None:
             plan_reuse_count_aggregates[key] = aggregate
+    chunk_aggregates = {}
+    for key, values in chunk_values.items():
+        aggregate = _numeric_aggregate(values, include_sum=False)
+        if aggregate is not None:
+            chunk_aggregates[key] = aggregate
 
     return {
         "status": status,
@@ -726,6 +763,9 @@ def _diagnostics_summary(conn: sqlite3.Connection, study_id: str) -> dict[str, A
             "miss_windows": plan_reuse_miss_windows,
             "count_aggregates": plan_reuse_count_aggregates,
         },
+        "chunk_keys": list(WFA_GRID_V2_CHUNK_KEYS),
+        "chunk_aggregates": chunk_aggregates,
+        "full_population_result_object_note_windows": full_population_note_windows,
         "backend_kinds": sorted(backend_kinds),
         "compiled_workers": sorted(compiled_workers),
     }
@@ -903,7 +943,8 @@ def print_direct_report(report: Mapping[str, Any]) -> None:
             f"total={float(timings.get('total_seconds') or 0.0):.3f}s "
             f"fast={float(timings.get('fast_evaluation_seconds') or 0.0):.3f}s "
             f"cps={run.get('candidates_per_second')} "
-            f"candidates={run.get('candidate_count')}"
+            f"candidates={run.get('candidate_count')} "
+            f"chunks={(run.get('chunk_fields') or {}).get('chunk_count')}"
         )
         top = run.get("top_result") if isinstance(run.get("top_result"), dict) else {}
         if top:
@@ -961,6 +1002,14 @@ def print_wfa_report(report: Mapping[str, Any]) -> None:
                 f"total={_format_mean_seconds(aggregates.get('total_seconds'))} "
                 f"fast={_format_mean_seconds(aggregates.get('fast_evaluation_seconds'))} "
                 f"cps={_format_mean_rate(aggregates.get('candidates_per_second'))}"
+            )
+        chunks = diagnostics.get("chunk_aggregates")
+        if isinstance(chunks, dict) and chunks:
+            print(
+                "  grid_v2 chunk mean: "
+                f"count={_format_mean_rate(chunks.get('chunk_count'))} "
+                f"max_candidates={_format_mean_rate(chunks.get('max_chunk_candidates'))} "
+                f"max_mb={_format_mean_rate(chunks.get('max_chunk_estimated_mb'))}"
             )
         plan_reuse = diagnostics.get("plan_reuse")
         if isinstance(plan_reuse, dict) and int(plan_reuse.get("windows_with_fields") or 0):

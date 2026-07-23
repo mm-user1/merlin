@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -24,6 +25,7 @@ from core.post_process import DSRConfig, DSRResult, PostProcessConfig, StressTes
 from core.backtest_engine import StrategyResult, TradeRecord
 from core.backtest_engine import load_data
 from strategies import get_strategy_config
+from strategies.s03_reversal_v11_regime_er_b2.strategy import normalized_params as normalized_s03_params
 
 
 def _build_params_from_config(strategy_id: str):
@@ -985,6 +987,95 @@ def test_grid_v2_diagnostics_uses_sibling_candidates_per_second():
     assert diagnostics["plan_build_count"] == 1
     assert diagnostics["plan_reuse_hit_count"] == 0
     assert diagnostics["plan_reuse_miss_count"] == 1
+
+
+def test_s03_grid_v2_wfa_smoke_persists_signal_chunk_diagnostics():
+    periods = 240
+    x = np.arange(periods, dtype=float)
+    close = 100.0 + np.sin(x / 3.0) * 6.0 + np.sin(x / 11.0) * 2.0
+    df = pd.DataFrame(
+        {
+            "Open": close + np.cos(x / 5.0) * 0.1,
+            "High": close + 0.75,
+            "Low": close - 0.75,
+            "Close": close,
+            "Volume": np.full(periods, 1000.0),
+        },
+        index=pd.date_range("2025-01-01", periods=periods, freq="30min", tz="UTC"),
+    )
+    fixed_params = normalized_s03_params(
+        {
+            "dateFilter": False,
+            "maType3_options": ["EMA", "SMA"],
+            "maLength3": 8,
+            "maOffset3": 0.0,
+            "useCloseCount": True,
+            "closeCountLong": 1,
+            "closeCountShort": 1,
+            "useTBands": False,
+            "useRegime": True,
+            "regimeErLength": 6,
+            "regimeErThresh": 0.25,
+            "useEmergencySL": False,
+            "positionPct": 100.0,
+            "contractSize": 0.01,
+            "initialCapital": 100.0,
+            "commissionPct": 0.0,
+        }
+    )
+    base_template = {
+        "enabled_params": {"maType3": True, "maLength3": True, "regimeErLength": True},
+        "param_ranges": {},
+        "param_types": {},
+        "fixed_params": fixed_params,
+        "worker_processes": 1,
+        "risk_per_trade_pct": 2.0,
+        "contract_size": 0.01,
+        "commission_rate": 0.0,
+        "filter_min_profit": False,
+        "min_profit_threshold": 0.0,
+        "optimization_mode": "grid",
+        "objectives": ["net_profit_pct"],
+        "primary_objective": "net_profit_pct",
+        "constraints": [],
+        "score_config": {},
+        "grid_top_candidates": 1,
+        "grid_diversity_enabled": False,
+        "grid_slow_refinement_enabled": False,
+        "grid_v2_prefer_compiled": False,
+        "grid_v2_max_cache_mb": 0.03,
+    }
+    engine = WalkForwardEngine(
+        WFConfig(
+            strategy_id="s03_reversal_v11_regime_er_b2",
+            is_period_days=2,
+            oos_period_days=1,
+            warmup_bars=20,
+        ),
+        base_template,
+        {},
+        csv_file_path="synthetic_s03_grid_v2_wfa.csv",
+    )
+
+    result, study_id = engine.run_wf_optimization(df)
+
+    assert study_id is not None
+    assert result.windows
+    assert any(window.module_status["grid_v2"]["chunk_count"] > 1 for window in result.windows)
+    for window in result.windows:
+        diagnostics = window.module_status["grid_v2"]
+        assert diagnostics["engine"] == "v2"
+        assert diagnostics["backend_kind"] == "reference"
+        assert diagnostics["candidate_count"] == 120
+        assert diagnostics["chunk_count"] > 1
+        assert diagnostics["max_chunk_candidates"] < diagnostics["candidate_count"]
+        assert diagnostics["full_run_estimated_signal_mb"] > diagnostics["configured_limit_mb"]
+        assert diagnostics["full_population_result_object_note"]
+
+    loaded = storage.load_study_from_db(study_id)
+    persisted = loaded["windows"][0]["module_status"]["grid_v2"]
+    assert persisted["chunk_count"] > 1
+    assert persisted["max_chunk_candidates"] < persisted["candidate_count"]
 
 
 def test_grid_wfa_dsr_disabled_leaves_replay_dsr_fields_empty(monkeypatch):

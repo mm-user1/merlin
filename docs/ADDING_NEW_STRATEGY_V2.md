@@ -177,6 +177,22 @@ SIGNAL_CACHE_PARAM_NAMES = (...)
 DATAPREP_CACHE_PARAM_NAMES = (...)
 ```
 
+Optional batch build hook:
+
+```python
+def build_v2_execution_data_batch(
+    df: pd.DataFrame,
+    params_list: Sequence[Mapping[str, Any]],
+) -> list[ExecutionData]: ...
+```
+
+The batch hook is used by Grid V2 to build one run or one signal chunk more
+efficiently. It must return one aligned `ExecutionData` object per params
+mapping, in the same order. It is optional; if absent, Grid V2 calls
+`build_v2_execution_data` per unique cache row. Any shared indicator/cache work
+inside the hook must be scoped to the current call/chunk. Do not keep
+module-global DataFrame caches.
+
 `build_v2_execution_data` must return fully aligned `ExecutionData` containing
 timestamps, OHLC arrays, entry signals, and any profile-required arrays. It must
 not place orders or simulate exits.
@@ -289,6 +305,27 @@ so the dispatcher uses a cache worker multiplier of `1` even when multiple Numba
 threads are requested. The estimate includes the actual planned stacked
 signal/dataprep rows, compiled output arrays, and shared OHLC/timestamp arrays;
 the run fails before strategy data builds when the estimate exceeds the limit.
+
+For `topology=signal_reversal`, Grid V2 splits execution into chunks when the
+monolithic signal-stack estimate exceeds `grid_v2_max_cache_mb`. The same
+configured limit is still a fail-fast guardrail for non-signal/S06 stacked
+paths. Chunk diagnostics include `signal_build_seconds`, `stack_build_seconds`,
+`compiled_batch_seconds`, `cache_key_build_seconds`, `chunk_count`,
+`chunk_estimated_mb`, `max_chunk_candidates`, `max_chunk_estimated_mb`,
+`configured_limit_mb`, `estimated_signal_mb`,
+`full_run_estimated_signal_mb`, `signal_stack_rows_built`,
+`signal_stack_rows_peak`, `compiled_config_packing`, and
+`full_population_result_object_note`.
+
+The 512 MB guardrail bounds signal-stack chunk memory. Full-population result
+objects, candidate planning/materialization, ranking, and storage surfaces
+remain O(candidates) and are outside that guardrail. Strategy-side batch
+caches and temporary stack copies can also increase process peak memory beyond
+the reported chunk estimate. In chunked signal topology, `params_materialized`
+means params currently retained/materialized after chunk cache release, not
+total params ever built. `dataprep_hits` and `signal_hits` are logical
+cache-key reuse counters; a later chunk may rebuild arrays whose earlier
+physical copy was already released.
 
 Correct planning can still produce a grid that is too large to run under the
 default cache budget. The S03 Regime-ER B2 S03-like count with Regime off,
@@ -433,6 +470,16 @@ strategy on the `signal_reversal` topology:
   and `both`, with same-role boolean `depends_on` collapse so inactive Close
   Count, T Bands, Regime-ER, and Emergency SL child axes do not multiply the
   parameter space.
+- **Signal-reversal rescue performance evidence.** After TZ43, stored S03
+  Regime-ER B2 WFA studies in
+  `src/storage/2026-07-19_135447_s03-v11-regime-er-test.db` improved from
+  `11,750s -> 147s` on COREUSDT 1h and `11,756s -> 141s` on DOGEUSDT 1h with
+  the same `45,405` candidates/window and unchanged stitched OOS metrics. The
+  supporting artifacts are under `docs/_work/backtester_V2/benchmarks/`.
+- **Pure-Python Regime-ER fallback is for safety, not speed.** The optimized
+  Regime-ER loop has a JIT-off fallback so tests remain runnable with
+  `NUMBA_DISABLE_JIT=1`, but production Grid performance assumes normal Numba
+  availability.
 
 ## Baseline And Certification
 

@@ -207,6 +207,30 @@ Phase 2.6.4 certification notes:
   population results match for two windows and that the first window's
   materialized runtime dates are not mutated by the second window.
 
+Signal-reversal rescue certification notes:
+
+- TZ43/TZ44 optimized `signal_reversal` Grid V2 execution and diagnostics
+  without changing V1 runtime paths, S06 behavior, storage schema, or
+  `GRID_V2_ENGINE_VERSION`.
+- `signal_reversal` compiled Grid V2 uses chunked execution when the
+  monolithic signal-stack estimate exceeds `grid_v2_max_cache_mb`. Non-signal
+  stacked paths keep the existing fail-fast memory behavior.
+- Chunked-vs-monolithic `signal_reversal` tests require exact candidate IDs,
+  statuses, metrics, ranking order, selected IDs, selected metrics, and
+  selected guardrail summaries. Tolerances remain limited to compiled-vs-
+  reference parity tests where prior numerical tolerance already existed.
+- WFA `module_status.grid_v2` diagnostics persist the additional signal timing
+  buckets and chunk fields: `signal_build_seconds`, `stack_build_seconds`,
+  `compiled_batch_seconds`, `cache_key_build_seconds`, `chunk_count`,
+  `chunk_estimated_mb`, `max_chunk_candidates`, `max_chunk_estimated_mb`,
+  `configured_limit_mb`, `full_run_estimated_signal_mb`,
+  `signal_stack_rows_built`, `signal_stack_rows_peak`,
+  `compiled_config_packing`, and `full_population_result_object_note`.
+- `params_materialized` in signal topology reports the params currently
+  retained/materialized after chunk cache release, not total params ever built.
+- The Regime-ER optimized loop has a test-safe pure-Python fallback when Numba
+  JIT is disabled; production performance assumes normal Numba availability.
+
 Candidate planning is data-driven from V2 config/profile metadata. Semantic
 keys include the strategy id/version, Grid V2 engine version, resolved variant,
 resolved mode values, and active non-runtime parameter values. Runtime params

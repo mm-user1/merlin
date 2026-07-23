@@ -133,6 +133,15 @@ def _create_wfa_fixture_db(path: Path) -> None:
                 "plan_build_count": 1,
                 "plan_reuse_hit_count": 0,
                 "plan_reuse_miss_count": 1,
+                "chunk_count": 1,
+                "max_chunk_candidates": 48480,
+                "max_chunk_estimated_mb": 42.0,
+                "chunk_estimated_mb": 42.0,
+                "configured_limit_mb": 512.0,
+                "full_run_estimated_signal_mb": 9.25,
+                "signal_stack_rows_built": 162,
+                "signal_stack_rows_peak": 162,
+                "full_population_result_object_note": "Full-population materialization remains O(candidates).",
             }
         }
         diagnostics_2 = {
@@ -161,6 +170,15 @@ def _create_wfa_fixture_db(path: Path) -> None:
                 "plan_build_count": 1,
                 "plan_reuse_hit_count": 1,
                 "plan_reuse_miss_count": 1,
+                "chunk_count": 2,
+                "max_chunk_candidates": 24240,
+                "max_chunk_estimated_mb": 21.0,
+                "chunk_estimated_mb": 21.0,
+                "configured_limit_mb": 512.0,
+                "full_run_estimated_signal_mb": 9.25,
+                "signal_stack_rows_built": 324,
+                "signal_stack_rows_peak": 162,
+                "full_population_result_object_note": "Full-population materialization remains O(candidates).",
             }
         }
         conn.execute(
@@ -316,6 +334,15 @@ def test_direct_benchmark_reads_summary_from_config_and_top_selected_result(monk
                     "total_seconds": 1.0,
                 },
                 "candidates_per_second": 1234.5,
+                "chunk_count": 2,
+                "max_chunk_candidates": 30000,
+                "max_chunk_estimated_mb": 510.5,
+                "chunk_estimated_mb": 510.5,
+                "configured_limit_mb": 512.0,
+                "full_run_estimated_signal_mb": 600.0,
+                "signal_stack_rows_built": 60000,
+                "signal_stack_rows_peak": 30000,
+                "full_population_result_object_note": "Full-population materialization remains O(candidates).",
             },
         }
         selected = SimpleNamespace(
@@ -355,6 +382,10 @@ def test_direct_benchmark_reads_summary_from_config_and_top_selected_result(monk
     assert run["timing_fields"]["plan_build_seconds"] == pytest.approx(0.08)
     assert run["timing_fields"]["fast_result_materialization_seconds"] == pytest.approx(0.04)
     assert run["timing_fields"]["ranking_seconds"] == pytest.approx(0.05)
+    assert run["chunk_fields"]["chunk_count"] == 2
+    assert run["chunk_fields"]["max_chunk_candidates"] == 30000
+    assert run["chunk_fields"]["full_run_estimated_signal_mb"] == pytest.approx(600.0)
+    assert run["chunk_fields"]["full_population_result_object_note"]
     assert run["candidates_per_second"] == pytest.approx(1234.5)
     assert run["grid_summary"]["grid"]["cache_stats"]["dataprep_misses"] == 2
     assert run["top_result"]["candidate_id"] == 7
@@ -416,6 +447,13 @@ def test_inspect_wfa_db_fixture_detects_absent_present_and_partial_diagnostics(t
     assert plan_reuse["count_aggregates"]["plan_build_count"]["max"] == pytest.approx(1.0)
     assert plan_reuse["count_aggregates"]["plan_reuse_hit_count"]["max"] == pytest.approx(1.0)
     assert plan_reuse["count_aggregates"]["plan_reuse_miss_count"]["max"] == pytest.approx(1.0)
+    chunks = by_id["new-study"]["diagnostics"]["chunk_aggregates"]
+    assert chunks["chunk_count"]["mean"] == pytest.approx(1.5)
+    assert chunks["max_chunk_candidates"]["min"] == pytest.approx(24_240)
+    assert chunks["max_chunk_candidates"]["max"] == pytest.approx(48_480)
+    assert chunks["max_chunk_estimated_mb"]["mean"] == pytest.approx(31.5)
+    assert chunks["full_run_estimated_signal_mb"]["mean"] == pytest.approx(9.25)
+    assert by_id["new-study"]["diagnostics"]["full_population_result_object_note_windows"] == 2
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM studies").fetchone()[0] == 3

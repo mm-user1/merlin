@@ -84,11 +84,21 @@ For direct Grid V2 runs, record:
 - `cache_stats`
 - full `timings` dict
 - `timings.candidate_generation_seconds`
+- `timings.cache_key_build_seconds`, when present
+- `timings.signal_build_seconds`, when present
+- `timings.stack_build_seconds`, when present
+- `timings.compiled_batch_seconds`, when present
 - `timings.data_prepare_seconds`
 - `timings.fast_evaluation_seconds`
 - `timings.slow_validation_seconds`
 - `timings.slow_refinement_seconds`, when present
 - `timings.total_seconds`
+- chunk diagnostics when present: `chunk_count`, `chunk_estimated_mb`,
+  `max_chunk_candidates`, `max_chunk_estimated_mb`,
+  `configured_limit_mb`, `estimated_signal_mb`,
+  `full_run_estimated_signal_mb`, `signal_stack_rows_built`,
+  `signal_stack_rows_peak`, `compiled_config_packing`, and
+  `full_population_result_object_note`
 - `candidates_per_second`
 - `measured_wall_seconds`
 - selected result count
@@ -113,6 +123,14 @@ For saved WFA studies, record:
 - `optimization_time_seconds`
 - stitched OOS metrics
 - `module_status.grid_v2` diagnostics status and stable timing keys, if present
+- optional `module_status.grid_v2` signal bucket and chunk fields:
+  `signal_build_seconds`, `stack_build_seconds`,
+  `compiled_batch_seconds`, `cache_key_build_seconds`, `chunk_count`,
+  `chunk_estimated_mb`, `max_chunk_candidates`,
+  `max_chunk_estimated_mb`, `configured_limit_mb`,
+  `estimated_signal_mb`, `full_run_estimated_signal_mb`,
+  `signal_stack_rows_built`, `signal_stack_rows_peak`,
+  `compiled_config_packing`, and `full_population_result_object_note`
 
 ## Current Corrected DB Baseline
 
@@ -470,6 +488,70 @@ Remaining performance targets:
 - signal/dataprep stack splitting when data prep is the bottleneck;
 - strategy-side dataprep optimization;
 - WFA window parallelism.
+
+## Signal-Reversal Rescue After-Run
+
+Source artifacts:
+
+```text
+docs/_work/backtester_V2/benchmarks/phase_signal_reversal_rescue_wfa_db_inspection_after.json
+docs/_work/backtester_V2/benchmarks/phase_signal_reversal_rescue_direct_grid_after.json
+src/storage/2026-07-19_135447_s03-v11-regime-er-test.db
+```
+
+Implemented rescue behavior:
+
+- `signal_reversal` Grid V2 runs use chunked execution when the monolithic
+  signal-stack estimate exceeds `grid_v2_max_cache_mb`.
+- The historical fail-fast memory guardrail still applies to non-signal/S06
+  stacked paths; this rescue did not add chunking to those topologies.
+- The optional strategy hook
+  `build_v2_execution_data_batch(df, params_list) -> list[ExecutionData]`
+  lets a strategy build one run or chunk with per-call/per-chunk caches.
+  Strategies must not keep module-global DataFrame caches.
+- Normal production performance assumes Numba is available. The optimized
+  Regime-ER loop has a pure-Python fallback for tests/JIT-off runs, but that
+  fallback is intentionally slower.
+
+WFA DB evidence for S03 Regime-ER B2, same `45,405` candidates per IS window,
+same 12 WFA windows, same selected count, same fixed params/ranges, and
+unchanged stitched OOS metrics:
+
+| Symbol | Runtime Before | Runtime After | Mean Fast Before | Mean Fast After | Mean Signal | Mean Stack | Mean Compiled | Mean Cache Key | Mean CPS After |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| COREUSDT 1h | 11,750s | 147s | 977.721s | 10.709s | 5.051s | 0.578s | 0.747s | 3.427s | 4,254.7 |
+| DOGEUSDT 1h | 11,756s | 141s | 978.225s | 10.248s | 4.679s | 0.563s | 0.695s | 3.397s | 4,431.1 |
+
+The pre-TZ43 rows have older stable timing fields but do not have the new
+signal bucket or chunk fields; the artifact records those fields as absent.
+The post-TZ43 DB rows fit under the default chunk limit in one chunk:
+`chunk_count=1`, `max_chunk_candidates=45,405`,
+`max_chunk_estimated_mb=429.991`, and
+`full_run_estimated_signal_mb=422.623`.
+
+Direct multi-chunk evidence used a deterministic 7,300-candidate prefix of the
+747,200-candidate S03-like full plan. The monolithic estimate was
+`517.636 MB` with `max_signal_cache_mb=512`, so the run split into
+`chunk_count=2`. The largest chunk had `7,220` candidates and
+`511.971 MB` estimated stack memory. Wall time was `13.208s`, Grid V2
+evaluation time was `12.741s`, and selected slow enrichment completed for all
+three selected rows. The top candidate was `6516` with
+`net_profit_pct=629.0332414140`, `max_drawdown_pct=51.4077109943`, and
+`total_trades=446`.
+
+Memory caveats:
+
+- The 512 MB guardrail bounds signal-stack chunk memory. Full-population result
+  objects, candidate planning/materialization, ranking, and storage surfaces
+  remain O(candidates) and are outside that guardrail.
+- Strategy-side batch feature caches are outside the stack estimate and must be
+  scoped to the current batch/chunk.
+- Stacking can temporarily hold source `ExecutionData` rows and stacked arrays
+  at the same time, so process peak memory can exceed the reported chunk
+  estimate.
+- `dataprep_hits` and `signal_hits` are logical cache-key reuse counts across
+  the run. In chunked `signal_reversal` execution, physical arrays from an
+  earlier chunk may already have been released.
 
 ## JSON Report Shape
 
