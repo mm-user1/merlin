@@ -91,7 +91,16 @@ shared modules with `pytest.register_assert_rewrite` in the local conftest **bef
 importing them, using their actual qualified name (`server._helpers`). Keep the
 package marker empty. Do not import conftest or add test-to-test imports.
 
+`tests/pattern_lab` covers the Pattern Lab data foundation with runtime-generated
+synthetic packs only; it reads no market data and commits no binary fixtures. Its
+import-isolation and missing-dependency checks run in fresh child processes,
+because the root fixtures already import storage into the pytest process. They
+simulate an absent PyArrow with an import blocker instead of uninstalling the
+pinned dependency, so a missing wheel can never turn the suite into an
+all-skipped success.
+
 ```powershell
+& $py tools/run_tests.py -- tests/pattern_lab
 & $py tools/run_tests.py -- tests/server
 & $py tools/run_tests.py -- tests/server/test_runtime.py
 & $py tools/run_tests.py -- tests/server --co

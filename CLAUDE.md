@@ -87,6 +87,7 @@ Read the destination for the surface being changed before editing it.
 | Benchmark protocol and historical timing results | [docs/engine_v2/PERFORMANCE.md](docs/engine_v2/PERFORMANCE.md) |
 | Tool catalog | [tools/README.md](tools/README.md) |
 | Strategy Lab usage, schemas, safety, analysis, and allocation | [tools/strategy_lab/README.md](tools/strategy_lab/README.md) |
+| Pattern Lab data pack, schema, import, reads, and identity | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
 | Test tiers, isolation, and command selection | [tests/README.md](tests/README.md) |
 | Baseline provenance and interpretation | [data/baseline/README.md](data/baseline/README.md) and the [V2 baseline index](docs/README.md#baseline-evidence) |
 

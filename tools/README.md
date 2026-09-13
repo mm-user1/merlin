@@ -117,6 +117,28 @@ C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy
 See the [Strategy Lab manual](strategy_lab/README.md) for identity, isolation,
 schema, resume, scope-unlock, analysis, allocation, and certification contracts.
 
+## Pattern Lab
+
+Pattern Lab is local, research-only tooling for testing hypotheses before a
+strategy exists. Its implemented milestone is the data foundation: a stable
+Parquet market-data pack, an explicit manifest, a one-way importer for the
+historical prototype NPZ pack, and a fixed-interval reader/resampler with a
+reproducible research input fingerprint. It requires `pyarrow==22.0.0` from the
+root `requirements.txt` and never installs dependencies itself.
+
+```bash
+python -m tools.pattern_lab --help
+python -m tools.pattern_lab inspect --data-root <pack> --verify
+python -m tools.pattern_lab slice --data-root <pack> --instrument OKX_LINK-USDT-SWAP \
+    --start 2025-07-01T00:00:00Z --end 2026-07-01T00:00:00Z --timeframe-minutes 30
+```
+
+Feature, hypothesis, evaluation-model, bracket-probe and report commands are not
+implemented. Merlin and Strategy Lab do not import Pattern Lab, and ordinary
+Merlin CSV behavior is unchanged. See the
+[Pattern Lab data guide](pattern_lab/README.md) for the schema, manifest,
+identity encoding, read/write boundaries and the M1b collector handoff.
+
 ## Related documentation
 
 - [Test workflow](../tests/README.md)

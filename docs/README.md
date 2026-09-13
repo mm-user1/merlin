@@ -51,6 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
+| [Pattern Lab data foundation](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, NPZ import, fixed-interval reads, and input identity |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 ## Baseline evidence
@@ -90,4 +91,5 @@ are evidence records; current architecture and procedure documents do not.
 - V2 core or Grid change: read [V2 architecture](engine_v2/ARCHITECTURE.md),
   then certification and performance evidence if parity or speed is affected.
 - Strategy Lab work: read its [full guide](../tools/strategy_lab/README.md).
+- Pattern Lab data work: read its [data guide](../tools/pattern_lab/README.md).
 - Test planning: read the [test guide](../tests/README.md).
