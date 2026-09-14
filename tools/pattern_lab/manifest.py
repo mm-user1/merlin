@@ -8,6 +8,7 @@ by the T01 importer and by later collector work.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -37,6 +38,24 @@ INSTRUMENT_RULES_SCHEMA_VERSION = 1
 ROSTER_KEYS = ("contract", "instrument_id", "quote_currency", "roles", "symbol", "venue")
 CONTRACT_TYPES = ("linear_perpetual",)
 TRADING_STATUSES = ("live", "Trading")
+
+# The closed source-specific rule shape of each venue a v1 managed pack may
+# contain.  ``required`` keys carry a nonblank source string; ``nullable`` keys
+# are present but may be an explicit null when the source omits the value.
+MANAGED_VENUES = {
+    "OKX": {
+        "required": ("instType", "ctType", "settleCcy", "ctVal", "ctValCcy", "lotSz", "minSz",
+                     "tickSz", "state"),
+        "nullable": ("ctMult", "listTime"),
+        "trading_status": "live",
+    },
+    "BYBIT": {
+        "required": ("contractType", "baseCoin", "quoteCoin", "settleCoin", "status", "qtyStep",
+                     "minOrderQty", "tickSize"),
+        "nullable": ("launchTime", "minNotionalValue"),
+        "trading_status": "Trading",
+    },
+}
 
 PACK_STATES = ("ready", "incomplete")
 KNOWN_ROLES = ("factor", "research_only", "trading")
@@ -234,8 +253,62 @@ def from_epoch_ms(value: int) -> datetime:
     return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
 
+def exact_utc_from_epoch_ms(value: int, field: str = "timestamp") -> str:
+    """Render epoch milliseconds without the float rounding of a POSIX timestamp."""
+    return format_utc(_EPOCH + timedelta(milliseconds=int(value)), field)
+
+
+def listing_instant_utc(value: Any, field: str = "listed_at_utc") -> str | None:
+    """Return a source listing instant, or null when the source omits it.
+
+    Venues publish an absent listing as null, an empty string, ``"0"`` or
+    ``"-1"``.  A listing need not sit on the 5m grid, so millisecond detail is
+    preserved.  One rule serves both the collector and manifest validation.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise PatternLabDataError(
+            f"{field}: expected a millisecond timestamp string, got {type(value).__name__}."
+        )
+    text = str(value).strip()
+    if not text or text in {"0", "-1"}:
+        return None
+    try:
+        stamp = int(text)
+    except ValueError as exc:
+        raise PatternLabDataError(
+            f"{field}: {value!r} is not an integer millisecond timestamp."
+        ) from exc
+    if stamp <= 0:
+        return None
+    return exact_utc_from_epoch_ms(stamp, field)
+
+
+def preserve_extra_keys(base: Mapping[str, Any] | None, owned: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``owned`` with any unknown keys of ``base`` preserved alongside it.
+
+    Canonical owned values always win over a stale base value; unknown base keys
+    survive an update instead of being dropped by a rebuild.  Neither argument is
+    mutated, and nested values are deep-copied so a caller's object is never
+    aliased into the result.
+    """
+    merged = {
+        key: copy.deepcopy(value)
+        for key, value in (base or {}).items()
+        if key not in owned
+    }
+    merged.update({key: copy.deepcopy(value) for key, value in owned.items()})
+    return merged
+
+
 def format_epoch_ms(value: int) -> str:
     return format_utc(from_epoch_ms(value))
+
+
+def require_aligned_utc(value: Any, field: str) -> int:
+    """Return exact epoch milliseconds for a canonical 5m-aligned UTC boundary."""
+    return require_aligned(to_epoch_ms(value, field), BASE_STEP_MS, field)
 
 
 def normalize_timeframe_minutes(value: Any, field: str = "timeframe_minutes") -> int:
@@ -678,12 +751,146 @@ def roster_sha256(roster: Sequence[Mapping[str, Any]]) -> str:
     return hashlib.sha256(canonical_roster_bytes(roster)).hexdigest()
 
 
-def validate_instrument_rules(raw: Any, where: str) -> dict[str, Any]:
+def _raw_field(raw_fields: Mapping[str, Any], key: str, where: str) -> str:
+    return require_text(raw_fields.get(key), f"{where}.raw_contract_fields.{key}")
+
+
+def _require_raw_agreement(actual: Any, expected: Any, field: str, subject: str) -> None:
+    if actual != expected:
+        raise PatternLabDataError(
+            f"{field}: the source value {actual!r} does not agree with the normalized "
+            f"{subject} {expected!r}."
+        )
+
+
+def _require_decimal_agreement(
+    raw_fields: Mapping[str, Any], key: str, normalized: str, where: str, subject: str
+) -> None:
+    """Compare a raw quantity with its normalized value numerically.
+
+    Both spellings are preserved as the source published them; only their decimal
+    values must agree, so ``"0.10"`` and ``"0.1"`` match while ``"999"`` does not.
+    """
+    field = f"{where}.raw_contract_fields.{key}"
+    text = require_decimal_text(_raw_field(raw_fields, key, where), field)
+    if Decimal(text) != Decimal(normalized):
+        raise PatternLabDataError(
+            f"{field}: the source value {text!r} does not agree numerically with the normalized "
+            f"{subject} {normalized!r}."
+        )
+
+
+def _require_listing_agreement(
+    raw_fields: Mapping[str, Any], key: str, normalized: str | None, where: str
+) -> None:
+    field = f"{where}.raw_contract_fields.{key}"
+    expected = listing_instant_utc(raw_fields.get(key), field)
+    if expected != normalized:
+        raise PatternLabDataError(
+            f"{where}.listed_at_utc: {normalized!r} does not agree with the source {key} "
+            f"{raw_fields.get(key)!r}, which means {expected!r}."
+        )
+
+
+def _validate_okx_rules(rules: Mapping[str, Any], raw_fields: Mapping[str, Any], where: str) -> None:
+    """Check OKX source-to-normalized agreement for one managed entry."""
+    _require_raw_agreement(_raw_field(raw_fields, "instType", where), "SWAP", f"{where}.raw_contract_fields.instType", "product type")
+    _require_raw_agreement(_raw_field(raw_fields, "ctType", where), "linear", f"{where}.raw_contract_fields.ctType", "contract type")
+    _require_raw_agreement(
+        _raw_field(raw_fields, "settleCcy", where), rules["settlement_currency"],
+        f"{where}.raw_contract_fields.settleCcy", "settlement currency",
+    )
+    # The base currency is the contract-value currency, never the display symbol.
+    _require_raw_agreement(
+        _raw_field(raw_fields, "ctValCcy", where), rules["base_currency"],
+        f"{where}.raw_contract_fields.ctValCcy", "base currency",
+    )
+    _require_raw_agreement(
+        _raw_field(raw_fields, "state", where), rules["trading_status"],
+        f"{where}.raw_contract_fields.state", "trading status",
+    )
+    require_decimal_text(_raw_field(raw_fields, "ctVal", where), f"{where}.raw_contract_fields.ctVal")
+    _require_decimal_agreement(raw_fields, "lotSz", rules["quantity_step"], where, "quantity step")
+    _require_decimal_agreement(raw_fields, "minSz", rules["minimum_quantity"], where, "minimum quantity")
+    _require_decimal_agreement(raw_fields, "tickSz", rules["price_tick"], where, "price tick")
+    _require_listing_agreement(raw_fields, "listTime", rules["listed_at_utc"], where)
+    if rules["quantity_unit"] != "contracts":
+        raise PatternLabDataError(
+            f"{where}.quantity_unit: an OKX SWAP is sized in 'contracts', got "
+            f"{rules['quantity_unit']!r}."
+        )
+    if rules["minimum_notional"] is not None:
+        raise PatternLabDataError(
+            f"{where}.minimum_notional: these OKX instrument fields publish no minimum notional, "
+            f"so it must be null, got {rules['minimum_notional']!r}."
+        )
+
+
+def _validate_bybit_rules(rules: Mapping[str, Any], raw_fields: Mapping[str, Any], where: str) -> None:
+    """Check Bybit source-to-normalized agreement for one managed entry."""
+    _require_raw_agreement(
+        _raw_field(raw_fields, "contractType", where), "LinearPerpetual",
+        f"{where}.raw_contract_fields.contractType", "contract type",
+    )
+    _require_raw_agreement(
+        _raw_field(raw_fields, "baseCoin", where), rules["base_currency"],
+        f"{where}.raw_contract_fields.baseCoin", "base currency",
+    )
+    _require_raw_agreement(
+        _raw_field(raw_fields, "quoteCoin", where), rules["quote_currency"],
+        f"{where}.raw_contract_fields.quoteCoin", "quote currency",
+    )
+    _require_raw_agreement(
+        _raw_field(raw_fields, "settleCoin", where), rules["settlement_currency"],
+        f"{where}.raw_contract_fields.settleCoin", "settlement currency",
+    )
+    _require_raw_agreement(
+        _raw_field(raw_fields, "status", where), rules["trading_status"],
+        f"{where}.raw_contract_fields.status", "trading status",
+    )
+    _require_decimal_agreement(raw_fields, "qtyStep", rules["quantity_step"], where, "quantity step")
+    _require_decimal_agreement(raw_fields, "minOrderQty", rules["minimum_quantity"], where, "minimum quantity")
+    _require_decimal_agreement(raw_fields, "tickSize", rules["price_tick"], where, "price tick")
+    _require_listing_agreement(raw_fields, "launchTime", rules["listed_at_utc"], where)
+    notional = raw_fields.get("minNotionalValue")
+    field = f"{where}.raw_contract_fields.minNotionalValue"
+    if notional is None:
+        if rules["minimum_notional"] is not None:
+            raise PatternLabDataError(
+                f"{where}.minimum_notional: {rules['minimum_notional']!r} was normalized although "
+                "the source published no minimum notional."
+            )
+    else:
+        text = require_decimal_text(require_text(notional, field), field, allow_zero=True)
+        if rules["minimum_notional"] is None or Decimal(text) != Decimal(rules["minimum_notional"]):
+            raise PatternLabDataError(
+                f"{field}: the source value {text!r} does not agree numerically with the normalized "
+                f"minimum notional {rules['minimum_notional']!r}."
+            )
+    if rules["quantity_unit"] != rules["base_currency"]:
+        raise PatternLabDataError(
+            f"{where}.quantity_unit: a Bybit linear perpetual is sized in its base currency "
+            f"{rules['base_currency']!r}, got {rules['quantity_unit']!r}."
+        )
+
+
+_VENUE_RULE_CHECKS = {"OKX": _validate_okx_rules, "BYBIT": _validate_bybit_rules}
+
+
+def validate_instrument_rules(raw: Any, where: str, *, venue: str) -> dict[str, Any]:
     """Validate the closed v1 instrument-rule object of a collector-managed entry.
 
     These are current exchange metadata, not reconstructed historical rules.  M4
     owns their interpretation and enforcement; nothing here enables simulation.
+    The source-specific ``raw_contract_fields`` object is closed per venue and
+    must agree with every normalized value it was derived from.
     """
+    venue_spec = MANAGED_VENUES.get(venue)
+    if venue_spec is None:
+        raise PatternLabDataError(
+            f"{where}: a collector-managed entry must come from one of {sorted(MANAGED_VENUES)}, "
+            f"got venue {venue!r}."
+        )
     rules = _require_mapping(raw, where)
     version = require_int(rules.get("schema_version"), f"{where}.schema_version")
     if version != INSTRUMENT_RULES_SCHEMA_VERSION:
@@ -698,16 +905,24 @@ def validate_instrument_rules(raw: Any, where: str) -> dict[str, Any]:
                 f"{where}.raw_contract_fields.{key}: source fields are retained as strings or "
                 f"explicit nulls, got {type(value).__name__}."
             )
+    expected_keys = set(venue_spec["required"]) | set(venue_spec["nullable"])
+    missing = sorted(expected_keys - set(raw_fields))
+    unexpected = sorted(set(raw_fields) - expected_keys)
+    if missing or unexpected:
+        raise PatternLabDataError(
+            f"{where}.raw_contract_fields: the {venue} v1 object is closed; missing keys {missing}, "
+            f"unexpected keys {unexpected}."
+        )
     contract_type = rules.get("contract_type")
     if contract_type not in CONTRACT_TYPES:
         raise PatternLabDataError(
             f"{where}.contract_type: expected one of {list(CONTRACT_TYPES)}, got {contract_type!r}."
         )
     status = rules.get("trading_status")
-    if status not in TRADING_STATUSES:
+    if status != venue_spec["trading_status"]:
         raise PatternLabDataError(
-            f"{where}.trading_status: expected the original source status, one of "
-            f"{list(TRADING_STATUSES)}, got {status!r}."
+            f"{where}.trading_status: expected the original {venue} source status "
+            f"{venue_spec['trading_status']!r}, got {status!r}."
         )
     base = require_currency(rules.get("base_currency"), f"{where}.base_currency")
     quote = require_currency(rules.get("quote_currency"), f"{where}.quote_currency")
@@ -746,6 +961,7 @@ def validate_instrument_rules(raw: Any, where: str) -> dict[str, Any]:
     extra = sorted(set(rules) - set(validated))
     if extra:
         raise PatternLabDataError(f"{where}: the v1 rule object is closed; unexpected keys {extra}.")
+    _VENUE_RULE_CHECKS[venue](validated, raw_fields, where)
     return validated
 
 
@@ -767,18 +983,35 @@ def validate_collector(
         raise PatternLabDataError(
             f"{where}.roster_sha256: {digest} does not match the canonical roster digest {expected}."
         )
-    declared = {entry["instrument_id"]: entry["roles"] for entry in roster}
-    published = {entry["instrument_id"]: entry["roles"] for entry in instruments}
-    if declared != published:
+    declared = {entry["instrument_id"]: entry for entry in roster}
+    published = {
+        entry["instrument_id"]: {key: entry[key] for key in ROSTER_KEYS} for entry in instruments
+    }
+    if sorted(declared) != sorted(published):
         raise PatternLabDataError(
             f"{where}.roster: the roster must match the published instrument identities and roles "
             f"exactly; roster {sorted(declared)} versus manifest {sorted(published)}."
         )
+    for instrument_id, entry in sorted(declared.items()):
+        if entry != published[instrument_id]:
+            differing = sorted(key for key in ROSTER_KEYS if entry[key] != published[instrument_id][key])
+            raise PatternLabDataError(
+                f"{where}.roster: {instrument_id} disagrees with its published entry on {differing}; "
+                "all six roster fields must match the manifest exactly."
+            )
     managed_start = require_aligned(
         to_epoch_ms(collector.get("managed_start_utc"), f"{where}.managed_start_utc"),
         BASE_STEP_MS,
         f"{where}.managed_start_utc",
     )
+    for entry in instruments:
+        first_ms = to_epoch_ms(entry["first_open_utc"], f"{entry['instrument_id']}.first_open_utc")
+        if first_ms != managed_start:
+            raise PatternLabDataError(
+                f"{where}.managed_start_utc: {format_epoch_ms(managed_start)} must equal every "
+                f"instrument's first stored row, but {entry['instrument_id']} starts at "
+                f"{entry['first_open_utc']}."
+            )
     request = _require_mapping(collector.get("last_request"), f"{where}.last_request")
     request_extra = sorted(set(request) - {"start_utc", "end_utc"})
     if request_extra:
@@ -819,8 +1052,54 @@ def validate_collector(
     return validated
 
 
-def _validate_instrument(raw: Any, index: int, *, managed: bool = False) -> dict[str, Any]:
-    where = f"instruments[{index}]"
+def certification_shortfall_bars(entry: Mapping[str, Any]) -> int:
+    """Return how many stored 5m rows the closure cutoff does not certify.
+
+    Zero means the recorded cutoff covers every retained row.  An archival pack
+    with an unknown cutoff certifies nothing and is reported separately, because
+    unknown closure already blocks every research read.
+    """
+    cutoff = entry["verification"]["closed_before_utc"]
+    if cutoff is None:
+        return 0
+    covered = to_epoch_ms(entry["coverage_end_utc"], f"{entry['instrument_id']}.coverage_end_utc")
+    certified = to_epoch_ms(cutoff, f"{entry['instrument_id']}.closed_before_utc")
+    return max(0, (covered - certified) // BASE_STEP_MS)
+
+
+def _require_certified_coverage(entry: Mapping[str, Any], where: str) -> None:
+    """A managed entry's closure certification must cover all retained rows.
+
+    A prefix extension requested with an older end keeps the stored tail, so its
+    published certification must still be the maximum justified cutoff rather
+    than that older request.  Stored coverage is not the requested end: a short
+    requested tail is legitimate and is reported separately.
+    """
+    verification = entry["verification"]
+    cutoff = verification["closed_before_utc"]
+    if cutoff is None:
+        raise PatternLabDataError(
+            f"{where}.verification.closed_before_utc: a collector-managed entry must record the "
+            "closure cutoff that certifies its stored rows."
+        )
+    shortfall = certification_shortfall_bars(entry)
+    if shortfall:
+        raise PatternLabDataError(
+            f"{where}.verification.closed_before_utc: {cutoff} does not certify the stored coverage "
+            f"end {entry['coverage_end_utc']} ({shortfall} uncertified 5m row(s)). Publishing would "
+            "make already-readable rows unreadable; preserve the maximum justified cutoff instead."
+        )
+
+
+def validate_instrument_entry(
+    raw: Any, where: str = "instrument", *, managed: bool = False
+) -> dict[str, Any]:
+    """Validate one manifest instrument entry and return a normalized copy.
+
+    ``managed`` applies the collector contract: the versioned v1 rule object and
+    a closure cutoff that certifies every retained row.  Unknown extra keys are
+    retained, so an entry rebuilt from this result keeps future metadata.
+    """
     entry = _require_mapping(raw, where)
     venue = normalize_id_part(entry.get("venue"), f"{where}.venue")
     contract = normalize_id_part(entry.get("contract"), f"{where}.contract")
@@ -876,11 +1155,16 @@ def _validate_instrument(raw: Any, index: int, *, managed: bool = False) -> dict
         # A collector-managed entry always carries the versioned v1 rule object;
         # M1a archival packs keep their existing opaque-mapping behavior.
         entry["instrument_rules"] = validate_instrument_rules(
-            entry.get("instrument_rules"), f"{where}.instrument_rules"
+            entry.get("instrument_rules"), f"{where}.instrument_rules", venue=venue
         )
+        _require_certified_coverage(entry, where)
     elif "instrument_rules" in entry and entry["instrument_rules"] is not None:
         entry["instrument_rules"] = _require_mapping(entry["instrument_rules"], f"{where}.instrument_rules")
     return entry
+
+
+def _validate_instrument(raw: Any, index: int, *, managed: bool = False) -> dict[str, Any]:
+    return validate_instrument_entry(raw, f"instruments[{index}]", managed=managed)
 
 
 def validate_manifest(raw: Any) -> dict[str, Any]:
@@ -1014,15 +1298,32 @@ def research_blockers(entry: Mapping[str, Any]) -> list[str]:
 
 
 def research_limitations(entry: Mapping[str, Any]) -> list[str]:
-    """List every recorded limitation, including non-blocking coverage gaps."""
+    """List every recorded limitation, including non-blocking coverage gaps.
+
+    A closure cutoff earlier than the stored coverage end is exposed honestly as
+    a limitation rather than a blocker: the uncertified tail rows cannot be read,
+    while every earlier interval the cutoff does certify stays admissible.
+    """
     limitations = research_blockers(entry)
     if entry["missing_bar_count"]:
         limitations.append(f"{entry['missing_bar_count']} missing 5m bars inside the declared coverage")
+    shortfall = certification_shortfall_bars(entry)
+    if shortfall:
+        limitations.append(
+            f"closure is certified only before {entry['verification']['closed_before_utc']}, so the "
+            f"last {shortfall} stored 5m row(s) up to {entry['coverage_end_utc']} are uncertified"
+        )
     return limitations
 
 
-def _evidence_lines(entry: Mapping[str, Any]) -> list[str]:
-    """Render one instrument's verification evidence, source references and limits."""
+def _evidence_lines(entry: Mapping[str, Any], *, managed: bool) -> list[str]:
+    """Render one instrument's verification evidence, source references and limits.
+
+    Collector rule fields are rendered only for a validated managed entry.  An
+    unmanaged archival pack may carry any opaque rules mapping, including one
+    that happens to use ``schema_version`` for something else, so its content is
+    preserved in the manifest and merely acknowledged here.
+    """
     source = entry["source"]
     verification = entry["verification"]
     verified = "yes" if verification["volume_quote_verified"] else "no"
@@ -1051,7 +1352,13 @@ def _evidence_lines(entry: Mapping[str, Any]) -> list[str]:
     limitations = research_limitations(entry)
     lines.append(f"- Research limitations: {'; '.join(limitations) if limitations else 'none'}")
     rules = entry.get("instrument_rules")
-    if isinstance(rules, Mapping) and rules.get("schema_version") == INSTRUMENT_RULES_SCHEMA_VERSION:
+    if not managed:
+        if isinstance(rules, Mapping):
+            lines.append(
+                "- Instrument rules: opaque archival metadata, preserved verbatim. This pack is not "
+                "collector-managed, so no normalized contract, quantity or listing values are claimed."
+            )
+    elif isinstance(rules, Mapping):
         lines += [
             f"- Contract: {rules['contract_type']}, {rules['base_currency']}/{rules['quote_currency']}, "
             f"settled in {rules['settlement_currency']}, status {rules['trading_status']}",
@@ -1100,6 +1407,7 @@ def _collector_lines(manifest: Mapping[str, Any]) -> list[str]:
 def render_readme(manifest: Mapping[str, Any]) -> str:
     """Render the human-readable pack README from the manifest alone."""
     universe = manifest["universe"]
+    managed = manifest.get("collector") is not None
     lines = [
         "# Pattern Lab market-data pack",
         "",
@@ -1145,7 +1453,7 @@ def render_readme(manifest: Mapping[str, Any]) -> str:
                 missing=entry["missing_bar_count"],
             )
         )
-    if manifest.get("collector") is not None:
+    if managed:
         lines += _collector_lines(manifest)
     lines += [
         "",
@@ -1160,7 +1468,7 @@ def render_readme(manifest: Mapping[str, Any]) -> str:
         "its own; it copies the declared evidence into this pack's provenance.",
     ]
     for entry in manifest["instruments"]:
-        lines += ["", f"### {entry['instrument_id']}", ""] + _evidence_lines(entry)
+        lines += ["", f"### {entry['instrument_id']}", ""] + _evidence_lines(entry, managed=managed)
     lines += [
         "",
         "## Files",

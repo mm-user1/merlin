@@ -18,6 +18,8 @@ import numpy as np
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import exchange_data
 from tools.pattern_lab import manifest as pack_manifest
+from tools.pattern_lab import pack_lock
+from tools.pattern_lab import update_transaction
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STEP_MS = pack_manifest.BASE_STEP_MS
@@ -155,8 +157,8 @@ def mutate_manifest(root: Path, mutate) -> dict[str, Any]:
 # prototype NPZ pack builders, shared by the importer and CLI tests
 # --------------------------------------------------------------------------
 
-OKX_ID = "OKX_AAA-USDT-SWAP"
-BYBIT_ID = "BYBIT_ENAUSDT"
+LEGACY_OKX_ID = "OKX_AAA-USDT-SWAP"
+LEGACY_BYBIT_ID = "BYBIT_ENAUSDT"
 OKX_ENDPOINT = "GET https://www.okx.com/api/v5/market/history-candles (bar=5m)"
 
 
@@ -235,7 +237,7 @@ def sidecar(instruments=None, **overrides) -> dict[str, Any]:
         "instruments": instruments
         if instruments is not None
         else {
-            OKX_ID: {
+            LEGACY_OKX_ID: {
                 "quote_currency": "USDT",
                 "volume_unit_evidence": "OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
                 "evidence_source": "Source review plus the OKX candle field definition",
@@ -253,7 +255,9 @@ def sidecar(instruments=None, **overrides) -> dict[str, Any]:
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 OKX_CONTRACT = "AAA-USDT-SWAP"
 BYBIT_CONTRACT = "BBBUSDT"
-COLLECT_ROSTER_IDS = (f"BYBIT_{BYBIT_CONTRACT}", f"OKX_{OKX_CONTRACT}")
+OKX_ID = f"OKX_{OKX_CONTRACT}"
+BYBIT_ID = f"BYBIT_{BYBIT_CONTRACT}"
+COLLECT_ROSTER_IDS = (BYBIT_ID, OKX_ID)
 
 
 def roster_document(entries=None, **overrides):
@@ -516,3 +520,134 @@ def collector_options(**overrides) -> dict[str, Any]:
     payload = {"okx_rps": 10.0, "bybit_rps": 10.0, "timeout_seconds": 1.0, "max_attempts": 3}
     payload.update(overrides)
     return payload
+
+
+# --------------------------------------------------------------------------
+# collector operation builders, shared by the collector, recovery, lock and CLI
+# tests so no test module ever imports another test module
+# --------------------------------------------------------------------------
+
+def build_exchange(*, slots=120, first_slot=0, lag_ms=90_000, drop_slots=(), now_ms=None):
+    """Return ``(exchange, clock, stamps, values)`` for a two-venue fixture."""
+    stamps, values = synthetic_series(slots, first_slot=first_slot, drop_slots=drop_slots)
+    moment = int(now_ms if now_ms is not None else int(stamps[-1]) + STEP_MS + lag_ms)
+    exchange = FakeExchange(now_ms=moment)
+    exchange.add_okx(OKX_CONTRACT, timestamps=stamps, ohlcv=values)
+    exchange.add_bybit(BYBIT_CONTRACT, timestamps=stamps, ohlcv=values)
+    return exchange, FakeClock(moment), stamps, values
+
+
+def run_collect(root, roster_path, exchange, clock, *, start=None, end="latest-closed", **kwargs):
+    """Collect a new pack through the synthetic exchange."""
+    from tools.pattern_lab import collect as pack_collect
+
+    return pack_collect.collect_pack(
+        root,
+        start=start if start is not None else utc(ANCHOR_MS),
+        end=end,
+        roster_path=roster_path,
+        options=collector_options(),
+        transport=exchange,
+        clock=clock,
+        **kwargs,
+    )
+
+
+def run_update(root, exchange, clock, *, end="latest-closed", **kwargs):
+    """Update an existing managed pack through the synthetic exchange."""
+    from tools.pattern_lab import collect as pack_collect
+
+    return pack_collect.update_pack(
+        root,
+        end=end,
+        options=collector_options(),
+        transport=exchange,
+        clock=clock,
+        **kwargs,
+    )
+
+
+def recover(root, exchange, clock):
+    """Finish an interrupted operation through the synthetic exchange."""
+    from tools.pattern_lab import collect as pack_collect
+
+    return pack_collect.recover_pack(root, transport=exchange, clock=clock)
+
+
+def pending_journal(root: Path, *, roster=None, end_ms=None, **overrides) -> dict[str, Any]:
+    """Build a valid staging journal for an update of an existing pack.
+
+    The closure block is derived from the request exactly as the collector
+    freezes it, so the journal satisfies the validator's request/closure
+    agreement instead of relying on container types alone.
+    """
+    manifest = pack_manifest.read_manifest(root)
+    collector = manifest.get("collector")
+    if roster is None:
+        roster = (
+            [dict(entry) for entry in collector["roster"]]
+            if collector is not None
+            else [
+                {
+                    "contract": entry["contract"],
+                    "instrument_id": entry["instrument_id"],
+                    "quote_currency": entry["quote_currency"],
+                    "roles": list(entry["roles"]),
+                    "symbol": entry["symbol"],
+                    "venue": entry["venue"],
+                }
+                for entry in manifest["instruments"]
+            ]
+        )
+    start_utc = (
+        collector["managed_start_utc"]
+        if collector is not None
+        else manifest["instruments"][0]["first_open_utc"]
+    )
+    if end_ms is None:
+        end_ms = pack_manifest.to_epoch_ms(start_utc, "start") + 40 * STEP_MS
+    lag_ms = 60_000
+    operation_id = update_transaction.new_operation_id(
+        pack_manifest.parse_utc(GENERATED_UTC, "moment")
+    )
+    journal = {
+        "journal_version": 1,
+        "operation_id": operation_id,
+        "kind": "update",
+        "root": pack_lock.resolve_root_identity(root),
+        "staging_dir": update_transaction.staging_dir_name(operation_id),
+        "operation_started_utc": GENERATED_UTC,
+        "request": {
+            "start_utc": start_utc,
+            "end_utc": utc(end_ms),
+            "requested_end_token": None,
+            "requested_start_utc": None,
+            "note": None,
+        },
+        "options": {"okx_rps": 2.0, "bybit_rps": 2.0, "timeout_seconds": 20.0, "max_attempts": 5},
+        "universe": dict(manifest["universe"]),
+        "roster": roster,
+        "roster_sha256": pack_manifest.roster_sha256(roster),
+        "base": {
+            "revision": manifest["revision"],
+            "manifest_sha256": pack_manifest.file_sha256(pack_manifest.manifest_path(root)),
+            "readme_sha256": pack_manifest.file_sha256(root / pack_manifest.README_NAME),
+            "updates_sha256": pack_manifest.file_sha256(root / pack_manifest.UPDATES_NAME),
+            "files": {entry["instrument_id"]: entry["sha256"] for entry in manifest["instruments"]},
+        },
+        "target_revision": manifest["revision"] + 1,
+        "phase": "staging",
+        "closure": {
+            "server_times_ms": {roster[0]["venue"]: end_ms + lag_ms},
+            "observed_utc": GENERATED_UTC,
+            "publication_lag_ms": lag_ms,
+            "safe_cutoff_ms": end_ms,
+            "resolved_end_ms": end_ms,
+            "requested_end_token": None,
+        },
+        "preflight": {},
+        "staged": {},
+        "targets": None,
+    }
+    journal.update(overrides)
+    return journal

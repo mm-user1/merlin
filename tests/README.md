@@ -102,9 +102,16 @@ into an all-skipped success.
 Collector cases never call an exchange API. Every response is generated at runtime
 by the synthetic OKX/Bybit protocol fixture in `_helpers.py` and injected through
 the adapters' transport boundary, with an injected clock and sleeper so retries are
-deterministic and fast. Process-exclusion cases use task-owned child processes with
-bounded timeouts and external storage; no production process is signalled. A Linux
-run does not certify the Windows `msvcrt` lock branch.
+deterministic and fast. The package-local `conftest.py` adds a default network
+denial that replaces the collector's default transport and `urllib.request.urlopen`
+for every test in the package, so a forgotten injection fails loudly instead of
+reaching a venue. It is installed with plain assignment rather than `monkeypatch`,
+so a test's own `monkeypatch.undo()` cannot restore the real socket path; the guard
+itself is covered by tests. Shared collector, journal and recovery builders live in
+`_helpers.py`, and no Pattern Lab test module imports another test module.
+Process-exclusion cases use task-owned child processes with bounded timeouts and
+external storage; no production process is signalled. A Linux run does not certify
+the Windows `msvcrt` lock branch.
 
 ```powershell
 & $py tools/run_tests.py -- tests/pattern_lab

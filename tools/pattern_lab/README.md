@@ -191,8 +191,24 @@ optional `ctMult` is retained without inventing a multiplier. Spot-only
 `baseCcy`/`quoteCcy` fields are not required for a swap. Bybit raw keys are
 `contractType`, `baseCoin`, `quoteCoin`, `settleCoin`, `launchTime`, `status`,
 `qtyStep`, `minOrderQty`, `minNotionalValue`, `tickSize`, taken from the
-instrument and its nested filters. The normalized and raw fields must agree, and
-required identity or quantity fields are never guessed.
+instrument and its nested filters.
+
+`raw_contract_fields` is **closed per venue**: exactly those keys, with the
+required ones carrying a nonblank source string and only the explicitly nullable
+ones (`ctMult`/`listTime`, `launchTime`/`minNotionalValue`) allowed to be null. An
+empty mapping fails. Every normalized value must agree with the source field it was
+derived from — product and contract type, currencies, trading status, quantity
+unit, and the listing instant — and quantities are compared **numerically while
+both spellings are preserved**, so a source `"0.100"` matches a normalized `"0.1"`
+while a `qtyStep` of `"999"` beside a `quantity_step` of `"0.1"` is rejected. The
+base currency is read from `ctValCcy`/`baseCoin` and is never inferred from the
+display symbol. A managed pack contains only OKX and Bybit entries; `live` is
+required for OKX and `Trading` for Bybit. Required identity or quantity fields are
+never guessed.
+
+The `collector.roster` must match the published entries on **all six** roster
+fields, not only identities and roles, and `managed_start_utc` must equal every
+instrument's first stored row as well as the start of the last effective request.
 
 Only a change to a **relevant** value counts as new rules: a refreshed
 `as_of_utc` alone preserves the stored object. M4 owns interpretation and
@@ -211,6 +227,23 @@ numerical sizing outside these schemas.
   at or after the requested exclusive end. That prefix certification covers warmup
   rows as well as research rows. There is no ignore-verification switch, and a
   later wall clock never promotes unverified rows.
+- **A publication never withdraws certification from rows it keeps.** When a
+  prefix extension is requested with an end older than the cutoff that already
+  certifies the stored tail, the published cutoff is the **maximum justified** of
+  the previous and current ends: retained rows keep the certification they had,
+  newly fetched rows carry this operation's evidence, and the closure evidence and
+  source record both when they differ. The older request is never presented as
+  having certified the old tail, and an unverified archival row is never upgraded
+  merely because time passed.
+- A collector-managed entry must therefore satisfy
+  `closed_before_utc >= coverage_end_utc`; a manifest that would leave stored rows
+  uncertified is refused before publication. **Stored coverage is not the
+  requested end**: a short requested tail is legitimate and is reported as a tail
+  shortfall, not as a certification failure.
+- An archival M1a pack may still carry a cutoff earlier than its stored coverage.
+  That is exposed honestly as a research limitation naming the uncertified rows,
+  and it blocks neither the pack as a whole nor the earlier intervals the cutoff
+  does certify. An unknown cutoff remains a blocker, as before.
 
 ## Python API
 
@@ -279,8 +312,8 @@ serializer (`build_manifest`, `validate_manifest`, `read_manifest`,
 `write_manifest`), README renderer (`render_readme`), update history
 (`build_update_record`, `render_update_line`, `append_update_record`), roster
 helpers (`validate_roster_entries`, `canonical_roster_bytes`, `roster_sha256`),
-schema validators (`validate_collector`, `validate_instrument_rules`) and the
-durable write primitives (`write_text_atomic`, `fsync_path`, `fsync_directory`).
+schema validators (`validate_collector`, `validate_instrument_entry`,
+`validate_instrument_rules`) and the durable write primitives (`write_text_atomic`, `fsync_path`, `fsync_directory`).
 
 ### Process exclusion and read sessions
 
@@ -303,7 +336,12 @@ file never truncates or replaces it.
   root's parent, and a read never creates a missing root.
 - `read_session(root)` holds the guard across several related reads so they all see
   one pinned generation. Hold it while loading inputs and release it before a
-  lengthy RAM-only computation.
+  lengthy RAM-only computation. **A session's lifetime is exactly its context.**
+  It is bound to the live guard it was created with and is deactivated on normal
+  and exceptional exit, after which every `load_slice` and `inspect` call on it is
+  refused with `expired_read_session`. There is no public constructor that turns a
+  path alone into a working unlocked session, so a saved reference can never read a
+  root that another guard now owns.
 - Public entry points are thin lock-owning wrappers around module-private unlocked
   cores, and only cores call cores: `import-npz` never takes the lock twice through
   `publish_pack`, and `update` never calls a second locked `inspect_pack`. There is
@@ -618,16 +656,37 @@ preflight command and no cache.
 
 ### HTTP policy
 
-TLS verification stays on. Each request has a finite timeout (20s by default), at
-most five attempts, simple bounded backoff, and conservative per-venue pacing
-(`--okx-rps` / `--bybit-rps`, default 2 requests/second each, counting retries and
-metadata requests, with a documented ceiling of 10). Only timeouts, transient 5xx,
-429 and documented transient API codes are retried, honoring `Retry-After` within a
-bounded wait budget. Invalid symbols, invalid parameters and access restrictions
-fail immediately and are never treated as empty history. API success codes are
-checked even on HTTP 200, and malformed JSON or protocol data fail clearly. The
-effective pacing values are frozen in the journal and reused by `recover`. There is
-no adaptive scheduler.
+TLS verification stays on. Each request has a finite timeout (20s by default) and
+conservative per-venue pacing (`--okx-rps` / `--bybit-rps`, default 2
+requests/second each, counting retries and metadata requests, with a documented
+ceiling of 10). The effective pacing values are frozen in the journal and reused by
+`recover`. There is no adaptive scheduler.
+
+**One bounded attempt budget per request.** Transport failures, HTTP status codes
+and HTTP-200 venue business codes are classified by the same code and share the
+same budget: a maximum of **five attempts** in total, with simple bounded
+exponential backoff and `Retry-After` honored within a bounded wait budget of 60
+seconds. There is no nested retry loop, so a transient venue code costs one extra
+request, not another five. The attempt count is an integer in `[1, 5]`, enforced
+(never clamped) at the exposed options, at the client boundary and again when a
+journal's frozen options are restored; booleans, non-integers and out-of-range
+values are rejected.
+
+Only documented transient public-REST conditions are retried:
+
+| Class | Retried | Not retried |
+| --- | --- | --- |
+| Transport | a timeout, or a temporary connection/DNS failure | a TLS/certificate failure or a transport configuration error, which fail on the first response |
+| HTTP status | 429 and 5xx | every other non-200 status, including 4xx access restrictions |
+| OKX business code | `50011` rate limit, `50013` systems busy, `50026` system error | everything else, including `50113`, which is an invalid-signature configuration error rather than a throttle |
+| Bybit business code | `10006` too many visits, `10016` server error, `10018` IP rate limit | everything else, including `10002` (request time window) and the WebSocket-only `10429`; HTTP 429 is already classified from the status line |
+
+Invalid symbols, invalid parameters and access restrictions therefore fail on
+their first response and are never treated as empty history. API success codes are
+checked even on HTTP 200. Malformed JSON — including a bare JSON `null` — is
+reported as a clear source/protocol error naming what arrived. An exhausted budget
+reports the final underlying error together with the exact number of attempts
+made, so a diagnostic never claims retries that did not happen.
 
 **First-load timing is an estimate, not a benchmark.** 470 days at 5m is about
 135,360 rows per instrument: roughly 22,100 OKX pages at 300 rows and 680 Bybit
@@ -674,8 +733,11 @@ evidence timestamps are preserved when their relevant values did not change.
 
 The requested first slot must exist for every instrument after merging: an empty
 series, an unavailable prefix, listing or retention limit, or a source/protocol
-error blocks the whole publication. Dates are never silently shifted, no member is
-omitted and no venue is substituted. A successfully queried but **short tail** does
+error blocks the whole publication. A missing exact first candle has **several
+possible causes** that this operation cannot tell apart — a gap at exactly that
+slot, candle retention that does not reach back that far, or a later listing than
+the metadata reports — so the error names all three rather than guessing. Dates are
+never silently shifted, no member is omitted and no venue is substituted. A successfully queried but **short tail** does
 not block publication: each actual `last_open_utc`/`coverage_end_utc` is recorded
 and `tail_shortfall_bars = max(0, (requested_end_ms - coverage_end_ms) // 300000)`
 is reported, with exit status `1` whenever any shortfall exists — including a no-op
@@ -700,10 +762,29 @@ the target revision, the phase, completed preflight evidence, and one record per
 completed staged file with its relative final and staged paths, old digest if any,
 new digest, row/coverage facts and source/rules/verification evidence. On entering
 `applying` it also fixes the complete target manifest, README and history artifact
-digests. Journal types, versions, paths, digest/revision agreement and ownership
-are validated before any journal-driven data or metadata write; opening the lock
-file is the one necessary coordination exception. Commands and arbitrary journal
-paths are never executed.
+digests. The journal is validated before any journal-driven data or metadata write; opening
+the lock file is the one necessary coordination exception. Validation checks the
+promised relationships, not only container types:
+
+- the closed request, options, closure, preflight and staged-record shapes with
+  their scalar types; canonical aligned ranges; agreement between the effective
+  request and the frozen closure evidence; roster membership for every staged and
+  preflight record; and options that are valid frozen HTTP options;
+- an initial collect at target revision 1 with the required null base facts, and an
+  update at exactly base revision + 1;
+- deterministic final and staged paths, instrument identity, row/coverage facts and
+  old/new digest agreement with the recorded base and the staged manifest entry;
+- for the applying phase, the complete expected instrument set and the complete
+  frozen metadata targets, with no duplicate or foreign record;
+- agreement between the journal and the **frozen target manifest** — revision,
+  roster, collector operation and request, entries and artifact digests — read from
+  staging or, when the staged file was already consumed by a completed rename,
+  from the published destination that carries the recorded new digest.
+
+The whole applicable plan is validated **before the first live replacement**, so a
+valid-looking subset is never published ahead of discovering that another planned
+target is inconsistent. Commands and arbitrary journal paths are never executed,
+and there is no journal signing, corruption repair or pack migration.
 
 1. **staging** — the operation is recorded before any work. Each instrument is
    fetched and merged in RAM, written through the verified writer to its staged
@@ -742,10 +823,19 @@ digest, recovery stops. Restore the exact missing staged artifact from an availa
 copy, or collect a separate new root. Preserve the failed root and its journal;
 never clear the marker to make a partially replaced pack readable.
 
-If a crash leaves an uncheckpointed staging temporary it is incomplete work for
-that operation and is never adopted as a live instrument. Cleanup and recovery act
-only within the validated operation directory and on its known temporary names;
-any unexpected live artifact is reported, not removed. The journal owns its exact
+If a crash leaves a completed-but-uncheckpointed staged file, or an uncheckpointed
+temporary, it is incomplete work for that operation and is never adopted as a live
+instrument. The set of names an operation owns inside its staging directory is
+derived from the validated frozen roster and the fixed metadata target plan: each
+instrument's `<INSTRUMENT_ID>_5m.parquet`, the three target artifact names, and
+their exact temporary conventions. **Abort and cleanup therefore remove a durable
+file written just before its journal checkpoint**, while every entry that is not
+one of those exact names — an unrelated hidden file, a directory, or a symlink
+that merely borrows an owned name — is preserved and reported, never deleted or
+followed, and the journal is retained so the operation fails closed. A name only
+identifies incomplete owned work for removal and re-download; **only a validated
+checkpoint and digest ever permit a staged file to be reused** instead of fetched
+again. A caller's directory is never recursed into or recursively deleted. The journal owns its exact
 `..update-in-progress.json.tmp` text temporary and its named staging directory, and
 Parquet temporaries use the existing `.<file>.tmp-<uuid>` convention inside that
 directory only. A crash during the **very first** journal write leaves that
@@ -788,16 +878,73 @@ On a **conflict** (exit `2`, `error_code` `historical_conflict`): run
 discrepancy persists, collect a separate new root or wait for a reviewed repair
 operation. Do not delete the marker and do not change the overlap.
 
+**Any failure after the journal was written keeps that journal.** The error
+explains the operation ID, its phase, that research reads of the root are refused
+until it is resolved, and which of `recover` or `abort-update` applies. Nothing is
+deleted automatically, and an apparently empty operation is never auto-aborted,
+because a durable staged file can already exist without its checkpoint. A failure
+*before* the journal exists — a server-clock failure, for example — leaves no
+pending operation and says so.
+
+**An unavailable or delisted roster member blocks the whole all-roster update.**
+Preflight requires an available supported live contract for every entry, and the
+roster of a managed pack is fixed: `update` cannot add, drop or relabel an
+instrument, and no roster-editing command exists. Re-running the same command with
+the same roster fails the same way. The bounded workaround is to collect into a
+**separate new root** with an explicitly corrected roster, keeping the old root
+with its historical revisions and `updates.jsonl` evidence intact.
+
 The June 2025 buffer above is a collection default example, not a universal
 indicator warmup guarantee: the APIs take explicit dates and M2 records its actual
 warmup independently. The reserved interval `[2026-07-01, 2026-10-01)` is not
 authorized for analysis, September 2026 cannot be called complete until its candles
 have closed, and re-fetching prototype data does not erase its prior analytical use.
 
-Before a full operational download, perform a bounded public request/pagination
-smoke for one instrument per venue with the implemented adapter, then the
-full-roster preflight. That operational smoke is not part of ordinary pytest and
-authorizes neither a market study nor a bulk download during coding.
+### Bounded public smoke, before the first full download
+
+Run this once, manually, **after code acceptance and before the operational
+download**. It is not part of pytest, it authorizes neither a market study nor a
+bulk download, and it writes no pack. It requests 1100 closed 5m bars per venue
+through the real adapters at production page limits, so OKX (limit 300) needs four
+pages and Bybit (limit 1000) needs two: a single page would prove nothing about
+pagination.
+
+```bash
+python - <<'SMOKE'
+from tools.pattern_lab import exchange_data as ex
+from tools.pattern_lab.manifest import BASE_STEP_MS, format_epoch_ms
+
+BARS = 1100
+client = ex.HttpClient(rates={"OKX": 2.0, "BYBIT": 2.0})
+for adapter, contract in ((ex.OkxAdapter(), "BTC-USDT-SWAP"), (ex.BybitAdapter(), "ENAUSDT")):
+    server_ms = adapter.server_time_ms(client)
+    end_ms = ex.safe_closed_cutoff_ms([server_ms])
+    start_ms = end_ms - BARS * BASE_STEP_MS
+    rules = adapter.instrument_metadata(client, contract)
+    stamps, values = adapter.fetch_candles(client, contract, start_ms=start_ms, end_ms=end_ms)
+    assert stamps.size == BARS, (contract, stamps.size)                  # exact count
+    assert list(stamps) == sorted(stamps), contract                      # ascending order
+    assert all(int(s) % BASE_STEP_MS == 0 for s in stamps), contract     # 5m UTC grid
+    assert int(stamps[0]) == start_ms and int(stamps[-1]) + BASE_STEP_MS == end_ms
+    assert values.dtype.name == "float64" and values.shape == (BARS, 5)
+    assert (values[:, :4] > 0).all() and values[:, :4].min() > 0         # finite positive OHLC
+    assert (values[:, 2] <= values[:, [0, 3]].min(axis=1)).all()         # low <= min(open, close)
+    assert (values[:, [0, 3]].max(axis=1) <= values[:, 1]).all()         # ... <= high
+    assert (values[:, 4] >= 0).all()                                     # quote turnover
+    print(adapter.venue, contract, "pages ok",
+          format_epoch_ms(int(stamps[0])), "->", format_epoch_ms(end_ms),
+          "median quote turnover", float(sorted(values[:, 4])[BARS // 2]),
+          "| server", format_epoch_ms(server_ms), "| unit", rules["quantity_unit"],
+          "| step", rules["quantity_step"], "| status", rules["trading_status"])
+print("http requests:", client.request_count)
+SMOKE
+```
+
+The printed median quote turnover is the quote-field mapping check: it must be a
+plausible **quote-currency** notional for the instrument, not a base-asset
+quantity. Confirm the server time is close to the host clock and the rules match
+the venue's published contract page. Then run the full-roster preflight by starting
+the real `collect` and letting its preflight pass before the bulk download begins.
 
 ## Commands
 
@@ -845,14 +992,17 @@ stable `error_code` on stdout alongside its stderr explanation; `import-npz`,
 | `1` | inspection verification problems, or a completed publication or no-op with a reported tail shortfall — published does not mean the requested range is complete |
 | `2` | invalid request, data or dependency; source failure; missing start coverage; historical conflict; invalid or unrecoverable journal |
 | `3` | pack busy; the rejected caller mutated nothing |
-| `4` | a valid pending operation must be recovered or aborted before the requested action |
+| `4` | a valid pending operation must be recovered or aborted before the requested action, including a research `slice` and a pending **initial** collect that has no manifest yet |
 
 A detected conflict returns `2` even though it leaves a valid staging journal
 behind; a subsequent ordinary update then sees that journal and returns `4`. A plain
 `inspect` of a valid pending journal returns its status with `0`, while
 `inspect --verify` returns `1` with `checked=false`, `ok=false` and a
-pending-operation problem — never a passing certification. A malformed marker
-returns `2`. There is no hidden default data root, no default output directory and
+pending-operation problem — never a passing certification. Every other read,
+including `slice`, checks the pending state **before** requiring a manifest, so a
+pending first collect and the known initial journal temporary both return `4`
+rather than looking like a missing pack. A malformed journal is invalid input and
+returns `2`; a busy root returns `3` before the pending state is consulted. There is no hidden default data root, no default output directory and
 no environment-wide output location.
 
 ## Verification commands
@@ -872,8 +1022,12 @@ $env:MERLIN_TEST_ROOT = Join-Path $env:LOCALAPPDATA 'Temp\merlin-tests'
 
 The Windows commands matter because a Linux run does not certify the Windows
 `msvcrt` byte-range lock branch or the documented absence of a directory flush.
-Ordinary pytest never calls an exchange API: every response is generated at runtime
-through the injectable transport.
+Ordinary pytest never calls an exchange API. Every response is generated at runtime
+through the injectable transport, and the suite additionally installs a default
+network denial: the package's default transport and `urllib.request.urlopen` both
+fail loudly, so a forgotten injection cannot reach a real venue. The guard is
+installed outside `monkeypatch`, so a test's own `monkeypatch.undo()` restores the
+guard rather than the real socket path.
 
 ## M2 handoff and known limits
 
@@ -889,6 +1043,8 @@ Known limits of these milestones:
 
 - No historical-value repair operation: a conflict is reported and blocks
   publication, and there is no force or overwrite-history switch.
+- No roster editing: an unavailable or delisted member blocks the whole all-roster
+  update, and the bounded workaround is a corrected roster in a separate new root.
 - Recovery covers tested process interruption, not arbitrary disk corruption or
   unsupported power-loss behavior. A lost applying-stage artifact whose destination
   is not already the new digest is unrecoverable in place.

@@ -17,50 +17,29 @@ from tools.pattern_lab import collect as pack_collect
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import exchange_data
 from tools.pattern_lab import manifest as pack_manifest
+from tools.pattern_lab import update_transaction
 
 from ._helpers import (
     ANCHOR_MS,
     BYBIT_CONTRACT,
+    BYBIT_ID,
     OKX_CONTRACT,
+    OKX_ID,
     STEP_MS,
     FakeClock,
     FakeExchange,
+    build_exchange,
     bybit_instrument,
     collector_options,
     fake_client,
+    mutate_manifest,
     okx_instrument,
     roster_document,
+    run_collect,
     synthetic_series,
     utc,
     write_roster,
 )
-
-OKX_ID = f"OKX_{OKX_CONTRACT}"
-BYBIT_ID = f"BYBIT_{BYBIT_CONTRACT}"
-
-
-def build_exchange(*, slots=120, first_slot=0, lag_ms=90_000, drop_slots=(), now_ms=None):
-    """Return ``(exchange, clock, stamps, values)`` for a two-venue fixture."""
-    stamps, values = synthetic_series(slots, first_slot=first_slot, drop_slots=drop_slots)
-    moment = int(now_ms if now_ms is not None else int(stamps[-1]) + STEP_MS + lag_ms)
-    exchange = FakeExchange(now_ms=moment)
-    exchange.add_okx(OKX_CONTRACT, timestamps=stamps, ohlcv=values)
-    exchange.add_bybit(BYBIT_CONTRACT, timestamps=stamps, ohlcv=values)
-    return exchange, FakeClock(moment), stamps, values
-
-
-def run_collect(root, roster_path, exchange, clock, *, start=None, end="latest-closed", **kwargs):
-    return pack_collect.collect_pack(
-        root,
-        start=start if start is not None else utc(ANCHOR_MS),
-        end=end,
-        roster_path=roster_path,
-        options=collector_options(),
-        transport=exchange,
-        clock=clock,
-        **kwargs,
-    )
-
 
 @pytest.fixture
 def roster(tmp_path):
@@ -365,10 +344,12 @@ class TestAdapters:
         assert okx["raw_contract_fields"]["ctValCcy"] == "AAA"
         assert bybit["quantity_unit"] == bybit["base_currency"] == "BBB"
         assert bybit["minimum_notional"] == "5"
-        for rules in (okx, bybit):
+        for venue, rules in (("OKX", okx), ("BYBIT", bybit)):
             assert rules["contract_type"] == "linear_perpetual"
             assert rules["quote_currency"] == rules["settlement_currency"] == "USDT"
-            pack_manifest.validate_instrument_rules(rules, "rules")
+            # The adapter's own output satisfies the closed per-venue rule schema,
+            # including raw-to-normalized agreement on every quantity and listing.
+            assert pack_manifest.validate_instrument_rules(rules, "rules", venue=venue) == rules
 
     @pytest.mark.parametrize(
         "overrides, message",
@@ -833,7 +814,9 @@ class TestUpdateBoundaries:
                 root, end=utc(ANCHOR_MS + 40 * STEP_MS), options=collector_options()
             )
 
-    def test_unknown_extra_columns_block_an_update_but_not_a_read(self, tmp_path, roster):
+    def test_unknown_extra_columns_block_an_update_but_not_a_read(
+        self, tmp_path, roster, monkeypatch
+    ):
         root = tmp_path / "pack"
         exchange, clock, stamps, _ = build_exchange(slots=30)
         run_collect(root, roster, exchange, clock)
@@ -845,6 +828,15 @@ class TestUpdateBoundaries:
         )
         assert len(loaded.bars) == 10
 
+        exchange.requests.clear()
+        reads = []
+        original = pack_data.read_ohlcv_rows
+
+        def counted(path, **kwargs):
+            reads.append(path)
+            return original(path, **kwargs)
+
+        monkeypatch.setattr(pack_data, "read_ohlcv_rows", counted)
         with pytest.raises(PatternLabDataError) as failure:
             pack_collect.update_pack(
                 root, end="latest-closed", options=collector_options(),
@@ -852,6 +844,10 @@ class TestUpdateBoundaries:
             )
         assert failure.value.error_code == "unsupported_extra_columns"
         assert "silently discard" in str(failure.value)
+        # The guard is a schema-only column check made before any network request,
+        # and the shared integrity verification read each file exactly once.
+        assert exchange.requests == []
+        assert len(reads) == len(pack_manifest.read_manifest(root)["instruments"])
 
     def test_a_later_start_or_older_end_is_already_covered(self, tmp_path, roster):
         root = tmp_path / "pack"
@@ -889,3 +885,377 @@ def _rewrite_with_extra_column(root, instrument_id):
         if entry["instrument_id"] == instrument_id:
             entry["sha256"] = pack_manifest.file_sha256(path)
     pack_manifest.write_manifest(root, manifest)
+
+
+def _okx_error(code, message="synthetic"):
+    return exchange_data.HttpResponse(
+        status=200, body=json.dumps({"code": code, "msg": message, "data": []})
+    )
+
+
+def _bybit_error(code, message="synthetic"):
+    return exchange_data.HttpResponse(
+        status=200, body=json.dumps({"retCode": code, "retMsg": message, "result": {}})
+    )
+
+
+class TestRequestAttemptBudget:
+    """One bounded attempt budget shared by transport, HTTP and venue errors."""
+
+    @pytest.mark.parametrize(
+        "adapter, response",
+        [
+            (exchange_data.OkxAdapter(), _okx_error("50011", "rate limit")),
+            (exchange_data.BybitAdapter(), _bybit_error(10006, "too many visits")),
+        ],
+    )
+    def test_a_transient_business_code_is_actually_retried(self, adapter, response):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(response)
+        assert adapter.server_time_ms(client) == exchange.now_ms
+        assert len(exchange.requests) == 2  # the retry is a second real request
+        assert clock.sleeps == [exchange_data.BACKOFF_BASE_SECONDS]
+
+    @pytest.mark.parametrize(
+        "adapter, response, fragment",
+        [
+            (exchange_data.OkxAdapter(), _okx_error("50013", "systems are busy"), "50013"),
+            (exchange_data.BybitAdapter(), _bybit_error(10016, "server error"), "10016"),
+        ],
+    )
+    def test_a_persistent_transient_code_exhausts_exactly_the_budget(
+        self, adapter, response, fragment
+    ):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)  # three attempts
+        for _ in range(5):
+            exchange.scripted.append(response)
+        with pytest.raises(PatternLabDataError) as failure:
+            adapter.server_time_ms(client)
+        assert len(exchange.requests) == 3
+        assert fragment in str(failure.value)
+        assert "failed after 3 attempt(s) of at most 3" in str(failure.value)
+
+    def test_http_and_business_failures_share_one_budget(self):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(exchange_data.HttpResponse(status=503, body=""))
+        exchange.scripted.append(_okx_error("50026", "system error"))
+        exchange.scripted.append(exchange_data.HttpResponse(status=429, body=""))
+        with pytest.raises(PatternLabDataError) as failure:
+            exchange_data.OkxAdapter().server_time_ms(client)
+        # Three attempts in total, not five HTTP retries nested inside five more.
+        assert len(exchange.requests) == 3
+        assert "HTTP 429 rate limit" in str(failure.value)  # the final underlying error
+
+    @pytest.mark.parametrize(
+        "adapter, response, fragment",
+        [
+            (exchange_data.OkxAdapter(), _okx_error("51001", "no such instrument"), "51001"),
+            (exchange_data.OkxAdapter(), _okx_error("50113", "invalid signature"), "50113"),
+            (exchange_data.BybitAdapter(), _bybit_error(10001, "params error"), "10001"),
+            (exchange_data.BybitAdapter(), _bybit_error(10002, "request time window"), "10002"),
+            (exchange_data.BybitAdapter(), _bybit_error(10429, "websocket protection"), "10429"),
+            (exchange_data.OkxAdapter(), exchange_data.HttpResponse(status=403, body="denied"), "HTTP 403"),
+            (
+                exchange_data.OkxAdapter(),
+                exchange_data.HttpResponse(
+                    status=0, body="", error="SSLCertVerificationError: bad chain", error_kind="tls"
+                ),
+                "permanent TLS",
+            ),
+            (
+                exchange_data.OkxAdapter(),
+                exchange_data.HttpResponse(
+                    status=0, body="", error="ValueError: unknown url type", error_kind="configuration"
+                ),
+                "permanent transport configuration",
+            ),
+        ],
+    )
+    def test_a_permanent_failure_fails_on_its_first_response(self, adapter, response, fragment):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        for _ in range(5):
+            exchange.scripted.append(response)
+        with pytest.raises(PatternLabDataError) as failure:
+            adapter.server_time_ms(client)
+        assert len(exchange.requests) == 1
+        assert fragment in str(failure.value)
+        assert clock.sleeps == []
+
+    def test_a_timeout_is_still_retried_while_tls_is_not(self):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(
+            exchange_data.HttpResponse(
+                status=0, body="", error="TimeoutError: read timed out", error_kind="timeout"
+            )
+        )
+        assert exchange_data.OkxAdapter().server_time_ms(client) == exchange.now_ms
+        assert len(exchange.requests) == 2
+
+    @pytest.mark.parametrize(
+        "exc, kind",
+        [
+            (TimeoutError("read timed out"), "timeout"),
+            (ConnectionResetError("peer reset"), "connection"),
+            (__import__("socket").gaierror("name resolution failed"), "connection"),
+            (__import__("ssl").SSLCertVerificationError("bad chain"), "tls"),
+            (ValueError("unknown url type"), "configuration"),
+        ],
+    )
+    def test_transport_exceptions_are_classified_rather_than_lumped_together(self, exc, kind):
+        assert exchange_data.classify_transport_exception(exc) == kind
+
+    @pytest.mark.parametrize(
+        "body, fragment",
+        [
+            ("null", "not a JSON object"),
+            ("{ not json", "not valid JSON"),
+            ("[]", "not a JSON object"),
+        ],
+    )
+    def test_a_malformed_payload_names_the_protocol_problem(self, body, fragment):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(exchange_data.HttpResponse(status=200, body=body))
+        with pytest.raises(PatternLabDataError) as failure:
+            exchange_data.OkxAdapter().server_time_ms(client)
+        assert fragment in str(failure.value)
+        assert "unreachable" not in str(failure.value)
+        assert len(exchange.requests) == 1
+
+    def test_retry_after_is_honored_within_a_bounded_budget(self):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(
+            exchange_data.HttpResponse(status=429, body="", headers={"Retry-After": "99999"})
+        )
+        assert exchange_data.OkxAdapter().server_time_ms(client) == exchange.now_ms
+        assert clock.sleeps == [exchange_data.RETRY_WAIT_BUDGET_SECONDS]
+
+    @pytest.mark.parametrize("value", [True, 0, 6, 3.0, "3", None])
+    def test_an_invalid_attempt_count_is_rejected_at_every_boundary(self, value):
+        with pytest.raises(PatternLabDataError, match="max_attempts"):
+            exchange_data.normalize_max_attempts(value)
+        with pytest.raises(PatternLabDataError, match="max_attempts"):
+            exchange_data.HttpClient(max_attempts=value)
+        with pytest.raises(PatternLabDataError, match="max_attempts"):
+            pack_collect.build_options(max_attempts=value)
+        with pytest.raises(PatternLabDataError, match="max_attempts"):
+            pack_collect._client_from_options(
+                collector_options(max_attempts=value), transport=None, clock=None
+            )
+
+    def test_pacing_counts_a_retry_as_a_request(self):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock, rates={"OKX": 1.0, "BYBIT": 1.0})
+        exchange.scripted.append(exchange_data.HttpResponse(status=503, body=""))
+        exchange_data.OkxAdapter().server_time_ms(client)
+        # The 0.5s backoff already elapsed, so pacing waits only the remaining
+        # 0.5s of the one-second interval: a retry is paced like any request.
+        assert clock.sleeps == [exchange_data.BACKOFF_BASE_SECONDS, 0.5]
+        assert len(exchange.requests) == 2
+
+
+class TestNetworkIsolation:
+    """The suite can never reach a real exchange, however a fixture is wired."""
+
+    def test_the_default_transport_is_denied(self):
+        with pytest.raises(AssertionError, match="real exchange request"):
+            exchange_data.HttpClient().get_json(
+                "https://example.invalid/api", {}, venue="OKX", where="probe"
+            )
+
+    def test_a_raw_urlopen_is_denied(self):
+        import urllib.request
+
+        with pytest.raises(AssertionError, match="real exchange request"):
+            urllib.request.urlopen("https://example.invalid/api")
+
+    def test_monkeypatch_undo_restores_the_guard_not_the_network(self, monkeypatch):
+        monkeypatch.setattr(
+            exchange_data,
+            "urllib_transport",
+            lambda url, timeout: exchange_data.HttpResponse(status=200, body="{}"),
+        )
+        assert exchange_data.urllib_transport("https://example.invalid/api", 1.0).status == 200
+        monkeypatch.undo()
+        with pytest.raises(AssertionError, match="real exchange request"):
+            exchange_data.urllib_transport("https://example.invalid/api", 1.0)
+
+
+class TestClosureCertification:
+    """A publication never withdraws certification from rows it keeps."""
+
+    def _collected_with_earlier_history(self, tmp_path, roster):
+        """Collect slots 0..59 from a source that also holds slots -10..-1."""
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=70, first_slot=-10)
+        run_collect(root, roster, exchange, clock, start=utc(ANCHOR_MS))
+        return root, exchange, clock, stamps
+
+    def test_a_prefix_extension_with_an_older_end_keeps_the_certified_tail(self, tmp_path, roster):
+        root, exchange, clock, _ = self._collected_with_earlier_history(tmp_path, roster)
+        coverage_end = utc(ANCHOR_MS + 60 * STEP_MS)
+        tail = {"start": utc(ANCHOR_MS + 50 * STEP_MS), "end": coverage_end}
+        fixed = {"start": utc(ANCHOR_MS + 20 * STEP_MS), "end": utc(ANCHOR_MS + 30 * STEP_MS)}
+        before_tail = pack_data.load_slice(root, OKX_ID, **tail)
+        before_fixed = pack_data.load_slice(root, OKX_ID, **fixed)
+
+        result = pack_collect.update_pack(
+            root,
+            start=utc(ANCHOR_MS - 10 * STEP_MS),
+            end=utc(ANCHOR_MS + 40 * STEP_MS),  # older than the stored coverage end
+            options=collector_options(),
+            transport=exchange,
+            clock=clock,
+        )
+        assert result["status"] == "completed"
+
+        entry = pack_manifest.find_instrument(pack_manifest.read_manifest(root), OKX_ID)
+        assert entry["first_open_utc"] == utc(ANCHOR_MS - 10 * STEP_MS)
+        assert entry["coverage_end_utc"] == coverage_end
+        # The maximum justified cutoff is preserved, not replaced by this request.
+        assert entry["verification"]["closed_before_utc"] == coverage_end
+        assert "retained from the previous generation" in entry["verification"]["closure_evidence"]
+        assert "did not re-verify them" in entry["verification"]["closure_evidence"]
+        assert "Retained tail certification" in entry["verification"]["closure_source"]
+
+        after_tail = pack_data.load_slice(root, OKX_ID, **tail)
+        assert after_tail.input_fingerprint == before_tail.input_fingerprint
+        after_fixed = pack_data.load_slice(root, OKX_ID, **fixed)
+        assert after_fixed.input_fingerprint == before_fixed.input_fingerprint
+
+    def test_a_later_no_op_preserves_the_extended_pack_byte_for_byte(self, tmp_path, roster):
+        root, exchange, clock, _ = self._collected_with_earlier_history(tmp_path, roster)
+        window = {
+            "start": utc(ANCHOR_MS - 10 * STEP_MS),
+            "end": utc(ANCHOR_MS + 40 * STEP_MS),
+        }
+        pack_collect.update_pack(
+            root, options=collector_options(), transport=exchange, clock=clock, **window
+        )
+        before = {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+        result = pack_collect.update_pack(
+            root, options=collector_options(), transport=exchange, clock=clock, **window
+        )
+        assert result["status"] == "no_op"
+        assert pack_manifest.read_manifest(root)["revision"] == 2
+        assert {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()} == before
+
+    def test_a_fresh_collection_certifies_exactly_its_own_request(self, tmp_path, roster):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        entry = pack_manifest.find_instrument(pack_manifest.read_manifest(root), OKX_ID)
+        assert entry["verification"]["closed_before_utc"] == entry["coverage_end_utc"]
+        assert "retained from the previous generation" not in entry["verification"]["closure_evidence"]
+
+
+class TestMetadataPreservation:
+    """An update replaces the values it owns and preserves everything else."""
+
+    def _decorate(self, root):
+        """Add unknown top-level, per-entry and nested metadata to a live pack."""
+
+        def mutate(manifest):
+            manifest["future_top_level"] = {"kept": True}
+            for entry in manifest["instruments"]:
+                entry["future_entry"] = f"kept for {entry['instrument_id']}"
+                entry["source"]["future_source"] = "kept source extra"
+                entry["verification"]["future_verification"] = "kept verification extra"
+
+        mutate_manifest(root, mutate)
+
+    def test_changed_unchanged_and_rules_only_entries_all_keep_their_extras(
+        self, tmp_path, roster
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        self._decorate(root)
+        before = pack_manifest.read_manifest(root)
+
+        # OKX gains rows; Bybit keeps its rows but publishes a new tick size.
+        longer_stamps, longer_values = synthetic_series(60)
+        exchange.now_ms = clock.now_ms = int(longer_stamps[-1]) + STEP_MS + 90_000
+        exchange.set_rows("OKX", OKX_CONTRACT, longer_stamps, longer_values)
+        exchange.instruments[("BYBIT", BYBIT_CONTRACT)] = bybit_instrument(
+            BYBIT_CONTRACT, priceFilter={"tickSize": "0.0002"}
+        )
+        result = pack_collect.update_pack(
+            root, end="latest-closed", options=collector_options(), transport=exchange, clock=clock
+        )
+        assert result["status"] == "completed"
+
+        manifest = pack_manifest.read_manifest(root)
+        assert manifest["future_top_level"] == {"kept": True}
+        assert manifest["universe"] == before["universe"]
+        assert manifest["collector"]["roster"] == before["collector"]["roster"]
+        for entry in manifest["instruments"]:
+            assert entry["future_entry"] == f"kept for {entry['instrument_id']}"
+            assert entry["source"]["future_source"] == "kept source extra"
+            assert entry["verification"]["future_verification"] == "kept verification extra"
+
+        changed = pack_manifest.find_instrument(manifest, OKX_ID)
+        rules_only = pack_manifest.find_instrument(manifest, BYBIT_ID)
+        assert changed["row_count"] == 60
+        # A canonical owned value of this operation wins over the stale one.
+        assert changed["source"]["operation_id"] == result["operation_id"]
+        assert rules_only["row_count"] == 40
+        assert rules_only["instrument_rules"]["price_tick"] == "0.0002"
+        assert rules_only["sha256"] == pack_manifest.find_instrument(before, BYBIT_ID)["sha256"]
+
+    def test_a_no_op_preserves_extras_without_publishing_a_revision(self, tmp_path, roster):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        self._decorate(root)
+        before = {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+        result = pack_collect.update_pack(
+            root, end="latest-closed", options=collector_options(), transport=exchange, clock=clock
+        )
+        assert result["status"] == "no_op"
+        assert {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()} == before
+
+
+class TestFailureDiagnostics:
+    """A failure explains what is pending without inventing or deleting one."""
+
+    def test_a_server_clock_failure_leaves_and_reports_no_journal(self, tmp_path, roster):
+        root = tmp_path / "pack"
+        exchange, clock, _, _ = build_exchange(slots=40)
+        exchange.fail_time_for.add("OKX")
+        with pytest.raises(PatternLabDataError) as failure:
+            run_collect(root, roster, exchange, clock)
+        assert "remains journalled" not in str(failure.value)
+        assert update_transaction.pending_state(root) is None
+
+    def test_a_failure_after_journalling_explains_the_phase_and_the_next_action(
+        self, tmp_path, roster
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=30)
+        run_collect(root, roster, exchange, clock)
+        longer_stamps, longer_values = synthetic_series(40)
+        exchange.now_ms = clock.now_ms = int(longer_stamps[-1]) + STEP_MS + 90_000
+        conflicting = longer_values.copy()
+        conflicting[25, 4] += 5.0  # slot 25 lies inside the one-hour tail overlap
+        exchange.set_rows("OKX", OKX_CONTRACT, longer_stamps, conflicting)
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, longer_stamps, longer_values)
+
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_collect.update_pack(
+                root, end="latest-closed", options=collector_options(),
+                transport=exchange, clock=clock,
+            )
+        message = str(failure.value)
+        assert failure.value.error_code == "historical_conflict"  # the original failure is kept
+        assert "remains journalled in the staging phase" in message
+        assert "research reads" in message
+        assert "abort-update" in message
+        state = update_transaction.pending_state(root)
+        assert state is not None and state["valid"]  # evidence is retained, not removed

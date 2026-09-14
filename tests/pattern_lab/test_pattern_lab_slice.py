@@ -462,3 +462,27 @@ class TestPublicResampler:
         assert not np.signbit(aggregated[0, 4])
         assert omitted == 1
         assert np.array_equal(np.copysign(1.0, values[:, 4]), np.copysign(1.0, original[:, 4]))
+
+
+class TestCertificationShortfall:
+    """An archival cutoff short of stored coverage limits reads without blocking them."""
+
+    ID = "TEST_AAA-USDT-SWAP"
+
+    def test_earlier_slices_stay_admissible_and_the_shortfall_is_reported(self, tmp_path):
+        root = tmp_path / "pack"
+        single_pack(root, slot_count=48, closed_before_ms=ANCHOR_MS + 24 * STEP_MS)
+
+        certified = pack_data.load_slice(
+            root, self.ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 24 * STEP_MS)
+        )
+        assert len(certified.bars) == 24
+        with pytest.raises(PatternLabDataError, match="not certified closed"):
+            pack_data.load_slice(
+                root, self.ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 48 * STEP_MS)
+            )
+
+        entry = pack_data.inspect_pack(root)["instruments"][0]
+        assert entry["research_readable"] is True  # the pack is not globally rejected
+        assert any("uncertified" in item for item in entry["research_limitations"])
+        assert entry["research_blockers"] == []

@@ -22,14 +22,18 @@ from tools.pattern_lab import update_transaction
 from ._helpers import (
     ANCHOR_MS,
     BYBIT_CONTRACT,
+    BYBIT_ID,
     OKX_CONTRACT,
+    OKX_ID,
     STEP_MS,
-    collector_options,
+    build_exchange,
+    recover,
+    run_collect,
+    run_update,
     synthetic_series,
     utc,
     write_roster,
 )
-from .test_pattern_lab_collector import BYBIT_ID, OKX_ID, build_exchange, run_collect
 
 
 class Interrupted(RuntimeError):
@@ -86,21 +90,6 @@ def collected(tmp_path, roster):
     return root, exchange, clock
 
 
-def run_update(root, exchange, clock, **kwargs):
-    return pack_collect.update_pack(
-        root,
-        end="latest-closed",
-        options=collector_options(),
-        transport=exchange,
-        clock=clock,
-        **kwargs,
-    )
-
-
-def recover(root, exchange, clock):
-    return pack_collect.recover_pack(root, transport=exchange, clock=clock)
-
-
 def history_lines(root: Path) -> list[dict]:
     path = Path(root) / pack_manifest.UPDATES_NAME
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -146,6 +135,27 @@ class TestJournalValidation:
             (lambda j: j["staged"][OKX_ID].update(final_path="/etc/passwd"), "relative path"),
             (lambda j: j["targets"]["manifest"].update(staged_path="ohlcv/x"), "must be"),
             (lambda j: j["targets"].pop("readme"), "expected exactly"),
+            (lambda j: j.update(target_revision=99), "publishes 2"),
+            (lambda j: j["base"].update(revision=None), "must record the base revision"),
+            (lambda j: j["request"].update(end_utc=utc(ANCHOR_MS + 5 * STEP_MS)), "does not agree"),
+            (lambda j: j["request"].update(requested_end_token="now"), "requested_end_token"),
+            (lambda j: j["closure"].update(safe_cutoff_ms=j["closure"]["safe_cutoff_ms"] + STEP_MS),
+             "is not the cutoff"),
+            (lambda j: j["closure"].pop("observed_utc"), "closure object is closed"),
+            (lambda j: j["options"].update(max_attempts=9), "max_attempts"),
+            (lambda j: j["options"].pop("okx_rps"), "options object is closed"),
+            (lambda j: j["staged"].update(FOREIGN_ID=j["staged"][OKX_ID]), "not a member"),
+            (lambda j: j["preflight"].update(FOREIGN_ID={}), "not a member"),
+            (lambda j: j["staged"].pop(BYBIT_ID), "were never completed"),
+            (lambda j: j["staged"][OKX_ID]["facts"].update(row_count=1), "does not agree"),
+            (lambda j: j["staged"][OKX_ID].update(old_sha256="c" * 64), "recorded base digest"),
+            (lambda j: j["staged"][OKX_ID].update(new_sha256="c" * 64), "does not match the recorded"),
+            (
+                lambda j: j["staged"][OKX_ID].update(
+                    staged_path=f"{j['staging_dir']}/BYBIT_BBBUSDT_5m.parquet"
+                ),
+                "staged_path: must be",
+            ),
         ],
     )
     def test_malformed_journals_are_rejected(self, collected, monkeypatch, mutate, message):
@@ -236,6 +246,31 @@ class TestStagingRecovery:
         assert result["status"] == "recovered"
         assert_published_once(root, revision=1, events=1)
 
+    def test_an_initial_collect_reuses_its_completed_stage(self, tmp_path, roster, monkeypatch):
+        root = tmp_path / "fresh"
+        exchange, clock, _, _ = build_exchange(slots=40)
+        fail_before(
+            monkeypatch, pack_collect, "_collect_instrument", lambda calls, *_: calls == 2
+        )
+        with pytest.raises(Interrupted):
+            run_collect(root, roster, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        assert journal["kind"] == "collect" and sorted(journal["staged"]) == [BYBIT_ID]
+        staged = root / journal["staged"][BYBIT_ID]["staged_path"]
+        digest = pack_manifest.file_sha256(staged)
+
+        exchange.requests.clear()
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=1, events=1)
+        # The completed instrument was reused by digest, not downloaded again.
+        assert pack_manifest.file_sha256(
+            root / pack_manifest.instrument_relative_file(BYBIT_ID)
+        ) == digest
+        downloaded = {params.get("symbol") or params.get("instId") for _, params in exchange.requests}
+        assert BYBIT_CONTRACT not in downloaded
+        assert OKX_CONTRACT in downloaded
+
     def test_a_staged_artifact_that_vanished_is_refetched(self, collected, monkeypatch):
         root, exchange, clock = collected
         fail_before(
@@ -260,14 +295,14 @@ class TestApplyingRecovery:
             (update_transaction, "apply_operation", lambda calls, *_: True, "entering applying"),
             (
                 update_transaction,
-                "_replace_file",
+                "_publish_replacement",
                 lambda calls, args, kwargs: calls == 2,
                 "between file replacements",
             ),
             (
                 update_transaction,
-                "_replace_file",
-                lambda calls, args, kwargs: kwargs.get("where") == "targets.manifest",
+                "_publish_replacement",
+                lambda calls, args, kwargs: args[0].destination.name == pack_manifest.MANIFEST_NAME,
                 "after history and README",
             ),
             (update_transaction, "cleanup_operation", lambda calls, *_: True, "after the manifest"),
@@ -282,7 +317,7 @@ class TestApplyingRecovery:
         with pytest.raises(Interrupted):
             run_update(root, exchange, clock)
         assert update_transaction.pending_state(root) is not None
-        with pytest.raises(PatternLabDataError, match="pending collector operation"):
+        with pytest.raises(PatternLabPendingError, match="pending collector operation"):
             pack_data.load_slice(
                 root, OKX_ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 10 * STEP_MS)
             )
@@ -305,6 +340,9 @@ class TestApplyingRecovery:
         assert journal["target_revision"] == 2
         assert not list(root.glob(f"{update_transaction.STAGING_PREFIX}*"))
         recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+        # Running recovery again is a clean no-op, not a second revision.
+        assert recover(root, exchange, clock)["status"] == "nothing_to_recover"
         assert_published_once(root, revision=2, events=2)
 
     def test_an_unexpected_destination_hash_blocks_recovery(self, collected, monkeypatch):
@@ -381,7 +419,7 @@ class TestInitialJournalTemporary:
         with pytest.raises(Interrupted):
             run_update(root, exchange, clock)
         monkeypatch.undo()
-        with pytest.raises(PatternLabDataError, match="pending collector operation"):
+        with pytest.raises(PatternLabPendingError, match="pending collector operation"):
             pack_data.load_slice(
                 root, OKX_ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 10 * STEP_MS)
             )
@@ -553,3 +591,233 @@ class TestDurableWrites:
         stamps, values = synthetic_series(8)
         pack_data.write_ohlcv_file(tmp_path / "AAA_5m.parquet", stamps, values)
         assert events == ["fsync-file", "replace", "fsync-dir"]
+
+
+def raw_write_journal(root: Path, journal: dict) -> None:
+    """Write a journal without validation, to reproduce a corrupted marker."""
+    update_transaction.marker_path(root).write_text(
+        pack_manifest.dumps_json(journal) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
+def live_bytes(root: Path) -> dict:
+    """Return the published pack's bytes, excluding staging and coordination files."""
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+        and not any(part.startswith(".") for part in path.relative_to(root).parts)
+    }
+
+
+class TestOwnedStagingArtifacts:
+    """Cleanup covers exactly this operation's own work, and nothing else."""
+
+    def _interrupt_after_a_staged_file(self, monkeypatch):
+        """Stop after one durable staged Parquet write, before its checkpoint."""
+        return fail_after(monkeypatch, pack_data, "write_ohlcv_file", lambda calls, *_: calls == 1)
+
+    def test_abort_removes_a_completed_but_uncheckpointed_file(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        before = live_bytes(root)
+        self._interrupt_after_a_staged_file(monkeypatch)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+
+        journal = update_transaction.pending_state(root)["journal"]
+        staging = root / journal["staging_dir"]
+        orphan = sorted(item.name for item in staging.iterdir())
+        assert journal["staged"] == {}  # the file exists without a checkpoint
+        assert orphan  # ... and it is genuinely on disk
+
+        aborted = pack_collect.abort_update(root)
+        assert sorted(aborted["removed_artifacts"]) == orphan
+        assert not staging.exists()
+        assert update_transaction.pending_state(root) is None
+        assert live_bytes(root) == before  # live data and base metadata are untouched
+
+    def test_an_uncheckpointed_file_is_refetched_rather_than_trusted(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        self._interrupt_after_a_staged_file(monkeypatch)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        exchange.requests.clear()
+        recover(root, exchange, clock)
+        # A name alone never certifies completed data: the instrument is downloaded again.
+        assert any(path.endswith("candles") or "kline" in path for path, _ in exchange.requests)
+        assert_published_once(root, revision=2, events=2)
+
+    def test_an_unknown_hidden_file_is_preserved_and_reported(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        fail_before(monkeypatch, update_transaction, "apply_operation", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        note = root / journal["staging_dir"] / ".operator-note"
+        note.write_text("unrecorded evidence", encoding="utf-8")
+
+        with pytest.raises(PatternLabDataError, match="unexpected artifacts") as failure:
+            recover(root, exchange, clock)
+        assert failure.value.error_code == "unexpected_staging_artifact"
+        assert note.read_text(encoding="utf-8") == "unrecorded evidence"
+        assert update_transaction.pending_state(root) is not None  # the journal is retained
+
+        # Once the unknown artifact is gone, the same operation finishes forward.
+        note.unlink()
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+
+    def test_cleanup_refuses_a_symlink_instead_of_following_it(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        before = live_bytes(root)
+        fail_before(monkeypatch, pack_collect, "_enter_applying", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        assert journal["phase"] == "staging"
+
+        # A symlink borrowing an owned target name must not make cleanup unlink
+        # the live file it points at, however plausible its name looks.
+        target = root / pack_manifest.README_NAME
+        link = root / journal["staging_dir"] / pack_manifest.README_NAME
+        link.symlink_to(target)
+        with pytest.raises(PatternLabDataError, match="unexpected artifacts") as failure:
+            pack_collect.abort_update(root)
+        assert failure.value.error_code == "unexpected_staging_artifact"
+        assert link.is_symlink() and target.is_file()
+        assert live_bytes(root) == before
+        assert update_transaction.pending_state(root) is not None
+
+        link.unlink()
+        pack_collect.abort_update(root)
+        assert live_bytes(root) == before
+
+    def test_a_symlinked_staged_artifact_is_refused_before_any_replacement(
+        self, collected, monkeypatch
+    ):
+        root, exchange, clock = collected
+        before = live_bytes(root)
+        fail_before(monkeypatch, update_transaction, "apply_operation", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        staged = root / journal["staged"][OKX_ID]["staged_path"]
+        staged.unlink()
+        staged.symlink_to(root / pack_manifest.instrument_relative_file(OKX_ID))
+        with pytest.raises(PatternLabDataError, match="resolves outside"):
+            recover(root, exchange, clock)
+        assert live_bytes(root) == before
+
+    @pytest.mark.parametrize("stop_after", [1, 2, 3])
+    def test_an_interrupted_target_metadata_write_is_recoverable(
+        self, collected, monkeypatch, stop_after
+    ):
+        root, exchange, clock = collected
+        before = live_bytes(root)
+        fail_after(
+            monkeypatch,
+            update_transaction,
+            "write_staged_text",
+            lambda calls, *_: calls == stop_after,
+        )
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        assert journal["phase"] == "staging"  # applying is entered only after all of them
+        assert live_bytes(root) == before
+
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+
+    def test_an_aborted_initial_collect_discards_its_uncheckpointed_file(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "fresh"
+        exchange, clock, _, _ = build_exchange(slots=40)
+        self._interrupt_after_a_staged_file(monkeypatch)
+        with pytest.raises(Interrupted):
+            run_collect(root, roster, exchange, clock)
+        monkeypatch.undo()
+        pack_collect.abort_update(root)
+        assert sorted(item.name for item in root.iterdir()) == [pack_lock.LOCK_NAME]
+
+
+class TestApplyPlanValidation:
+    """The whole plan is validated before the first live replacement."""
+
+    def _interrupted_applying(self, root, exchange, clock, monkeypatch):
+        fail_before(monkeypatch, update_transaction, "apply_operation", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        return update_transaction.pending_state(root)["journal"]
+
+    def test_a_disagreeing_target_revision_fails_before_any_replacement(
+        self, collected, monkeypatch
+    ):
+        root, exchange, clock = collected
+        journal = self._interrupted_applying(root, exchange, clock, monkeypatch)
+        before = live_bytes(root)
+        # Base revision 1, journal target 99, frozen manifest 2.
+        journal["target_revision"] = 99
+        raw_write_journal(root, journal)
+
+        with pytest.raises(PatternLabDataError) as failure:
+            recover(root, exchange, clock)
+        assert failure.value.error_code == "invalid_journal"
+        assert pack_manifest.read_manifest(root)["revision"] == 1
+        assert len(history_lines(root)) == 1
+        assert update_transaction.marker_path(root).is_file()  # the marker is not cleared
+        assert live_bytes(root) == before
+
+    def test_a_frozen_manifest_that_disagrees_with_the_journal_publishes_nothing(
+        self, collected, monkeypatch
+    ):
+        root, exchange, clock = collected
+        journal = self._interrupted_applying(root, exchange, clock, monkeypatch)
+        before = live_bytes(root)
+        staged = root / journal["targets"]["manifest"]["staged_path"]
+        frozen = json.loads(staged.read_text(encoding="utf-8"))
+        frozen["collector"]["operation_id"] = "20200101T000000Z-0123456789ab"
+        staged.write_text(pack_manifest.dumps_json(frozen) + "\n", encoding="utf-8", newline="\n")
+        journal["targets"]["manifest"]["new_sha256"] = pack_manifest.file_sha256(staged)
+        raw_write_journal(root, journal)
+
+        with pytest.raises(PatternLabDataError, match="disagrees with the journal"):
+            recover(root, exchange, clock)
+        assert live_bytes(root) == before
+        assert update_transaction.marker_path(root).is_file()
+
+    def test_an_inconsistent_later_target_blocks_the_earlier_ones(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        journal = self._interrupted_applying(root, exchange, clock, monkeypatch)
+        before = live_bytes(root)
+        # The manifest is published last, so a lost manifest artifact must stop the
+        # operation before any instrument file or the README is replaced.
+        (root / journal["targets"]["manifest"]["staged_path"]).unlink()
+        with pytest.raises(PatternLabDataError) as failure:
+            recover(root, exchange, clock)
+        assert failure.value.error_code == "unrecoverable_staged_artifact"
+        assert live_bytes(root) == before
+
+    def test_a_consumed_staged_artifact_is_not_treated_as_corruption(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        fail_before(monkeypatch, update_transaction, "cleanup_operation", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        staged = root / journal["targets"]["manifest"]["staged_path"]
+        assert not staged.is_file()  # already renamed onto its destination
+        # The already-published destination carries the same frozen bytes.
+        assert update_transaction.frozen_target_text(root, journal, "manifest") == (
+            (root / pack_manifest.MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)

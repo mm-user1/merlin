@@ -17,23 +17,25 @@ import time
 
 import pytest
 
-from tools.pattern_lab import PatternLabBusyError, PatternLabDataError
+from tools.pattern_lab import (
+    PatternLabBusyError,
+    PatternLabDataError,
+    PatternLabPendingError,
+)
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import import_npz as pack_import
 from tools.pattern_lab import manifest as pack_manifest
 from tools.pattern_lab import pack_lock
-from tools.pattern_lab import update_transaction
 
 from ._helpers import (
-    ANCHOR_MS,
-    STEP_MS,
     REPO_ROOT,
+    instrument_source,
     legacy_series,
+    pending_journal,
+    publish,
     sidecar,
     single_pack,
     synthetic_series,
-    instrument_source,
-    publish,
     utc,
     write_legacy_pack,
 )
@@ -222,24 +224,46 @@ class TestProcessExclusion:
     def test_a_read_session_prevents_a_between_read_update(self, tmp_path):
         root = tmp_path / "pack"
         stamps, _ = single_pack(root, slot_count=40)
+        window = {"start": utc(int(stamps[0])), "end": utc(int(stamps[10]))}
         with pack_data.read_session(root) as session:
-            first = session.load_slice(
-                "TEST_AAA-USDT-SWAP", start=utc(int(stamps[0])), end=utc(int(stamps[10]))
-            )
+            first = session.load_slice("TEST_AAA-USDT-SWAP", **window)
             blocked = run_child(BUSY_CALLER, str(root), "inspect")
             assert json.loads(blocked.stdout)["busy"] is True
-            second = session.load_slice(
-                "TEST_AAA-USDT-SWAP", start=utc(int(stamps[0])), end=utc(int(stamps[10]))
-            )
+            # Related reads inside the session share one pinned generation and the
+            # session's own guard: it never self-locks against itself.
+            second = session.load_slice("TEST_AAA-USDT-SWAP", **window)
+            assert session.inspect()["revision"] == 1
         assert first.input_fingerprint == second.input_fingerprint
-        assert session.inspect()["revision"] == 1
+
+        # The session's lifetime is exactly its context: afterwards it is not a
+        # public unlocked read capability, whoever holds the root.
+        with pytest.raises(PatternLabDataError, match="read session ended"):
+            session.load_slice("TEST_AAA-USDT-SWAP", **window)
+        with pytest.raises(PatternLabDataError, match="read session ended"):
+            session.inspect()
+        with pack_lock.pack_guard(root):
+            with pytest.raises(PatternLabDataError, match="read session ended"):
+                session.load_slice("TEST_AAA-USDT-SWAP", **window)
+
+    def test_a_read_session_is_deactivated_by_an_exception_too(self, tmp_path):
+        root = tmp_path / "pack"
+        stamps, _ = single_pack(root, slot_count=40)
+        escaped = None
+        with pytest.raises(RuntimeError):
+            with pack_data.read_session(root) as session:
+                escaped = session
+                raise RuntimeError("the caller failed mid-session")
+        with pytest.raises(PatternLabDataError, match="read session ended"):
+            escaped.inspect()
+        # The OS guard was released too, so an ordinary read works again.
+        assert pack_data.inspect_pack(root)["revision"] == 1
 
     def test_process_death_releases_the_guard_but_a_journal_still_blocks_reads(self, tmp_path):
         root = tmp_path / "pack"
         stamps, _ = single_pack(root, slot_count=40)
         journal = tmp_path / "journal.json"
         journal.write_text(
-            pack_manifest.dumps_json(_minimal_journal(root)) + "\n", encoding="utf-8"
+            pack_manifest.dumps_json(pending_journal(root)) + "\n", encoding="utf-8"
         )
         ready = tmp_path / "ready"
         child = start_child(DYING_HOLDER, str(root), str(journal), str(ready))
@@ -250,7 +274,7 @@ class TestProcessExclusion:
         # The OS released the guard at process exit, so the lock is free again.
         with pack_lock.pack_guard(root):
             pass
-        with pytest.raises(PatternLabDataError, match="pending collector operation"):
+        with pytest.raises(PatternLabPendingError, match="pending collector operation"):
             pack_data.load_slice(
                 root, "TEST_AAA-USDT-SWAP", start=utc(int(stamps[0])), end=utc(int(stamps[10]))
             )
@@ -308,53 +332,3 @@ class TestDestinationCreation:
         stamps, values = synthetic_series(20)
         with pytest.raises(PatternLabDataError, match="already exists"):
             publish(root, [instrument_source(stamps, values)])
-
-
-def _minimal_journal(root: Path) -> dict:
-    """Build a valid staging journal for an update of a one-instrument pack."""
-    roster = [
-        {
-            "contract": "AAA-USDT-SWAP",
-            "instrument_id": "TEST_AAA-USDT-SWAP",
-            "quote_currency": "USDT",
-            "roles": ["trading"],
-            "symbol": "AAA",
-            "venue": "TEST",
-        }
-    ]
-    operation_id = update_transaction.new_operation_id(
-        pack_manifest.parse_utc("2026-09-14T00:00:00Z", "moment")
-    )
-    manifest = pack_manifest.read_manifest(root)
-    return {
-        "journal_version": 1,
-        "operation_id": operation_id,
-        "kind": "update",
-        "root": pack_lock.resolve_root_identity(root),
-        "staging_dir": update_transaction.staging_dir_name(operation_id),
-        "operation_started_utc": "2026-09-14T00:00:00Z",
-        "request": {
-            "start_utc": utc(ANCHOR_MS),
-            "end_utc": utc(ANCHOR_MS + 40 * STEP_MS),
-            "requested_end_token": None,
-            "requested_start_utc": None,
-            "note": None,
-        },
-        "options": {"okx_rps": 2.0, "bybit_rps": 2.0, "timeout_seconds": 20.0, "max_attempts": 5},
-        "universe": dict(manifest["universe"]),
-        "roster": roster,
-        "roster_sha256": pack_manifest.roster_sha256(roster),
-        "base": {
-            "revision": manifest["revision"],
-            "manifest_sha256": pack_manifest.file_sha256(pack_manifest.manifest_path(root)),
-            "readme_sha256": pack_manifest.file_sha256(root / pack_manifest.README_NAME),
-            "updates_sha256": pack_manifest.file_sha256(root / pack_manifest.UPDATES_NAME),
-            "files": {entry["instrument_id"]: entry["sha256"] for entry in manifest["instruments"]},
-        },
-        "target_revision": manifest["revision"] + 1,
-        "phase": "staging",
-        "closure": {},
-        "preflight": {},
-        "staged": {},
-        "targets": None,
-    }

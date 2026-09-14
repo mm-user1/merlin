@@ -14,6 +14,7 @@ that is separate from M2's compute multiprocessing.
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from pathlib import Path
 import re
@@ -24,6 +25,7 @@ import numpy as np
 
 from . import (
     PatternLabDataError,
+    PatternLabError,
     PatternLabPendingError,
 )
 from . import data as pack_data
@@ -35,7 +37,7 @@ from .manifest import BASE_STEP_MS, format_epoch_ms, to_epoch_ms
 
 ROSTER_SCHEMA_VERSION = 1
 DEFAULT_ROSTER_PATH = Path(__file__).resolve().parent / "configs" / "universe.json"
-LATEST_CLOSED = "latest-closed"
+LATEST_CLOSED = exchange_data.LATEST_CLOSED
 
 # One hour of base bars re-fetched on both sides of existing coverage so an
 # overlap comparison can detect a source discrepancy before it is published.
@@ -142,10 +144,6 @@ def load_roster(path: Path | None = None) -> dict[str, Any]:
 # request resolution
 # --------------------------------------------------------------------------
 
-def _aligned_utc(value: Any, field: str) -> int:
-    return pack_manifest.require_aligned(to_epoch_ms(value, field), BASE_STEP_MS, field)
-
-
 def _resolve_end(
     client: exchange_data.HttpClient, venues: Sequence[str], end: Any, *, field: str = "end"
 ) -> dict[str, Any]:
@@ -162,7 +160,7 @@ def _resolve_end(
         token = LATEST_CLOSED
         end_ms = cutoff
     else:
-        end_ms = _aligned_utc(end, field)
+        end_ms = pack_manifest.require_aligned_utc(end, field)
         if end_ms > cutoff:
             raise PatternLabDataError(
                 f"{field}: {format_epoch_ms(end_ms)} is beyond the safe closed cutoff "
@@ -339,21 +337,51 @@ def _source_metadata(adapter, entry: Mapping[str, Any], *, observed_utc: str, op
     )
 
 
-def _verification(adapter, *, resolved_end_ms: int, closure: Mapping[str, Any]):
+def _verification(
+    adapter,
+    *,
+    resolved_end_ms: int,
+    closure: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+):
+    """Build the entry's verification, preserving justified previous certification.
+
+    A prefix extension may be requested with an end older than the cutoff that
+    already certifies the stored tail.  Those retained rows keep their earlier
+    certification and the newly fetched rows carry this operation's evidence, so
+    the published cutoff is the maximum justified of the two.  The current,
+    older request is never presented as having certified the old tail itself.
+    """
     flag = " OKX additionally requires the candle confirm flag '1'." if adapter.venue == "OKX" else ""
+    evidence = (
+        "Only rows whose open plus 5m is at or before the frozen cutoff were retained." + flag
+    )
+    source = (
+        f"{adapter.time_reference} sampled at operation start "
+        f"({closure['observed_utc']}), minus a {closure['publication_lag_ms']}ms publication "
+        "allowance, floored to the 5m grid."
+    )
+    certified_ms = resolved_end_ms
+    previous_utc = None if previous is None else previous.get("closed_before_utc")
+    if previous_utc is not None:
+        previous_ms = to_epoch_ms(previous_utc, "previous closed_before_utc")
+        if previous_ms > resolved_end_ms:
+            certified_ms = previous_ms
+            evidence += (
+                f" Rows from {format_epoch_ms(resolved_end_ms)} onwards are retained from the "
+                f"previous generation and keep its certification; this operation's older requested "
+                f"end did not re-verify them."
+            )
+            source += (
+                f" Retained tail certification before {previous_utc} comes from the previously "
+                "published generation of this pack, recorded in updates.jsonl."
+            )
     return pack_manifest.build_verification(
         volume_quote_verified=True,
         volume_quote_evidence=adapter.quote_volume_evidence,
-        closed_before_utc=format_epoch_ms(resolved_end_ms),
-        closure_evidence=(
-            "Only rows whose open plus 5m is at or before the frozen cutoff were retained."
-            + flag
-        ),
-        closure_source=(
-            f"{adapter.time_reference} sampled at operation start "
-            f"({closure['observed_utc']}), minus a {closure['publication_lag_ms']}ms publication "
-            "allowance, floored to the 5m grid."
-        ),
+        closed_before_utc=format_epoch_ms(certified_ms),
+        closure_evidence=evidence,
+        closure_source=source,
     )
 
 
@@ -376,13 +404,18 @@ def _client_from_options(
     transport: Callable[..., Any] | None,
     clock: Any | None,
 ) -> exchange_data.HttpClient:
-    """Build the paced HTTP client from the options frozen in the journal."""
+    """Build the paced HTTP client from the options frozen in the journal.
+
+    The frozen values are revalidated here, so a restored journal can never
+    widen the attempt budget or the pacing this build accepts.
+    """
+    frozen = exchange_data.validate_http_options(options, where="journal.options")
     return exchange_data.HttpClient(
         transport=transport,
         clock=clock,
-        timeout=float(options["timeout_seconds"]),
-        max_attempts=int(options["max_attempts"]),
-        rates={"OKX": float(options["okx_rps"]), "BYBIT": float(options["bybit_rps"])},
+        timeout=frozen["timeout_seconds"],
+        max_attempts=frozen["max_attempts"],
+        rates={"OKX": frozen["okx_rps"], "BYBIT": frozen["bybit_rps"]},
     )
 
 
@@ -394,21 +427,14 @@ def build_options(
     max_attempts: int = exchange_data.MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     """Validate and freeze the per-operation HTTP options."""
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
-        raise PatternLabDataError(
-            f"timeout_seconds: expected a number, got {type(timeout_seconds).__name__}."
-        )
-    timeout = float(timeout_seconds)
-    if not (timeout > 0.0) or timeout != timeout or timeout == float("inf"):
-        raise PatternLabDataError(
-            f"timeout_seconds: must be a positive finite number, got {timeout_seconds!r}."
-        )
-    return {
-        "okx_rps": exchange_data.normalize_rps(okx_rps, "okx_rps"),
-        "bybit_rps": exchange_data.normalize_rps(bybit_rps, "bybit_rps"),
-        "timeout_seconds": timeout,
-        "max_attempts": pack_manifest.require_int(max_attempts, "max_attempts", minimum=1),
-    }
+    return exchange_data.validate_http_options(
+        {
+            "okx_rps": okx_rps,
+            "bybit_rps": bybit_rps,
+            "timeout_seconds": timeout_seconds,
+            "max_attempts": max_attempts,
+        }
+    )
 
 
 def _require_no_pending(data_root: Path, action: str) -> None:
@@ -424,6 +450,34 @@ def _require_no_pending(data_root: Path, action: str) -> None:
     )
 
 
+def _explain_pending(data_root: Path, exc: PatternLabError) -> PatternLabError:
+    """Return ``exc`` extended with the recovery guidance a journalled failure needs.
+
+    A failure before the journal exists leaves nothing pending and is reported
+    exactly as raised, so a server-clock failure is never described as having
+    left a new journal behind.  A failure after journalling keeps the journal
+    and its staged artifacts as evidence: nothing is deleted automatically and
+    an apparently empty operation is never auto-aborted, because a durable file
+    can already exist without its checkpoint.
+    """
+    state = update_transaction.pending_state(data_root)
+    if state is None or not state["valid"]:
+        return exc
+    journal = state["journal"]
+    action = (
+        "run 'recover' to finish it forward; it can no longer be aborted"
+        if journal["phase"] == "applying"
+        else "run 'abort-update' to discard it and leave the pack unchanged, or 'recover' to continue it"
+    )
+    return type(exc)(
+        f"{exc}\nOperation {journal['operation_id']} ({journal['kind']}) remains journalled in the "
+        f"{journal['phase']} phase, so research reads of {data_root} are refused until it is "
+        f"resolved: {action}. Its journal and staged artifacts are retained as evidence; nothing "
+        "was removed automatically.",
+        error_code=exc.error_code,
+    )
+
+
 def _guard_identity(guard: pack_lock.PackGuard, journal: Mapping[str, Any]) -> None:
     """Refuse to write into a pending root that was moved away from its journal."""
     if journal["root"] != guard.identity:
@@ -436,25 +490,34 @@ def _guard_identity(guard: pack_lock.PackGuard, journal: Mapping[str, Any]) -> N
     guard.verify_root_unchanged()
 
 
-def _read_existing_series(data_root: Path, entry: Mapping[str, Any]):
-    """Read one stored instrument, refusing an update of unknown extra columns."""
+def _require_supported_columns(data_root: Path, entry: Mapping[str, Any]) -> Path:
+    """Refuse to update a stored file carrying unknown extra OHLCV columns.
+
+    This reads the Parquet schema only: the six-column writer would silently
+    discard a reader-tolerated future column, so an update of such a file is
+    refused up front without paying for a full read of every instrument.
+    """
     path = pack_manifest.resolve_pack_path(data_root, entry["file"], f"{entry['instrument_id']}.file")
-    columns = pack_data.parquet_column_names(path)
-    unknown = [name for name in columns if name not in pack_data.PARQUET_COLUMNS]
+    unknown = [
+        name for name in pack_data.parquet_column_names(path) if name not in pack_data.PARQUET_COLUMNS
+    ]
     if unknown:
         raise PatternLabDataError(
             f"{path}: the stored file carries extra columns {unknown}. The six-column writer would "
             "silently discard them, so an update of this file is refused; reading it remains supported.",
             error_code="unsupported_extra_columns",
         )
-    return pack_data.read_ohlcv_rows(path)
+    return path
+
+
+def _read_existing_series(data_root: Path, entry: Mapping[str, Any]):
+    """Read one stored instrument, refusing an update of unknown extra columns."""
+    return pack_data.read_ohlcv_rows(_require_supported_columns(data_root, entry))
 
 
 def _verify_base_pack(data_root: Path, manifest: Mapping[str, Any]) -> None:
     """Verify every declared file's integrity before staging an update."""
-    problems: list[str] = []
-    for entry in manifest["instruments"]:
-        problems.extend(pack_data._verify_instrument(data_root, entry))
+    problems = pack_data.verify_instrument_files(data_root, manifest)
     if problems:
         raise PatternLabDataError(
             "the existing pack failed verification, so it is not a safe base for an update:\n  "
@@ -541,8 +604,10 @@ def _preflight(
         if not available:
             failures.append(
                 f"{instrument_id}: the requested first slot {format_epoch_ms(start_ms)} is not "
-                "retrievable; the venue's candle retention or listing does not reach it. Listing "
-                "metadata alone never proves retention depth."
+                "retrievable. That can mean a missing candle at exactly that slot, candle retention "
+                "that does not reach back that far, or a later listing than the metadata reports; "
+                "listing metadata alone never proves retention depth. The date is not moved "
+                "automatically."
             )
             evidence.pop(instrument_id)
     if failures:
@@ -635,8 +700,12 @@ def _collect_instrument(
         observed = "an empty series" if stamps.size == 0 else format_epoch_ms(int(stamps[0]))
         raise PatternLabDataError(
             f"{instrument_id}: the requested first slot {format_epoch_ms(effective_start_ms)} is absent "
-            f"after merging (the merged series starts at {observed}). The whole publication is blocked: "
-            "no date is shifted, no member is omitted and no venue is substituted.",
+            f"after merging (the merged series starts at {observed}). The venue may have no candle for "
+            "that exact slot, its retention may not reach back that far, or the contract may have been "
+            "listed later; the causes are different and this operation cannot tell them apart. The "
+            "whole publication is blocked: no date is shifted, no member is omitted and no venue is "
+            "substituted. Choose a start the source actually covers, or collect this instrument into "
+            "a separate root.",
             error_code="missing_start_coverage",
         )
 
@@ -659,7 +728,7 @@ def _collect_instrument(
         )
         staged_path = f"{update_transaction.staging_dir_name(operation_id)}/{file_name}"
         new_digest = written.sha256
-        new_entry = pack_manifest.build_instrument_entry(
+        owned = pack_manifest.build_instrument_entry(
             symbol=entry["symbol"],
             venue=entry["venue"],
             contract=entry["contract"],
@@ -670,19 +739,31 @@ def _collect_instrument(
             last_open_ms=written.last_open_ms,
             missing_bar_count=written.missing_bar_count,
             sha256=written.sha256,
-            source=_source_metadata(
-                adapter, entry, observed_utc=observed_utc, operation_id=operation_id
+            source=pack_manifest.preserve_extra_keys(
+                None if old_entry is None else old_entry["source"],
+                _source_metadata(
+                    adapter, entry, observed_utc=observed_utc, operation_id=operation_id
+                ),
             ),
-            verification=_verification(
-                adapter, resolved_end_ms=end_ms, closure=journal["closure"]
+            verification=pack_manifest.preserve_extra_keys(
+                None if old_entry is None else old_entry["verification"],
+                _verification(
+                    adapter,
+                    resolved_end_ms=end_ms,
+                    closure=journal["closure"],
+                    previous=None if old_entry is None else old_entry["verification"],
+                ),
             ),
             instrument_rules=rules,
         )
+        # Unknown metadata an earlier or future writer stored on this entry
+        # survives the rebuild; every canonical value this operation owns wins.
+        new_entry = pack_manifest.preserve_extra_keys(old_entry, owned)
     else:
         new_digest = old_digest
-        new_entry = dict(old_entry)
+        new_entry = copy.deepcopy(dict(old_entry))
         if not reuse_rules:
-            new_entry["instrument_rules"] = rules
+            new_entry["instrument_rules"] = copy.deepcopy(dict(rules))
 
     coverage_end_ms = int(stamps[-1]) + BASE_STEP_MS
     facts = {
@@ -831,7 +912,11 @@ def _update_source_record(journal: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _enter_applying(
-    data_root: Path, journal: Mapping[str, Any], progress: Callable[[str], None] | None
+    data_root: Path,
+    journal: Mapping[str, Any],
+    progress: Callable[[str], None] | None,
+    *,
+    base_manifest: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Freeze every final metadata byte, then record the applying phase durably."""
     journal = dict(journal)
@@ -855,6 +940,11 @@ def _enter_applying(
         revision=journal["target_revision"],
         state="ready",
         collector=collector,
+    )
+    # Unknown top-level metadata of the base manifest survives this publication;
+    # the universe object and normalized roster are carried through unchanged.
+    manifest = pack_manifest.validate_manifest(
+        pack_manifest.preserve_extra_keys(base_manifest, manifest)
     )
     record = pack_manifest.build_update_record(
         manifest,
@@ -968,7 +1058,7 @@ def _execute(
             )
             result["checked_utc"] = pack_manifest.format_utc(client.clock.now_utc(), "checked_utc")
             return result
-        journal = _enter_applying(data_root, journal, progress)
+        journal = _enter_applying(data_root, journal, progress, base_manifest=base_manifest)
     applied = update_transaction.apply_operation(data_root, journal, progress=progress)
     return _result(
         data_root,
@@ -1088,7 +1178,7 @@ def collect_pack(
         client = _client_from_options(frozen, transport=transport, clock=clock)
         venues = sorted({entry["venue"] for entry in resolved["roster"]})
         closure = _resolve_end(client, venues, end)
-        start_ms = _aligned_utc(start, "start")
+        start_ms = pack_manifest.require_aligned_utc(start, "start")
         if start_ms >= closure["resolved_end_ms"]:
             raise PatternLabDataError(
                 f"start: requires start < end, got {format_epoch_ms(start_ms)} >= "
@@ -1118,9 +1208,12 @@ def collect_pack(
         journal = update_transaction.write_journal(root, journal)
         (root / pack_manifest.OHLCV_DIR).mkdir(exist_ok=True)
         _note(progress, f"operation {operation_id}: collecting {len(resolved['roster'])} instruments")
-        return _execute(
-            root, guard, journal, client=client, progress=progress, base_manifest=None
-        )
+        try:
+            return _execute(
+                root, guard, journal, client=client, progress=progress, base_manifest=None
+            )
+        except PatternLabError as exc:
+            raise _explain_pending(root, exc) from exc
 
 
 def update_pack(
@@ -1157,7 +1250,7 @@ def update_pack(
             )
         _verify_base_pack(root, manifest)
         for entry in manifest["instruments"]:
-            _read_existing_series(root, entry)  # rejects unknown extra OHLCV columns up front
+            _require_supported_columns(root, entry)  # schema-only check, before any download
 
         resolved = {
             "universe": dict(manifest["universe"]),
@@ -1169,7 +1262,7 @@ def update_pack(
         closure = _resolve_end(client, venues, end)
         end_ms = closure["resolved_end_ms"]
         managed_start_ms = to_epoch_ms(collector["managed_start_utc"], "collector.managed_start_utc")
-        requested_start_ms = None if start is None else _aligned_utc(start, "start")
+        requested_start_ms = None if start is None else pack_manifest.require_aligned_utc(start, "start")
         effective_start_ms = (
             managed_start_ms
             if requested_start_ms is None
@@ -1205,9 +1298,12 @@ def update_pack(
         )
         journal = update_transaction.write_journal(root, journal)
         _note(progress, f"operation {operation_id}: updating revision {manifest['revision']}")
-        return _execute(
-            root, guard, journal, client=client, progress=progress, base_manifest=manifest
-        )
+        try:
+            return _execute(
+                root, guard, journal, client=client, progress=progress, base_manifest=manifest
+            )
+        except PatternLabError as exc:
+            raise _explain_pending(root, exc) from exc
 
 
 def _promote_initial_journal(
@@ -1279,9 +1375,12 @@ def recover_pack(
             progress,
             f"recovering operation {journal['operation_id']} from the {journal['phase']} phase",
         )
-        result = _execute(
-            root, guard, journal, client=client, progress=progress, base_manifest=base_manifest
-        )
+        try:
+            result = _execute(
+                root, guard, journal, client=client, progress=progress, base_manifest=base_manifest
+            )
+        except PatternLabError as exc:
+            raise _explain_pending(root, exc) from exc
         result["status"] = "recovered" if result["status"] == "completed" else result["status"]
         return result
 

@@ -15,8 +15,8 @@ from tools.pattern_lab import manifest as pack_manifest
 
 from ._helpers import (
     ANCHOR_MS,
-    BYBIT_ID,
-    OKX_ID,
+    LEGACY_BYBIT_ID,
+    LEGACY_OKX_ID,
     STEP_MS,
     legacy_series,
     sidecar,
@@ -42,12 +42,12 @@ class TestCanonicalImport:
         )
         metadata = sidecar(
             {
-                OKX_ID: {
+                LEGACY_OKX_ID: {
                     "quote_currency": "USDT",
                     "volume_unit_evidence": "OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
                     "evidence_source": "Source review plus the OKX candle field definition",
                 },
-                BYBIT_ID: {
+                LEGACY_BYBIT_ID: {
                     "quote_currency": "USDT",
                     "volume_unit_evidence": "Linear ENAUSDT turnover; fetch_base.py reads kline field 6.",
                     "evidence_source": "Source review plus the Bybit V5 kline field definition",
@@ -60,8 +60,8 @@ class TestCanonicalImport:
         assert summary["state"] == "ready"
         manifest = pack_manifest.read_manifest(tmp_path / "pack")
         okx, bybit = manifest["instruments"]
-        assert okx["instrument_id"] == OKX_ID
-        assert bybit["instrument_id"] == BYBIT_ID
+        assert okx["instrument_id"] == LEGACY_OKX_ID
+        assert bybit["instrument_id"] == LEGACY_BYBIT_ID
         assert okx["roles"] == ["trading"]
         assert bybit["roles"] == ["research_only"]
         assert okx["quote_currency"] == "USDT"
@@ -79,7 +79,7 @@ class TestCanonicalImport:
 
         stamps, values = synthetic_series(48)
         read_stamps, read_values = pack_data.read_ohlcv_rows(
-            tmp_path / "pack" / "ohlcv" / f"{OKX_ID}_5m.parquet"
+            tmp_path / "pack" / "ohlcv" / f"{LEGACY_OKX_ID}_5m.parquet"
         )
         assert np.array_equal(read_stamps, stamps)
         assert np.array_equal(read_values, values.astype(np.float32).astype(np.float64))
@@ -98,7 +98,7 @@ class TestCanonicalImport:
         cutoff = utc(ANCHOR_MS + 144 * STEP_MS)
         metadata = sidecar(
             {
-                OKX_ID: {
+                LEGACY_OKX_ID: {
                     "quote_currency": "USDT",
                     "volume_unit_evidence": "OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
                     "evidence_source": "Source review plus the OKX candle field definition",
@@ -110,7 +110,7 @@ class TestCanonicalImport:
         )
         legacy.import_npz_pack(source, tmp_path / "pack", source_metadata=metadata)
         loaded = pack_data.load_slice(
-            tmp_path / "pack", OKX_ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 144 * STEP_MS), timeframe_minutes=60
+            tmp_path / "pack", LEGACY_OKX_ID, start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 144 * STEP_MS), timeframe_minutes=60
         )
         assert len(loaded.bars) == 12
 
@@ -125,7 +125,7 @@ class TestCanonicalImport:
         entry = pack_manifest.read_manifest(tmp_path / "pack")["instruments"][0]
         assert entry["source"]["timestamps_resorted"] is True
         read_stamps, read_values = pack_data.read_ohlcv_rows(
-            tmp_path / "pack" / "ohlcv" / f"{OKX_ID}_5m.parquet"
+            tmp_path / "pack" / "ohlcv" / f"{LEGACY_OKX_ID}_5m.parquet"
         )
         assert np.array_equal(read_stamps, stamps)
         assert np.array_equal(read_values, values.astype(np.float32).astype(np.float64))
@@ -224,8 +224,8 @@ class TestSourceMetadataSidecar:
         path = tmp_path / "metadata.json"
         path.write_text(json.dumps(sidecar()), encoding="utf-8", newline="\n")
         loaded = legacy.load_source_metadata(path)
-        assert loaded["instruments"][OKX_ID]["closed_before_utc"] is None
-        assert loaded["instruments"][OKX_ID]["quote_currency"] == "USDT"
+        assert loaded["instruments"][LEGACY_OKX_ID]["closed_before_utc"] is None
+        assert loaded["instruments"][LEGACY_OKX_ID]["quote_currency"] == "USDT"
 
     def test_duplicate_json_keys_are_rejected(self, tmp_path):
         path = tmp_path / "metadata.json"
@@ -249,20 +249,20 @@ class TestSourceMetadataSidecar:
             sidecar({}),
             sidecar({"okx_aaa-usdt-swap": {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s"}}),
             sidecar({"OKXAAA": {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e"}}),
-            sidecar({OKX_ID: {"quote_currency": "usdt", "volume_unit_evidence": "e", "evidence_source": "s"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "  ", "evidence_source": "s"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": 7, "evidence_source": "s"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e"}}),
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "usdt", "volume_unit_evidence": "e", "evidence_source": "s"}}),
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "  ", "evidence_source": "s"}}),
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": 7, "evidence_source": "s"}}),
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
                               "note": "unknown key"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
                               "closure_evidence": "partial"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
                               "closed_before_utc": "2026-01-01T00:00:00Z", "closure_evidence": "e"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
                               "closed_before_utc": "2026-01-01T00:01:00Z", "closure_evidence": "e",
                               "closure_source": "s"}}),
-            sidecar({OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
+            sidecar({LEGACY_OKX_ID: {"quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s",
                               "closed_before_utc": "2026-01-01T00:00:00", "closure_evidence": "e",
                               "closure_source": "s"}}),
         ],
@@ -283,7 +283,7 @@ class TestSourceMetadataSidecar:
         extra["instruments"]["OKX_ZZZ"] = {
             "quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s"
         }
-        extra["instruments"][BYBIT_ID] = {
+        extra["instruments"][LEGACY_BYBIT_ID] = {
             "quote_currency": "USDT", "volume_unit_evidence": "e", "evidence_source": "s"
         }
         with pytest.raises(PatternLabDataError, match=r"unexpected \['OKX_ZZZ'\]"):

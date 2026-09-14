@@ -25,7 +25,13 @@ import urllib.request
 import numpy as np
 
 from . import PatternLabDataError
-from .manifest import BASE_STEP_MS, format_epoch_ms, format_utc, require_text
+from .manifest import (
+    BASE_STEP_MS,
+    format_epoch_ms,
+    format_utc,
+    listing_instant_utc,
+    require_text,
+)
 
 OKX_BASE_URL = "https://www.okx.com"
 BYBIT_BASE_URL = "https://api.bybit.com"
@@ -34,6 +40,8 @@ OKX_PAGE_LIMIT = 300  # current documented maximum for history-candles (default 
 BYBIT_PAGE_LIMIT = 1000  # current documented maximum for /v5/market/kline
 
 DEFAULT_TIMEOUT_SECONDS = 20.0
+# One request never costs more than this many attempts in total: HTTP status,
+# transport and venue business codes all share the same budget.
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 0.5
 BACKOFF_CEILING_SECONDS = 8.0
@@ -51,14 +59,39 @@ MAX_REQUESTS_PER_SECOND = 10.0
 # guarantee published by either venue.
 CLOSURE_LAG_MS = 60_000
 
+# A collector-only convenience resolved once to a concrete end; it never enters
+# load_slice or a frozen research configuration.
+LATEST_CLOSED = "latest-closed"
+
 USER_AGENT = "merlin-pattern-lab/1 (+local research tooling)"
 
-# Documented transient API conditions that are retried; every other business
-# code fails immediately so an invalid symbol never looks like empty history.
-OKX_RETRYABLE_CODES = frozenset({"50011", "50013", "50026", "50113"})
-BYBIT_RETRYABLE_CODES = frozenset({10002, 10006, 10016, 10429})
+# Documented transient public-REST conditions that are retried; every other
+# business code fails on its first response, so an invalid symbol, an expired
+# request window or an access restriction never looks like empty history.
+#
+# OKX: 50011 rate limit reached, 50013 systems are busy, 50026 system error.
+# 50113 is an invalid-signature configuration error and is deliberately absent.
+OKX_RETRYABLE_CODES = frozenset({"50011", "50013", "50026"})
+# Bybit UTA REST: 10006 too many visits, 10016 server error, 10018 IP rate limit.
+# 10002 is a request-time-window error, and 10429 is a WebSocket-only code; HTTP
+# 429 is already classified from the status line, so neither belongs here.
+BYBIT_RETRYABLE_CODES = frozenset({10006, 10016, 10018})
+
+# Transport failure classes. A timeout or a temporary connection failure may be
+# retried; a TLS or configuration failure is permanent and fails immediately,
+# so the two are never indistinguishable status-0 retries.
+TRANSPORT_KINDS = ("timeout", "connection", "tls", "configuration")
+TRANSIENT_TRANSPORT_KINDS = frozenset({"timeout", "connection"})
+_TRANSPORT_LABELS = {
+    "timeout": "the request timed out",
+    "connection": "a temporary connection failure",
+    "tls": "a permanent TLS or certificate failure",
+    "configuration": "a permanent transport configuration failure",
+}
 
 PROGRESS_PAGE_INTERVAL = 25
+
+OPTION_KEYS = ("bybit_rps", "max_attempts", "okx_rps", "timeout_seconds")
 
 
 def source_error(message: str, *, error_code: str = "source_failure") -> PatternLabDataError:
@@ -72,12 +105,17 @@ def source_error(message: str, *, error_code: str = "source_failure") -> Pattern
 
 @dataclass(frozen=True)
 class HttpResponse:
-    """One decoded HTTP response; ``status`` 0 marks a transport-level failure."""
+    """One decoded HTTP response; ``status`` 0 marks a transport-level failure.
+
+    ``error_kind`` names that failure's class, one of :data:`TRANSPORT_KINDS`.
+    An unset or unknown kind is treated as a temporary connection failure.
+    """
 
     status: int
     body: str
     headers: Mapping[str, str] = field(default_factory=dict)
     error: str | None = None
+    error_kind: str | None = None
 
     def header(self, name: str) -> str | None:
         lowered = name.lower()
@@ -85,6 +123,24 @@ class HttpResponse:
             if key.lower() == lowered:
                 return value
         return None
+
+
+def classify_transport_exception(exc: BaseException) -> str:
+    """Return which of :data:`TRANSPORT_KINDS` one transport exception belongs to."""
+    import socket
+    import ssl
+
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
+        return classify_transport_exception(exc.reason)
+    if isinstance(exc, ssl.SSLError):  # includes SSLCertVerificationError
+        return "tls"
+    if isinstance(exc, TimeoutError):  # socket.timeout is an alias since 3.10
+        return "timeout"
+    if isinstance(exc, (ConnectionError, socket.gaierror, socket.herror)):
+        return "connection"
+    if isinstance(exc, OSError):
+        return "connection"
+    return "configuration"
 
 
 def urllib_transport(url: str, timeout: float) -> HttpResponse:
@@ -104,8 +160,13 @@ def urllib_transport(url: str, timeout: float) -> HttpResponse:
         except Exception:  # pragma: no cover - the body is optional diagnostics
             pass
         return HttpResponse(status=int(exc.code), body=body, headers=dict(exc.headers or {}))
-    except Exception as exc:  # timeouts, DNS, TLS and connection failures
-        return HttpResponse(status=0, body="", error=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:  # timeouts, DNS, TLS and configuration failures
+        return HttpResponse(
+            status=0,
+            body="",
+            error=f"{type(exc).__name__}: {exc}",
+            error_kind=classify_transport_exception(exc),
+        )
 
 
 class SystemClock:
@@ -141,6 +202,94 @@ def normalize_rps(value: Any, field_name: str) -> float:
     return rate
 
 
+def normalize_timeout(value: Any, field_name: str = "timeout_seconds") -> float:
+    """Validate one finite positive per-request timeout in seconds."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PatternLabDataError(f"{field_name}: expected a number, got {type(value).__name__}.")
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0.0:
+        raise PatternLabDataError(
+            f"{field_name}: must be a positive finite number, got {value!r}."
+        )
+    return timeout
+
+
+def normalize_max_attempts(value: Any, field_name: str = "max_attempts") -> int:
+    """Validate the shared per-request attempt budget: an integer in [1, 5].
+
+    The bound is enforced rather than clamped, so an out-of-range option is a
+    rejected request instead of a silently different retry budget.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PatternLabDataError(f"{field_name}: expected an integer, got {type(value).__name__}.")
+    if not 1 <= value <= MAX_ATTEMPTS:
+        raise PatternLabDataError(
+            f"{field_name}: must be an integer in [1, {MAX_ATTEMPTS}], got {value}."
+        )
+    return value
+
+
+def validate_http_options(raw: Any, *, where: str = "options") -> dict[str, Any]:
+    """Validate the closed per-operation HTTP options frozen in the journal."""
+    if not isinstance(raw, Mapping):
+        raise PatternLabDataError(f"{where}: expected an object, got {type(raw).__name__}.")
+    missing = sorted(set(OPTION_KEYS) - set(raw))
+    extra = sorted(set(raw) - set(OPTION_KEYS))
+    if missing or extra:
+        raise PatternLabDataError(
+            f"{where}: the options object is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+    return {
+        "okx_rps": normalize_rps(raw["okx_rps"], f"{where}.okx_rps"),
+        "bybit_rps": normalize_rps(raw["bybit_rps"], f"{where}.bybit_rps"),
+        "timeout_seconds": normalize_timeout(raw["timeout_seconds"], f"{where}.timeout_seconds"),
+        "max_attempts": normalize_max_attempts(raw["max_attempts"], f"{where}.max_attempts"),
+    }
+
+
+@dataclass(frozen=True)
+class _Attempt:
+    """The outcome of one HTTP attempt: a payload, or a classified failure."""
+
+    payload: Any = None
+    ok: bool = False
+    retryable: bool = False
+    reason: str = ""
+
+
+def _classify_attempt(response: HttpResponse, check) -> _Attempt:
+    """Classify transport, HTTP status, JSON and venue business errors alike.
+
+    One classifier feeds one attempt budget: an HTTP-200 response carrying a
+    transient venue code is retried exactly like a 5xx, and a permanent code
+    fails on its first response.
+    """
+    if response.status == 0:
+        kind = response.error_kind if response.error_kind in TRANSPORT_KINDS else "connection"
+        return _Attempt(
+            retryable=kind in TRANSIENT_TRANSPORT_KINDS,
+            reason=f"{_TRANSPORT_LABELS[kind]} ({response.error})",
+        )
+    if response.status == 429:
+        return _Attempt(retryable=True, reason="HTTP 429 rate limit")
+    if 500 <= response.status < 600:
+        return _Attempt(retryable=True, reason=f"HTTP {response.status} from the venue")
+    if response.status != 200:
+        return _Attempt(
+            reason=f"HTTP {response.status} from the venue: {response.body[:200]!r}"
+        )
+    try:
+        payload = json.loads(response.body)
+    except ValueError as exc:
+        return _Attempt(reason=f"the response body is not valid JSON ({exc})")
+    if check is not None:
+        problem = check(payload)
+        if problem is not None:
+            retryable, reason = problem
+            return _Attempt(retryable=retryable, reason=reason)
+    return _Attempt(payload=payload, ok=True)
+
+
 class HttpClient:
     """Paced, bounded-retry JSON client shared by both venue adapters."""
 
@@ -155,8 +304,8 @@ class HttpClient:
     ):
         self.transport = transport or urllib_transport
         self.clock = clock or SystemClock()
-        self.timeout = float(timeout)
-        self.max_attempts = int(max_attempts)
+        self.timeout = normalize_timeout(timeout)
+        self.max_attempts = normalize_max_attempts(max_attempts)
         self.rates = {venue: float(rate) for venue, rate in (rates or {}).items()}
         self.request_count = 0
         self._last_request: dict[str, float] = {}
@@ -173,20 +322,34 @@ class HttpClient:
                 now = self.clock.monotonic()
         self._last_request[venue] = now
 
-    def get_json(self, url: str, params: Mapping[str, Any], *, venue: str, where: str) -> Any:
-        """Return decoded JSON, retrying only documented transient conditions."""
+    def get_json(
+        self,
+        url: str,
+        params: Mapping[str, Any],
+        *,
+        venue: str,
+        where: str,
+        check: Callable[[Any], tuple[bool, str] | None] | None = None,
+    ) -> Any:
+        """Return decoded JSON, retrying only documented transient conditions.
+
+        ``check`` is the venue's business-code classifier.  It shares this one
+        attempt/backoff budget, so there is no nested retry loop multiplying the
+        number of requests a single logical call can make.
+        """
         target = f"{url}?{urllib.parse.urlencode(params)}" if params else url
         budget = RETRY_WAIT_BUDGET_SECONDS
-        last: str = "no attempt was made"
+        reason = "no attempt was made"
+        attempt = 0
         for attempt in range(1, self.max_attempts + 1):
             self._pace(venue)
             self.request_count += 1
             response = self.transport(target, self.timeout)
-            retryable, reason, payload = self._classify(response, where)
-            if payload is not None:
-                return payload
-            last = reason
-            if not retryable or attempt == self.max_attempts:
+            outcome = _classify_attempt(response, check)
+            if outcome.ok:
+                return outcome.payload
+            reason = outcome.reason
+            if not outcome.retryable or attempt == self.max_attempts:
                 break
             wait = min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_CEILING_SECONDS)
             hinted = _retry_after_seconds(response)
@@ -197,23 +360,10 @@ class HttpClient:
                 break
             budget -= wait
             self.clock.sleep(wait)
-        raise source_error(f"{where}: {last} (target {target}).")
-
-    def _classify(self, response: HttpResponse, where: str) -> tuple[bool, str, Any]:
-        """Return ``(retryable, reason, payload)``; ``payload`` is set on success."""
-        if response.status == 0:
-            return True, f"transport failure: {response.error}", None
-        if response.status == 429:
-            return True, "HTTP 429 rate limit", None
-        if 500 <= response.status < 600:
-            return True, f"HTTP {response.status} from the venue", None
-        if response.status != 200:
-            return False, f"HTTP {response.status} from the venue: {response.body[:200]!r}", None
-        try:
-            payload = json.loads(response.body)
-        except ValueError as exc:
-            return False, f"the response body is not valid JSON ({exc})", None
-        return False, "unreachable", payload
+        raise source_error(
+            f"{where}: {reason}; failed after {attempt} attempt(s) of at most "
+            f"{self.max_attempts} (target {target})."
+        )
 
 
 def _retry_after_seconds(response: HttpResponse) -> float | None:
@@ -293,26 +443,13 @@ def _decimal_text(value: Any, where: str, *, allow_zero: bool = False) -> str:
     return text
 
 
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _exact_utc(epoch_ms: int, where: str) -> str:
-    """Render epoch milliseconds without the float rounding of a POSIX timestamp."""
-    from datetime import timedelta
-
-    return format_utc(_EPOCH + timedelta(milliseconds=int(epoch_ms)), where)
-
-
 def _listed_at_utc(raw: Any, where: str) -> str | None:
-    """Return the canonical listing instant, or null when the source omits it."""
-    text = _optional_text(raw)
-    if text is None or text.strip() in {"0", "-1"}:
-        return None
-    stamp = _epoch_ms(text, where)
-    if stamp <= 0:
-        return None
-    # A listing time need not sit on the 5m grid; render it with millisecond detail.
-    return _exact_utc(stamp, where)
+    """Return the canonical listing instant, or null when the source omits it.
+
+    The conversion rule lives in :func:`manifest.listing_instant_utc` so the
+    collector and manifest validation agree on exactly one interpretation.
+    """
+    return listing_instant_utc(raw, where)
 
 
 def _sorted_unique_rows(
@@ -347,6 +484,30 @@ def _sorted_unique_rows(
 # venue adapters
 # --------------------------------------------------------------------------
 
+def _okx_business_problem(payload: Any) -> tuple[bool, str] | None:
+    """Classify an OKX HTTP-200 envelope for the shared attempt budget."""
+    if not isinstance(payload, Mapping):
+        return False, f"OKX returned {type(payload).__name__}, not a JSON object"
+    code = payload.get("code")
+    if code == "0":
+        return None
+    retryable = isinstance(code, str) and code in OKX_RETRYABLE_CODES
+    kind = "a documented transient condition" if retryable else "not a retryable condition"
+    return retryable, f"OKX returned code {code!r} ({payload.get('msg')!r}), {kind}"
+
+
+def _bybit_business_problem(payload: Any) -> tuple[bool, str] | None:
+    """Classify a Bybit HTTP-200 envelope for the shared attempt budget."""
+    if not isinstance(payload, Mapping):
+        return False, f"Bybit returned {type(payload).__name__}, not a JSON object"
+    code = payload.get("retCode")
+    if code == 0 and not isinstance(code, bool):
+        return None
+    retryable = isinstance(code, int) and not isinstance(code, bool) and code in BYBIT_RETRYABLE_CODES
+    kind = "a documented transient condition" if retryable else "not a retryable condition"
+    return retryable, f"Bybit returned retCode {code!r} ({payload.get('retMsg')!r}), {kind}"
+
+
 class OkxAdapter:
     """OKX USDT-margined linear SWAP contracts."""
 
@@ -363,17 +524,13 @@ class OkxAdapter:
         self.base_url = base_url.rstrip("/")
 
     def _get(self, client: HttpClient, path: str, params: Mapping[str, Any], where: str) -> list[Any]:
-        payload = _require_mapping(
-            client.get_json(f"{self.base_url}{path}", params, venue=self.venue, where=where), where
+        payload = client.get_json(
+            f"{self.base_url}{path}",
+            params,
+            venue=self.venue,
+            where=where,
+            check=_okx_business_problem,
         )
-        code = payload.get("code")
-        if code != "0":
-            message = payload.get("msg")
-            retryable = isinstance(code, str) and code in OKX_RETRYABLE_CODES
-            raise source_error(
-                f"{where}: OKX returned code {code!r} ({message!r}); "
-                f"this condition is {'transient but exhausted its retries' if retryable else 'not retryable'}."
-            )
         return list(_require_list(payload.get("data"), f"{where}.data"))
 
     def server_time_ms(self, client: HttpClient) -> int:
@@ -528,17 +685,13 @@ class BybitAdapter:
         self.base_url = base_url.rstrip("/")
 
     def _get(self, client: HttpClient, path: str, params: Mapping[str, Any], where: str) -> Mapping[str, Any]:
-        payload = _require_mapping(
-            client.get_json(f"{self.base_url}{path}", params, venue=self.venue, where=where), where
+        payload = client.get_json(
+            f"{self.base_url}{path}",
+            params,
+            venue=self.venue,
+            where=where,
+            check=_bybit_business_problem,
         )
-        code = payload.get("retCode")
-        if code != 0:
-            message = payload.get("retMsg")
-            retryable = isinstance(code, int) and code in BYBIT_RETRYABLE_CODES
-            raise source_error(
-                f"{where}: Bybit returned retCode {code!r} ({message!r}); "
-                f"this condition is {'transient but exhausted its retries' if retryable else 'not retryable'}."
-            )
         return _require_mapping(payload.get("result"), f"{where}.result")
 
     def server_time_ms(self, client: HttpClient) -> int:

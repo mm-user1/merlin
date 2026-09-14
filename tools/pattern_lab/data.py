@@ -21,7 +21,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
-from . import PatternLabDataError, PatternLabDependencyError
+from . import PatternLabDataError, PatternLabDependencyError, PatternLabPendingError
 from . import manifest as pack_manifest
 from . import pack_lock
 from . import update_transaction
@@ -1001,9 +1001,20 @@ def research_bars(data_slice: DataSlice) -> pd.DataFrame:
     return data_slice.bars.iloc[data_slice.research_start_index:]
 
 
-def _read_pack_state(data_root: Path) -> tuple[dict[str, Any], Any]:
-    """Return the validated manifest and any pending operation state."""
-    return pack_manifest.read_manifest(data_root), update_transaction.pending_state(data_root)
+def _require_no_pending_generation(data_root: Path, *, where: str) -> None:
+    """Refuse a research read while any pending operation is present.
+
+    The check runs before a manifest is required, so a pending initial collect is
+    a pending operation rather than a missing pack.  A valid pending operation is
+    an actionable recover/abort state; only a malformed journal is invalid input.
+    """
+    pending = update_transaction.pending_state(data_root)
+    if pending is None:
+        return
+    problem = f"{data_root}: {where} " + update_transaction.pending_problem(pending)
+    if not pending["valid"]:
+        raise PatternLabDataError(problem, error_code="invalid_journal")
+    raise PatternLabPendingError(problem)
 
 
 def load_slice(
@@ -1038,12 +1049,14 @@ def load_slice(
 
 
 @contextmanager
-def read_session(data_root: Path) -> Iterator["ReadSession"]:
+def read_session(data_root: Path) -> Iterator["_ReadSession"]:
     """Hold the exclusion guard across several related reads of one generation.
 
     Keep the session only while loading inputs, then release it before a lengthy
     RAM-only computation: the guard is coarse, so two independent readers
-    conflict deliberately.
+    conflict deliberately.  The session's lifetime is exactly this context: it is
+    deactivated on normal and exceptional exit, so a saved reference can never
+    keep reading a root whose guard has been released.
 
     M2's process pool must let the coordinator own this guard and have its
     workers call the same private read core, holding it until every child has
@@ -1051,14 +1064,43 @@ def read_session(data_root: Path) -> Iterator["ReadSession"]:
     pool and makes no claim that such a cross-process lifetime is implemented.
     """
     with pack_lock.pack_guard(data_root) as guard:
-        yield ReadSession(guard.root)
+        session = _ReadSession(guard)
+        try:
+            yield session
+        finally:
+            session.close()
 
 
-@dataclass(frozen=True)
-class ReadSession:
-    """A held read guard over one data root, delegating to the private read core."""
+class _ReadSession:
+    """A read capability bound to one live owned guard.
 
-    data_root: Path
+    There is no public constructor taking only a path: a working session exists
+    only inside :func:`read_session`, so a path alone can never become an
+    unlocked public read capability.
+    """
+
+    def __init__(self, guard: pack_lock.PackGuard):
+        self._guard = guard
+        self._active = True
+
+    @property
+    def data_root(self) -> Path:
+        return self._guard.root
+
+    def close(self) -> None:
+        """End this session; every later read or inspect is refused."""
+        self._active = False
+
+    def _require_held(self) -> Path:
+        if not self._active:
+            raise PatternLabDataError(
+                f"{self._guard.root}: this read session ended when its context exited, so it no "
+                "longer holds the pack lock. Open a new read_session(...) for further reads instead "
+                "of reusing a released one.",
+                error_code="expired_read_session",
+            )
+        self._guard.verify_root_unchanged()
+        return self._guard.root
 
     def load_slice(
         self,
@@ -1070,7 +1112,7 @@ class ReadSession:
         timeframe_minutes: int = BASE_TIMEFRAME_MINUTES,
     ) -> DataSlice:
         return _load_slice_unlocked(
-            self.data_root,
+            self._require_held(),
             instrument_id,
             start=start,
             end=end,
@@ -1079,7 +1121,7 @@ class ReadSession:
         )
 
     def inspect(self, *, verify: bool = False) -> dict[str, Any]:
-        return _inspect_pack_unlocked(self.data_root, verify=verify)
+        return _inspect_pack_unlocked(self._require_held(), verify=verify)
 
 
 def _load_slice_unlocked(
@@ -1095,13 +1137,10 @@ def _load_slice_unlocked(
     data_root = Path(data_root)
     if not data_root.is_dir():
         raise PatternLabDataError(f"{data_root}: data root is not an existing directory.")
-    manifest_before, marker_before = _read_pack_state(data_root)
-    if marker_before is not None:
-        raise PatternLabDataError(
-            f"{data_root}: a pending collector operation is present; the pack is being updated. "
-            + update_transaction.pending_problem(marker_before),
-            error_code="pending_operation",
-        )
+    _require_no_pending_generation(
+        data_root, where="a pending collector operation is present, so the pack is being updated."
+    )
+    manifest_before = pack_manifest.read_manifest(data_root)
     if manifest_before["state"] != "ready":
         raise PatternLabDataError(
             f"{data_root}: manifest state is {manifest_before['state']!r}; only a ready pack can be read."
@@ -1155,13 +1194,12 @@ def _load_slice_unlocked(
     path = pack_manifest.resolve_pack_path(data_root, entry["file"], f"{resolved_id}.file")
     stamps, values = read_ohlcv_rows(path, start_ms=warmup_ms, end_ms=end_ms, allow_empty=True)
 
-    manifest_after, marker_after = _read_pack_state(data_root)
-    if marker_after is not None:
-        raise PatternLabDataError(
-            f"{data_root}: a pending collector operation appeared during the read; the result would "
-            "mix versions.",
-            error_code="pending_operation",
-        )
+    _require_no_pending_generation(
+        data_root,
+        where="a pending collector operation appeared during the read, so the result would mix "
+        "versions.",
+    )
+    manifest_after = pack_manifest.read_manifest(data_root)
     if (manifest_after["revision"], manifest_after["state"]) != (manifest_before["revision"], manifest_before["state"]):
         raise PatternLabDataError(
             f"{data_root}: the pack changed during the read "

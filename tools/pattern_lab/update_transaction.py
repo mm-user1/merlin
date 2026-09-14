@@ -24,6 +24,7 @@ environment without the optional wheel.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 from pathlib import Path, PurePosixPath
@@ -32,18 +33,26 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from . import PatternLabDataError
+from . import exchange_data
 from . import manifest as pack_manifest
 from .manifest import (
+    BASE_STEP_MS,
     MANIFEST_NAME,
     README_NAME,
     UPDATE_MARKER_NAME,
     UPDATE_MARKER_TEMP_NAME,
     UPDATES_NAME,
     file_sha256,
+    format_epoch_ms,
     format_utc,
+    require_aligned,
+    require_aligned_utc,
+    require_bool,
     require_int,
+    require_optional_text,
     require_sha256,
     require_text,
+    to_epoch_ms,
 )
 
 JOURNAL_VERSION = 1
@@ -53,8 +62,37 @@ PHASES = ("staging", "applying")
 TEXT_TARGETS = ("updates", "readme", "manifest")
 TARGET_FINAL_NAMES = {"updates": UPDATES_NAME, "readme": README_NAME, "manifest": MANIFEST_NAME}
 
+REQUEST_KEYS = ("end_utc", "note", "requested_end_token", "requested_start_utc", "start_utc")
+CLOSURE_KEYS = (
+    "observed_utc",
+    "publication_lag_ms",
+    "requested_end_token",
+    "resolved_end_ms",
+    "safe_cutoff_ms",
+    "server_times_ms",
+)
+PREFLIGHT_KEYS = ("listed_at_utc", "listing_known", "probe", "rules")
+FACT_BOOL_KEYS = ("changed", "rules_changed")
+FACT_TEXT_KEYS = ("coverage_end_utc", "first_open_utc", "last_open_utc")
+FACT_COUNT_KEYS = (
+    "added_rows",
+    "appended_rows",
+    "fetched_rows",
+    "gap_bar_count",
+    "gap_range_count",
+    "inserted_rows",
+    "missing_bar_count",
+    "prefix_rows",
+    "row_count",
+    "tail_shortfall_bars",
+)
+FACT_LIST_KEYS = ("fetch_ranges", "gap_ranges")
+FACT_KEYS = FACT_BOOL_KEYS + FACT_TEXT_KEYS + FACT_COUNT_KEYS + FACT_LIST_KEYS
+
 _OPERATION_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 _STAGED_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The Parquet writer's same-directory temporary convention, ``.<name>.tmp-<uuid>``.
+_STAGED_TEMP_RE = re.compile(r"^\.(?P<base>.+)\.tmp-[0-9a-f]{32}$")
 
 
 def new_operation_id(moment: datetime) -> str:
@@ -110,7 +148,39 @@ def _relative_staged_path(value: Any, operation_id: str, where: str) -> str:
     return text
 
 
-def _validate_staged_record(raw: Any, operation_id: str, where: str) -> dict[str, Any]:
+def _validate_facts(raw: Any, entry: Mapping[str, Any], where: str) -> dict[str, Any]:
+    """Validate one staged record's reported facts and tie them to its entry."""
+    facts = _mapping(raw, where)
+    missing = sorted(set(FACT_KEYS) - set(facts))
+    extra = sorted(set(facts) - set(FACT_KEYS))
+    if missing or extra:
+        raise _journal_error(
+            f"{where}: the facts object is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+    try:
+        for key in FACT_BOOL_KEYS:
+            require_bool(facts[key], f"{where}.{key}")
+        for key in FACT_COUNT_KEYS:
+            require_int(facts[key], f"{where}.{key}", minimum=0)
+        for key in FACT_TEXT_KEYS:
+            require_text(facts[key], f"{where}.{key}")
+        for key in FACT_LIST_KEYS:
+            if not isinstance(facts[key], list):
+                raise PatternLabDataError(f"{where}.{key}: expected a list.")
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
+    for key in ("row_count", "first_open_utc", "last_open_utc", "coverage_end_utc", "missing_bar_count"):
+        if facts[key] != entry[key]:
+            raise _journal_error(
+                f"{where}.{key}: {facts[key]!r} does not agree with the staged manifest entry "
+                f"{entry[key]!r}."
+            )
+    return facts
+
+
+def _validate_staged_record(
+    raw: Any, operation_id: str, where: str, *, base_files: Mapping[str, str]
+) -> dict[str, Any]:
     record = _mapping(raw, where)
     instrument_id = pack_manifest.normalize_instrument_id(
         record.get("instrument_id"), f"{where}.instrument_id"
@@ -120,6 +190,12 @@ def _validate_staged_record(raw: Any, operation_id: str, where: str) -> dict[str
         raise _journal_error(f"{where}.changed: expected a boolean.")
     old = record.get("old_sha256")
     staged = record.get("staged_path")
+    try:
+        entry = pack_manifest.validate_instrument_entry(
+            record.get("entry"), f"{where}.entry", managed=True
+        )
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
     validated = {
         "instrument_id": instrument_id,
         "final_path": pack_manifest.validate_relative_file(record.get("final_path"), f"{where}.final_path"),
@@ -129,16 +205,51 @@ def _validate_staged_record(raw: Any, operation_id: str, where: str) -> dict[str
         "old_sha256": None if old is None else require_sha256(old, f"{where}.old_sha256"),
         "new_sha256": require_sha256(record.get("new_sha256"), f"{where}.new_sha256"),
         "changed": changed,
-        "entry": _mapping(record.get("entry"), f"{where}.entry"),
-        "facts": _mapping(record.get("facts"), f"{where}.facts"),
+        "entry": entry,
+        "facts": _validate_facts(record.get("facts"), entry, f"{where}.facts"),
     }
-    if changed and validated["staged_path"] is None:
-        raise _journal_error(f"{where}: a changed instrument must record its staged replacement path.")
-    if not changed and validated["old_sha256"] != validated["new_sha256"]:
-        raise _journal_error(f"{where}: an unchanged instrument cannot change its digest.")
     extra = sorted(set(record) - set(validated))
     if extra:
         raise _journal_error(f"{where}: unexpected journal keys {extra}.")
+
+    # Paths and digests are deterministic functions of the instrument identity,
+    # so a record can never point recovery at another instrument's file.
+    if entry["instrument_id"] != instrument_id:
+        raise _journal_error(
+            f"{where}.entry.instrument_id: {entry['instrument_id']!r} is not {instrument_id!r}."
+        )
+    expected_final = pack_manifest.instrument_relative_file(instrument_id)
+    if validated["final_path"] != expected_final:
+        raise _journal_error(
+            f"{where}.final_path: must be {expected_final!r}, got {validated['final_path']!r}."
+        )
+    if entry["file"] != expected_final:
+        raise _journal_error(f"{where}.entry.file: must be {expected_final!r}, got {entry['file']!r}.")
+    if entry["sha256"] != validated["new_sha256"]:
+        raise _journal_error(
+            f"{where}.entry.sha256: {entry['sha256']} does not match the recorded new digest "
+            f"{validated['new_sha256']}."
+        )
+    if changed:
+        if validated["staged_path"] is None:
+            raise _journal_error(
+                f"{where}: a changed instrument must record its staged replacement path."
+            )
+        expected_staged = (
+            f"{staging_dir_name(operation_id)}/{pack_manifest.instrument_file_name(instrument_id)}"
+        )
+        if validated["staged_path"] != expected_staged:
+            raise _journal_error(
+                f"{where}.staged_path: must be {expected_staged!r}, got {validated['staged_path']!r}."
+            )
+    elif validated["old_sha256"] != validated["new_sha256"]:
+        raise _journal_error(f"{where}: an unchanged instrument cannot change its digest.")
+    expected_old = base_files.get(instrument_id)
+    if validated["old_sha256"] != expected_old:
+        raise _journal_error(
+            f"{where}.old_sha256: {validated['old_sha256']} is not the recorded base digest "
+            f"{expected_old} for {instrument_id}."
+        )
     return validated
 
 
@@ -159,8 +270,157 @@ def _validate_text_target(raw: Any, key: str, operation_id: str, where: str) -> 
     return validated
 
 
+def _validate_request(raw: Any, where: str) -> dict[str, Any]:
+    """Validate the resolved, canonical, nonempty request interval."""
+    request = _mapping(raw, where)
+    missing = sorted(set(REQUEST_KEYS) - set(request))
+    extra = sorted(set(request) - set(REQUEST_KEYS))
+    if missing or extra:
+        raise _journal_error(
+            f"{where}: the request object is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+    try:
+        start_ms = require_aligned_utc(request["start_utc"], f"{where}.start_utc")
+        end_ms = require_aligned_utc(request["end_utc"], f"{where}.end_utc")
+        requested_start = request["requested_start_utc"]
+        requested_start_ms = (
+            None if requested_start is None else require_aligned_utc(requested_start, f"{where}.requested_start_utc")
+        )
+        note = require_optional_text(request["note"], f"{where}.note")
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
+    if start_ms >= end_ms:
+        raise _journal_error(
+            f"{where}: requires start_utc < end_utc, got {format_epoch_ms(start_ms)} >= "
+            f"{format_epoch_ms(end_ms)}."
+        )
+    token = request["requested_end_token"]
+    if token not in (None, exchange_data.LATEST_CLOSED):
+        raise _journal_error(
+            f"{where}.requested_end_token: expected null or {exchange_data.LATEST_CLOSED!r}, got {token!r}."
+        )
+    if requested_start_ms is not None and requested_start_ms < start_ms:
+        raise _journal_error(
+            f"{where}.requested_start_utc: the effective start {format_epoch_ms(start_ms)} must be at "
+            f"or before the requested {format_epoch_ms(requested_start_ms)}."
+        )
+    return {
+        "start_utc": format_epoch_ms(start_ms),
+        "end_utc": format_epoch_ms(end_ms),
+        "requested_end_token": token,
+        "requested_start_utc": None
+        if requested_start_ms is None
+        else format_epoch_ms(requested_start_ms),
+        "note": note,
+    }
+
+
+def _validate_closure(raw: Any, where: str, *, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the frozen closure evidence and its agreement with the request."""
+    closure = _mapping(raw, where)
+    missing = sorted(set(CLOSURE_KEYS) - set(closure))
+    extra = sorted(set(closure) - set(CLOSURE_KEYS))
+    if missing or extra:
+        raise _journal_error(
+            f"{where}: the closure object is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+    samples = _mapping(closure["server_times_ms"], f"{where}.server_times_ms")
+    if not samples:
+        raise _journal_error(f"{where}.server_times_ms: at least one venue server time is required.")
+    try:
+        times = {
+            pack_manifest.normalize_id_part(venue, f"{where}.server_times_ms key"): require_int(
+                value, f"{where}.server_times_ms[{venue}]", minimum=1
+            )
+            for venue, value in samples.items()
+        }
+        lag_ms = require_int(closure["publication_lag_ms"], f"{where}.publication_lag_ms", minimum=0)
+        cutoff_ms = require_aligned(
+            require_int(closure["safe_cutoff_ms"], f"{where}.safe_cutoff_ms"),
+            BASE_STEP_MS,
+            f"{where}.safe_cutoff_ms",
+        )
+        resolved_ms = require_aligned(
+            require_int(closure["resolved_end_ms"], f"{where}.resolved_end_ms"),
+            BASE_STEP_MS,
+            f"{where}.resolved_end_ms",
+        )
+        observed = format_utc(closure["observed_utc"], f"{where}.observed_utc")
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
+    expected_cutoff = ((min(times.values()) - lag_ms) // BASE_STEP_MS) * BASE_STEP_MS
+    if cutoff_ms != expected_cutoff:
+        raise _journal_error(
+            f"{where}.safe_cutoff_ms: {cutoff_ms} is not the cutoff {expected_cutoff} derived from the "
+            "recorded server samples and publication allowance."
+        )
+    if resolved_ms > cutoff_ms:
+        raise _journal_error(
+            f"{where}.resolved_end_ms: {format_epoch_ms(resolved_ms)} is beyond the frozen safe closed "
+            f"cutoff {format_epoch_ms(cutoff_ms)}."
+        )
+    if resolved_ms != to_epoch_ms(request["end_utc"], f"{where}.resolved_end_ms"):
+        raise _journal_error(
+            f"{where}.resolved_end_ms: {format_epoch_ms(resolved_ms)} does not agree with the effective "
+            f"request end {request['end_utc']}."
+        )
+    if closure["requested_end_token"] != request["requested_end_token"]:
+        raise _journal_error(
+            f"{where}.requested_end_token: {closure['requested_end_token']!r} does not agree with the "
+            f"request token {request['requested_end_token']!r}."
+        )
+    return {
+        "server_times_ms": times,
+        "observed_utc": observed,
+        "publication_lag_ms": lag_ms,
+        "safe_cutoff_ms": cutoff_ms,
+        "resolved_end_ms": resolved_ms,
+        "requested_end_token": request["requested_end_token"],
+    }
+
+
+def _validate_preflight(raw: Any, where: str, roster_ids: Sequence[str]) -> dict[str, Any]:
+    """Validate the recorded preflight evidence for roster members only."""
+    evidence = _mapping(raw, where)
+    known = set(roster_ids)
+    validated: dict[str, Any] = {}
+    for key, value in evidence.items():
+        position = f"{where}[{key}]"
+        if key not in known:
+            raise _journal_error(f"{position}: {key!r} is not a member of the recorded roster.")
+        item = _mapping(value, position)
+        missing = sorted(set(PREFLIGHT_KEYS) - set(item))
+        extra = sorted(set(item) - set(PREFLIGHT_KEYS))
+        if missing or extra:
+            raise _journal_error(
+                f"{position}: the preflight record is closed; missing keys {missing}, unexpected "
+                f"keys {extra}."
+            )
+        listed = item["listed_at_utc"]
+        try:
+            validated[key] = {
+                "rules": _mapping(item["rules"], f"{position}.rules"),
+                "probe": _mapping(item["probe"], f"{position}.probe"),
+                "listing_known": require_bool(item["listing_known"], f"{position}.listing_known"),
+                "listed_at_utc": None if listed is None else format_utc(listed, f"{position}.listed_at_utc"),
+            }
+        except PatternLabDataError as exc:
+            raise _journal_error(str(exc)) from exc
+        if validated[key]["listing_known"] != (listed is not None):
+            raise _journal_error(
+                f"{position}.listing_known: does not agree with the recorded listed_at_utc {listed!r}."
+            )
+    return validated
+
+
 def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
-    """Validate the versioned operation journal before any journal-driven write."""
+    """Validate the versioned operation journal before any journal-driven write.
+
+    Every promised relationship is checked here, not only container types: the
+    canonical request and closure agree, options are the valid frozen ones, the
+    staged set is a roster subset with deterministic paths and digests, and the
+    target revision follows from the recorded base.
+    """
     journal = _mapping(raw, where)
     version = require_int(journal.get("journal_version"), f"{where}.journal_version")
     if version != JOURNAL_VERSION:
@@ -197,16 +457,48 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
             for key, value in base_files.items()
         },
     }
-    if kind == "collect" and validated_base["revision"] is not None:
-        raise _journal_error(f"{where}.base.revision: an initial collect has no base revision.")
-    if kind == "update" and validated_base["revision"] is None:
-        raise _journal_error(f"{where}.base.revision: an update must record the base revision.")
+    target_revision = require_int(
+        journal.get("target_revision"), f"{where}.target_revision", minimum=1
+    )
+    if kind == "collect":
+        if validated_base["revision"] is not None:
+            raise _journal_error(f"{where}.base.revision: an initial collect has no base revision.")
+        stale = sorted(
+            key
+            for key in ("manifest_sha256", "readme_sha256", "updates_sha256")
+            if validated_base[key] is not None
+        )
+        if stale or validated_base["files"]:
+            raise _journal_error(
+                f"{where}.base: an initial collect requires null base facts, but it records {stale} "
+                f"and {sorted(validated_base['files'])}."
+            )
+        if target_revision != 1:
+            raise _journal_error(
+                f"{where}.target_revision: an initial collect publishes revision 1, got {target_revision}."
+            )
+    else:
+        if validated_base["revision"] is None:
+            raise _journal_error(f"{where}.base.revision: an update must record the base revision.")
+        if target_revision != validated_base["revision"] + 1:
+            raise _journal_error(
+                f"{where}.target_revision: an update of revision {validated_base['revision']} publishes "
+                f"{validated_base['revision'] + 1}, got {target_revision}."
+            )
 
-    request = _mapping(journal.get("request"), f"{where}.request")
+    roster = pack_manifest.validate_roster_entries(journal.get("roster"), f"{where}.roster")
+    roster_ids = [entry["instrument_id"] for entry in roster]
+    request = _validate_request(journal.get("request"), f"{where}.request")
     staged_raw = _mapping(journal.get("staged"), f"{where}.staged")
     staged: dict[str, Any] = {}
     for key, value in staged_raw.items():
-        record = _validate_staged_record(value, operation_id, f"{where}.staged[{key}]")
+        if key not in roster_ids:
+            raise _journal_error(
+                f"{where}.staged[{key}]: {key!r} is not a member of the recorded roster."
+            )
+        record = _validate_staged_record(
+            value, operation_id, f"{where}.staged[{key}]", base_files=validated_base["files"]
+        )
         if record["instrument_id"] != key:
             raise _journal_error(f"{where}.staged[{key}]: record declares {record['instrument_id']!r}.")
         staged[key] = record
@@ -225,9 +517,20 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
             key: _validate_text_target(mapping[key], key, operation_id, f"{where}.targets.{key}")
             for key in TEXT_TARGETS
         }
-    if phase == "applying" and not targets:
-        raise _journal_error(f"{where}.targets: the applying phase requires frozen target metadata.")
+    if phase == "applying":
+        if not targets:
+            raise _journal_error(f"{where}.targets: the applying phase requires frozen target metadata.")
+        incomplete = sorted(set(roster_ids) - set(staged))
+        if incomplete:
+            raise _journal_error(
+                f"{where}.staged: the applying phase requires every roster instrument, but "
+                f"{incomplete} were never completed."
+            )
 
+    try:
+        options = exchange_data.validate_http_options(journal.get("options"), where=f"{where}.options")
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
     validated = {
         "journal_version": version,
         "operation_id": operation_id,
@@ -238,19 +541,19 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
             journal.get("operation_started_utc"), f"{where}.operation_started_utc"
         ),
         "request": request,
-        "options": _mapping(journal.get("options"), f"{where}.options"),
+        "options": options,
         "universe": _mapping(journal.get("universe"), f"{where}.universe"),
-        "roster": pack_manifest.validate_roster_entries(journal.get("roster"), f"{where}.roster"),
+        "roster": roster,
         "roster_sha256": require_sha256(journal.get("roster_sha256"), f"{where}.roster_sha256"),
         "base": validated_base,
-        "target_revision": require_int(journal.get("target_revision"), f"{where}.target_revision", minimum=1),
+        "target_revision": target_revision,
         "phase": phase,
-        "closure": _mapping(journal.get("closure"), f"{where}.closure"),
-        "preflight": _mapping(journal.get("preflight"), f"{where}.preflight"),
+        "closure": _validate_closure(journal.get("closure"), f"{where}.closure", request=request),
+        "preflight": _validate_preflight(journal.get("preflight"), f"{where}.preflight", roster_ids),
         "staged": staged,
         "targets": targets or None,
     }
-    if pack_manifest.roster_sha256(validated["roster"]) != validated["roster_sha256"]:
+    if pack_manifest.roster_sha256(roster) != validated["roster_sha256"]:
         raise _journal_error(f"{where}.roster_sha256: does not match the recorded roster.")
     extra = sorted(set(journal) - set(validated))
     if extra:
@@ -398,7 +701,17 @@ def _unrecoverable(message: str) -> PatternLabDataError:
     )
 
 
-def _replace_file(
+@dataclass(frozen=True)
+class _Replacement:
+    """One validated pending move from a staged artifact to its destination."""
+
+    destination: Path
+    staged: Path
+    relative: str | None
+    label: str | None
+
+
+def _plan_replacement(
     data_root: Path,
     *,
     destination: Path,
@@ -407,8 +720,8 @@ def _replace_file(
     new_sha256: str,
     operation_id: str,
     where: str,
-) -> bool:
-    """Replace one destination from its staged artifact; return whether it moved.
+) -> Path | None:
+    """Validate one planned replacement and return the staged source, or None.
 
     The destination must match either the recorded old digest (the step has not
     run) or the recorded new digest (it completed before the crash).  A third
@@ -416,7 +729,7 @@ def _replace_file(
     """
     current = digest_or_none(destination)
     if current == new_sha256:
-        return False
+        return None
     if current != old_sha256:
         raise PatternLabDataError(
             f"{where}: {destination} has SHA-256 {current} but the journal recorded "
@@ -436,9 +749,130 @@ def _replace_file(
             f"{new_sha256}.",
             error_code="unexpected_target_state",
         )
-    os.replace(staged, destination)
-    pack_manifest.fsync_directory(destination.parent)
-    return True
+    return staged
+
+
+def frozen_target_text(data_root: Path, journal: Mapping[str, Any], key: str) -> str:
+    """Return one frozen metadata artifact's exact bytes, staged or published.
+
+    A staged artifact consumed by a completed rename is not corruption: the
+    already-published destination carrying the recorded new digest is the same
+    frozen bytes, so recovery reads it from there instead.
+    """
+    target = journal["targets"][key]
+    root = Path(data_root)
+    where = f"targets.{key}"
+    staged = resolve_staged(root, target["staged_path"], journal["operation_id"], f"{where}.staged_path")
+    for candidate in (staged, root / target["final_name"]):
+        if candidate.is_file() and file_sha256(candidate) == target["new_sha256"]:
+            return candidate.read_text(encoding="utf-8")
+    raise _unrecoverable(
+        f"{where}: neither the staged artifact {staged} nor the published {target['final_name']} "
+        f"carries the frozen digest {target['new_sha256']}."
+    )
+
+
+def _validate_target_manifest(data_root: Path, journal: Mapping[str, Any]) -> None:
+    """Require the frozen target manifest to agree with the journal's plan."""
+    text = frozen_target_text(data_root, journal, "manifest")
+    try:
+        manifest = pack_manifest.validate_manifest(
+            pack_manifest.loads_strict(text, source="targets.manifest")
+        )
+    except PatternLabDataError as exc:
+        raise _journal_error(f"targets.manifest: the frozen manifest is invalid ({exc}).") from exc
+    collector = manifest.get("collector")
+    if collector is None:
+        raise _journal_error("targets.manifest: a collector operation must publish a managed manifest.")
+    mismatches = []
+    if manifest["revision"] != journal["target_revision"]:
+        mismatches.append(f"revision {manifest['revision']} versus target {journal['target_revision']}")
+    if collector["operation_id"] != journal["operation_id"]:
+        mismatches.append(
+            f"operation {collector['operation_id']!r} versus {journal['operation_id']!r}"
+        )
+    if collector["roster_sha256"] != journal["roster_sha256"] or collector["roster"] != journal["roster"]:
+        mismatches.append("a different roster")
+    expected_request = {
+        "start_utc": journal["request"]["start_utc"],
+        "end_utc": journal["request"]["end_utc"],
+    }
+    if collector["last_request"] != expected_request:
+        mismatches.append(f"last_request {collector['last_request']} versus {expected_request}")
+    published = {entry["instrument_id"]: entry for entry in manifest["instruments"]}
+    if sorted(published) != sorted(journal["staged"]):
+        mismatches.append(f"instruments {sorted(published)} versus staged {sorted(journal['staged'])}")
+    else:
+        for instrument_id, record in sorted(journal["staged"].items()):
+            if published[instrument_id] != record["entry"]:
+                mismatches.append(f"a different entry for {instrument_id}")
+    if mismatches:
+        raise _journal_error(
+            "targets.manifest: the frozen target manifest disagrees with the journal ("
+            + "; ".join(mismatches)
+            + "). Nothing was replaced."
+        )
+
+
+def build_apply_plan(data_root: Path, journal: Mapping[str, Any]) -> list[_Replacement]:
+    """Validate the complete plan and return its pending moves, in publish order.
+
+    Every destination, staged artifact and the frozen target manifest are checked
+    before the first live replacement, so a valid-looking subset is never
+    published ahead of discovering that another planned target is inconsistent.
+    """
+    root = Path(data_root)
+    if journal["phase"] != "applying":
+        raise _journal_error("apply: the journal is not in the applying phase.")
+    _validate_target_manifest(root, journal)
+
+    moves: list[_Replacement] = []
+    for instrument_id in sorted(journal["staged"]):
+        record = journal["staged"][instrument_id]
+        where = f"staged[{instrument_id}]"
+        destination = pack_manifest.resolve_pack_path(root, record["final_path"], f"{where}.final_path")
+        if not record["changed"]:
+            actual = digest_or_none(destination)
+            if actual != record["new_sha256"]:
+                raise PatternLabDataError(
+                    f"{where}: the unchanged file {destination} has SHA-256 {actual}, not the "
+                    f"recorded {record['new_sha256']}.",
+                    error_code="unexpected_target_state",
+                )
+            continue
+        staged = _plan_replacement(
+            root,
+            destination=destination,
+            staged_relative=record["staged_path"],
+            old_sha256=record["old_sha256"],
+            new_sha256=record["new_sha256"],
+            operation_id=journal["operation_id"],
+            where=where,
+        )
+        if staged is not None:
+            moves.append(_Replacement(destination, staged, record["final_path"], instrument_id))
+    # History and README first, the manifest last: a ready manifest is the only
+    # signal that the whole generation is published.
+    for key in TEXT_TARGETS:
+        target = journal["targets"][key]
+        staged = _plan_replacement(
+            root,
+            destination=root / target["final_name"],
+            staged_relative=target["staged_path"],
+            old_sha256=target["old_sha256"],
+            new_sha256=target["new_sha256"],
+            operation_id=journal["operation_id"],
+            where=f"targets.{key}",
+        )
+        if staged is not None:
+            moves.append(_Replacement(root / target["final_name"], staged, None, None))
+    return moves
+
+
+def _publish_replacement(move: _Replacement) -> None:
+    """Perform one already-validated move and flush its containing directory."""
+    os.replace(move.staged, move.destination)
+    pack_manifest.fsync_directory(move.destination.parent)
 
 
 def apply_operation(
@@ -451,53 +885,13 @@ def apply_operation(
     resumed operation publishes exactly one revision and one history event.
     """
     root = Path(data_root)
-    if journal["phase"] != "applying":
-        raise _journal_error("apply: the journal is not in the applying phase.")
-    targets = journal["targets"]
-    operation_id = journal["operation_id"]
     replaced: list[str] = []
-
-    for instrument_id in sorted(journal["staged"]):
-        record = journal["staged"][instrument_id]
-        destination = pack_manifest.resolve_pack_path(
-            root, record["final_path"], f"staged[{instrument_id}].final_path"
-        )
-        if not record["changed"]:
-            actual = digest_or_none(destination)
-            if actual != record["new_sha256"]:
-                raise PatternLabDataError(
-                    f"staged[{instrument_id}]: the unchanged file {destination} has SHA-256 {actual}, "
-                    f"not the recorded {record['new_sha256']}.",
-                    error_code="unexpected_target_state",
-                )
-            continue
-        moved = _replace_file(
-            root,
-            destination=destination,
-            staged_relative=record["staged_path"],
-            old_sha256=record["old_sha256"],
-            new_sha256=record["new_sha256"],
-            operation_id=operation_id,
-            where=f"staged[{instrument_id}]",
-        )
-        if moved:
-            replaced.append(record["final_path"])
-        if progress is not None:
-            progress(f"applied {instrument_id}")
-
-    # History and README first, the manifest last: a ready manifest is the only
-    # signal that the whole generation is published.
-    for key in TEXT_TARGETS:
-        target = targets[key]
-        _replace_file(
-            root,
-            destination=root / target["final_name"],
-            staged_relative=target["staged_path"],
-            old_sha256=target["old_sha256"],
-            new_sha256=target["new_sha256"],
-            operation_id=operation_id,
-            where=f"targets.{key}",
-        )
+    for move in build_apply_plan(root, journal):
+        _publish_replacement(move)
+        if move.relative is not None:
+            replaced.append(move.relative)
+        if progress is not None and move.label is not None:
+            progress(f"applied {move.label}")
 
     _verify_targets(root, journal)
     cleanup_operation(root, journal)
@@ -532,53 +926,69 @@ def _verify_targets(data_root: Path, journal: Mapping[str, Any]) -> None:
             )
 
 
-def staged_artifact_paths(data_root: Path, journal: Mapping[str, Any]) -> list[Path]:
-    """Return every staged artifact this operation recorded, in a stable order."""
-    operation_id = journal["operation_id"]
-    relatives: list[str] = []
-    for instrument_id in sorted(journal["staged"]):
-        staged = journal["staged"][instrument_id]["staged_path"]
-        if staged is not None:
-            relatives.append(staged)
-    if journal["targets"] is not None:
-        relatives.extend(journal["targets"][key]["staged_path"] for key in TEXT_TARGETS)
-    return [
-        resolve_staged(data_root, relative, operation_id, f"staged artifact {relative}")
-        for relative in relatives
-    ]
+def owned_staging_names(journal: Mapping[str, Any]) -> set[str]:
+    """Return every completed file name this operation may create while staging.
+
+    The set is derived from the validated frozen roster and the fixed metadata
+    target plan, so a file that was written durably but interrupted before its
+    journal checkpoint is still recognized as this operation's own work.  A name
+    identifies incomplete owned work for removal and re-download; only a
+    validated checkpoint and digest ever permit a staged file to be reused.
+    """
+    names = {
+        pack_manifest.instrument_file_name(entry["instrument_id"]) for entry in journal["roster"]
+    }
+    return names | set(TARGET_FINAL_NAMES.values())
+
+
+def is_owned_staging_name(name: str, owned: set[str]) -> bool:
+    """Return whether one staging entry matches this operation's exact conventions."""
+    if name in owned:
+        return True
+    temporary = _STAGED_TEMP_RE.fullmatch(name)  # Parquet: .<name>.tmp-<uuid>
+    if temporary is not None:
+        return temporary.group("base") in owned
+    if name.startswith(".") and name.endswith(".tmp"):  # text: .<name>.tmp
+        return name[1:-len(".tmp")] in owned
+    return False
 
 
 def cleanup_operation(data_root: Path, journal: Mapping[str, Any]) -> list[str]:
-    """Remove only this operation's recorded artifacts and its staging directory.
+    """Remove only this operation's own artifacts and its staging directory.
 
-    Cleanup is idempotent: an already-consumed artifact is simply absent.  An
-    unexpected live artifact inside the staging directory is reported, never
-    removed, and the directory is then retained for inspection.
+    Cleanup is idempotent: an already-consumed artifact is simply absent.  Any
+    entry that is not one of this operation's exact owned names — including a
+    symlink or a directory — is preserved and reported, and the staging
+    directory is then retained with its journal for inspection.
     """
     root = Path(data_root)
-    removed: list[str] = []
-    for path in staged_artifact_paths(root, journal):
-        if path.is_file():
-            path.unlink()
-            removed.append(path.name)
     directory = staging_dir(root, journal["operation_id"])
-    if directory.is_dir():
-        # Parquet temporaries of an interrupted write live here and belong to this
-        # operation; anything else is reported rather than deleted.
-        for child in sorted(directory.iterdir()):
-            if child.is_file() and child.name.startswith("."):
-                child.unlink()
-                removed.append(child.name)
-        remaining = sorted(item.name for item in directory.iterdir())
-        if remaining:
-            raise PatternLabDataError(
-                f"{directory}: unexpected artifacts {remaining} remain in this operation's staging "
-                "directory. They were not created by the recorded plan and are reported rather than "
-                "deleted; inspect and remove them manually.",
-                error_code="unexpected_staging_artifact",
-            )
-        directory.rmdir()
-        pack_manifest.fsync_directory(root)
+    if directory.is_symlink():
+        raise PatternLabDataError(
+            f"{directory}: the staging directory must not be a symlink.", error_code="unsafe_path"
+        )
+    removed: list[str] = []
+    if not directory.is_dir():
+        return removed
+    owned = owned_staging_names(journal)
+    unexpected: list[str] = []
+    for child in sorted(directory.iterdir()):
+        # A symlink is never followed and a directory is never recursed into.
+        if child.is_symlink() or not child.is_file() or not is_owned_staging_name(child.name, owned):
+            unexpected.append(child.name)
+            continue
+        child.unlink()
+        removed.append(child.name)
+    if unexpected:
+        raise PatternLabDataError(
+            f"{directory}: unexpected artifacts {unexpected} are present in this operation's staging "
+            "directory. They are not part of the recorded plan, so they are preserved and reported "
+            "rather than deleted; the operation journal is retained. Inspect them, move them "
+            "elsewhere, and run the command again.",
+            error_code="unexpected_staging_artifact",
+        )
+    directory.rmdir()
+    pack_manifest.fsync_directory(root)
     return removed
 
 
@@ -648,17 +1058,6 @@ def remove_empty_created_directories(data_root: Path, names: Iterable[str]) -> l
     if removed:
         pack_manifest.fsync_directory(root)
     return removed
-
-
-def discard_unrecorded_staging(data_root: Path, operation_id: str) -> None:
-    """Delete an operation's own staging directory when no journal was published.
-
-    Used only on the failure path of the very first journal write, where the
-    directory was created by this process and can contain nothing else.
-    """
-    directory = staging_dir(data_root, operation_id)
-    if directory.is_dir() and not any(directory.iterdir()):
-        directory.rmdir()
 
 
 def unexpected_root_artifacts(data_root: Path, allowed: Sequence[str]) -> list[str]:

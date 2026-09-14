@@ -27,6 +27,7 @@ from tools.pattern_lab.__main__ import (
 from ._helpers import (
     ANCHOR_MS,
     BYBIT_CONTRACT,
+    LEGACY_OKX_ID,
     OKX_CONTRACT,
     OKX_ID,
     REPO_ROOT,
@@ -34,7 +35,9 @@ from ._helpers import (
     FakeClock,
     FakeExchange,
     legacy_series,
+    collector_options,
     mutate_manifest,
+    pending_journal,
     sidecar,
     single_pack,
     synthetic_series,
@@ -238,7 +241,7 @@ class TestCommandLine:
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["instrument_count"] == 1
-        assert payload["instruments"][0]["instrument_id"] == OKX_ID
+        assert payload["instruments"][0]["instrument_id"] == LEGACY_OKX_ID
         assert payload["source_manifest_sha256"] == pack_manifest.file_sha256(source / "MANIFEST.json")
         record = json.loads((output / "updates.jsonl").read_text(encoding="utf-8").strip())
         assert record["note"] == "synthetic import"
@@ -400,7 +403,7 @@ class TestCollectorCommandLine:
             capsys, "collect", "--universe", str(roster), "--data-root", str(root),
             "--start", utc(ANCHOR_MS), "--end", "latest-closed",
         )[0] == EXIT_OK
-        update_transaction.marker_path(root).write_text(_pending_journal(root), encoding="utf-8")
+        update_transaction.write_journal(root, pending_journal(root))
         code, payload, err = call(capsys, "update", "--data-root", str(root), "--end", "latest-closed")
         assert code == EXIT_PENDING
         assert payload["error_code"] == "pending_operation"
@@ -528,42 +531,104 @@ class TestCollectorCommandLine:
         assert "latest-closed" in result.stdout
 
 
-def _pending_journal(root) -> str:
-    """Return a valid staging journal for the pack at ``root``."""
-    manifest = pack_manifest.read_manifest(root)
-    collector = manifest["collector"]
-    operation_id = update_transaction.new_operation_id(
-        pack_manifest.parse_utc(manifest["generated_utc"], "moment")
-    )
-    journal = {
-        "journal_version": 1,
-        "operation_id": operation_id,
-        "kind": "update",
-        "root": pack_lock.resolve_root_identity(root),
-        "staging_dir": update_transaction.staging_dir_name(operation_id),
-        "operation_started_utc": manifest["generated_utc"],
-        "request": dict(
-            collector["last_request"],
-            requested_end_token=None,
-            requested_start_utc=None,
-            note=None,
-        ),
-        "options": {"okx_rps": 2.0, "bybit_rps": 2.0, "timeout_seconds": 20.0, "max_attempts": 5},
-        "universe": dict(manifest["universe"]),
-        "roster": [dict(entry) for entry in collector["roster"]],
-        "roster_sha256": collector["roster_sha256"],
-        "base": {
-            "revision": manifest["revision"],
-            "manifest_sha256": pack_manifest.file_sha256(pack_manifest.manifest_path(root)),
-            "readme_sha256": pack_manifest.file_sha256(root / pack_manifest.README_NAME),
-            "updates_sha256": pack_manifest.file_sha256(root / pack_manifest.UPDATES_NAME),
-            "files": {entry["instrument_id"]: entry["sha256"] for entry in manifest["instruments"]},
-        },
-        "target_revision": manifest["revision"] + 1,
-        "phase": "staging",
-        "closure": {},
-        "preflight": {},
-        "staged": {},
-        "targets": None,
-    }
-    return pack_manifest.dumps_json(update_transaction.validate_journal(journal)) + "\n"
+class TestPendingReadExitCodes:
+    """A valid pending operation is exit 4 everywhere a research read is refused."""
+
+    def _collect(self, capsys, tmp_path, root):
+        roster = write_roster(tmp_path / "universe.json")
+        assert call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )[0] == EXIT_OK
+        return roster
+
+    def _slice(self, capsys, root):
+        return call(
+            capsys, "slice", "--data-root", str(root), "--instrument", OKX_ID,
+            "--start", utc(ANCHOR_MS), "--end", utc(ANCHOR_MS + 10 * STEP_MS),
+        )
+
+    def test_a_normal_root_reads_and_inspects_cleanly(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        self._collect(capsys, tmp_path, root)
+        assert self._slice(capsys, root)[0] == EXIT_OK
+        assert call(capsys, "inspect", "--data-root", str(root))[0] == EXIT_OK
+        assert call(capsys, "inspect", "--data-root", str(root), "--verify")[0] == EXIT_OK
+
+    def test_a_pending_update_makes_a_slice_exit_four(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        self._collect(capsys, tmp_path, root)
+        update_transaction.write_journal(root, pending_journal(root))
+
+        code, _, err = self._slice(capsys, root)
+        assert code == EXIT_PENDING
+        assert "recover" in err and "abort-update" in err
+        # A plain inspect still reports the pending status with 0 ...
+        status, report, _ = call(capsys, "inspect", "--data-root", str(root))
+        assert status == EXIT_OK
+        assert report["pending_operation"]["source"] == "marker"
+        # ... while --verify refuses to certify it.
+        code, report, _ = call(capsys, "inspect", "--data-root", str(root), "--verify")
+        assert code == EXIT_VERIFICATION_PROBLEMS
+        assert report["verification_check"]["checked"] is False
+        assert report["verification_check"]["ok"] is False
+
+    def test_a_pending_initial_collect_exits_four_before_a_manifest_is_required(
+        self, tmp_path, capsys, wired
+    ):
+        root = tmp_path / "fresh"
+        exchange, clock, _ = wired
+        roster = write_roster(tmp_path / "universe.json")
+        with pytest.raises(RuntimeError):
+            pack_collect.collect_pack(
+                root, start=utc(ANCHOR_MS), end="latest-closed", roster_path=roster,
+                options=collector_options(), transport=exchange, clock=clock,
+                progress=_fail_once_staging(),
+            )
+        assert not pack_manifest.manifest_path(root).is_file()
+
+        code, _, err = self._slice(capsys, root)
+        assert code == EXIT_PENDING  # a pending first collect, not a missing pack
+        assert "recover" in err
+        status, report, _ = call(capsys, "inspect", "--data-root", str(root))
+        assert status == EXIT_OK
+        assert report["manifest_present"] is False
+        assert report["pending_operation"]["kind"] == "collect"
+
+    def test_the_initial_journal_temporary_also_exits_four(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        self._collect(capsys, tmp_path, root)
+        journal = update_transaction.write_journal(root, pending_journal(root))
+        update_transaction.marker_path(root).rename(update_transaction.marker_temp_path(root))
+        assert journal["phase"] == "staging"
+
+        code, _, err = self._slice(capsys, root)
+        assert code == EXIT_PENDING
+        assert "recover" in err
+
+    def test_a_malformed_marker_stays_invalid_input(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        self._collect(capsys, tmp_path, root)
+        update_transaction.marker_path(root).write_text("{ not json", encoding="utf-8")
+        code, _, err = self._slice(capsys, root)
+        assert code == EXIT_ERROR
+        assert "malformed pending-operation journal" in err
+
+    def test_a_busy_root_still_exits_three(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        self._collect(capsys, tmp_path, root)
+        update_transaction.write_journal(root, pending_journal(root))
+        with pack_lock.pack_guard(root):
+            code, _, err = self._slice(capsys, root)
+        assert code == EXIT_BUSY  # busy is decided before the pending state
+        assert "pack lock" in err
+
+
+def _fail_once_staging():
+    """Return a progress sink that interrupts an operation after its journal exists."""
+
+    def progress(message):
+        if message.startswith("preflight"):
+            raise RuntimeError("simulated interruption after the journal was written")
+
+    return progress
