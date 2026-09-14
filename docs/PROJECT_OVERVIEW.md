@@ -16,7 +16,9 @@ src/indicators/       shared technical indicators
 src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
 tools/strategy_lab/   local V2-only research pipeline
-tests/                core/server, V2, JavaScript, and Strategy Lab suites
+tools/pattern_lab/    local research-only market-data pack and collector
+tests/                core/server, V2, JavaScript, Strategy Lab, and
+                      Pattern Lab suites
 ```
 
 For detailed V2 guarantees see [V2 architecture](engine_v2/ARCHITECTURE.md).
@@ -196,6 +198,22 @@ change Merlin runtime behavior and has no CSV-level multiprocessing extension.
 
 The complete usage, identity, schema, resume, analysis, allocation, and safety
 contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
+
+## Pattern Lab integration
+
+Pattern Lab is separate local, research-only tooling for testing hypotheses
+before a strategy exists. Merlin and Strategy Lab do not import it, and it does
+not change Merlin runtime behavior or CSV handling. Implemented capabilities are
+the Parquet market-data pack with its manifest, NPZ import and fixed-interval
+reader, plus the closed-bar exchange collector with recoverable updates,
+cooperative process exclusion and collector/instrument-rule provenance. It
+requires `pyarrow==22.0.0` and reaches the network only inside an explicit
+collect, update or recover operation. Hypothesis, evaluation-model, bracket-probe
+and reporting milestones are not implemented, and shipped collector code is not an
+operationally prepared market pack.
+
+The complete schema, roster, adapter, exclusion, recovery and command contracts
+are in the [Pattern Lab data guide](../tools/pattern_lab/README.md).
 
 ## Current strategies
 

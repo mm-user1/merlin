@@ -1,0 +1,551 @@
+{
+  "schema_version": 1,
+  "universe": {
+    "selection_source": "Pattern Lab prototype MANIFEST.json roster, sha256 a0467010383dbc710e364bc6d8f00b8b17a8b31ff4d61735919876f62473296f",
+    "selection_date": null,
+    "historical_membership": "unknown",
+    "notes": "Preserved roster: 44 trading, 9 research_only, 1 factor. Historical membership is not verified. No prototype price/volume values or split claims are adopted."
+  },
+  "instruments": [
+    {
+      "instrument_id": "BYBIT_DASHUSDT",
+      "symbol": "DASH",
+      "venue": "BYBIT",
+      "contract": "DASHUSDT",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "BYBIT_ENAUSDT",
+      "symbol": "ENA",
+      "venue": "BYBIT",
+      "contract": "ENAUSDT",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "BYBIT_PENDLEUSDT",
+      "symbol": "PENDLE",
+      "venue": "BYBIT",
+      "contract": "PENDLEUSDT",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "BYBIT_SEIUSDT",
+      "symbol": "SEI",
+      "venue": "BYBIT",
+      "contract": "SEIUSDT",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "BYBIT_ZECUSDT",
+      "symbol": "ZEC",
+      "venue": "BYBIT",
+      "contract": "ZECUSDT",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_AAVE-USDT-SWAP",
+      "symbol": "AAVE",
+      "venue": "OKX",
+      "contract": "AAVE-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ADA-USDT-SWAP",
+      "symbol": "ADA",
+      "venue": "OKX",
+      "contract": "ADA-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ALGO-USDT-SWAP",
+      "symbol": "ALGO",
+      "venue": "OKX",
+      "contract": "ALGO-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_APE-USDT-SWAP",
+      "symbol": "APE",
+      "venue": "OKX",
+      "contract": "APE-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_APT-USDT-SWAP",
+      "symbol": "APT",
+      "venue": "OKX",
+      "contract": "APT-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ARB-USDT-SWAP",
+      "symbol": "ARB",
+      "venue": "OKX",
+      "contract": "ARB-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ATOM-USDT-SWAP",
+      "symbol": "ATOM",
+      "venue": "OKX",
+      "contract": "ATOM-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_AVAX-USDT-SWAP",
+      "symbol": "AVAX",
+      "venue": "OKX",
+      "contract": "AVAX-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_AXS-USDT-SWAP",
+      "symbol": "AXS",
+      "venue": "OKX",
+      "contract": "AXS-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_BCH-USDT-SWAP",
+      "symbol": "BCH",
+      "venue": "OKX",
+      "contract": "BCH-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_BNB-USDT-SWAP",
+      "symbol": "BNB",
+      "venue": "OKX",
+      "contract": "BNB-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_BTC-USDT-SWAP",
+      "symbol": "BTC",
+      "venue": "OKX",
+      "contract": "BTC-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "factor"
+      ]
+    },
+    {
+      "instrument_id": "OKX_CORE-USDT-SWAP",
+      "symbol": "CORE",
+      "venue": "OKX",
+      "contract": "CORE-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_CRV-USDT-SWAP",
+      "symbol": "CRV",
+      "venue": "OKX",
+      "contract": "CRV-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_DOGE-USDT-SWAP",
+      "symbol": "DOGE",
+      "venue": "OKX",
+      "contract": "DOGE-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_DOT-USDT-SWAP",
+      "symbol": "DOT",
+      "venue": "OKX",
+      "contract": "DOT-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ENS-USDT-SWAP",
+      "symbol": "ENS",
+      "venue": "OKX",
+      "contract": "ENS-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ETC-USDT-SWAP",
+      "symbol": "ETC",
+      "venue": "OKX",
+      "contract": "ETC-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ETH-USDT-SWAP",
+      "symbol": "ETH",
+      "venue": "OKX",
+      "contract": "ETH-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ETHFI-USDT-SWAP",
+      "symbol": "ETHFI",
+      "venue": "OKX",
+      "contract": "ETHFI-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_FIL-USDT-SWAP",
+      "symbol": "FIL",
+      "venue": "OKX",
+      "contract": "FIL-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_GRASS-USDT-SWAP",
+      "symbol": "GRASS",
+      "venue": "OKX",
+      "contract": "GRASS-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_HBAR-USDT-SWAP",
+      "symbol": "HBAR",
+      "venue": "OKX",
+      "contract": "HBAR-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_INJ-USDT-SWAP",
+      "symbol": "INJ",
+      "venue": "OKX",
+      "contract": "INJ-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_JUP-USDT-SWAP",
+      "symbol": "JUP",
+      "venue": "OKX",
+      "contract": "JUP-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_LDO-USDT-SWAP",
+      "symbol": "LDO",
+      "venue": "OKX",
+      "contract": "LDO-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_LINK-USDT-SWAP",
+      "symbol": "LINK",
+      "venue": "OKX",
+      "contract": "LINK-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_LTC-USDT-SWAP",
+      "symbol": "LTC",
+      "venue": "OKX",
+      "contract": "LTC-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_NEAR-USDT-SWAP",
+      "symbol": "NEAR",
+      "venue": "OKX",
+      "contract": "NEAR-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ONDO-USDT-SWAP",
+      "symbol": "ONDO",
+      "venue": "OKX",
+      "contract": "ONDO-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_OP-USDT-SWAP",
+      "symbol": "OP",
+      "venue": "OKX",
+      "contract": "OP-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ORDI-USDT-SWAP",
+      "symbol": "ORDI",
+      "venue": "OKX",
+      "contract": "ORDI-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    },
+    {
+      "instrument_id": "OKX_PENGU-USDT-SWAP",
+      "symbol": "PENGU",
+      "venue": "OKX",
+      "contract": "PENGU-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_PEPE-USDT-SWAP",
+      "symbol": "PEPE",
+      "venue": "OKX",
+      "contract": "PEPE-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_POL-USDT-SWAP",
+      "symbol": "POL",
+      "venue": "OKX",
+      "contract": "POL-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_SHIB-USDT-SWAP",
+      "symbol": "SHIB",
+      "venue": "OKX",
+      "contract": "SHIB-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_SOL-USDT-SWAP",
+      "symbol": "SOL",
+      "venue": "OKX",
+      "contract": "SOL-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_STX-USDT-SWAP",
+      "symbol": "STX",
+      "venue": "OKX",
+      "contract": "STX-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_SUI-USDT-SWAP",
+      "symbol": "SUI",
+      "venue": "OKX",
+      "contract": "SUI-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_TAO-USDT-SWAP",
+      "symbol": "TAO",
+      "venue": "OKX",
+      "contract": "TAO-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_TIA-USDT-SWAP",
+      "symbol": "TIA",
+      "venue": "OKX",
+      "contract": "TIA-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_TRX-USDT-SWAP",
+      "symbol": "TRX",
+      "venue": "OKX",
+      "contract": "TRX-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_UNI-USDT-SWAP",
+      "symbol": "UNI",
+      "venue": "OKX",
+      "contract": "UNI-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_VIRTUAL-USDT-SWAP",
+      "symbol": "VIRTUAL",
+      "venue": "OKX",
+      "contract": "VIRTUAL-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_WIF-USDT-SWAP",
+      "symbol": "WIF",
+      "venue": "OKX",
+      "contract": "WIF-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_WLD-USDT-SWAP",
+      "symbol": "WLD",
+      "venue": "OKX",
+      "contract": "WLD-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_XLM-USDT-SWAP",
+      "symbol": "XLM",
+      "venue": "OKX",
+      "contract": "XLM-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_XRP-USDT-SWAP",
+      "symbol": "XRP",
+      "venue": "OKX",
+      "contract": "XRP-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "trading"
+      ]
+    },
+    {
+      "instrument_id": "OKX_ZK-USDT-SWAP",
+      "symbol": "ZK",
+      "venue": "OKX",
+      "contract": "ZK-USDT-SWAP",
+      "quote_currency": "USDT",
+      "roles": [
+        "research_only"
+      ]
+    }
+  ]
+}

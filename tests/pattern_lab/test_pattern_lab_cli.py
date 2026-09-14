@@ -7,21 +7,40 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
+from tools.pattern_lab import collect as pack_collect
 from tools.pattern_lab import data as pack_data
+from tools.pattern_lab import exchange_data
 from tools.pattern_lab import manifest as pack_manifest
-from tools.pattern_lab.__main__ import main
+from tools.pattern_lab import pack_lock
+from tools.pattern_lab import update_transaction
+from tools.pattern_lab.__main__ import (
+    EXIT_BUSY,
+    EXIT_ERROR,
+    EXIT_OK,
+    EXIT_PENDING,
+    EXIT_VERIFICATION_PROBLEMS,
+    main,
+)
 
 from ._helpers import (
     ANCHOR_MS,
+    BYBIT_CONTRACT,
+    OKX_CONTRACT,
     OKX_ID,
     REPO_ROOT,
     STEP_MS,
+    FakeClock,
+    FakeExchange,
     legacy_series,
     mutate_manifest,
     sidecar,
     single_pack,
+    synthetic_series,
     utc,
     write_legacy_pack,
+    write_roster,
 )
 
 ISOLATION_CHILD = textwrap.dedent(
@@ -41,8 +60,14 @@ ISOLATION_CHILD = textwrap.dedent(
     sys.addaudithook(audit)
 
     import tools.pattern_lab
-    from tools.pattern_lab import data, import_npz, manifest
+    from tools.pattern_lab import collect, data, exchange_data, import_npz, manifest
+    from tools.pattern_lab import pack_lock, update_transaction
+    from tools.pattern_lab.__main__ import build_parser
     data.require_pyarrow()
+    build_parser()
+    collect.load_roster()
+    exchange_data.adapter_for("OKX")
+    exchange_data.adapter_for("BYBIT")
     data.input_fingerprint(
         header=data.fingerprint_header(
             instrument_id="TEST_A", venue="TEST", contract="A", quote_currency="USDT",
@@ -288,3 +313,257 @@ class TestImportIsolation:
         requirements = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
         assert "pyarrow==22.0.0" in requirements
         assert len([line for line in requirements if line.startswith("pyarrow")]) == 1
+
+
+# --------------------------------------------------------------------------
+# collector command line
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def wired(monkeypatch):
+    """Route the CLI's default transport and clock at the injection boundary."""
+    stamps, values = synthetic_series(40)
+    now_ms = int(stamps[-1]) + STEP_MS + 90_000
+    exchange = FakeExchange(now_ms=now_ms)
+    exchange.add_okx(OKX_CONTRACT, timestamps=stamps, ohlcv=values)
+    exchange.add_bybit(BYBIT_CONTRACT, timestamps=stamps, ohlcv=values)
+    clock = FakeClock(now_ms)
+    monkeypatch.setattr(exchange_data, "urllib_transport", exchange)
+    monkeypatch.setattr(exchange_data, "SystemClock", lambda: clock)
+    return exchange, clock, stamps
+
+
+def call(capsys, *arguments):
+    """Run the CLI in process and return ``(code, stdout_json, stderr)``."""
+    code = main(list(arguments))
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out) if captured.out.strip() else None
+    return code, payload, captured.err
+
+
+class TestCollectorCommandLine:
+    def test_help_lists_the_collector_commands(self):
+        result = run_cli("--help")
+        assert result.returncode == 0
+        for command in ("collect", "update", "recover", "abort-update"):
+            assert command in result.stdout
+
+    def test_collect_prints_a_structured_result_and_exits_zero(self, tmp_path, capsys, wired):
+        roster = write_roster(tmp_path / "universe.json")
+        code, payload, err = call(
+            capsys,
+            "collect",
+            "--universe",
+            str(roster),
+            "--data-root",
+            str(tmp_path / "pack"),
+            "--start",
+            utc(ANCHOR_MS),
+            "--end",
+            "latest-closed",
+        )
+        assert code == EXIT_OK
+        assert payload["status"] == "completed"
+        assert payload["kind"] == "collect"
+        assert payload["revision_before"] is None and payload["revision_after"] == 1
+        assert payload["resolved_request"]["requested_end_token"] == "latest-closed"
+        assert len(payload["instruments"]) == 2
+        assert payload["http_request_count"] > 0
+        assert "pattern-lab:" in err  # progress diagnostics stay on stderr
+
+    def test_a_tail_shortfall_publishes_but_exits_one(self, tmp_path, capsys, wired):
+        exchange, clock, stamps = wired
+        exchange.now_ms = clock.now_ms = int(stamps[-1]) + 30 * STEP_MS
+        roster = write_roster(tmp_path / "universe.json")
+        code, payload, err = call(
+            capsys,
+            "collect",
+            "--universe",
+            str(roster),
+            "--data-root",
+            str(tmp_path / "pack"),
+            "--start",
+            utc(ANCHOR_MS),
+            "--end",
+            "latest-closed",
+        )
+        assert code == EXIT_VERIFICATION_PROBLEMS
+        assert payload["status"] == "completed"
+        assert payload["tail_shortfall_bars"] > 0
+        assert "the requested range is not complete" in err
+
+    def test_a_pending_operation_makes_an_update_exit_four(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        assert call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )[0] == EXIT_OK
+        update_transaction.marker_path(root).write_text(_pending_journal(root), encoding="utf-8")
+        code, payload, err = call(capsys, "update", "--data-root", str(root), "--end", "latest-closed")
+        assert code == EXIT_PENDING
+        assert payload["error_code"] == "pending_operation"
+        assert payload["status"] == "failed"
+        assert "recover" in err
+
+    def test_a_busy_pack_exits_three_without_mutating_anything(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )
+        before = {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+        with pack_lock.pack_guard(root):
+            code, payload, err = call(
+                capsys, "update", "--data-root", str(root), "--end", "latest-closed"
+            )
+        assert code == EXIT_BUSY
+        assert payload["error_code"] == "pack_busy"
+        after = {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+        assert after == before
+
+    def test_inspect_reports_a_pending_initial_collect_without_a_manifest(
+        self, tmp_path, capsys, wired, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        original = pack_collect._collect_instrument
+        calls = {"n": 0}
+
+        def wrapper(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("interrupted")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(pack_collect, "_collect_instrument", wrapper)
+        with pytest.raises(RuntimeError):
+            call(
+                capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+                "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+            )
+        # Restore only the interrupted helper: the wired transport must stay patched.
+        monkeypatch.setattr(pack_collect, "_collect_instrument", original)
+
+        code, payload, _ = call(capsys, "inspect", "--data-root", str(root))
+        assert code == EXIT_OK
+        assert payload["manifest_present"] is False
+        assert payload["pending_operation"]["phase"] == "staging"
+
+        code, payload, err = call(capsys, "inspect", "--data-root", str(root), "--verify")
+        assert code == EXIT_VERIFICATION_PROBLEMS
+        assert payload["verification_check"] == {
+            "checked": False,
+            "ok": False,
+            "problems": payload["verification_check"]["problems"],
+        }
+        assert "verification problem" in err
+
+        code, payload, _ = call(capsys, "recover", "--data-root", str(root))
+        assert code == EXIT_OK
+        assert payload["status"] == "recovered"
+
+    def test_abort_update_leaves_a_reusable_lock_only_root(self, tmp_path, capsys, wired, monkeypatch):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        original = pack_collect._collect_instrument
+
+        def wrapper(*args, **kwargs):
+            raise RuntimeError("interrupted")
+
+        monkeypatch.setattr(pack_collect, "_collect_instrument", wrapper)
+        with pytest.raises(RuntimeError):
+            call(
+                capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+                "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+            )
+        monkeypatch.setattr(pack_collect, "_collect_instrument", original)
+
+        code, payload, _ = call(capsys, "abort-update", "--data-root", str(root))
+        assert code == EXIT_OK
+        assert payload["status"] == "aborted"
+        assert sorted(item.name for item in root.iterdir()) == [pack_lock.LOCK_NAME]
+
+    def test_recover_without_a_pending_operation_is_reported_plainly(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )
+        code, payload, _ = call(capsys, "recover", "--data-root", str(root))
+        assert code == EXIT_OK
+        assert payload["status"] == "nothing_to_recover"
+
+    @pytest.mark.parametrize("flag, value", [("--okx-rps", "0"), ("--bybit-rps", "500")])
+    def test_invalid_pacing_options_are_refused(self, tmp_path, capsys, wired, flag, value):
+        roster = write_roster(tmp_path / "universe.json")
+        code, payload, err = call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(tmp_path / "pack"),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed", flag, value,
+        )
+        assert code == EXIT_ERROR
+        assert payload["status"] == "failed"
+        assert "pattern-lab:" in err
+
+    def test_an_existing_pack_blocks_a_new_collect(self, tmp_path, capsys, wired):
+        root = tmp_path / "pack"
+        roster = write_roster(tmp_path / "universe.json")
+        call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )
+        code, payload, _ = call(
+            capsys, "collect", "--universe", str(roster), "--data-root", str(root),
+            "--start", utc(ANCHOR_MS), "--end", "latest-closed",
+        )
+        assert code == EXIT_ERROR
+        assert payload["error_code"] == "destination_not_empty"
+
+    def test_collect_help_documents_the_resolved_end_token(self):
+        result = run_cli("collect", "--help")
+        assert result.returncode == 0
+        assert "latest-closed" in result.stdout
+
+
+def _pending_journal(root) -> str:
+    """Return a valid staging journal for the pack at ``root``."""
+    manifest = pack_manifest.read_manifest(root)
+    collector = manifest["collector"]
+    operation_id = update_transaction.new_operation_id(
+        pack_manifest.parse_utc(manifest["generated_utc"], "moment")
+    )
+    journal = {
+        "journal_version": 1,
+        "operation_id": operation_id,
+        "kind": "update",
+        "root": pack_lock.resolve_root_identity(root),
+        "staging_dir": update_transaction.staging_dir_name(operation_id),
+        "operation_started_utc": manifest["generated_utc"],
+        "request": dict(
+            collector["last_request"],
+            requested_end_token=None,
+            requested_start_utc=None,
+            note=None,
+        ),
+        "options": {"okx_rps": 2.0, "bybit_rps": 2.0, "timeout_seconds": 20.0, "max_attempts": 5},
+        "universe": dict(manifest["universe"]),
+        "roster": [dict(entry) for entry in collector["roster"]],
+        "roster_sha256": collector["roster_sha256"],
+        "base": {
+            "revision": manifest["revision"],
+            "manifest_sha256": pack_manifest.file_sha256(pack_manifest.manifest_path(root)),
+            "readme_sha256": pack_manifest.file_sha256(root / pack_manifest.README_NAME),
+            "updates_sha256": pack_manifest.file_sha256(root / pack_manifest.UPDATES_NAME),
+            "files": {entry["instrument_id"]: entry["sha256"] for entry in manifest["instruments"]},
+        },
+        "target_revision": manifest["revision"] + 1,
+        "phase": "staging",
+        "closure": {},
+        "preflight": {},
+        "staged": {},
+        "targets": None,
+    }
+    return pack_manifest.dumps_json(update_transaction.validate_journal(journal)) + "\n"

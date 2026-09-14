@@ -6,13 +6,17 @@ root.  No market data, binary fixture or real pack is committed or read.
 
 from __future__ import annotations
 
+from collections import deque
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+import urllib.parse
 
 import numpy as np
 
 from tools.pattern_lab import data as pack_data
+from tools.pattern_lab import exchange_data
 from tools.pattern_lab import manifest as pack_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -238,5 +242,277 @@ def sidecar(instruments=None, **overrides) -> dict[str, Any]:
             }
         },
     }
+    payload.update(overrides)
+    return payload
+
+
+# --------------------------------------------------------------------------
+# synthetic exchange protocol fixtures, shared by the collector tests
+# --------------------------------------------------------------------------
+
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+OKX_CONTRACT = "AAA-USDT-SWAP"
+BYBIT_CONTRACT = "BBBUSDT"
+COLLECT_ROSTER_IDS = (f"BYBIT_{BYBIT_CONTRACT}", f"OKX_{OKX_CONTRACT}")
+
+
+def roster_document(entries=None, **overrides):
+    """Build a closed roster configuration document for the collector."""
+    payload = {
+        "schema_version": 1,
+        "universe": {
+            "selection_source": "tests/pattern_lab/_helpers.py synthetic roster",
+            "selection_date": None,
+            "historical_membership": "unknown",
+            "notes": "synthetic test roster",
+        },
+        "instruments": entries
+        if entries is not None
+        else [
+            {
+                "instrument_id": f"BYBIT_{BYBIT_CONTRACT}",
+                "symbol": "BBB",
+                "venue": "BYBIT",
+                "contract": BYBIT_CONTRACT,
+                "quote_currency": "USDT",
+                "roles": ["trading"],
+            },
+            {
+                "instrument_id": f"OKX_{OKX_CONTRACT}",
+                "symbol": "AAA",
+                "venue": "OKX",
+                "contract": OKX_CONTRACT,
+                "quote_currency": "USDT",
+                "roles": ["trading"],
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def write_roster(path: Path, document=None) -> Path:
+    """Write a roster configuration file and return its path."""
+    path = Path(path)
+    path.write_text(json.dumps(document or roster_document(), indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def okx_instrument(contract: str = OKX_CONTRACT, **overrides) -> dict[str, Any]:
+    payload = {
+        "instType": "SWAP",
+        "instId": contract,
+        "ctType": "linear",
+        "settleCcy": "USDT",
+        "ctVal": "0.1",
+        "ctValCcy": contract.split("-")[0],
+        "ctMult": "1",
+        "lotSz": "1",
+        "minSz": "1",
+        "tickSz": "0.001",
+        "listTime": "1700000000000",
+        "state": "live",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def bybit_instrument(contract: str = BYBIT_CONTRACT, **overrides) -> dict[str, Any]:
+    lot = {"qtyStep": "0.1", "minOrderQty": "0.1", "minNotionalValue": "5", "maxOrderQty": "1000"}
+    price = {"tickSize": "0.0001", "minPrice": "0.0001"}
+    payload = {
+        "symbol": contract,
+        "contractType": "LinearPerpetual",
+        "status": "Trading",
+        "baseCoin": contract[:-4],
+        "quoteCoin": "USDT",
+        "settleCoin": "USDT",
+        "launchTime": "1700000000000",
+        "lotSizeFilter": dict(lot),
+        "priceFilter": dict(price),
+    }
+    for key, value in overrides.items():
+        if key in ("lotSizeFilter", "priceFilter") and isinstance(value, dict):
+            payload[key] = {**payload[key], **value}
+        else:
+            payload[key] = value
+    return payload
+
+
+class FakeClock:
+    """Deterministic monotonic clock, sleeper and wall clock."""
+
+    def __init__(self, now_ms: int):
+        self.now_ms = int(now_ms)
+        self.elapsed = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(float(seconds))
+        self.elapsed += float(seconds)
+
+    def now_utc(self) -> datetime:
+        return (EPOCH + timedelta(milliseconds=self.now_ms)).replace(microsecond=0)
+
+
+class FakeExchange:
+    """A synthetic OKX/Bybit protocol server over the injectable transport.
+
+    The adapters' real request construction, cursor arithmetic and response
+    decoding are exercised; only the socket is replaced. Series are stored as
+    canonical 5m arrays, and a candle counts as closed once its close time is at
+    or before the venue's current clock.
+    """
+
+    def __init__(self, *, now_ms: int):
+        self.now_ms = int(now_ms)
+        self.series: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
+        self.instruments: dict[tuple[str, str], Any] = {}
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        self.scripted: deque = deque()
+        self.page_limit_override: int | None = None
+        self.stall_after: int | None = None
+        self.fail_time_for: set[str] = set()
+        self._candle_calls = 0
+
+    # -- fixture setup -----------------------------------------------------
+    def add_okx(self, contract: str = OKX_CONTRACT, *, timestamps=None, ohlcv=None, metadata=None):
+        self.series[("OKX", contract)] = (np.asarray(timestamps), np.asarray(ohlcv))
+        self.instruments[("OKX", contract)] = (
+            okx_instrument(contract) if metadata is None else metadata
+        )
+
+    def add_bybit(self, contract: str = BYBIT_CONTRACT, *, timestamps=None, ohlcv=None, metadata=None):
+        self.series[("BYBIT", contract)] = (np.asarray(timestamps), np.asarray(ohlcv))
+        self.instruments[("BYBIT", contract)] = (
+            bybit_instrument(contract) if metadata is None else metadata
+        )
+
+    def set_rows(self, venue: str, contract: str, timestamps, ohlcv) -> None:
+        self.series[(venue, contract)] = (np.asarray(timestamps), np.asarray(ohlcv))
+
+    # -- transport ---------------------------------------------------------
+    def __call__(self, url: str, timeout: float) -> exchange_data.HttpResponse:
+        parsed = urllib.parse.urlparse(url)
+        params = {key: value[0] for key, value in urllib.parse.parse_qs(parsed.query).items()}
+        self.requests.append((parsed.path, params))
+        if self.scripted:
+            return self.scripted.popleft()
+        handler = {
+            "/api/v5/public/time": self._okx_time,
+            "/api/v5/public/instruments": self._okx_instruments,
+            "/api/v5/market/history-candles": self._okx_candles,
+            "/v5/market/time": self._bybit_time,
+            "/v5/market/instruments-info": self._bybit_instruments,
+            "/v5/market/kline": self._bybit_candles,
+        }.get(parsed.path)
+        if handler is None:
+            return exchange_data.HttpResponse(status=404, body="{}")
+        return handler(params)
+
+    def _json(self, payload) -> exchange_data.HttpResponse:
+        return exchange_data.HttpResponse(status=200, body=json.dumps(payload))
+
+    # -- OKX ---------------------------------------------------------------
+    def _okx_time(self, params):
+        if "OKX" in self.fail_time_for:
+            return exchange_data.HttpResponse(status=500, body="{}")
+        return self._json({"code": "0", "msg": "", "data": [{"ts": str(self.now_ms)}]})
+
+    def _okx_instruments(self, params):
+        key = ("OKX", params.get("instId", ""))
+        if key not in self.instruments:
+            return self._json({"code": "0", "msg": "", "data": []})
+        return self._json({"code": "0", "msg": "", "data": [self.instruments[key]]})
+
+    def _okx_candles(self, params):
+        key = ("OKX", params.get("instId", ""))
+        if key not in self.series:
+            return self._json({"code": "51001", "msg": "Instrument ID does not exist", "data": []})
+        stamps, values = self.series[key]
+        after = int(params["after"])
+        limit = self._limit(int(params["limit"]))
+        chosen = np.flatnonzero(stamps < after)
+        rows = []
+        for index in chosen[::-1][:limit]:
+            stamp = int(stamps[index])
+            row = values[index]
+            confirm = "1" if stamp + STEP_MS <= self.now_ms else "0"
+            rows.append(
+                [str(stamp), *(f"{float(item):.10f}" for item in row[:4]), "0", "0",
+                 f"{float(row[4]):.10f}", confirm]
+            )
+        return self._json({"code": "0", "msg": "", "data": rows})
+
+    # -- Bybit -------------------------------------------------------------
+    def _bybit_time(self, params):
+        if "BYBIT" in self.fail_time_for:
+            return exchange_data.HttpResponse(status=500, body="{}")
+        return self._json(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "timeSecond": str(self.now_ms // 1000),
+                    "timeNano": str(self.now_ms * 1_000_000),
+                },
+            }
+        )
+
+    def _bybit_instruments(self, params):
+        key = ("BYBIT", params.get("symbol", ""))
+        listing = [] if key not in self.instruments else [self.instruments[key]]
+        return self._json(
+            {"retCode": 0, "retMsg": "OK", "result": {"category": "linear", "list": listing}}
+        )
+
+    def _bybit_candles(self, params):
+        symbol = params.get("symbol", "")
+        key = ("BYBIT", symbol)
+        if key not in self.series:
+            return self._json({"retCode": 10001, "retMsg": "Not supported symbols", "result": {}})
+        stamps, values = self.series[key]
+        start, end = int(params["start"]), int(params["end"])
+        limit = self._limit(int(params["limit"]))
+        chosen = np.flatnonzero((stamps >= start) & (stamps <= end))
+        rows = [
+            [
+                str(int(stamps[index])),
+                *(f"{float(item):.10f}" for item in values[index][:4]),
+                "0",
+                f"{float(values[index][4]):.10f}",
+            ]
+            for index in chosen[::-1][:limit]
+        ]
+        return self._json(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {"symbol": symbol, "category": "linear", "list": rows},
+            }
+        )
+
+    def _limit(self, requested: int) -> int:
+        self._candle_calls += 1
+        if self.stall_after is not None and self._candle_calls > self.stall_after:
+            return 0  # a repeated page with no progress
+        if self.page_limit_override is not None:
+            return min(requested, self.page_limit_override)
+        return requested
+
+
+def fake_client(exchange: FakeExchange, clock: FakeClock, **overrides) -> exchange_data.HttpClient:
+    """Build the paced client used by the adapter-level tests."""
+    options = {"timeout": 1.0, "max_attempts": 3, "rates": {"OKX": 1000.0, "BYBIT": 1000.0}}
+    options.update(overrides)
+    return exchange_data.HttpClient(transport=exchange, clock=clock, **options)
+
+
+def collector_options(**overrides) -> dict[str, Any]:
+    """Fast, deterministic pacing for the collector operation tests."""
+    payload = {"okx_rps": 10.0, "bybit_rps": 10.0, "timeout_seconds": 1.0, "max_attempts": 3}
     payload.update(overrides)
     return payload

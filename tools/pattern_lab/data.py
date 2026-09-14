@@ -7,6 +7,7 @@ the optional wheel.  Pattern Lab never installs dependencies itself.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -14,7 +15,7 @@ import json
 import os
 from pathlib import Path
 import struct
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 import numpy as np
@@ -22,6 +23,8 @@ import pandas as pd
 
 from . import PatternLabDataError, PatternLabDependencyError
 from . import manifest as pack_manifest
+from . import pack_lock
+from . import update_transaction
 from .manifest import (
     BASE_STEP_MS,
     BASE_TIMEFRAME_MINUTES,
@@ -296,10 +299,15 @@ def write_ohlcv_file(
         if not np.array_equal(read_stamps, stamps) or not np.array_equal(read_values, values):
             raise PatternLabDataError(f"{target}: readback of the written file did not reproduce the input values.")
         digest = pack_manifest.file_sha256(temporary)
+        # Flush the completed temporary before the replace; the containing
+        # directory is flushed after it, so a crash leaves either the old file or
+        # the complete new one.
+        pack_manifest.fsync_path(temporary)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
     os.replace(temporary, target)
+    pack_manifest.fsync_directory(target.parent)
     return WrittenFile(
         path=target,
         sha256=digest,
@@ -308,6 +316,17 @@ def write_ohlcv_file(
         last_open_ms=int(stamps[-1]),
         missing_bar_count=missing_bar_count(stamps),
     )
+
+
+def parquet_column_names(path: Path) -> list[str]:
+    """Return the physical column names of one stored file, without reading rows."""
+    pa, pq = require_pyarrow()
+    path = Path(path)
+    if not path.is_file():
+        raise PatternLabDataError(f"{path}: Parquet file is missing.")
+    schema = pq.read_schema(path)
+    _validate_parquet_schema(pa, schema, path)
+    return list(schema.names)
 
 
 def read_ohlcv_rows(
@@ -402,6 +421,36 @@ def _require_disjoint(output_root: Path, source_root: Path | None) -> None:
         )
 
 
+@contextmanager
+def new_pack_guard(output_root: Path, *, source_root: Path | None = None) -> Iterator[Path]:
+    """Create a NEW pack directory exclusively, lock it and recheck it under the lock.
+
+    Archival publication keeps its stricter new-directory-only policy: the
+    destination must not exist at all.  The directory is created exclusively,
+    locked immediately and then rechecked, so a competing initial collect that
+    created the directory first can never be overwritten by a process that only
+    got there earlier.
+    """
+    output_root = Path(output_root)
+    _require_disjoint(output_root, source_root)
+    try:
+        output_root.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise PatternLabDataError(
+            f"{output_root}: destination already exists; publication requires a new directory.",
+            error_code="destination_not_new",
+        ) from exc
+    with pack_lock.pack_guard(output_root):
+        unexpected = update_transaction.unexpected_root_artifacts(output_root, [pack_lock.LOCK_NAME])
+        if unexpected:
+            raise PatternLabDataError(
+                f"{output_root}: the destination gained {unexpected} before this publication acquired "
+                "the pack lock; another operation owns it.",
+                error_code="destination_not_new",
+            )
+        yield output_root
+
+
 def publish_pack(
     output_root: Path,
     instruments: Iterable[InstrumentSource],
@@ -412,6 +461,7 @@ def publish_pack(
     source: Mapping[str, Any] | None = None,
     note: str | None = None,
     source_root: Path | None = None,
+    collector: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Publish a NEW pack: per-instrument files, README, history, manifest last.
 
@@ -421,16 +471,34 @@ def publish_pack(
     instrument must declare verified quote-volume units before its file is
     written; unknown closure remains publishable as archival provenance.
     """
+    with new_pack_guard(output_root, source_root=source_root) as root:
+        return _publish_pack_unlocked(
+            root,
+            instruments,
+            universe=universe,
+            generated_utc=generated_utc,
+            revision=revision,
+            source=source,
+            note=note,
+            collector=collector,
+        )
+
+
+def _publish_pack_unlocked(
+    output_root: Path,
+    instruments: Iterable[InstrumentSource],
+    *,
+    universe: Mapping[str, Any],
+    generated_utc: Any = None,
+    revision: int = 1,
+    source: Mapping[str, Any] | None = None,
+    note: str | None = None,
+    collector: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Publish into a directory whose pack lock the caller already owns."""
     require_pyarrow()
     output_root = Path(output_root)
-    _require_disjoint(output_root, source_root)
-    try:
-        output_root.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as exc:
-        raise PatternLabDataError(
-            f"{output_root}: destination already exists; publication requires a new directory."
-        ) from exc
-    (output_root / OHLCV_DIR).mkdir()
+    (output_root / OHLCV_DIR).mkdir(exist_ok=True)
 
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -474,7 +542,12 @@ def publish_pack(
 
     moment = generated_utc or datetime.now(timezone.utc).replace(microsecond=0)
     manifest = pack_manifest.build_manifest(
-        instruments=entries, universe=universe, generated_utc=moment, revision=revision, state="ready"
+        instruments=entries,
+        universe=universe,
+        generated_utc=moment,
+        revision=revision,
+        state="ready",
+        collector=collector,
     )
     pack_manifest.write_text_atomic(output_root / pack_manifest.README_NAME, pack_manifest.render_readme(manifest))
     pack_manifest.append_update_record(
@@ -550,13 +623,51 @@ def _verify_instrument(data_root: Path, entry: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def verify_instrument_files(data_root: Path, manifest: Mapping[str, Any]) -> list[str]:
+    """Return every integrity problem of a manifest's declared files, or an empty list."""
+    problems: list[str] = []
+    for entry in manifest["instruments"]:
+        problems.extend(_verify_instrument(data_root, entry))
+    return problems
+
+
 def inspect_pack(data_root: Path, *, verify: bool = False) -> dict[str, Any]:
     """Return read-only structured pack metadata, optionally verifying the files.
 
     ``verify`` is an integrity check of hashes, schema and actual coverage.  It
     never promotes unknown closure or quote-unit evidence.
     """
+    with pack_lock.pack_guard(data_root):
+        return _inspect_pack_unlocked(data_root, verify=verify)
+
+
+def _inspect_pack_unlocked(data_root: Path, *, verify: bool = False) -> dict[str, Any]:
+    """Inspect a pack whose lock the caller already owns.
+
+    The pending marker is checked **before** a manifest is required, so an
+    interrupted initial collect can still report its operation, phase and
+    completed staged instruments instead of looking like a missing pack.
+    """
     data_root = Path(data_root)
+    pending = update_transaction.pending_state(data_root)
+    if pending is not None and not pending["valid"]:
+        raise PatternLabDataError(
+            update_transaction.pending_problem(pending), error_code="invalid_journal"
+        )
+    pending_report = None if pending is None else update_transaction.pending_summary(pending)
+    manifest_file = pack_manifest.manifest_path(data_root)
+    if pending is not None and not manifest_file.is_file():
+        report = {
+            "data_root": str(data_root),
+            "manifest_present": False,
+            "update_in_progress": True,
+            "pending_operation": pending_report,
+            "instrument_count": 0,
+            "instruments": [],
+        }
+        report["verification_check"] = _pending_verification(pending, verify)
+        return report
+
     manifest = pack_manifest.read_manifest(data_root)
     instruments = []
     for entry in manifest["instruments"]:
@@ -584,19 +695,28 @@ def inspect_pack(data_root: Path, *, verify: bool = False) -> dict[str, Any]:
                 "research_limitations": limitations,
             }
         )
+    collector = manifest.get("collector")
     report = {
         "data_root": str(data_root),
+        "manifest_present": True,
         "schema_version": manifest["schema_version"],
         "revision": manifest["revision"],
         "state": manifest["state"],
         "generated_utc": manifest["generated_utc"],
         "base_timeframe_minutes": manifest["base_timeframe_minutes"],
         "volume_unit": manifest["volume_unit"],
-        "update_in_progress": pack_manifest.update_marker_path(data_root).exists(),
+        "update_in_progress": pending is not None,
+        "pending_operation": pending_report,
+        "collector_managed": collector is not None,
+        "collector": None if collector is None else dict(collector),
         "universe": dict(manifest["universe"]),
         "instrument_count": len(manifest["instruments"]),
         "instruments": instruments,
     }
+    if pending is not None:
+        # A pending generation can never be certified, whatever the files hold.
+        report["verification_check"] = _pending_verification(pending, verify)
+        return report
     if verify:
         problems: list[str] = []
         for entry in manifest["instruments"]:
@@ -605,6 +725,13 @@ def inspect_pack(data_root: Path, *, verify: bool = False) -> dict[str, Any]:
     else:
         report["verification_check"] = {"checked": False, "ok": None, "problems": []}
     return report
+
+
+def _pending_verification(pending: Mapping[str, Any], verify: bool) -> dict[str, Any]:
+    """Report a pending operation as a verification problem, never as a pass."""
+    if not verify:
+        return {"checked": False, "ok": None, "problems": []}
+    return {"checked": False, "ok": False, "problems": [update_transaction.pending_problem(pending)]}
 
 
 # --------------------------------------------------------------------------
@@ -874,8 +1001,9 @@ def research_bars(data_slice: DataSlice) -> pd.DataFrame:
     return data_slice.bars.iloc[data_slice.research_start_index:]
 
 
-def _read_pack_state(data_root: Path) -> tuple[dict[str, Any], bool]:
-    return pack_manifest.read_manifest(data_root), pack_manifest.update_marker_path(data_root).exists()
+def _read_pack_state(data_root: Path) -> tuple[dict[str, Any], Any]:
+    """Return the validated manifest and any pending operation state."""
+    return pack_manifest.read_manifest(data_root), update_transaction.pending_state(data_root)
 
 
 def load_slice(
@@ -894,14 +1022,85 @@ def load_slice(
     the requested timeframe on the UTC epoch grid.  The declared coverage,
     quote-unit verification and closure cutoff must admit the whole consumed
     interval; nothing is shifted, shortened or filled to make a request succeed.
+
+    The read holds the data root's exclusion guard for its duration.  Use
+    :func:`read_session` to pin one generation across several related reads.
     """
+    with pack_lock.pack_guard(data_root):
+        return _load_slice_unlocked(
+            data_root,
+            instrument_id,
+            start=start,
+            end=end,
+            warmup_start=warmup_start,
+            timeframe_minutes=timeframe_minutes,
+        )
+
+
+@contextmanager
+def read_session(data_root: Path) -> Iterator["ReadSession"]:
+    """Hold the exclusion guard across several related reads of one generation.
+
+    Keep the session only while loading inputs, then release it before a lengthy
+    RAM-only computation: the guard is coarse, so two independent readers
+    conflict deliberately.
+
+    M2's process pool must let the coordinator own this guard and have its
+    workers call the same private read core, holding it until every child has
+    completed its reads or has been stopped and joined on error.  T02 exposes no
+    pool and makes no claim that such a cross-process lifetime is implemented.
+    """
+    with pack_lock.pack_guard(data_root) as guard:
+        yield ReadSession(guard.root)
+
+
+@dataclass(frozen=True)
+class ReadSession:
+    """A held read guard over one data root, delegating to the private read core."""
+
+    data_root: Path
+
+    def load_slice(
+        self,
+        instrument_id: str,
+        *,
+        start: Any,
+        end: Any,
+        warmup_start: Any = None,
+        timeframe_minutes: int = BASE_TIMEFRAME_MINUTES,
+    ) -> DataSlice:
+        return _load_slice_unlocked(
+            self.data_root,
+            instrument_id,
+            start=start,
+            end=end,
+            warmup_start=warmup_start,
+            timeframe_minutes=timeframe_minutes,
+        )
+
+    def inspect(self, *, verify: bool = False) -> dict[str, Any]:
+        return _inspect_pack_unlocked(self.data_root, verify=verify)
+
+
+def _load_slice_unlocked(
+    data_root: Path,
+    instrument_id: str,
+    *,
+    start: Any,
+    end: Any,
+    warmup_start: Any = None,
+    timeframe_minutes: int = BASE_TIMEFRAME_MINUTES,
+) -> DataSlice:
+    """Read a slice from a pack whose lock the caller already owns."""
     data_root = Path(data_root)
     if not data_root.is_dir():
         raise PatternLabDataError(f"{data_root}: data root is not an existing directory.")
     manifest_before, marker_before = _read_pack_state(data_root)
-    if marker_before:
+    if marker_before is not None:
         raise PatternLabDataError(
-            f"{data_root}: {pack_manifest.UPDATE_MARKER_NAME} is present; the pack is being updated."
+            f"{data_root}: a pending collector operation is present; the pack is being updated. "
+            + update_transaction.pending_problem(marker_before),
+            error_code="pending_operation",
         )
     if manifest_before["state"] != "ready":
         raise PatternLabDataError(
@@ -957,9 +1156,11 @@ def load_slice(
     stamps, values = read_ohlcv_rows(path, start_ms=warmup_ms, end_ms=end_ms, allow_empty=True)
 
     manifest_after, marker_after = _read_pack_state(data_root)
-    if marker_after:
+    if marker_after is not None:
         raise PatternLabDataError(
-            f"{data_root}: {pack_manifest.UPDATE_MARKER_NAME} appeared during the read; the result would mix versions."
+            f"{data_root}: a pending collector operation appeared during the read; the result would "
+            "mix versions.",
+            error_code="pending_operation",
         )
     if (manifest_after["revision"], manifest_after["state"]) != (manifest_before["revision"], manifest_before["state"]):
         raise PatternLabDataError(

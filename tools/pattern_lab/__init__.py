@@ -8,15 +8,49 @@ the pinned wheel is absent from the environment.
 
 
 class PatternLabError(Exception):
-    """Base class for every Pattern Lab failure reported to a caller."""
+    """Base class for every Pattern Lab failure reported to a caller.
+
+    ``error_code`` is a stable machine-readable label carried into the JSON that
+    the collector commands print for a failed operation.  Subclasses declare a
+    default; an individual raise may override it for a specific condition.
+    """
+
+    error_code = "pattern_lab_error"
+
+    def __init__(self, *args, error_code: str | None = None):
+        super().__init__(*args)
+        if error_code is not None:
+            self.error_code = error_code
 
 
 class PatternLabDataError(PatternLabError):
     """Invalid market data, metadata, request interval or pack layout."""
 
+    error_code = "invalid_data"
+
 
 class PatternLabDependencyError(PatternLabError):
     """A declared third-party dependency is missing from this environment."""
 
+    error_code = "missing_dependency"
 
-__all__ = ["PatternLabError", "PatternLabDataError", "PatternLabDependencyError"]
+
+class PatternLabBusyError(PatternLabError):
+    """Another process holds the data root's cooperative exclusion lock."""
+
+    error_code = "pack_busy"
+
+
+class PatternLabPendingError(PatternLabError):
+    """A valid pending operation must be recovered or aborted first."""
+
+    error_code = "pending_operation"
+
+
+__all__ = [
+    "PatternLabError",
+    "PatternLabDataError",
+    "PatternLabDependencyError",
+    "PatternLabBusyError",
+    "PatternLabPendingError",
+]

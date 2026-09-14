@@ -63,8 +63,9 @@ baselines, or mutate external systems unless explicitly authorized.
 
 - `src/` — application, engines, strategies, persistence, and Flask UI.
 - `data/` — market inputs and tracked regression/certification baselines.
-- `tests/` — core/server, V2, JavaScript, and Strategy Lab verification.
-- `tools/` — maintenance, benchmark, and Strategy Lab commands.
+- `tests/` — core/server, V2, JavaScript, Strategy Lab, and Pattern Lab
+  verification.
+- `tools/` — maintenance, benchmark, Strategy Lab, and Pattern Lab commands.
 - `docs/` — current architecture, procedures, evidence, and historical
   references. `docs/_work/` is ignored local planning history.
 

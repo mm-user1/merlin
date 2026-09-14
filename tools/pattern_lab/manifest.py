@@ -9,8 +9,10 @@ by the T01 importer and by later collector work.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Mapping, Sequence
@@ -27,6 +29,14 @@ README_NAME = "README.md"
 UPDATES_NAME = "updates.jsonl"
 OHLCV_DIR = "ohlcv"
 UPDATE_MARKER_NAME = ".update-in-progress.json"
+# write_text_atomic's sibling temporary for the marker, owned by the journal.
+UPDATE_MARKER_TEMP_NAME = f".{UPDATE_MARKER_NAME}.tmp"
+
+COLLECTOR_SCHEMA_VERSION = 1
+INSTRUMENT_RULES_SCHEMA_VERSION = 1
+ROSTER_KEYS = ("contract", "instrument_id", "quote_currency", "roles", "symbol", "venue")
+CONTRACT_TYPES = ("linear_perpetual",)
+TRADING_STATUSES = ("live", "Trading")
 
 PACK_STATES = ("ready", "incomplete")
 KNOWN_ROLES = ("factor", "research_only", "trading")
@@ -308,12 +318,48 @@ def dumps_json(payload: Any) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
+def fsync_path(path: Path) -> None:
+    """Flush one already-closed file's contents to stable storage."""
+    handle = os.open(path, os.O_RDWR)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
+def fsync_directory(path: Path) -> None:
+    """Flush a directory entry where the platform supports it.
+
+    POSIX hosts flush the containing directory so a completed rename survives a
+    process or host interruption.  Windows offers no supported directory flush,
+    so this is a documented no-op there: interruption recovery on Windows relies
+    on the retained journal, not on a flushed directory entry.
+    """
+    if os.name != "posix":
+        return
+    handle = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+
+
 def write_text_atomic(target: Path, text: str) -> None:
-    """Write UTF-8 text through a sibling temporary file and an atomic replace."""
+    """Write UTF-8 text durably through a sibling temporary file and a replace.
+
+    The temporary is flushed and fsynced **before** the replace; the containing
+    directory is flushed **after** it, so a crash leaves either the old file or
+    the complete new one.
+    """
     target = Path(target)
     temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_text(text, encoding="utf-8", newline="\n")
-    temporary.replace(target)
+    payload = text.encode("utf-8")
+    with open(temporary, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+    fsync_path(temporary)
+    os.replace(temporary, target)
+    fsync_directory(target.parent)
 
 
 # --------------------------------------------------------------------------
@@ -443,8 +489,15 @@ def build_manifest(
     generated_utc: Any,
     revision: int = 1,
     state: str = "ready",
+    collector: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build and validate a complete manifest document."""
+    """Build and validate a complete manifest document.
+
+    ``collector`` marks the pack as collector-managed: its roster, managed start
+    and last request are validated, and every instrument entry must then carry
+    the versioned v1 rule object.  Archival manifests without it stay valid and
+    unmanaged.
+    """
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "revision": require_int(revision, "revision", minimum=1),
@@ -455,6 +508,8 @@ def build_manifest(
         "universe": dict(universe),
         "instruments": [dict(entry) for entry in instruments],
     }
+    if collector is not None:
+        manifest["collector"] = dict(collector)
     return validate_manifest(manifest)
 
 
@@ -534,7 +589,237 @@ def require_published_verification(raw: Any, where: str) -> dict[str, Any]:
     return verification
 
 
-def _validate_instrument(raw: Any, index: int) -> dict[str, Any]:
+# --------------------------------------------------------------------------
+# collector provenance and instrument rules (populated by the M1b collector)
+# --------------------------------------------------------------------------
+
+def require_decimal_text(value: Any, field: str, *, allow_zero: bool = False) -> str:
+    """Validate a finite decimal quantity string, preserving its source spelling."""
+    text = require_text(value, field)
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError) as exc:
+        raise PatternLabDataError(f"{field}: expected a decimal number, got {value!r}.") from exc
+    if not number.is_finite():
+        raise PatternLabDataError(f"{field}: expected a finite decimal number, got {value!r}.")
+    if number < 0 or (number == 0 and not allow_zero):
+        raise PatternLabDataError(
+            f"{field}: expected a {'nonnegative' if allow_zero else 'positive'} decimal, got {value!r}."
+        )
+    return text
+
+
+def validate_roster_entries(raw: Any, where: str = "collector.roster") -> list[dict[str, Any]]:
+    """Validate the closed six-key roster entries and return them canonically sorted."""
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
+        raise PatternLabDataError(f"{where}: expected a list of roster entries, got {type(raw).__name__}.")
+    if not raw:
+        raise PatternLabDataError(f"{where}: at least one roster entry is required.")
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        position = f"{where}[{index}]"
+        entry = _require_mapping(item, position)
+        missing = sorted(set(ROSTER_KEYS) - set(entry))
+        extra = sorted(set(entry) - set(ROSTER_KEYS))
+        if missing or extra:
+            raise PatternLabDataError(
+                f"{position}: the roster entry is closed; missing keys {missing}, unexpected keys {extra}."
+            )
+        venue = normalize_id_part(entry["venue"], f"{position}.venue")
+        contract = normalize_id_part(entry["contract"], f"{position}.contract")
+        instrument_id = normalize_instrument_id(entry["instrument_id"], f"{position}.instrument_id")
+        if instrument_id != f"{venue}_{contract}":
+            raise PatternLabDataError(
+                f"{position}.instrument_id: {instrument_id!r} does not match venue/contract "
+                f"{venue}_{contract}."
+            )
+        if instrument_id in seen:
+            raise PatternLabDataError(f"{where}: duplicate instrument {instrument_id!r}.")
+        seen.add(instrument_id)
+        symbol = require_text(entry["symbol"], f"{position}.symbol")
+        if not symbol.isascii() or symbol != symbol.strip() or any(ch.isspace() for ch in symbol):
+            raise PatternLabDataError(
+                f"{position}.symbol: expected ASCII text without whitespace, got {symbol!r}."
+            )
+        entries.append(
+            {
+                "contract": contract,
+                "instrument_id": instrument_id,
+                "quote_currency": require_currency(entry["quote_currency"], f"{position}.quote_currency"),
+                "roles": normalize_roles(entry["roles"], f"{position}.roles"),
+                "symbol": symbol,
+                "venue": venue,
+            }
+        )
+    ordered = sorted(entries, key=lambda item: item["instrument_id"])
+    if [item["instrument_id"] for item in entries] != [item["instrument_id"] for item in ordered]:
+        raise PatternLabDataError(f"{where}: entries must be sorted by instrument_id.")
+    return ordered
+
+
+def canonical_roster_bytes(roster: Sequence[Mapping[str, Any]]) -> bytes:
+    """Return the exact bytes hashed into ``collector.roster_sha256``.
+
+    Only the roster's semantic identity is hashed: no universe object, no dates,
+    no paths and no physical file formatting.
+    """
+    return json.dumps(
+        [dict(entry) for entry in roster],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def roster_sha256(roster: Sequence[Mapping[str, Any]]) -> str:
+    """Return the canonical SHA-256 identity of a validated roster."""
+    return hashlib.sha256(canonical_roster_bytes(roster)).hexdigest()
+
+
+def validate_instrument_rules(raw: Any, where: str) -> dict[str, Any]:
+    """Validate the closed v1 instrument-rule object of a collector-managed entry.
+
+    These are current exchange metadata, not reconstructed historical rules.  M4
+    owns their interpretation and enforcement; nothing here enables simulation.
+    """
+    rules = _require_mapping(raw, where)
+    version = require_int(rules.get("schema_version"), f"{where}.schema_version")
+    if version != INSTRUMENT_RULES_SCHEMA_VERSION:
+        raise PatternLabDataError(
+            f"{where}.schema_version: unsupported version {version}; this build writes "
+            f"{INSTRUMENT_RULES_SCHEMA_VERSION}."
+        )
+    raw_fields = _require_mapping(rules.get("raw_contract_fields"), f"{where}.raw_contract_fields")
+    for key, value in raw_fields.items():
+        if value is not None and not isinstance(value, str):
+            raise PatternLabDataError(
+                f"{where}.raw_contract_fields.{key}: source fields are retained as strings or "
+                f"explicit nulls, got {type(value).__name__}."
+            )
+    contract_type = rules.get("contract_type")
+    if contract_type not in CONTRACT_TYPES:
+        raise PatternLabDataError(
+            f"{where}.contract_type: expected one of {list(CONTRACT_TYPES)}, got {contract_type!r}."
+        )
+    status = rules.get("trading_status")
+    if status not in TRADING_STATUSES:
+        raise PatternLabDataError(
+            f"{where}.trading_status: expected the original source status, one of "
+            f"{list(TRADING_STATUSES)}, got {status!r}."
+        )
+    base = require_currency(rules.get("base_currency"), f"{where}.base_currency")
+    quote = require_currency(rules.get("quote_currency"), f"{where}.quote_currency")
+    settlement = require_currency(rules.get("settlement_currency"), f"{where}.settlement_currency")
+    if quote != "USDT" or settlement != "USDT":
+        raise PatternLabDataError(
+            f"{where}: v1 stores only USDT-quoted, USDT-settled linear contracts; got quote "
+            f"{quote!r} and settlement {settlement!r}."
+        )
+    unit = require_text(rules.get("quantity_unit"), f"{where}.quantity_unit")
+    if unit not in ("contracts", base):
+        raise PatternLabDataError(
+            f"{where}.quantity_unit: expected 'contracts' or the base currency {base!r}, got {unit!r}."
+        )
+    notional = rules.get("minimum_notional")
+    listed = rules.get("listed_at_utc")
+    validated = {
+        "schema_version": version,
+        "source_reference": require_text(rules.get("source_reference"), f"{where}.source_reference"),
+        "as_of_utc": format_utc(rules.get("as_of_utc"), f"{where}.as_of_utc"),
+        "contract_type": contract_type,
+        "base_currency": base,
+        "quote_currency": quote,
+        "settlement_currency": settlement,
+        "quantity_unit": unit,
+        "quantity_step": require_decimal_text(rules.get("quantity_step"), f"{where}.quantity_step"),
+        "minimum_quantity": require_decimal_text(rules.get("minimum_quantity"), f"{where}.minimum_quantity"),
+        "price_tick": require_decimal_text(rules.get("price_tick"), f"{where}.price_tick"),
+        "minimum_notional": None
+        if notional is None
+        else require_decimal_text(notional, f"{where}.minimum_notional", allow_zero=True),
+        "listed_at_utc": None if listed is None else format_utc(listed, f"{where}.listed_at_utc"),
+        "trading_status": status,
+        "raw_contract_fields": dict(raw_fields),
+    }
+    extra = sorted(set(rules) - set(validated))
+    if extra:
+        raise PatternLabDataError(f"{where}: the v1 rule object is closed; unexpected keys {extra}.")
+    return validated
+
+
+def validate_collector(
+    raw: Any, *, instruments: Sequence[Mapping[str, Any]], where: str = "manifest.collector"
+) -> dict[str, Any]:
+    """Validate the closed collector provenance object of a managed pack."""
+    collector = _require_mapping(raw, where)
+    version = require_int(collector.get("schema_version"), f"{where}.schema_version")
+    if version != COLLECTOR_SCHEMA_VERSION:
+        raise PatternLabDataError(
+            f"{where}.schema_version: unsupported collector version {version}; this build writes "
+            f"{COLLECTOR_SCHEMA_VERSION}."
+        )
+    roster = validate_roster_entries(collector.get("roster"), f"{where}.roster")
+    digest = require_sha256(collector.get("roster_sha256"), f"{where}.roster_sha256")
+    expected = roster_sha256(roster)
+    if digest != expected:
+        raise PatternLabDataError(
+            f"{where}.roster_sha256: {digest} does not match the canonical roster digest {expected}."
+        )
+    declared = {entry["instrument_id"]: entry["roles"] for entry in roster}
+    published = {entry["instrument_id"]: entry["roles"] for entry in instruments}
+    if declared != published:
+        raise PatternLabDataError(
+            f"{where}.roster: the roster must match the published instrument identities and roles "
+            f"exactly; roster {sorted(declared)} versus manifest {sorted(published)}."
+        )
+    managed_start = require_aligned(
+        to_epoch_ms(collector.get("managed_start_utc"), f"{where}.managed_start_utc"),
+        BASE_STEP_MS,
+        f"{where}.managed_start_utc",
+    )
+    request = _require_mapping(collector.get("last_request"), f"{where}.last_request")
+    request_extra = sorted(set(request) - {"start_utc", "end_utc"})
+    if request_extra:
+        raise PatternLabDataError(
+            f"{where}.last_request: the object is closed; unexpected keys {request_extra}."
+        )
+    start_ms = require_aligned(
+        to_epoch_ms(request.get("start_utc"), f"{where}.last_request.start_utc"),
+        BASE_STEP_MS,
+        f"{where}.last_request.start_utc",
+    )
+    end_ms = require_aligned(
+        to_epoch_ms(request.get("end_utc"), f"{where}.last_request.end_utc"),
+        BASE_STEP_MS,
+        f"{where}.last_request.end_utc",
+    )
+    if start_ms >= end_ms:
+        raise PatternLabDataError(
+            f"{where}.last_request: requires start_utc < end_utc, got "
+            f"{format_epoch_ms(start_ms)} >= {format_epoch_ms(end_ms)}."
+        )
+    if start_ms != managed_start:
+        raise PatternLabDataError(
+            f"{where}.last_request.start_utc: must equal managed_start_utc "
+            f"{format_epoch_ms(managed_start)}, got {format_epoch_ms(start_ms)}."
+        )
+    validated = {
+        "schema_version": version,
+        "roster": roster,
+        "roster_sha256": digest,
+        "managed_start_utc": format_epoch_ms(managed_start),
+        "last_request": {"start_utc": format_epoch_ms(start_ms), "end_utc": format_epoch_ms(end_ms)},
+        "operation_id": require_text(collector.get("operation_id"), f"{where}.operation_id"),
+    }
+    extra = sorted(set(collector) - set(validated))
+    if extra:
+        raise PatternLabDataError(f"{where}: the v1 collector object is closed; unexpected keys {extra}.")
+    return validated
+
+
+def _validate_instrument(raw: Any, index: int, *, managed: bool = False) -> dict[str, Any]:
     where = f"instruments[{index}]"
     entry = _require_mapping(raw, where)
     venue = normalize_id_part(entry.get("venue"), f"{where}.venue")
@@ -587,7 +872,13 @@ def _validate_instrument(raw: Any, index: int) -> dict[str, Any]:
     entry["sha256"] = require_sha256(entry.get("sha256"), f"{where}.sha256")
     entry["source"] = _validate_source(entry.get("source"), f"{where}.source")
     entry["verification"] = _validate_verification(entry.get("verification"), f"{where}.verification")
-    if "instrument_rules" in entry and entry["instrument_rules"] is not None:
+    if managed:
+        # A collector-managed entry always carries the versioned v1 rule object;
+        # M1a archival packs keep their existing opaque-mapping behavior.
+        entry["instrument_rules"] = validate_instrument_rules(
+            entry.get("instrument_rules"), f"{where}.instrument_rules"
+        )
+    elif "instrument_rules" in entry and entry["instrument_rules"] is not None:
         entry["instrument_rules"] = _require_mapping(entry["instrument_rules"], f"{where}.instrument_rules")
     return entry
 
@@ -625,11 +916,12 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     instruments = manifest.get("instruments")
     if not isinstance(instruments, list) or not instruments:
         raise PatternLabDataError("manifest.instruments: expected a nonempty list.")
+    managed = manifest.get("collector") is not None
     validated: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     seen_files: set[str] = set()
     for index, entry in enumerate(instruments):
-        item = _validate_instrument(entry, index)
+        item = _validate_instrument(entry, index, managed=managed)
         if item["instrument_id"] in seen_ids:
             raise PatternLabDataError(f"manifest.instruments: duplicate instrument_id {item['instrument_id']!r}.")
         if item["file"] in seen_files:
@@ -638,6 +930,8 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         seen_files.add(item["file"])
         validated.append(item)
     manifest["instruments"] = validated
+    if managed:
+        manifest["collector"] = validate_collector(manifest["collector"], instruments=validated)
     return manifest
 
 
@@ -696,12 +990,16 @@ def build_update_record(
     }
 
 
+def render_update_line(record: Mapping[str, Any]) -> str:
+    """Render one JSON Lines update record, including its trailing newline."""
+    return json.dumps(record, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+
+
 def append_update_record(data_root: Path, record: Mapping[str, Any]) -> None:
     """Append one JSON Lines update record using explicit UTF-8 and newlines."""
-    line = json.dumps(record, sort_keys=True, ensure_ascii=False, allow_nan=False)
     path = Path(data_root) / UPDATES_NAME
     with open(path, "a", encoding="utf-8", newline="\n") as handle:
-        handle.write(line + "\n")
+        handle.write(render_update_line(record))
 
 
 def research_blockers(entry: Mapping[str, Any]) -> list[str]:
@@ -752,6 +1050,50 @@ def _evidence_lines(entry: Mapping[str, Any]) -> list[str]:
         )
     limitations = research_limitations(entry)
     lines.append(f"- Research limitations: {'; '.join(limitations) if limitations else 'none'}")
+    rules = entry.get("instrument_rules")
+    if isinstance(rules, Mapping) and rules.get("schema_version") == INSTRUMENT_RULES_SCHEMA_VERSION:
+        lines += [
+            f"- Contract: {rules['contract_type']}, {rules['base_currency']}/{rules['quote_currency']}, "
+            f"settled in {rules['settlement_currency']}, status {rules['trading_status']}",
+            f"- Quantity unit: {rules['quantity_unit']}; step {rules['quantity_step']}, "
+            f"minimum {rules['minimum_quantity']}, price tick {rules['price_tick']}, "
+            f"minimum notional {rules['minimum_notional'] or 'unavailable'}",
+            f"- Listed at UTC: {rules['listed_at_utc'] or 'unknown'} "
+            f"(rules observed {rules['as_of_utc']} from {rules['source_reference']})",
+        ]
+    return lines
+
+
+def tail_shortfall_bars(entry: Mapping[str, Any], requested_end_utc: Any) -> int:
+    """Return how many 5m slots an instrument's actual tail falls short of a request."""
+    requested = to_epoch_ms(requested_end_utc, "requested_end_utc")
+    covered = to_epoch_ms(entry["coverage_end_utc"], f"{entry['instrument_id']}.coverage_end_utc")
+    return max(0, (requested - covered) // BASE_STEP_MS)
+
+
+def _collector_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """Render the collector section: managed request, roster identity and shortfalls."""
+    collector = manifest["collector"]
+    request = collector["last_request"]
+    lines = [
+        "",
+        "## Collector-managed coverage",
+        "",
+        f"- Managed start (UTC): {collector['managed_start_utc']}",
+        f"- Last requested interval: [{request['start_utc']}, {request['end_utc']})",
+        f"- Roster entries: {len(collector['roster'])} (SHA-256 `{collector['roster_sha256']}`)",
+        f"- Publishing operation: `{collector['operation_id']}`",
+        "",
+        "The requested end is the frozen request of the last publishing operation. A published",
+        "pack does not mean the requested range is complete: each instrument's actual coverage",
+        "is authoritative, and a short tail is reported below rather than hidden.",
+        "",
+        "| Instrument | Coverage end UTC | Tail shortfall (5m bars) |",
+        "| --- | --- | --- |",
+    ]
+    for entry in manifest["instruments"]:
+        shortfall = tail_shortfall_bars(entry, request["end_utc"])
+        lines.append(f"| {entry['instrument_id']} | {entry['coverage_end_utc']} | {shortfall} |")
     return lines
 
 
@@ -779,6 +1121,9 @@ def render_readme(manifest: Mapping[str, Any]) -> str:
         f"- Historical (point-in-time) membership: {universe['historical_membership']}",
         f"- Notes: {universe['notes'] or 'none'}",
         "",
+        "Membership is the currently selected roster. A later generation time neither erases",
+        "prior use of this data nor reconstructs point-in-time historical membership.",
+        "",
         "## Coverage",
         "",
         "Coverage end is exclusive. Missing bars are absent 5m slots inside the declared",
@@ -800,6 +1145,8 @@ def render_readme(manifest: Mapping[str, Any]) -> str:
                 missing=entry["missing_bar_count"],
             )
         )
+    if manifest.get("collector") is not None:
+        lines += _collector_lines(manifest)
     lines += [
         "",
         "## Verification, evidence and source limitations",

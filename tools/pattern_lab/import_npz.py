@@ -18,7 +18,7 @@ import numpy as np
 
 from . import PatternLabDataError
 from . import manifest as pack_manifest
-from .data import InstrumentSource, publish_pack
+from .data import InstrumentSource, _publish_pack_unlocked, new_pack_guard
 from .manifest import (
     BASE_STEP_MS,
     build_instrument_id,
@@ -348,21 +348,23 @@ def import_npz_pack(
             "selection date, and point-in-time historical membership is not verified."
         ),
     )
-    summary = publish_pack(
-        output_root,
-        iter_instrument_sources(source_root, entries, metadata),
-        universe=resolved_universe,
-        generated_utc=generated_utc or datetime.now(timezone.utc).replace(microsecond=0),
-        source={
-            "kind": "legacy_npz_import",
-            "source_root": str(source_root.resolve()),
-            "source_manifest": LEGACY_MANIFEST_NAME,
-            "source_manifest_sha256": legacy_manifest_hash,
-            "series_count": len(entries),
-        },
-        note=note,
-        source_root=source_root,
-    )
+    # The importer owns the destination guard itself and calls the unlocked
+    # publication core, so it never acquires the same pack lock twice.
+    with new_pack_guard(output_root, source_root=source_root) as locked_root:
+        summary = _publish_pack_unlocked(
+            locked_root,
+            iter_instrument_sources(source_root, entries, metadata),
+            universe=resolved_universe,
+            generated_utc=generated_utc or datetime.now(timezone.utc).replace(microsecond=0),
+            source={
+                "kind": "legacy_npz_import",
+                "source_root": str(source_root.resolve()),
+                "source_manifest": LEGACY_MANIFEST_NAME,
+                "source_manifest_sha256": legacy_manifest_hash,
+                "series_count": len(entries),
+            },
+            note=note,
+        )
     summary["source_root"] = str(source_root.resolve())
     summary["source_manifest_sha256"] = legacy_manifest_hash
     return summary

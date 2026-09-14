@@ -405,3 +405,178 @@ class TestPublicationVerificationPolicy:
             volume_quote_verified=True, volume_quote_evidence="synthetic"
         )
         assert pack_manifest.require_published_verification(verification, "TEST_A")["closed_before_utc"] is None
+
+
+def _rules(**overrides):
+    """Build a valid collector-managed instrument-rule object."""
+    rules = {
+        "schema_version": 1,
+        "source_reference": "GET /api/v5/public/instruments (instType=SWAP) instId=AAA-USDT-SWAP",
+        "as_of_utc": "2026-09-14T00:00:00Z",
+        "contract_type": "linear_perpetual",
+        "base_currency": "AAA",
+        "quote_currency": "USDT",
+        "settlement_currency": "USDT",
+        "quantity_unit": "contracts",
+        "quantity_step": "1",
+        "minimum_quantity": "1",
+        "price_tick": "0.001",
+        "minimum_notional": None,
+        "listed_at_utc": "2023-11-14T22:13:20Z",
+        "trading_status": "live",
+        "raw_contract_fields": {
+            "instType": "SWAP",
+            "ctType": "linear",
+            "settleCcy": "USDT",
+            "ctVal": "0.1",
+            "ctValCcy": "AAA",
+            "ctMult": None,
+            "lotSz": "1",
+            "minSz": "1",
+            "tickSz": "0.001",
+            "listTime": "1700000000000",
+            "state": "live",
+        },
+    }
+    rules.update(overrides)
+    return rules
+
+
+def _roster(**overrides):
+    entry = {
+        "contract": "AAA-USDT-SWAP",
+        "instrument_id": "TEST_AAA-USDT-SWAP",
+        "quote_currency": "USDT",
+        "roles": ["trading"],
+        "symbol": "AAA",
+        "venue": "TEST",
+    }
+    entry.update(overrides)
+    return [entry]
+
+
+def _collector(roster=None, **overrides):
+    entries = _roster() if roster is None else roster
+    payload = {
+        "schema_version": 1,
+        "roster": entries,
+        "roster_sha256": pack_manifest.roster_sha256(entries),
+        "managed_start_utc": utc(ANCHOR_MS),
+        "last_request": {"start_utc": utc(ANCHOR_MS), "end_utc": utc(ANCHOR_MS + 3 * STEP_MS)},
+        "operation_id": "20260914T000000Z-0123456789ab",
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestCollectorProvenance:
+    def test_a_managed_manifest_validates_and_renders(self):
+        managed = _manifest([_entry(instrument_rules=_rules())], collector=_collector())
+        validated = pack_manifest.validate_manifest(managed)
+        assert validated["collector"]["roster_sha256"] == pack_manifest.roster_sha256(_roster())
+        readme = pack_manifest.render_readme(validated)
+        assert "## Collector-managed coverage" in readme
+        assert "Tail shortfall (5m bars)" in readme
+        assert "| 0 |" in readme
+        assert "Quantity unit: contracts" in readme
+
+    def test_an_archival_manifest_without_a_collector_stays_unmanaged(self):
+        validated = pack_manifest.validate_manifest(_manifest())
+        assert "collector" not in validated
+        assert "## Collector-managed coverage" not in pack_manifest.render_readme(validated)
+
+    def test_the_roster_digest_excludes_universe_dates_and_paths(self):
+        first = pack_manifest.roster_sha256(_roster())
+        managed = _manifest(
+            [_entry(instrument_rules=_rules())],
+            collector=_collector(),
+            universe=pack_manifest.build_universe(notes="entirely different provenance"),
+        )
+        assert pack_manifest.validate_manifest(managed)["collector"]["roster_sha256"] == first
+        assert pack_manifest.canonical_roster_bytes(_roster()).endswith(b"}]")
+
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            ({"schema_version": 2}, "unsupported collector version"),
+            ({"roster_sha256": "b" * 64}, "does not match the canonical roster digest"),
+            ({"operation_id": "  "}, "nonblank string"),
+            ({"managed_start_utc": utc(ANCHOR_MS + 60_000)}, "not aligned"),
+            ({"extra": 1}, "closed"),
+            (
+                {"last_request": {"start_utc": utc(ANCHOR_MS), "end_utc": utc(ANCHOR_MS)}},
+                "start_utc < end_utc",
+            ),
+            (
+                {
+                    "last_request": {
+                        "start_utc": utc(ANCHOR_MS + STEP_MS),
+                        "end_utc": utc(ANCHOR_MS + 3 * STEP_MS),
+                    }
+                },
+                "must equal managed_start_utc",
+            ),
+            (
+                {
+                    "last_request": {
+                        "start_utc": utc(ANCHOR_MS),
+                        "end_utc": utc(ANCHOR_MS + STEP_MS),
+                        "token": "latest-closed",
+                    }
+                },
+                "closed",
+            ),
+        ],
+    )
+    def test_invalid_collector_objects_are_rejected(self, overrides, message):
+        managed = _manifest([_entry(instrument_rules=_rules())], collector=_collector(**overrides))
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_manifest.validate_manifest(managed)
+
+    def test_the_roster_must_match_the_published_identities_and_roles(self):
+        relabelled = _roster(roles=["research_only"])
+        managed = _manifest(
+            [_entry(instrument_rules=_rules())],
+            collector=_collector(roster=relabelled),
+        )
+        with pytest.raises(PatternLabDataError, match="must match the published instrument"):
+            pack_manifest.validate_manifest(managed)
+
+    def test_a_managed_entry_requires_the_versioned_rule_object(self):
+        managed = _manifest([_entry()], collector=_collector())
+        with pytest.raises(PatternLabDataError, match="instrument_rules"):
+            pack_manifest.validate_manifest(managed)
+
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            ({"schema_version": 2}, "unsupported version"),
+            ({"contract_type": "future"}, "contract_type"),
+            ({"trading_status": "halted"}, "trading_status"),
+            ({"quote_currency": "USDC"}, "USDT-quoted"),
+            ({"quantity_unit": "lots"}, "quantity_unit"),
+            ({"quantity_step": "0"}, "positive decimal"),
+            ({"price_tick": "abc"}, "decimal number"),
+            ({"minimum_notional": "-1"}, "nonnegative decimal"),
+            ({"raw_contract_fields": {"lotSz": 1}}, "retained as strings"),
+            ({"extra": 1}, "closed"),
+        ],
+    )
+    def test_invalid_instrument_rules_are_rejected(self, overrides, message):
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_manifest.validate_instrument_rules(_rules(**overrides), "rules")
+
+    def test_a_listing_instant_need_not_sit_on_the_grid(self):
+        rules = pack_manifest.validate_instrument_rules(
+            _rules(listed_at_utc="2023-11-14T22:13:21Z"), "rules"
+        )
+        assert rules["listed_at_utc"] == "2023-11-14T22:13:21Z"
+        assert pack_manifest.validate_instrument_rules(_rules(listed_at_utc=None), "rules")[
+            "listed_at_utc"
+        ] is None
+
+    def test_tail_shortfall_is_derived_from_the_requested_end(self):
+        entry = _entry()
+        assert pack_manifest.tail_shortfall_bars(entry, entry["coverage_end_utc"]) == 0
+        later = utc(ANCHOR_MS + 10 * STEP_MS)
+        assert pack_manifest.tail_shortfall_bars(entry, later) == 7

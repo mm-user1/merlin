@@ -120,24 +120,40 @@ schema, resume, scope-unlock, analysis, allocation, and certification contracts.
 ## Pattern Lab
 
 Pattern Lab is local, research-only tooling for testing hypotheses before a
-strategy exists. Its implemented milestone is the data foundation: a stable
+strategy exists. Its implemented milestones are the data foundation (a stable
 Parquet market-data pack, an explicit manifest, a one-way importer for the
 historical prototype NPZ pack, and a fixed-interval reader/resampler with a
-reproducible research input fingerprint. It requires `pyarrow==22.0.0` from the
-root `requirements.txt` and never installs dependencies itself.
+reproducible research input fingerprint) and the collector (closed-bar 5m
+collection from public exchange APIs, recoverable updates, cooperative process
+exclusion and collector/instrument-rule provenance). It requires
+`pyarrow==22.0.0` from the root `requirements.txt` and never installs
+dependencies itself.
 
 ```bash
 python -m tools.pattern_lab --help
+python -m tools.pattern_lab collect --universe tools/pattern_lab/configs/universe.json \
+    --data-root <new-pack> --start 2025-06-01T00:00:00Z --end latest-closed
+python -m tools.pattern_lab update --data-root <pack> --end 2026-10-01T00:00:00Z
+python -m tools.pattern_lab recover --data-root <pack>
+python -m tools.pattern_lab abort-update --data-root <pack>
 python -m tools.pattern_lab inspect --data-root <pack> --verify
 python -m tools.pattern_lab slice --data-root <pack> --instrument OKX_LINK-USDT-SWAP \
     --start 2025-07-01T00:00:00Z --end 2026-07-01T00:00:00Z --timeframe-minutes 30
 ```
 
+Network access happens only inside `collect`, `update` and `recover`, through
+unauthenticated public REST endpoints. Every pack-level operation, including a
+read, takes the in-root `.pack-lock` guard, so a busy root is reported (exit `3`)
+rather than queued and two independent readers conflict deliberately. Exit `4`
+means a pending operation must be recovered or aborted first. Collector code
+availability is not an operationally prepared market pack.
+
 Feature, hypothesis, evaluation-model, bracket-probe and report commands are not
 implemented. Merlin and Strategy Lab do not import Pattern Lab, and ordinary
 Merlin CSV behavior is unchanged. See the
 [Pattern Lab data guide](pattern_lab/README.md) for the schema, manifest,
-identity encoding, read/write boundaries and the M1b collector handoff.
+roster, adapters, identity encoding, exclusion/recovery contract and the
+operational recipes.
 
 ## Related documentation
 
