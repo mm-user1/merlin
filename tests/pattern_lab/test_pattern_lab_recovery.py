@@ -821,3 +821,410 @@ class TestApplyPlanValidation:
         )
         recover(root, exchange, clock)
         assert_published_once(root, revision=2, events=2)
+
+
+def staging_bytes(root: Path) -> dict:
+    """Return every staging artifact's bytes, which a rejected journal must keep."""
+    return {
+        path.relative_to(root): path.read_bytes()
+        for directory in sorted(root.glob(f"{update_transaction.STAGING_PREFIX}*"))
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def denied_transport(*args, **kwargs):
+    """Invalid restored evidence must be rejected before any request is made."""
+    raise AssertionError("a rejected journal reached the transport")
+
+
+def set_listing(record: dict, epoch_ms: int, key: str) -> None:
+    """Move one preflight record's listing consistently, source field included."""
+    listed = pack_manifest.exact_utc_from_epoch_ms(epoch_ms)
+    record["listed_at_utc"] = listed
+    record["listing_known"] = True
+    record["rules"]["listed_at_utc"] = listed
+    record["rules"]["raw_contract_fields"][key] = str(epoch_ms)
+
+
+class TestRestoredEvidenceValidation:
+    """Saved preflight and closure evidence is validated before any work."""
+
+    def _interrupted(self, root, exchange, clock, monkeypatch, boundary, module=pack_collect):
+        fail_before(monkeypatch, module, boundary, lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        return update_transaction.pending_state(root)["journal"]
+
+    @pytest.mark.parametrize(
+        "mutate, message",
+        [
+            (lambda j: j["preflight"][OKX_ID].update(rules={}), "schema_version"),
+            (
+                lambda j: j["preflight"][OKX_ID]["rules"].update(price_tick="0.5"),
+                "does not agree numerically",
+            ),
+            (lambda j: j["preflight"][OKX_ID].update(probe={}), "probe record is closed"),
+            (
+                lambda j: j["preflight"][OKX_ID]["probe"].update(checked="yes"),
+                "expected a boolean",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID]["probe"].update(reason="  "),
+                "probe.reason",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID]["probe"].update(checked=True),
+                "must record an available first slot",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID]["probe"].update(available=True),
+                "an unchecked probe made no observation",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID]["probe"].update(
+                    slot_utc=utc(ANCHOR_MS + 3 * STEP_MS)
+                ),
+                "is not the effective requested start",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID].update(listed_at_utc=None, listing_known=False),
+                "does not agree with the recorded rules listing",
+            ),
+            (
+                lambda j: j["preflight"][OKX_ID].update(listing_known=False),
+                "listing_known: does not agree",
+            ),
+            (
+                lambda j: set_listing(j["preflight"][OKX_ID], ANCHOR_MS + STEP_MS, "listTime"),
+                "after the effective requested start",
+            ),
+            (
+                lambda j: j["preflight"].pop(OKX_ID),
+                "must cover every member",
+            ),
+            (
+                lambda j: j.update(preflight={}),
+                "completed work requires the recorded all-roster preflight",
+            ),
+            (
+                lambda j: j["closure"]["server_times_ms"].pop("OKX"),
+                "must cover exactly the roster venues",
+            ),
+            (
+                lambda j: j["closure"]["server_times_ms"].update(KRAKEN=1),
+                "must cover exactly the roster venues",
+            ),
+            (
+                lambda j: j["closure"].update(publication_lag_ms=0),
+                "is not the fixed 60000ms publication allowance",
+            ),
+        ],
+    )
+    def test_invalid_restored_evidence_is_rejected(self, collected, monkeypatch, mutate, message):
+        root, exchange, clock = collected
+        journal = self._interrupted(root, exchange, clock, monkeypatch, "_enter_applying")
+        mutate(journal)
+        with pytest.raises(PatternLabDataError) as failure:
+            update_transaction.validate_journal(journal)
+        assert failure.value.error_code == "invalid_journal"
+        assert message in str(failure.value)
+
+    @pytest.mark.parametrize("boundary", ["_collect_instrument", "_enter_applying"])
+    def test_invalid_rules_fail_before_any_download_or_staged_write(
+        self, collected, monkeypatch, boundary
+    ):
+        """The reproduced case: empty saved rules and probe must stop recovery."""
+        root, exchange, clock = collected
+        journal = self._interrupted(root, exchange, clock, monkeypatch, boundary)
+        before_live, before_staging = live_bytes(root), staging_bytes(root)
+        journal["preflight"][OKX_ID]["rules"] = {}
+        journal["preflight"][OKX_ID]["probe"] = {}
+        raw_write_journal(root, journal)
+
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_collect.recover_pack(root, transport=denied_transport, clock=clock)
+        assert failure.value.error_code == "invalid_journal"
+        assert update_transaction.marker_path(root).is_file()
+        assert live_bytes(root) == before_live
+        assert staging_bytes(root) == before_staging
+        assert pack_manifest.read_manifest(root)["revision"] == 1
+        assert len(history_lines(root)) == 1
+
+    def test_the_initial_state_before_preflight_stays_valid(self, collected, monkeypatch):
+        root, exchange, clock = collected
+        journal = self._interrupted(
+            root, exchange, clock, monkeypatch, "_preflight"
+        )
+        assert journal["preflight"] == {}
+        assert journal["staged"] == {}
+        assert journal["targets"] is None
+        assert update_transaction.validate_journal(journal) == journal
+        # And it still recovers normally, re-running the preflight it never had.
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+
+    def test_a_checked_prefix_and_an_unchecked_append_are_both_valid(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40, first_slot=10)
+        run_collect(root, roster, exchange, clock, start=utc(int(stamps[0])))
+
+        wider_stamps, wider_values = synthetic_series(60)
+        exchange.now_ms = clock.now_ms = int(wider_stamps[-1]) + STEP_MS + 90_000
+        exchange.set_rows("OKX", OKX_CONTRACT, wider_stamps, wider_values)
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, wider_stamps, wider_values)
+
+        fail_before(monkeypatch, pack_collect, "_enter_applying", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock, start=utc(int(wider_stamps[0])))
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        # A newly requested prefix is actually probed and available.
+        assert journal["preflight"][OKX_ID]["probe"]["checked"] is True
+        assert journal["preflight"][OKX_ID]["probe"]["available"] is True
+        assert update_transaction.validate_journal(journal) == journal
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+
+        # An ordinary append needs no probe: unchecked, with no observation.
+        longer_stamps, longer_values = synthetic_series(80)
+        exchange.now_ms = clock.now_ms = int(longer_stamps[-1]) + STEP_MS + 90_000
+        exchange.set_rows("OKX", OKX_CONTRACT, longer_stamps, longer_values)
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, longer_stamps, longer_values)
+        fail_before(monkeypatch, pack_collect, "_enter_applying", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        appended = update_transaction.pending_state(root)["journal"]
+        assert appended["preflight"][OKX_ID]["probe"]["checked"] is False
+        assert appended["preflight"][OKX_ID]["probe"]["available"] is None
+        assert update_transaction.validate_journal(appended) == appended
+
+    def test_an_unchecked_probe_cannot_stand_in_for_a_new_prefix(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40, first_slot=10)
+        run_collect(root, roster, exchange, clock, start=utc(int(stamps[0])))
+        wider_stamps, wider_values = synthetic_series(60)
+        exchange.now_ms = clock.now_ms = int(wider_stamps[-1]) + STEP_MS + 90_000
+        exchange.set_rows("OKX", OKX_CONTRACT, wider_stamps, wider_values)
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, wider_stamps, wider_values)
+
+        fail_before(monkeypatch, pack_collect, "_collect_instrument", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock, start=utc(int(wider_stamps[0])))
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        before_live = live_bytes(root)
+        for record in journal["preflight"].values():
+            record["probe"] = {
+                "checked": False,
+                "slot_utc": journal["request"]["start_utc"],
+                "available": None,
+                "reason": "the requested start is already verified in the stored pack",
+            }
+        raw_write_journal(root, journal)
+
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_collect.recover_pack(root, transport=denied_transport, clock=clock)
+        assert failure.value.error_code == "invalid_journal"
+        assert "never probed at the source" in str(failure.value)
+        assert live_bytes(root) == before_live
+        assert update_transaction.marker_path(root).is_file()
+
+    def test_a_partially_applied_recovery_needs_no_old_manifest(self, collected, monkeypatch):
+        """Applying may already have consumed the old generation; that is valid."""
+        root, exchange, clock = collected
+        fail_after(
+            monkeypatch,
+            update_transaction,
+            "_publish_replacement",
+            lambda calls, *_: calls == 1,
+        )
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        assert journal["phase"] == "applying"
+        # The unchecked probes are still valid here: nothing re-reads the old
+        # manifest to prove an already-covered start at this phase.
+        assert update_transaction.validate_journal(journal) == journal
+        recover(root, exchange, clock)
+        assert_published_once(root, revision=2, events=2)
+
+
+class TestDerivedFactAdmission:
+    """Contradictory derived facts are rejected at journal admission."""
+
+    def _staging_journal(self, root, exchange, clock, monkeypatch):
+        fail_before(monkeypatch, pack_collect, "_enter_applying", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        return update_transaction.pending_state(root)["journal"]
+
+    @pytest.mark.parametrize(
+        "mutate, message",
+        [
+            (
+                lambda j, f: f.update(tail_shortfall_bars=777),
+                "is not the 0 bar(s) between the coverage end",
+            ),
+            (lambda j, f: f.update(changed=not f["changed"]), "does not agree with the staged record"),
+            (lambda j, f: f.update(added_rows=f["added_rows"] + 1), "is not the sum"),
+            (lambda j, f: f.update(appended_rows=f["appended_rows"] + 1), "is not the sum"),
+            (
+                lambda j, f: f.update(gap_bar_count=f["gap_bar_count"] + 1),
+                "does not agree with the entry's missing_bar_count",
+            ),
+            (
+                lambda j, f: f.update(gap_range_count=1),
+                "cannot hold only 0 missing bar(s)",
+            ),
+            (
+                lambda j, f: f["fetch_ranges"][0].update(extra=1),
+                "a fetch range is closed",
+            ),
+            (
+                lambda j, f: f["fetch_ranges"][0].update(start_utc=utc(ANCHOR_MS - STEP_MS)),
+                "falls outside the effective request",
+            ),
+            (
+                lambda j, f: f["fetch_ranges"][0].update(end_utc=f["fetch_ranges"][0]["start_utc"]),
+                "requires start_utc < end_utc",
+            ),
+            (
+                lambda j, f: f["fetch_ranges"].append(dict(f["fetch_ranges"][0])),
+                "sorted and coalesced",
+            ),
+            (
+                lambda j, f: f["fetch_ranges"].append(
+                    {"start_utc": utc(ANCHOR_MS + STEP_MS // 2), "end_utc": utc(ANCHOR_MS + STEP_MS)}
+                ),
+                "5m",
+            ),
+        ],
+    )
+    def test_contradictory_facts_are_refused(self, collected, monkeypatch, mutate, message):
+        root, exchange, clock = collected
+        journal = self._staging_journal(root, exchange, clock, monkeypatch)
+        mutate(journal, journal["staged"][OKX_ID]["facts"])
+        with pytest.raises(PatternLabDataError) as failure:
+            update_transaction.validate_journal(journal)
+        assert failure.value.error_code == "invalid_journal"
+        assert message in str(failure.value)
+
+    @pytest.mark.parametrize("boundary_module, boundary", [
+        (pack_collect, "_enter_applying"),
+        (update_transaction, "apply_operation"),
+    ])
+    def test_one_wrong_counter_blocks_publication_in_either_phase(
+        self, collected, monkeypatch, boundary_module, boundary
+    ):
+        """The reproduced case: a zero shortfall changed to 777 never publishes."""
+        root, exchange, clock = collected
+        fail_before(monkeypatch, boundary_module, boundary, lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        before_live, before_staging = live_bytes(root), staging_bytes(root)
+        assert journal["staged"][OKX_ID]["facts"]["tail_shortfall_bars"] == 0
+        journal["staged"][OKX_ID]["facts"]["tail_shortfall_bars"] = 777
+        raw_write_journal(root, journal)
+
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_collect.recover_pack(root, transport=denied_transport, clock=clock)
+        assert failure.value.error_code == "invalid_journal"
+        assert pack_manifest.read_manifest(root)["revision"] == 1
+        assert len(history_lines(root)) == 1
+        assert update_transaction.marker_path(root).is_file()
+        assert live_bytes(root) == before_live
+        assert staging_bytes(root) == before_staging
+
+    def test_a_true_short_tail_and_its_fetch_ranges_stay_valid(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, values = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        # The clock advances but no new candle closes: the requested end is ahead
+        # of the actual coverage for every instrument.
+        exchange.now_ms = clock.now_ms = int(stamps[-1]) + STEP_MS + 20 * STEP_MS
+        fail_before(monkeypatch, pack_collect, "_is_no_op", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        facts = journal["staged"][OKX_ID]["facts"]
+        assert facts["tail_shortfall_bars"] > 0
+        assert facts["added_rows"] == 0 and facts["changed"] is False
+        assert update_transaction.validate_journal(journal) == journal
+
+    def test_a_rules_only_change_adds_no_rows(self, tmp_path, roster, monkeypatch):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        exchange.instruments[("OKX", OKX_CONTRACT)]["tickSz"] = "0.002"
+        fail_before(monkeypatch, pack_collect, "_enter_applying", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        facts = journal["staged"][OKX_ID]["facts"]
+        assert facts["changed"] is False and facts["rules_changed"] is True
+        assert facts["added_rows"] == 0
+        assert update_transaction.validate_journal(journal) == journal
+
+    def test_an_older_requested_end_reports_a_zero_shortfall(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, stamps, _ = build_exchange(slots=40)
+        run_collect(root, roster, exchange, clock)
+        fail_before(monkeypatch, pack_collect, "_is_no_op", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock, end=utc(int(stamps[20])))
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        facts = journal["staged"][OKX_ID]["facts"]
+        # The stored tail reaches past the older requested end: zero, not negative.
+        assert facts["tail_shortfall_bars"] == 0
+        assert facts["fetch_ranges"] == []
+        assert update_transaction.validate_journal(journal) == journal
+
+    def test_a_truncated_gap_sample_stays_valid(self, tmp_path, roster, monkeypatch):
+        root = tmp_path / "pack"
+        dropped = tuple(range(3, 40, 3))  # 13 separate one-bar gaps
+        exchange, clock, _, _ = build_exchange(slots=60, drop_slots=dropped)
+        run_collect(root, roster, exchange, clock)
+        fail_before(monkeypatch, pack_collect, "_is_no_op", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        facts = journal["staged"][OKX_ID]["facts"]
+        assert facts["gap_range_count"] == len(dropped) > update_transaction.GAP_SAMPLE_LIMIT
+        assert len(facts["gap_ranges"]) == update_transaction.GAP_SAMPLE_LIMIT
+        sampled = sum(item["missing_bars"] for item in facts["gap_ranges"])
+        assert sampled < facts["gap_bar_count"]  # a truncated sample is still valid
+        assert update_transaction.validate_journal(journal) == journal
+
+    def test_an_invalid_gap_sample_is_refused(self, tmp_path, roster, monkeypatch):
+        root = tmp_path / "pack"
+        exchange, clock, _, _ = build_exchange(slots=60, drop_slots=(5, 9))
+        run_collect(root, roster, exchange, clock)
+        fail_before(monkeypatch, pack_collect, "_is_no_op", lambda *_: True)
+        with pytest.raises(Interrupted):
+            run_update(root, exchange, clock)
+        monkeypatch.undo()
+        journal = update_transaction.pending_state(root)["journal"]
+        facts = journal["staged"][OKX_ID]["facts"]
+        assert len(facts["gap_ranges"]) == 2
+        facts["gap_ranges"][0]["missing_bars"] += 1
+        with pytest.raises(PatternLabDataError, match="is not the 1 slot"):
+            update_transaction.validate_journal(journal)

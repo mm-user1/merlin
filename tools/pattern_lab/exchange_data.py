@@ -69,13 +69,22 @@ USER_AGENT = "merlin-pattern-lab/1 (+local research tooling)"
 # business code fails on its first response, so an invalid symbol, an expired
 # request window or an access restriction never looks like empty history.
 #
-# OKX: 50011 rate limit reached, 50013 systems are busy, 50026 system error.
-# 50113 is an invalid-signature configuration error and is deliberately absent.
-OKX_RETRYABLE_CODES = frozenset({"50011", "50013", "50026"})
-# Bybit UTA REST: 10006 too many visits, 10016 server error, 10018 IP rate limit.
-# 10002 is a request-time-window error, and 10429 is a WebSocket-only code; HTTP
-# 429 is already classified from the status line, so neither belongs here.
-BYBIT_RETRYABLE_CODES = frozenset({10006, 10016, 10018})
+# OKX: 50004 endpoint request timeout, 50011 rate limit reached, 50013 systems
+# are busy, 50026 system error. 50113 is an invalid-signature configuration
+# error and is deliberately absent.
+OKX_RETRYABLE_CODES = frozenset({"50004", "50011", "50013", "50026"})
+# OKX documents 50004 with HTTP 400, a status line that is otherwise permanent.
+# It is the one documented exception whose body is parsed before that decision.
+OKX_TIMEOUT_CODE = "50004"
+OKX_TIMEOUT_STATUS = 400
+# Bybit UTA REST: 10000 server timeout, 10006 too many visits, 10016 server
+# error. 10018 (IP rate limit) is struck through in the current official table;
+# its bounded handling is retained as legacy compatibility, not as a current
+# required API condition. 10002 is a request-time-window error, and 10429 is a
+# WebSocket-only code; HTTP 429 is already classified from the status line, so
+# neither belongs here.
+BYBIT_RETRYABLE_CODES = frozenset({10000, 10006, 10016})
+BYBIT_LEGACY_RETRYABLE_CODES = frozenset({10018})
 
 # Transport failure classes. A timeout or a temporary connection failure may be
 # retried; a TLS or configuration failure is permanent and fails immediately,
@@ -257,12 +266,15 @@ class _Attempt:
     reason: str = ""
 
 
-def _classify_attempt(response: HttpResponse, check) -> _Attempt:
+def _classify_attempt(response: HttpResponse, check, status_check=None) -> _Attempt:
     """Classify transport, HTTP status, JSON and venue business errors alike.
 
     One classifier feeds one attempt budget: an HTTP-200 response carrying a
     transient venue code is retried exactly like a 5xx, and a permanent code
-    fails on its first response.
+    fails on its first response.  ``status_check`` is the venue's narrow
+    exception for a documented transient condition that arrives on an otherwise
+    permanent status line; it is supplied by the adapter, so another venue's
+    body quoting the same digits is never reclassified.
     """
     if response.status == 0:
         kind = response.error_kind if response.error_kind in TRANSPORT_KINDS else "connection"
@@ -275,6 +287,11 @@ def _classify_attempt(response: HttpResponse, check) -> _Attempt:
     if 500 <= response.status < 600:
         return _Attempt(retryable=True, reason=f"HTTP {response.status} from the venue")
     if response.status != 200:
+        if status_check is not None:
+            problem = status_check(response)
+            if problem is not None:
+                retryable, reason = problem
+                return _Attempt(retryable=retryable, reason=reason)
         return _Attempt(
             reason=f"HTTP {response.status} from the venue: {response.body[:200]!r}"
         )
@@ -330,10 +347,12 @@ class HttpClient:
         venue: str,
         where: str,
         check: Callable[[Any], tuple[bool, str] | None] | None = None,
+        status_check: Callable[[HttpResponse], tuple[bool, str] | None] | None = None,
     ) -> Any:
         """Return decoded JSON, retrying only documented transient conditions.
 
-        ``check`` is the venue's business-code classifier.  It shares this one
+        ``check`` is the venue's business-code classifier and ``status_check``
+        its narrow documented exception on a non-200 status.  Both share this one
         attempt/backoff budget, so there is no nested retry loop multiplying the
         number of requests a single logical call can make.
         """
@@ -345,7 +364,7 @@ class HttpClient:
             self._pace(venue)
             self.request_count += 1
             response = self.transport(target, self.timeout)
-            outcome = _classify_attempt(response, check)
+            outcome = _classify_attempt(response, check, status_check)
             if outcome.ok:
                 return outcome.payload
             reason = outcome.reason
@@ -496,6 +515,31 @@ def _okx_business_problem(payload: Any) -> tuple[bool, str] | None:
     return retryable, f"OKX returned code {code!r} ({payload.get('msg')!r}), {kind}"
 
 
+def _okx_status_problem(response: HttpResponse) -> tuple[bool, str] | None:
+    """Recognize OKX's documented endpoint timeout when it arrives as HTTP 400.
+
+    OKX documents ``50004`` as an endpoint request timeout with HTTP 400, so the
+    generic permanent-4xx decision would reject a transient condition.  Only that
+    exact exception is parsed here: a malformed body, any other code and every
+    other status keep failing on their first response, and this classifier is
+    wired into the OKX adapter alone.
+    """
+    if response.status != OKX_TIMEOUT_STATUS:
+        return None
+    try:
+        payload = json.loads(response.body)
+    except ValueError:
+        return None
+    if not isinstance(payload, Mapping) or payload.get("code") != OKX_TIMEOUT_CODE:
+        return None
+    if not isinstance(payload.get("msg"), str):
+        return None  # not a valid OKX error envelope
+    return True, (
+        f"OKX returned HTTP {OKX_TIMEOUT_STATUS} with code {OKX_TIMEOUT_CODE!r} "
+        f"({payload['msg']!r}), the documented endpoint request timeout"
+    )
+
+
 def _bybit_business_problem(payload: Any) -> tuple[bool, str] | None:
     """Classify a Bybit HTTP-200 envelope for the shared attempt budget."""
     if not isinstance(payload, Mapping):
@@ -503,9 +547,17 @@ def _bybit_business_problem(payload: Any) -> tuple[bool, str] | None:
     code = payload.get("retCode")
     if code == 0 and not isinstance(code, bool):
         return None
-    retryable = isinstance(code, int) and not isinstance(code, bool) and code in BYBIT_RETRYABLE_CODES
-    kind = "a documented transient condition" if retryable else "not a retryable condition"
-    return retryable, f"Bybit returned retCode {code!r} ({payload.get('retMsg')!r}), {kind}"
+    integer = isinstance(code, int) and not isinstance(code, bool)
+    if integer and code in BYBIT_RETRYABLE_CODES:
+        kind = "a documented transient condition"
+    elif integer and code in BYBIT_LEGACY_RETRYABLE_CODES:
+        kind = "a legacy transient condition retained for compatibility"
+    else:
+        return False, (
+            f"Bybit returned retCode {code!r} ({payload.get('retMsg')!r}), "
+            "not a retryable condition"
+        )
+    return True, f"Bybit returned retCode {code!r} ({payload.get('retMsg')!r}), {kind}"
 
 
 class OkxAdapter:
@@ -530,6 +582,7 @@ class OkxAdapter:
             venue=self.venue,
             where=where,
             check=_okx_business_problem,
+            status_check=_okx_status_problem,
         )
         return list(_require_list(payload.get("data"), f"{where}.data"))
 

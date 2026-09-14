@@ -126,9 +126,11 @@ has no trading role. File presence never changes trading eligibility.
 `source` records `input_format`, `input_dtype`, `source_hash` (nullable),
 `source_reference` and `volume_unit_evidence`. `verification` records
 `closed_before_utc` (nullable) with `closure_evidence`/`closure_source`, plus
-`volume_quote_verified` and `volume_quote_evidence`. A closure cutoff certifies
-that retained bars ending at or before it were closed when observed; it does not
-certify a gap-free history. Unknown evidence stays unknown.
+`volume_quote_verified` and `volume_quote_evidence`, and the optional
+collector-owned `retained_closure` record described under
+[Coverage, closure and gaps](#coverage-closure-and-gaps). A closure cutoff
+certifies that retained bars ending at or before it were closed when observed; it
+does not certify a gap-free history. Unknown evidence stays unknown.
 
 Publishers never emit `state=incomplete` or `volume_quote_verified=false`:
 a failed publication leaves no manifest, and unproven quote units are rejected.
@@ -139,7 +141,8 @@ block per instrument: the quote-volume assertion and its evidence, the declared
 volume unit and currency, the evidence source when recorded, the input format and
 dtype, the source reference and source digest when present, the closure cutoff
 with its evidence and source (or an explicit "unknown" stating that research reads
-are refused), and the remaining research limitations. Absent provenance is left
+are refused), any retained previous certification, and the remaining research
+limitations. Absent provenance is left
 out rather than invented. That evidence is the assertion of the operator who
 published or imported the pack: the legacy NPZ importer performs no exchange
 verification of its own, while the collector records what it actually observed.
@@ -235,6 +238,25 @@ numerical sizing outside these schemas.
   source record both when they differ. The older request is never presented as
   having certified the old tail, and an unverified archival row is never upgraded
   merely because time passed.
+- **The retained certification lives in `verification.retained_closure`.**
+  `updates.jsonl` records revisions, membership and a per-operation source
+  summary; it has never stored a previous generation's per-instrument closure
+  evidence, so that is where the retained justification is kept instead. The
+  field is optional and collector-owned: `null` when this operation's own fetch
+  certifies every stored row, or a flat object with exactly
+  `closed_before_utc`, `closure_evidence` and `closure_source` copied from the
+  generation that actually published them. Its cutoff must equal the published
+  winning cutoff, and its evidence and source must be nonblank; a malformed
+  supplied record is rejected rather than repaired. A second older-end extension
+  **carries the existing record forward unchanged** rather than nesting a record
+  inside a record or concatenating another generation's generated explanation,
+  and a rebuild whose own cutoff wins — including equality — sets the field to
+  `null` so no obsolete record survives. Entries published before this field
+  existed remain valid with it absent; evidence an earlier implementation
+  discarded is never invented retroactively, so such a legacy entry keeps only
+  the cutoff it published. The record is frozen with the rest of the target
+  metadata in the normal staging/applying path, so recovery republishes exactly
+  those bytes.
 - A collector-managed entry must therefore satisfy
   `closed_before_utc >= coverage_end_utc`; a manifest that would leave stored rows
   uncertified is refused before publication. **Stored coverage is not the
@@ -678,8 +700,26 @@ Only documented transient public-REST conditions are retried:
 | --- | --- | --- |
 | Transport | a timeout, or a temporary connection/DNS failure | a TLS/certificate failure or a transport configuration error, which fail on the first response |
 | HTTP status | 429 and 5xx | every other non-200 status, including 4xx access restrictions |
-| OKX business code | `50011` rate limit, `50013` systems busy, `50026` system error | everything else, including `50113`, which is an invalid-signature configuration error rather than a throttle |
-| Bybit business code | `10006` too many visits, `10016` server error, `10018` IP rate limit | everything else, including `10002` (request time window) and the WebSocket-only `10429`; HTTP 429 is already classified from the status line |
+| OKX business code | `50004` endpoint request timeout, `50011` rate limit, `50013` systems busy, `50026` system error | everything else, including `50113`, which is an invalid-signature configuration error rather than a throttle |
+| Bybit business code | `10000` server timeout, `10006` too many visits, `10016` server error | everything else, including `10002` (request time window) and the WebSocket-only `10429`; HTTP 429 is already classified from the status line |
+
+**One documented status-line exception.** OKX publishes `50004` ("API endpoint
+request timeout") with **HTTP 400**, a status this policy otherwise treats as
+permanent. The OKX adapter alone parses a 400 body for exactly that code in a
+valid OKX error envelope and retries it inside the same attempt budget; the same
+code inside an HTTP-200 envelope is classified by the ordinary business-code
+allowlist. A malformed 400 body, any other code, any other status, and another
+venue's body quoting the same digits all keep failing on the first response: the
+classification follows the adapter that made the request, never a string match.
+The retried codes are the ones each venue documents for these public read-only
+GET operations; no order-placement retry semantics, endpoint registry or SDK is
+involved. OKX `50001` is documented at HTTP 503 and is therefore already retried
+from the status line, and `50013`/`50026` are documented at HTTP 429/500, so
+their presence in the HTTP-200 allowlist is defensive rather than load-bearing.
+Bybit `10018` (IP rate limit) is **struck through in the current official
+table**: its bounded handling is retained as legacy compatibility and is labelled
+as such in `BYBIT_LEGACY_RETRYABLE_CODES`, not claimed as a current required API
+condition.
 
 Invalid symbols, invalid parameters and access restrictions therefore fail on
 their first response and are never treated as empty history. API success codes are
@@ -770,10 +810,43 @@ promised relationships, not only container types:
   their scalar types; canonical aligned ranges; agreement between the effective
   request and the frozen closure evidence; roster membership for every staged and
   preflight record; and options that are valid frozen HTTP options;
+- **closure evidence** whose clock samples cover exactly the distinct venues of
+  the frozen roster — a missing venue is never accepted because the remaining
+  samples happen to give the same cutoff — the fixed publication allowance, the
+  derived safe cutoff, and `latest-closed` resolving to that cutoff;
+- **restored preflight evidence** that is usable as it stands: each record's
+  rules pass the same venue-aware managed-rule validator the manifest uses; the
+  closed probe object has a boolean `checked`, the effective requested start as
+  its aligned `slot_utc` and a nonblank `reason`, with `available` true when
+  checked and null when not; `listing_known`, the normalized `listed_at_utc` and
+  the rules' own listing agree; and a known listing after the effective requested
+  start is rejected. An initial collect requires successful checked probes.
+  Preflight is checkpointed for the whole roster at once, so a recorded preflight
+  must cover every member, and any completed instrument — or the applying phase —
+  requires it; the legitimate state before preflight is an empty mapping with
+  nothing completed and no frozen targets. Invalid saved evidence fails with
+  `invalid_journal` **before** any network call, staged write or live
+  replacement, and is never fabricated or quietly re-run;
 - an initial collect at target revision 1 with the required null base facts, and an
   update at exactly base revision + 1;
 - deterministic final and staged paths, instrument identity, row/coverage facts and
   old/new digest agreement with the recorded base and the staged manifest entry;
+- **derived facts that follow from the saved request and entry**:
+  `tail_shortfall_bars == max(0, (request_end_ms - coverage_end_ms) // 300000)`,
+  so a stored tail reaching past an older requested end is zero rather than
+  negative; `changed` agreeing with the record; `added_rows` equal to
+  `prefix_rows + inserted_rows + appended_rows`, with no additions when the data
+  are unchanged (a rules-only update is still legitimate, and initial collection
+  counts its new rows as prefix rows); `gap_bar_count` equal to the entry's
+  `missing_bar_count`, with consistent nonnegative range counts; fetch ranges
+  carrying exactly `start_utc`/`end_utc` as aligned nonempty intervals inside the
+  effective request, sorted and coalesced, with an empty list valid for an
+  already-covered older request; and gap samples carrying exactly
+  `from_utc`/`to_utc`/`missing_bars` as aligned nonempty half-open intervals
+  inside the stored coverage, sorted, nonoverlapping, counted from the interval
+  length, and numbering `min(gap_range_count, 10)`. A truncated sample stays
+  valid without summing to the full total, and the positions or counts of
+  unsampled gaps are never inferred;
 - for the applying phase, the complete expected instrument set and the complete
   frozen metadata targets, with no duplicate or foreign record;
 - agreement between the journal and the **frozen target manifest** — revision,
@@ -798,6 +871,14 @@ and there is no journal signing, corruption repair or pack migration.
    All targets are verified, only recorded staging artifacts are deleted, and the
    marker is removed **last**. Cleanup is idempotent: an already-consumed artifact
    may be absent when its destination matches the recorded target digest.
+
+One further check needs the base manifest and therefore lives at the collector
+boundary, where that manifest is already required and verified: when a restored
+staging **update** is resumed, an unchecked probe — which records an
+already-covered start — is refused for an instrument whose stored history begins
+after this operation's effective start. Nothing re-reads a data file to make that
+check, and it is not required of the applying phase, where the old generation may
+already have been consumed.
 
 Before each replacement the destination must match either the recorded old digest
 (the step has not run) or the recorded new digest (it completed before the crash).
@@ -909,14 +990,43 @@ through the real adapters at production page limits, so OKX (limit 300) needs fo
 pages and Bybit (limit 1000) needs two: a single page would prove nothing about
 pagination.
 
+A thin transport wrapper keeps **one** raw successful candle page per venue from
+that same fetch, so the decoded quote turnover can be compared with the documented
+raw field directly: OKX array index 7 (`volCcyQuote`) and Bybit index 6
+(`turnover`). Only that small sample is retained, and no candle is re-fetched for
+the comparison — a second response could legitimately differ.
+
 ```bash
 python - <<'SMOKE'
+import json
+import numpy as np
 from tools.pattern_lab import exchange_data as ex
 from tools.pattern_lab.manifest import BASE_STEP_MS, format_epoch_ms
 
 BARS = 1100
-client = ex.HttpClient(rates={"OKX": 2.0, "BYBIT": 2.0})
-for adapter, contract in ((ex.OkxAdapter(), "BTC-USDT-SWAP"), (ex.BybitAdapter(), "ENAUSDT")):
+
+
+class Capture:
+    """Pass every request through, retaining one raw candle page per venue."""
+
+    def __init__(self):
+        self.sample, self.pages = None, 0
+
+    def __call__(self, url, timeout):
+        response = ex.urllib_transport(url, timeout)
+        if "candles" in url or "kline" in url:
+            self.pages += 1
+            if self.sample is None and response.status == 200:
+                self.sample = json.loads(response.body)
+        return response
+
+
+for adapter, contract, quote_index, rows_of in (
+    (ex.OkxAdapter(), "BTC-USDT-SWAP", 7, lambda body: body["data"]),
+    (ex.BybitAdapter(), "ENAUSDT", 6, lambda body: body["result"]["list"]),
+):
+    capture = Capture()
+    client = ex.HttpClient(transport=capture, rates={"OKX": 2.0, "BYBIT": 2.0})
     server_ms = adapter.server_time_ms(client)
     end_ms = ex.safe_closed_cutoff_ms([server_ms])
     start_ms = end_ms - BARS * BASE_STEP_MS
@@ -927,24 +1037,45 @@ for adapter, contract in ((ex.OkxAdapter(), "BTC-USDT-SWAP"), (ex.BybitAdapter()
     assert all(int(s) % BASE_STEP_MS == 0 for s in stamps), contract     # 5m UTC grid
     assert int(stamps[0]) == start_ms and int(stamps[-1]) + BASE_STEP_MS == end_ms
     assert values.dtype.name == "float64" and values.shape == (BARS, 5)
-    assert (values[:, :4] > 0).all() and values[:, :4].min() > 0         # finite positive OHLC
+    assert np.isfinite(values).all(), contract                           # no NaN or inf
+    assert (values[:, :4] > 0).all()                                     # positive OHLC
     assert (values[:, 2] <= values[:, [0, 3]].min(axis=1)).all()         # low <= min(open, close)
     assert (values[:, [0, 3]].max(axis=1) <= values[:, 1]).all()         # ... <= high
     assert (values[:, 4] >= 0).all()                                     # quote turnover
-    print(adapter.venue, contract, "pages ok",
+
+    # The quote-field check: one retained closed bar from the captured page,
+    # compared with the documented raw index of that very response.
+    raw = {int(row[0]): row for row in rows_of(capture.sample)}
+    matched = [int(s) for s in stamps if int(s) in raw]
+    assert matched, contract
+    stamp = matched[0]
+    decoded = float(values[list(stamps).index(stamp), 4])
+    assert float(raw[stamp][quote_index]) == decoded, (contract, raw[stamp])
+    print(adapter.venue, contract, "candle pages", capture.pages,
           format_epoch_ms(int(stamps[0])), "->", format_epoch_ms(end_ms),
-          "median quote turnover", float(sorted(values[:, 4])[BARS // 2]),
+          "| quote field", format_epoch_ms(stamp), decoded,
           "| server", format_epoch_ms(server_ms), "| unit", rules["quantity_unit"],
-          "| step", rules["quantity_step"], "| status", rules["trading_status"])
-print("http requests:", client.request_count)
+          "| step", rules["quantity_step"], "| status", rules["trading_status"],
+          "| http requests", client.request_count)
 SMOKE
 ```
 
-The printed median quote turnover is the quote-field mapping check: it must be a
-plausible **quote-currency** notional for the instrument, not a base-asset
-quantity. Confirm the server time is close to the host clock and the rules match
-the venue's published contract page. Then run the full-roster preflight by starting
-the real `collect` and letting its preflight pass before the bulk download begins.
+The raw-versus-decoded equality is the quote-field evidence: it shows the adapter
+read the documented **quote-currency** turnover index of the response it actually
+decoded. A median-turnover plausibility print is a useful sanity check but is
+**not** independent proof of field selection, so it is no longer used as one.
+`np.isfinite(values).all()` is the finiteness check; the `> 0` assertions alone are
+not one. Confirm the reported candle-page counts match the expected four (OKX) and
+two (Bybit), that the server time is close to the host clock, and that the rules
+match the venue's published contract page. Then run the full-roster preflight by
+starting the real `collect` and letting its preflight pass before the bulk download
+begins.
+
+The snippet's comparison logic is covered synthetically by
+`tests/pattern_lab/test_pattern_lab_collector.py::TestQuoteFieldEvidence`, using a
+fixture whose base and quote volumes differ so a wrong-index comparison fails.
+That is evidence about the snippet only: it certifies nothing about the live
+endpoints, which this recipe alone can exercise.
 
 ## Commands
 

@@ -36,6 +36,7 @@ from ._helpers import (
     okx_instrument,
     roster_document,
     run_collect,
+    run_update,
     synthetic_series,
     utc,
     write_roster,
@@ -899,6 +900,19 @@ def _bybit_error(code, message="synthetic"):
     )
 
 
+def _okx_status_error(status, payload, message="API endpoint request timeout"):
+    """One non-200 OKX response carrying an error envelope, as documented."""
+    body = payload if isinstance(payload, str) else json.dumps({**payload, "msg": message})
+    return exchange_data.HttpResponse(status=status, body=body)
+
+
+# OKX documents 50004 with HTTP 400 and inside an HTTP-200 envelope; Bybit
+# documents 10000 as a server timeout on HTTP 200.
+OKX_TIMEOUT_400 = _okx_status_error(400, {"code": "50004", "data": []})
+OKX_TIMEOUT_200 = _okx_error("50004", "API endpoint request timeout")
+BYBIT_TIMEOUT_200 = _bybit_error(10000, "Server Timeout")
+
+
 class TestRequestAttemptBudget:
     """One bounded attempt budget shared by transport, HTTP and venue errors."""
 
@@ -936,6 +950,111 @@ class TestRequestAttemptBudget:
         assert len(exchange.requests) == 3
         assert fragment in str(failure.value)
         assert "failed after 3 attempt(s) of at most 3" in str(failure.value)
+
+    @pytest.mark.parametrize(
+        "adapter, response",
+        [
+            (exchange_data.OkxAdapter(), OKX_TIMEOUT_400),
+            (exchange_data.OkxAdapter(), OKX_TIMEOUT_200),
+            (exchange_data.BybitAdapter(), BYBIT_TIMEOUT_200),
+        ],
+    )
+    def test_a_documented_server_timeout_is_retried(self, adapter, response):
+        """OKX 50004 (HTTP 400 and HTTP 200) and Bybit 10000 are transient."""
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(response)
+        assert adapter.server_time_ms(client) == exchange.now_ms
+        assert len(exchange.requests) == 2  # the valid second response is consumed
+        assert clock.sleeps == [exchange_data.BACKOFF_BASE_SECONDS]
+
+    @pytest.mark.parametrize(
+        "adapter, response, fragment",
+        [
+            (exchange_data.OkxAdapter(), OKX_TIMEOUT_400, "HTTP 400 with code '50004'"),
+            (exchange_data.OkxAdapter(), OKX_TIMEOUT_200, "50004"),
+            (exchange_data.BybitAdapter(), BYBIT_TIMEOUT_200, "10000"),
+        ],
+    )
+    def test_a_persistent_server_timeout_exhausts_exactly_the_budget(
+        self, adapter, response, fragment
+    ):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)  # three attempts
+        for _ in range(5):
+            exchange.scripted.append(response)
+        with pytest.raises(PatternLabDataError) as failure:
+            adapter.server_time_ms(client)
+        assert len(exchange.requests) == 3
+        assert fragment in str(failure.value)
+        assert "failed after 3 attempt(s) of at most 3" in str(failure.value)
+
+    def test_a_documented_timeout_shares_the_budget_with_http_failures(self):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(OKX_TIMEOUT_400)
+        exchange.scripted.append(exchange_data.HttpResponse(status=503, body=""))
+        exchange.scripted.append(OKX_TIMEOUT_200)
+        with pytest.raises(PatternLabDataError) as failure:
+            exchange_data.OkxAdapter().server_time_ms(client)
+        assert len(exchange.requests) == 3  # one budget, not one per class
+        assert "50004" in str(failure.value)
+
+    def test_a_documented_timeout_is_retried_for_candles_too(self):
+        """A temporary server timeout must not interrupt a long download."""
+        exchange, clock, stamps, values = build_exchange(slots=6)
+        client = fake_client(exchange, clock)
+        exchange.scripted.append(OKX_TIMEOUT_400)
+        fetched, _ = exchange_data.OkxAdapter().fetch_candles(
+            client, OKX_CONTRACT, start_ms=int(stamps[0]), end_ms=int(stamps[-1]) + STEP_MS
+        )
+        assert fetched.size == stamps.size
+
+    @pytest.mark.parametrize(
+        "adapter, response, fragment",
+        [
+            # A generic or malformed 400 body is never parsed into a retry.
+            (
+                exchange_data.OkxAdapter(),
+                _okx_status_error(400, {"code": "51000", "data": []}, "parameter error"),
+                "HTTP 400",
+            ),
+            (exchange_data.OkxAdapter(), _okx_status_error(400, "{ not json"), "HTTP 400"),
+            (exchange_data.OkxAdapter(), _okx_status_error(400, '{"code": "50004"}'), "HTTP 400"),
+            (exchange_data.OkxAdapter(), _okx_status_error(401, {"code": "50004", "data": []}), "HTTP 401"),
+            (exchange_data.OkxAdapter(), _okx_status_error(403, {"code": "50004", "data": []}), "HTTP 403"),
+            # Another venue's body quoting the same digits is classified by the
+            # actual adapter, not by a string match.
+            (
+                exchange_data.BybitAdapter(),
+                _okx_status_error(400, {"code": "50004", "data": []}),
+                "HTTP 400",
+            ),
+            (exchange_data.BybitAdapter(), _bybit_error(10001, "params error"), "10001"),
+        ],
+    )
+    def test_a_permanent_400_is_not_widened_into_a_transient_error(self, adapter, response, fragment):
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        for _ in range(5):
+            exchange.scripted.append(response)
+        with pytest.raises(PatternLabDataError) as failure:
+            adapter.server_time_ms(client)
+        assert len(exchange.requests) == 1
+        assert fragment in str(failure.value)
+        assert clock.sleeps == []
+
+    def test_the_legacy_bybit_rate_limit_code_is_labelled_as_such(self):
+        """10018 is struck through upstream; its handling is legacy, not required."""
+        assert 10018 in exchange_data.BYBIT_LEGACY_RETRYABLE_CODES
+        assert 10018 not in exchange_data.BYBIT_RETRYABLE_CODES
+        exchange, clock, _, _ = build_exchange(slots=3)
+        client = fake_client(exchange, clock)
+        for _ in range(5):
+            exchange.scripted.append(_bybit_error(10018, "ip rate limit"))
+        with pytest.raises(PatternLabDataError, match="legacy transient condition"):
+            exchange_data.BybitAdapter().server_time_ms(client)
+        assert len(exchange.requests) == 3
 
     def test_http_and_business_failures_share_one_budget(self):
         exchange, clock, _, _ = build_exchange(slots=3)
@@ -1060,6 +1179,60 @@ class TestRequestAttemptBudget:
         assert len(exchange.requests) == 2
 
 
+class TestQuoteFieldEvidence:
+    """The later smoke recipe's raw-response comparison, run against fixtures.
+
+    This verifies the recipe's logic only. It is synthetic evidence about the
+    snippet, never certification of a live endpoint, and no live request is made.
+    """
+
+    class _Capture:
+        """The recipe's thin transport wrapper: one small raw candle sample."""
+
+        def __init__(self, transport):
+            self.transport = transport
+            self.sample = None
+            self.pages = 0
+
+        def __call__(self, url, timeout):
+            response = self.transport(url, timeout)
+            if "candles" in url or "kline" in url:
+                self.pages += 1
+                if self.sample is None and response.status == 200:
+                    self.sample = json.loads(response.body)  # one bounded page
+            return response
+
+    @pytest.mark.parametrize(
+        "adapter, contract, quote_index, rows_of",
+        [
+            (exchange_data.OkxAdapter(), OKX_CONTRACT, 7, lambda body: body["data"]),
+            (exchange_data.BybitAdapter(), BYBIT_CONTRACT, 6, lambda body: body["result"]["list"]),
+        ],
+    )
+    def test_a_raw_row_confirms_the_decoded_quote_turnover(
+        self, adapter, contract, quote_index, rows_of
+    ):
+        exchange, clock, stamps, _ = build_exchange(slots=8)
+        capture = self._Capture(exchange)
+        client = fake_client(exchange, clock)
+        client.transport = capture
+        fetched, values = adapter.fetch_candles(
+            client, contract, start_ms=int(stamps[0]), end_ms=int(stamps[-1]) + STEP_MS
+        )
+        assert capture.pages >= 1
+        assert np.isfinite(values).all()
+
+        raw = {int(row[0]): row for row in rows_of(capture.sample)}
+        matched = [int(stamp) for stamp in fetched if int(stamp) in raw]
+        assert matched, "no retained closed timestamp appears in the captured page"
+        stamp = matched[0]
+        decoded = float(values[list(fetched).index(stamp), 4])
+        assert float(raw[stamp][quote_index]) == decoded
+        # The same fixture's base volume differs, so reading the wrong index is
+        # detected rather than passing on a coincidence.
+        assert float(raw[stamp][5]) != decoded
+
+
 class TestNetworkIsolation:
     """The suite can never reach a real exchange, however a fixture is wired."""
 
@@ -1153,6 +1326,191 @@ class TestClosureCertification:
         entry = pack_manifest.find_instrument(pack_manifest.read_manifest(root), OKX_ID)
         assert entry["verification"]["closed_before_utc"] == entry["coverage_end_utc"]
         assert "retained from the previous generation" not in entry["verification"]["closure_evidence"]
+        assert entry["verification"]["retained_closure"] is None
+
+
+class TestRetainedClosureEvidence:
+    """The retained certification lives in one flat, bounded, real record."""
+
+    def _extended(self, tmp_path, roster):
+        """A pack whose stored tail is certified later than the last request."""
+        root = tmp_path / "pack"
+        exchange, clock, _, _ = build_exchange(slots=70, first_slot=-10)
+        run_collect(root, roster, exchange, clock, start=utc(ANCHOR_MS))
+        original = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+        pack_collect.update_pack(
+            root,
+            start=utc(ANCHOR_MS - 10 * STEP_MS),
+            end=utc(ANCHOR_MS + 40 * STEP_MS),  # older than the stored coverage end
+            options=collector_options(),
+            transport=exchange,
+            clock=clock,
+        )
+        return root, exchange, clock, original
+
+    def test_the_retained_record_carries_the_previous_evidence_verbatim(self, tmp_path, roster):
+        root, _, _, original = self._extended(tmp_path, roster)
+        verification = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+        retained = verification["retained_closure"]
+        assert sorted(retained) == list(pack_manifest.RETAINED_CLOSURE_KEYS)
+        assert retained["closed_before_utc"] == verification["closed_before_utc"]
+        assert retained["closure_evidence"] == original["closure_evidence"]
+        assert retained["closure_source"] == original["closure_source"]
+        # The generated explanation points at the real location, not history.
+        assert "verification.retained_closure" in verification["closure_source"]
+        assert "updates.jsonl" not in verification["closure_source"]
+        history = (root / pack_manifest.UPDATES_NAME).read_text(encoding="utf-8")
+        assert original["closure_evidence"] not in history  # history never stored it
+        assert retained["closure_evidence"] in pack_manifest.render_readme(
+            pack_manifest.read_manifest(root)
+        )
+
+    def test_a_second_older_end_extension_carries_it_forward_without_nesting(
+        self, tmp_path, roster
+    ):
+        root, exchange, clock, original = self._extended(tmp_path, roster)
+        coverage_end = utc(ANCHOR_MS + 60 * STEP_MS)
+        tail = {"start": utc(ANCHOR_MS + 50 * STEP_MS), "end": coverage_end}
+        before_tail = pack_data.load_slice(root, OKX_ID, **tail)
+        first = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+
+        exchange.set_rows("OKX", OKX_CONTRACT, *synthetic_series(90, first_slot=-30))
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, *synthetic_series(90, first_slot=-30))
+        result = pack_collect.update_pack(
+            root,
+            start=utc(ANCHOR_MS - 30 * STEP_MS),
+            end=utc(ANCHOR_MS + 45 * STEP_MS),  # still older than the stored tail
+            options=collector_options(),
+            transport=exchange,
+            clock=clock,
+        )
+        assert result["status"] == "completed"
+        verification = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+        retained = verification["retained_closure"]
+        # The ORIGINAL evidence survives, flat and bounded: no record inside a
+        # record and no second generation's generated explanation appended.
+        assert retained == {
+            "closed_before_utc": coverage_end,
+            "closure_evidence": original["closure_evidence"],
+            "closure_source": original["closure_source"],
+        }
+        assert first["closure_evidence"] not in retained["closure_evidence"]
+        assert len(verification["closure_source"]) < 2 * len(first["closure_source"])
+        assert verification["closed_before_utc"] == coverage_end
+        assert pack_data.load_slice(root, OKX_ID, **tail).input_fingerprint == (
+            before_tail.input_fingerprint
+        )
+
+    def test_a_genuine_new_tail_drops_the_obsolete_record(self, tmp_path, roster):
+        root, exchange, clock, _ = self._extended(tmp_path, roster)
+        assert pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]["retained_closure"] is not None
+
+        stamps, values = synthetic_series(100, first_slot=-10)
+        exchange.now_ms = clock.now_ms = int(stamps[-1]) + STEP_MS + 90_000
+        exchange.set_rows("OKX", OKX_CONTRACT, stamps, values)
+        exchange.set_rows("BYBIT", BYBIT_CONTRACT, stamps, values)
+        result = run_update(root, exchange, clock)
+        assert result["status"] == "completed"
+
+        verification = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+        assert verification["retained_closure"] is None  # this fetch certifies it all
+        assert verification["closed_before_utc"] == utc(int(stamps[-1]) + STEP_MS)
+        assert "retained from the previous generation" not in verification["closure_evidence"]
+
+    def test_a_no_op_preserves_the_retained_record_byte_for_byte(self, tmp_path, roster):
+        root, exchange, clock, _ = self._extended(tmp_path, roster)
+        before = {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+        result = pack_collect.update_pack(
+            root,
+            start=utc(ANCHOR_MS - 10 * STEP_MS),
+            end=utc(ANCHOR_MS + 40 * STEP_MS),
+            options=collector_options(),
+            transport=exchange,
+            clock=clock,
+        )
+        assert result["status"] == "no_op"
+        assert {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()} == before
+
+    def test_an_interrupted_publication_recovers_the_frozen_record(
+        self, tmp_path, roster, monkeypatch
+    ):
+        root = tmp_path / "pack"
+        exchange, clock, _, _ = build_exchange(slots=70, first_slot=-10)
+        run_collect(root, roster, exchange, clock, start=utc(ANCHOR_MS))
+        original = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]
+
+        original_apply = update_transaction.apply_operation
+        monkeypatch.setattr(
+            update_transaction,
+            "apply_operation",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("interrupted")),
+        )
+        with pytest.raises(RuntimeError):
+            pack_collect.update_pack(
+                root,
+                start=utc(ANCHOR_MS - 10 * STEP_MS),
+                end=utc(ANCHOR_MS + 40 * STEP_MS),
+                options=collector_options(),
+                transport=exchange,
+                clock=clock,
+            )
+        monkeypatch.setattr(update_transaction, "apply_operation", original_apply)
+        journal = update_transaction.pending_state(root)["journal"]
+        frozen = journal["staged"][OKX_ID]["entry"]["verification"]["retained_closure"]
+        assert frozen["closure_evidence"] == original["closure_evidence"]
+
+        pack_collect.recover_pack(root, transport=exchange, clock=clock)
+        published = pack_manifest.find_instrument(
+            pack_manifest.read_manifest(root), OKX_ID
+        )["verification"]["retained_closure"]
+        assert published == frozen  # republished, never regenerated
+
+    @pytest.mark.parametrize(
+        "record, message",
+        [
+            ({}, "retained closure record is closed"),
+            ({"closed_before_utc": None, "closure_evidence": "e", "closure_source": "s"}, "closed_before_utc"),
+            (
+                {"closed_before_utc": "2026-01-01T00:00:00Z", "closure_evidence": "e", "closure_source": "s"},
+                "is not the published cutoff",
+            ),
+        ],
+    )
+    def test_a_malformed_supplied_record_is_rejected(self, tmp_path, roster, record, message):
+        root, _, _, _ = self._extended(tmp_path, roster)
+
+        def mutate(manifest):
+            for entry in manifest["instruments"]:
+                entry["verification"]["retained_closure"] = dict(record)
+
+        mutate_manifest(root, mutate)
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_manifest.read_manifest(root)
+
+    def test_an_absent_field_remains_valid(self, tmp_path, roster):
+        root, _, _, _ = self._extended(tmp_path, roster)
+
+        def mutate(manifest):
+            for entry in manifest["instruments"]:
+                entry["verification"].pop("retained_closure", None)
+
+        mutate_manifest(root, mutate)
+        manifest = pack_manifest.read_manifest(root)  # legacy managed entries still read
+        assert "retained_closure" not in manifest["instruments"][0]["verification"]
 
 
 class TestMetadataPreservation:

@@ -37,6 +37,7 @@ COLLECTOR_SCHEMA_VERSION = 1
 INSTRUMENT_RULES_SCHEMA_VERSION = 1
 ROSTER_KEYS = ("contract", "instrument_id", "quote_currency", "roles", "symbol", "venue")
 CONTRACT_TYPES = ("linear_perpetual",)
+RETAINED_CLOSURE_KEYS = ("closed_before_utc", "closure_evidence", "closure_source")
 TRADING_STATUSES = ("live", "Trading")
 
 # The closed source-specific rule shape of each venue a v1 managed pack may
@@ -490,8 +491,15 @@ def build_verification(
     closed_before_utc: Any = None,
     closure_evidence: str | None = None,
     closure_source: str | None = None,
+    retained_closure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the verification block; closure evidence is all-or-nothing."""
+    """Build the verification block; closure evidence is all-or-nothing.
+
+    ``retained_closure`` is the optional flat record of a previous generation's
+    certification, kept when that cutoff is later than this operation's fetch
+    end.  The ordinary fields still describe the current fetch and the published
+    maximum cutoff.
+    """
     payload = {
         "volume_quote_verified": require_bool(volume_quote_verified, "verification.volume_quote_verified"),
         "volume_quote_evidence": require_text(volume_quote_evidence, "verification.volume_quote_evidence"),
@@ -500,7 +508,7 @@ def build_verification(
         "closure_source": None,
     }
     if closed_before_utc is None:
-        if closure_evidence is not None or closure_source is not None:
+        if closure_evidence is not None or closure_source is not None or retained_closure is not None:
             raise PatternLabDataError(
                 "verification: closure evidence requires a non-null closed_before_utc."
             )
@@ -510,6 +518,11 @@ def build_verification(
     payload["closed_before_utc"] = format_epoch_ms(cutoff)
     payload["closure_evidence"] = require_text(closure_evidence, "verification.closure_evidence")
     payload["closure_source"] = require_text(closure_source, "verification.closure_source")
+    payload["retained_closure"] = validate_retained_closure(
+        retained_closure,
+        "verification.retained_closure",
+        closed_before_utc=payload["closed_before_utc"],
+    )
     return payload
 
 
@@ -644,6 +657,44 @@ def _validate_verification(raw: Any, where: str) -> dict[str, Any]:
         require_text(origin, f"{where}.closure_source")
         verification["closed_before_utc"] = format_epoch_ms(cutoff_ms)
     return verification
+
+
+def validate_retained_closure(raw: Any, where: str, *, closed_before_utc: str) -> dict[str, Any] | None:
+    """Validate the optional flat record of a previous generation's certification.
+
+    Null means this operation's own fetch certifies every stored row.  A nonnull
+    record names the cutoff, evidence and source that were actually published
+    before, so the retained tail's justification stays readable without whole
+    manifest snapshots or recursively nested explanations.  Its cutoff is the
+    published winning cutoff; evidence is never invented for an entry that has
+    none.
+    """
+    if raw is None:
+        return None
+    record = _require_mapping(raw, where)
+    missing = sorted(set(RETAINED_CLOSURE_KEYS) - set(record))
+    extra = sorted(set(record) - set(RETAINED_CLOSURE_KEYS))
+    if missing or extra:
+        raise PatternLabDataError(
+            f"{where}: the retained closure record is closed; missing keys {missing}, "
+            f"unexpected keys {extra}."
+        )
+    cutoff_ms = require_aligned(
+        to_epoch_ms(record["closed_before_utc"], f"{where}.closed_before_utc"),
+        BASE_STEP_MS,
+        f"{where}.closed_before_utc",
+    )
+    validated = {
+        "closed_before_utc": format_epoch_ms(cutoff_ms),
+        "closure_evidence": require_text(record["closure_evidence"], f"{where}.closure_evidence"),
+        "closure_source": require_text(record["closure_source"], f"{where}.closure_source"),
+    }
+    if validated["closed_before_utc"] != closed_before_utc:
+        raise PatternLabDataError(
+            f"{where}.closed_before_utc: {validated['closed_before_utc']} is not the published "
+            f"cutoff {closed_before_utc} it is supposed to justify."
+        )
+    return validated
 
 
 def require_published_verification(raw: Any, where: str) -> dict[str, Any]:
@@ -1158,6 +1209,14 @@ def validate_instrument_entry(
             entry.get("instrument_rules"), f"{where}.instrument_rules", venue=venue
         )
         _require_certified_coverage(entry, where)
+        if "retained_closure" in entry["verification"]:
+            # Optional and collector-owned: absent stays absent for entries
+            # published before the field existed.
+            entry["verification"]["retained_closure"] = validate_retained_closure(
+                entry["verification"]["retained_closure"],
+                f"{where}.verification.retained_closure",
+                closed_before_utc=entry["verification"]["closed_before_utc"],
+            )
     elif "instrument_rules" in entry and entry["instrument_rules"] is not None:
         entry["instrument_rules"] = _require_mapping(entry["instrument_rules"], f"{where}.instrument_rules")
     return entry
@@ -1349,6 +1408,13 @@ def _evidence_lines(entry: Mapping[str, Any], *, managed: bool) -> list[str]:
             f"- Closed before UTC: {cutoff} \u2014 {verification['closure_evidence']} "
             f"(source: {verification['closure_source']})"
         )
+        retained = verification.get("retained_closure")
+        if managed and isinstance(retained, Mapping) and retained:
+            lines.append(
+                f"- Retained certification (`verification.retained_closure`): closed before "
+                f"{retained['closed_before_utc']} \u2014 {retained['closure_evidence']} "
+                f"(source: {retained['closure_source']})"
+            )
     limitations = research_limitations(entry)
     lines.append(f"- Research limitations: {'; '.join(limitations) if limitations else 'none'}")
     rules = entry.get("instrument_rules")

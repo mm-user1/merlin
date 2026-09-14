@@ -43,7 +43,8 @@ LATEST_CLOSED = exchange_data.LATEST_CLOSED
 # overlap comparison can detect a source discrepancy before it is published.
 OVERLAP_BARS = 12
 CONFLICT_SAMPLE_LIMIT = 10
-GAP_SAMPLE_LIMIT = 10
+# One shared bound, owned beside the journal validator that checks the sample.
+GAP_SAMPLE_LIMIT = update_transaction.GAP_SAMPLE_LIMIT
 
 ROSTER_TOP_LEVEL_KEYS = ("instruments", "schema_version", "universe")
 UNIVERSE_KEYS = ("historical_membership", "notes", "selection_date", "selection_source")
@@ -351,6 +352,14 @@ def _verification(
     certification and the newly fetched rows carry this operation's evidence, so
     the published cutoff is the maximum justified of the two.  The current,
     older request is never presented as having certified the old tail itself.
+
+    When the previous cutoff wins, its actual cutoff, evidence and source are
+    copied into the flat ``retained_closure`` record.  A previous entry that
+    already carries such a record for the same winning cutoff hands it on
+    unchanged, so repeated older-end updates never nest records or concatenate
+    another generation's generated explanation.  When this operation's own
+    cutoff wins, including equality, the field is explicitly null so no obsolete
+    record survives the rebuild.
     """
     flag = " OKX additionally requires the candle confirm flag '1'." if adapter.venue == "OKX" else ""
     evidence = (
@@ -362,11 +371,22 @@ def _verification(
         "allowance, floored to the 5m grid."
     )
     certified_ms = resolved_end_ms
+    retained = None
     previous_utc = None if previous is None else previous.get("closed_before_utc")
     if previous_utc is not None:
         previous_ms = to_epoch_ms(previous_utc, "previous closed_before_utc")
         if previous_ms > resolved_end_ms:
             certified_ms = previous_ms
+            carried = previous.get("retained_closure")
+            retained = (
+                copy.deepcopy(dict(carried))
+                if isinstance(carried, Mapping) and carried
+                else {
+                    "closed_before_utc": previous_utc,
+                    "closure_evidence": previous["closure_evidence"],
+                    "closure_source": previous["closure_source"],
+                }
+            )
             evidence += (
                 f" Rows from {format_epoch_ms(resolved_end_ms)} onwards are retained from the "
                 f"previous generation and keep its certification; this operation's older requested "
@@ -374,7 +394,8 @@ def _verification(
             )
             source += (
                 f" Retained tail certification before {previous_utc} comes from the previously "
-                "published generation of this pack, recorded in updates.jsonl."
+                "published generation of this pack; its own evidence is recorded in this entry's "
+                "verification.retained_closure."
             )
     return pack_manifest.build_verification(
         volume_quote_verified=True,
@@ -382,6 +403,7 @@ def _verification(
         closed_before_utc=format_epoch_ms(certified_ms),
         closure_evidence=evidence,
         closure_source=source,
+        retained_closure=retained,
     )
 
 
@@ -817,6 +839,31 @@ def _probe_ids(
     return probing
 
 
+def _require_probed_prefix(
+    preflight: Mapping[str, Any], probe_ids: Sequence[str]
+) -> None:
+    """Refuse restored preflight that never probed a newly requested prefix.
+
+    An unchecked probe records an already-covered start.  When the stored pack's
+    first row is later than this operation's effective start, that claim
+    contradicts the base manifest, so the journal is rejected before any network
+    call or staged write instead of being quietly re-run.
+    """
+    unchecked = sorted(
+        instrument_id
+        for instrument_id in probe_ids
+        if not preflight[instrument_id]["probe"]["checked"]
+    )
+    if unchecked:
+        raise PatternLabDataError(
+            f"the recorded preflight reports {unchecked} as already covered, but the stored pack "
+            "starts after this operation's effective start, so their prefix was never probed at the "
+            "source. The restored evidence is inconsistent with the base manifest; abort this "
+            "operation and start a new one rather than publishing unverified prefix history.",
+            error_code="invalid_journal",
+        )
+
+
 def _stage(
     data_root: Path,
     guard: pack_lock.PackGuard,
@@ -833,16 +880,22 @@ def _stage(
     roster = journal["roster"]
 
     preflight = dict(journal["preflight"])
-    if any(entry["instrument_id"] not in preflight for entry in roster):
+    probe_ids = _probe_ids(roster, base_manifest, effective_start_ms)
+    if not preflight:
         preflight = _preflight(
             client,
             roster,
             starts_ms={entry["instrument_id"]: effective_start_ms for entry in roster},
-            probe_ids=_probe_ids(roster, base_manifest, effective_start_ms),
+            probe_ids=probe_ids,
             progress=progress,
         )
         journal["preflight"] = preflight
         journal = update_transaction.write_journal(data_root, journal)
+    else:
+        # Restored evidence: the base manifest this path already verified says
+        # which starts are genuinely new, so an unchecked probe cannot stand in
+        # for a prefix that was never observed at the source.
+        _require_probed_prefix(preflight, probe_ids)
 
     staged = dict(journal["staged"])
     for index, entry in enumerate(roster, start=1):

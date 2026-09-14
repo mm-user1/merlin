@@ -445,8 +445,11 @@ class FakeExchange:
             stamp = int(stamps[index])
             row = values[index]
             confirm = "1" if stamp + STEP_MS <= self.now_ms else "0"
+            # vol/volCcy are base-denominated and differ from volCcyQuote, so a
+            # test that reads the wrong index cannot accidentally still pass.
+            base = f"{float(row[4]) / float(row[0]):.10f}"
             rows.append(
-                [str(stamp), *(f"{float(item):.10f}" for item in row[:4]), "0", "0",
+                [str(stamp), *(f"{float(item):.10f}" for item in row[:4]), base, base,
                  f"{float(row[4]):.10f}", confirm]
             )
         return self._json({"code": "0", "msg": "", "data": rows})
@@ -486,7 +489,8 @@ class FakeExchange:
             [
                 str(int(stamps[index])),
                 *(f"{float(item):.10f}" for item in values[index][:4]),
-                "0",
+                # index 5 is the base-coin volume, index 6 the quote turnover.
+                f"{float(values[index][4]) / float(values[index][0]):.10f}",
                 f"{float(values[index][4]):.10f}",
             ]
             for index in chosen[::-1][:limit]
@@ -638,7 +642,8 @@ def pending_journal(root: Path, *, roster=None, end_ms=None, **overrides) -> dic
         "target_revision": manifest["revision"] + 1,
         "phase": "staging",
         "closure": {
-            "server_times_ms": {roster[0]["venue"]: end_ms + lag_ms},
+            # The producer samples every distinct roster venue's clock.
+            "server_times_ms": {entry["venue"]: end_ms + lag_ms for entry in roster},
             "observed_utc": GENERATED_UTC,
             "publication_lag_ms": lag_ms,
             "safe_cutoff_ms": end_ms,

@@ -72,6 +72,12 @@ CLOSURE_KEYS = (
     "server_times_ms",
 )
 PREFLIGHT_KEYS = ("listed_at_utc", "listing_known", "probe", "rules")
+PROBE_KEYS = ("available", "checked", "reason", "slot_utc")
+FETCH_RANGE_KEYS = ("end_utc", "start_utc")
+GAP_RANGE_KEYS = ("from_utc", "missing_bars", "to_utc")
+# The producer's bounded gap sample size.  It lives here, beside the validator
+# that checks it, so the collector can share one limit without a circular import.
+GAP_SAMPLE_LIMIT = 10
 FACT_BOOL_KEYS = ("changed", "rules_changed")
 FACT_TEXT_KEYS = ("coverage_end_utc", "first_open_utc", "last_open_utc")
 FACT_COUNT_KEYS = (
@@ -148,8 +154,122 @@ def _relative_staged_path(value: Any, operation_id: str, where: str) -> str:
     return text
 
 
-def _validate_facts(raw: Any, entry: Mapping[str, Any], where: str) -> dict[str, Any]:
-    """Validate one staged record's reported facts and tie them to its entry."""
+def _validate_fetch_ranges(items: Sequence[Any], where: str, *, start_ms: int, end_ms: int) -> None:
+    """Validate the recorded fetch ranges: aligned, nonempty, sorted and coalesced.
+
+    An empty list is valid: an already-covered older request downloads nothing.
+    These are the intervals this operation actually fetched, not the stored
+    coverage a pack retains outside the effective request.
+    """
+    previous_end: int | None = None
+    for index, item in enumerate(items):
+        position = f"{where}[{index}]"
+        record = _mapping(item, position)
+        missing = sorted(set(FETCH_RANGE_KEYS) - set(record))
+        extra = sorted(set(record) - set(FETCH_RANGE_KEYS))
+        if missing or extra:
+            raise _journal_error(
+                f"{position}: a fetch range is closed; missing keys {missing}, unexpected keys {extra}."
+            )
+        try:
+            low = require_aligned_utc(record["start_utc"], f"{position}.start_utc")
+            high = require_aligned_utc(record["end_utc"], f"{position}.end_utc")
+        except PatternLabDataError as exc:
+            raise _journal_error(str(exc)) from exc
+        if low >= high:
+            raise _journal_error(
+                f"{position}: requires start_utc < end_utc, got {format_epoch_ms(low)} >= "
+                f"{format_epoch_ms(high)}."
+            )
+        if low < start_ms or high > end_ms:
+            raise _journal_error(
+                f"{position}: [{format_epoch_ms(low)}, {format_epoch_ms(high)}) falls outside the "
+                f"effective request [{format_epoch_ms(start_ms)}, {format_epoch_ms(end_ms)})."
+            )
+        if previous_end is not None and low <= previous_end:
+            raise _journal_error(
+                f"{position}: fetch ranges are recorded sorted and coalesced, but "
+                f"{format_epoch_ms(low)} does not follow {format_epoch_ms(previous_end)}."
+            )
+        previous_end = high
+
+
+def _validate_gap_ranges(
+    items: Sequence[Any], where: str, *, first_ms: int, last_ms: int, range_count: int, total_bars: int
+) -> None:
+    """Validate the bounded gap sample against the declared counts and coverage.
+
+    The sample is the producer's first :data:`GAP_SAMPLE_LIMIT` ranges, so a
+    truncated sample must stay internally valid without its missing bars adding
+    up to the full total.  The positions of unsampled gaps are never inferred.
+    """
+    expected = min(range_count, GAP_SAMPLE_LIMIT)
+    if len(items) != expected:
+        raise _journal_error(
+            f"{where}: {range_count} gap range(s) produce a bounded sample of {expected}, "
+            f"got {len(items)}."
+        )
+    previous_to: int | None = None
+    sampled = 0
+    for index, item in enumerate(items):
+        position = f"{where}[{index}]"
+        record = _mapping(item, position)
+        missing = sorted(set(GAP_RANGE_KEYS) - set(record))
+        extra = sorted(set(record) - set(GAP_RANGE_KEYS))
+        if missing or extra:
+            raise _journal_error(
+                f"{position}: a gap range is closed; missing keys {missing}, unexpected keys {extra}."
+            )
+        try:
+            low = require_aligned_utc(record["from_utc"], f"{position}.from_utc")
+            high = require_aligned_utc(record["to_utc"], f"{position}.to_utc")
+            bars = require_int(record["missing_bars"], f"{position}.missing_bars", minimum=1)
+        except PatternLabDataError as exc:
+            raise _journal_error(str(exc)) from exc
+        if low >= high:
+            raise _journal_error(
+                f"{position}: requires from_utc < to_utc, got {format_epoch_ms(low)} >= "
+                f"{format_epoch_ms(high)}."
+            )
+        if low <= first_ms or high > last_ms:
+            raise _journal_error(
+                f"{position}: [{format_epoch_ms(low)}, {format_epoch_ms(high)}) is not a gap inside "
+                f"the stored coverage ({format_epoch_ms(first_ms)} to {format_epoch_ms(last_ms)})."
+            )
+        if bars != (high - low) // BASE_STEP_MS:
+            raise _journal_error(
+                f"{position}.missing_bars: {bars} is not the {(high - low) // BASE_STEP_MS} slot(s) "
+                f"between {format_epoch_ms(low)} and {format_epoch_ms(high)}."
+            )
+        if previous_to is not None and low < previous_to:
+            raise _journal_error(
+                f"{position}: gap ranges are recorded sorted and nonoverlapping, but "
+                f"{format_epoch_ms(low)} precedes {format_epoch_ms(previous_to)}."
+            )
+        previous_to = high
+        sampled += bars
+    if sampled > total_bars:
+        raise _journal_error(
+            f"{where}: the sampled {sampled} missing bar(s) exceed the declared total {total_bars}."
+        )
+    if range_count <= GAP_SAMPLE_LIMIT and sampled != total_bars:
+        raise _journal_error(
+            f"{where}: the complete sample accounts for {sampled} missing bar(s), not the declared "
+            f"total {total_bars}."
+        )
+
+
+def _validate_facts(
+    raw: Any, entry: Mapping[str, Any], where: str, *, request: Mapping[str, Any], changed: bool
+) -> dict[str, Any]:
+    """Validate one staged record's reported facts and tie them to its entry.
+
+    Every constraint here follows from the saved request, the staged manifest
+    entry and the producer's declared formats, so contradictory counters are
+    rejected at journal admission instead of becoming published history or a
+    completion exit code.  Nothing is repaired and no market observation is
+    invented.
+    """
     facts = _mapping(raw, where)
     missing = sorted(set(FACT_KEYS) - set(facts))
     extra = sorted(set(facts) - set(FACT_KEYS))
@@ -175,11 +295,69 @@ def _validate_facts(raw: Any, entry: Mapping[str, Any], where: str) -> dict[str,
                 f"{where}.{key}: {facts[key]!r} does not agree with the staged manifest entry "
                 f"{entry[key]!r}."
             )
+
+    if facts["changed"] != changed:
+        raise _journal_error(
+            f"{where}.changed: {facts['changed']!r} does not agree with the staged record's "
+            f"{changed!r}."
+        )
+    components = facts["prefix_rows"] + facts["inserted_rows"] + facts["appended_rows"]
+    if facts["added_rows"] != components:
+        raise _journal_error(
+            f"{where}.added_rows: {facts['added_rows']} is not the sum {components} of its prefix, "
+            "inserted and appended components."
+        )
+    if not changed and facts["added_rows"]:
+        raise _journal_error(
+            f"{where}.added_rows: {facts['added_rows']} row(s) were added although the data are "
+            "recorded as unchanged; a rules-only update adds no rows."
+        )
+    if facts["gap_bar_count"] != facts["missing_bar_count"]:
+        raise _journal_error(
+            f"{where}.gap_bar_count: {facts['gap_bar_count']} does not agree with the entry's "
+            f"missing_bar_count {facts['missing_bar_count']}."
+        )
+    if facts["gap_range_count"] > facts["gap_bar_count"]:
+        raise _journal_error(
+            f"{where}.gap_range_count: {facts['gap_range_count']} range(s) cannot hold only "
+            f"{facts['gap_bar_count']} missing bar(s)."
+        )
+    if bool(facts["gap_range_count"]) != bool(facts["gap_bar_count"]):
+        raise _journal_error(
+            f"{where}: {facts['gap_range_count']} gap range(s) and {facts['gap_bar_count']} missing "
+            "bar(s) cannot both be recorded; zero gaps have no ranges."
+        )
+
+    start_ms = to_epoch_ms(request["start_utc"], f"{where}.request.start_utc")
+    end_ms = to_epoch_ms(request["end_utc"], f"{where}.request.end_utc")
+    coverage_end_ms = to_epoch_ms(facts["coverage_end_utc"], f"{where}.coverage_end_utc")
+    # A stored tail reaching past an older requested end is covered, not negative.
+    expected_shortfall = max(0, (end_ms - coverage_end_ms) // BASE_STEP_MS)
+    if facts["tail_shortfall_bars"] != expected_shortfall:
+        raise _journal_error(
+            f"{where}.tail_shortfall_bars: {facts['tail_shortfall_bars']} is not the "
+            f"{expected_shortfall} bar(s) between the coverage end {facts['coverage_end_utc']} and "
+            f"the requested end {request['end_utc']}."
+        )
+    _validate_fetch_ranges(facts["fetch_ranges"], f"{where}.fetch_ranges", start_ms=start_ms, end_ms=end_ms)
+    _validate_gap_ranges(
+        facts["gap_ranges"],
+        f"{where}.gap_ranges",
+        first_ms=to_epoch_ms(facts["first_open_utc"], f"{where}.first_open_utc"),
+        last_ms=to_epoch_ms(facts["last_open_utc"], f"{where}.last_open_utc"),
+        range_count=facts["gap_range_count"],
+        total_bars=facts["gap_bar_count"],
+    )
     return facts
 
 
 def _validate_staged_record(
-    raw: Any, operation_id: str, where: str, *, base_files: Mapping[str, str]
+    raw: Any,
+    operation_id: str,
+    where: str,
+    *,
+    base_files: Mapping[str, str],
+    request: Mapping[str, Any],
 ) -> dict[str, Any]:
     record = _mapping(raw, where)
     instrument_id = pack_manifest.normalize_instrument_id(
@@ -206,7 +384,9 @@ def _validate_staged_record(
         "new_sha256": require_sha256(record.get("new_sha256"), f"{where}.new_sha256"),
         "changed": changed,
         "entry": entry,
-        "facts": _validate_facts(record.get("facts"), entry, f"{where}.facts"),
+        "facts": _validate_facts(
+            record.get("facts"), entry, f"{where}.facts", request=request, changed=changed
+        ),
     }
     extra = sorted(set(record) - set(validated))
     if extra:
@@ -315,8 +495,15 @@ def _validate_request(raw: Any, where: str) -> dict[str, Any]:
     }
 
 
-def _validate_closure(raw: Any, where: str, *, request: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the frozen closure evidence and its agreement with the request."""
+def _validate_closure(
+    raw: Any, where: str, *, request: Mapping[str, Any], venues: Sequence[str]
+) -> dict[str, Any]:
+    """Validate the frozen closure evidence and its agreement with the request.
+
+    The recorded clock samples must cover exactly the frozen roster's distinct
+    venues: a missing venue is never accepted merely because the remaining
+    samples happen to give the same cutoff.
+    """
     closure = _mapping(raw, where)
     missing = sorted(set(CLOSURE_KEYS) - set(closure))
     extra = sorted(set(closure) - set(CLOSURE_KEYS))
@@ -348,6 +535,17 @@ def _validate_closure(raw: Any, where: str, *, request: Mapping[str, Any]) -> di
         observed = format_utc(closure["observed_utc"], f"{where}.observed_utc")
     except PatternLabDataError as exc:
         raise _journal_error(str(exc)) from exc
+    expected_venues = sorted(set(venues))
+    if sorted(times) != expected_venues:
+        raise _journal_error(
+            f"{where}.server_times_ms: the frozen clock samples must cover exactly the roster venues "
+            f"{expected_venues}, got {sorted(times)}."
+        )
+    if lag_ms != exchange_data.CLOSURE_LAG_MS:
+        raise _journal_error(
+            f"{where}.publication_lag_ms: {lag_ms} is not the fixed {exchange_data.CLOSURE_LAG_MS}ms "
+            "publication allowance this build applies."
+        )
     expected_cutoff = ((min(times.values()) - lag_ms) // BASE_STEP_MS) * BASE_STEP_MS
     if cutoff_ms != expected_cutoff:
         raise _journal_error(
@@ -369,6 +567,11 @@ def _validate_closure(raw: Any, where: str, *, request: Mapping[str, Any]) -> di
             f"{where}.requested_end_token: {closure['requested_end_token']!r} does not agree with the "
             f"request token {request['requested_end_token']!r}."
         )
+    if request["requested_end_token"] == exchange_data.LATEST_CLOSED and resolved_ms != cutoff_ms:
+        raise _journal_error(
+            f"{where}.resolved_end_ms: {exchange_data.LATEST_CLOSED!r} resolves to the frozen safe "
+            f"cutoff {format_epoch_ms(cutoff_ms)}, not {format_epoch_ms(resolved_ms)}."
+        )
     return {
         "server_times_ms": times,
         "observed_utc": observed,
@@ -379,14 +582,91 @@ def _validate_closure(raw: Any, where: str, *, request: Mapping[str, Any]) -> di
     }
 
 
-def _validate_preflight(raw: Any, where: str, roster_ids: Sequence[str]) -> dict[str, Any]:
-    """Validate the recorded preflight evidence for roster members only."""
+def _validate_probe(raw: Any, where: str, *, start_ms: int) -> dict[str, Any]:
+    """Validate one closed start-boundary probe record.
+
+    A checked probe is the only evidence that a requested managed start is
+    actually retrievable, so it must record that the slot was available.  An
+    unchecked probe records no observation at all and represents a start that is
+    already covered by the stored pack.
+    """
+    probe = _mapping(raw, where)
+    missing = sorted(set(PROBE_KEYS) - set(probe))
+    extra = sorted(set(probe) - set(PROBE_KEYS))
+    if missing or extra:
+        raise _journal_error(
+            f"{where}: the probe record is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+    try:
+        checked = require_bool(probe["checked"], f"{where}.checked")
+        slot_ms = require_aligned_utc(probe["slot_utc"], f"{where}.slot_utc")
+        reason = require_text(probe["reason"], f"{where}.reason")
+    except PatternLabDataError as exc:
+        raise _journal_error(str(exc)) from exc
+    if slot_ms != start_ms:
+        raise _journal_error(
+            f"{where}.slot_utc: {format_epoch_ms(slot_ms)} is not the effective requested start "
+            f"{format_epoch_ms(start_ms)}."
+        )
+    available = probe["available"]
+    if checked and available is not True:
+        raise _journal_error(
+            f"{where}.available: a checked probe retained as valid evidence must record an available "
+            f"first slot, got {available!r}."
+        )
+    if not checked and available is not None:
+        raise _journal_error(
+            f"{where}.available: an unchecked probe made no observation, so available must be null, "
+            f"got {available!r}."
+        )
+    return {
+        "checked": checked,
+        "slot_utc": format_epoch_ms(slot_ms),
+        "available": available,
+        "reason": reason,
+    }
+
+
+def _validate_preflight(
+    raw: Any,
+    where: str,
+    *,
+    roster: Sequence[Mapping[str, Any]],
+    request: Mapping[str, Any],
+    kind: str,
+    phase: str,
+    completed: Sequence[str],
+) -> dict[str, Any]:
+    """Validate the recorded preflight evidence before any recovery work.
+
+    Restored evidence must be usable as it stands: rules pass the venue-aware
+    managed-rule validator, the probe relates to this operation's effective start,
+    and the recorded listing agrees with both the rules and that start.  The
+    producer checkpoints the whole roster's preflight at once, so once any is
+    recorded all of it is required; the legitimate initial state before preflight
+    is an empty mapping with nothing completed.  Nothing here fabricates missing
+    evidence or quietly re-runs an invalid completed preflight.
+    """
     evidence = _mapping(raw, where)
-    known = set(roster_ids)
+    venues = {entry["instrument_id"]: entry["venue"] for entry in roster}
+    if not evidence:
+        if completed or phase == "applying":
+            raise _journal_error(
+                f"{where}: completed work requires the recorded all-roster preflight evidence, but "
+                f"none is recorded ({sorted(completed)} completed, phase {phase!r})."
+            )
+        return {}
+    absent = sorted(set(venues) - set(evidence))
+    if absent:
+        raise _journal_error(
+            f"{where}: preflight is checkpointed for the whole roster at once, so a recorded "
+            f"preflight must cover every member; {absent} are missing."
+        )
+    start_ms = to_epoch_ms(request["start_utc"], f"{where}.request.start_utc")
     validated: dict[str, Any] = {}
     for key, value in evidence.items():
         position = f"{where}[{key}]"
-        if key not in known:
+        if key not in venues:
             raise _journal_error(f"{position}: {key!r} is not a member of the recorded roster.")
         item = _mapping(value, position)
         missing = sorted(set(PREFLIGHT_KEYS) - set(item))
@@ -398,28 +678,53 @@ def _validate_preflight(raw: Any, where: str, roster_ids: Sequence[str]) -> dict
             )
         listed = item["listed_at_utc"]
         try:
-            validated[key] = {
-                "rules": _mapping(item["rules"], f"{position}.rules"),
-                "probe": _mapping(item["probe"], f"{position}.probe"),
+            rules = pack_manifest.validate_instrument_rules(
+                item["rules"], f"{position}.rules", venue=venues[key]
+            )
+            record = {
+                "rules": rules,
+                "probe": _validate_probe(item["probe"], f"{position}.probe", start_ms=start_ms),
                 "listing_known": require_bool(item["listing_known"], f"{position}.listing_known"),
                 "listed_at_utc": None if listed is None else format_utc(listed, f"{position}.listed_at_utc"),
             }
         except PatternLabDataError as exc:
             raise _journal_error(str(exc)) from exc
-        if validated[key]["listing_known"] != (listed is not None):
+        if record["listing_known"] != (record["listed_at_utc"] is not None):
             raise _journal_error(
                 f"{position}.listing_known: does not agree with the recorded listed_at_utc {listed!r}."
             )
+        if record["listed_at_utc"] != rules["listed_at_utc"]:
+            raise _journal_error(
+                f"{position}.listed_at_utc: {record['listed_at_utc']!r} does not agree with the "
+                f"recorded rules listing {rules['listed_at_utc']!r}."
+            )
+        if record["listed_at_utc"] is not None:
+            listed_ms = to_epoch_ms(record["listed_at_utc"], f"{position}.listed_at_utc")
+            if listed_ms > start_ms:
+                raise _journal_error(
+                    f"{position}.listed_at_utc: the venue lists this contract at "
+                    f"{record['listed_at_utc']}, after the effective requested start "
+                    f"{format_epoch_ms(start_ms)}; that is not valid retained preflight evidence."
+                )
+        if kind == "collect" and not record["probe"]["checked"]:
+            raise _journal_error(
+                f"{position}.probe.checked: an initial collect proves its requested start with a "
+                "start-boundary probe; no stored coverage can already cover it."
+            )
+        validated[key] = record
     return validated
 
 
 def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
     """Validate the versioned operation journal before any journal-driven write.
 
-    Every promised relationship is checked here, not only container types: the
-    canonical request and closure agree, options are the valid frozen ones, the
-    staged set is a roster subset with deterministic paths and digests, and the
-    target revision follows from the recorded base.
+    Relationships derivable from the saved state are checked here, not only
+    container types: the canonical request and closure agree and the clock
+    samples cover the frozen roster's venues, options are the valid frozen ones,
+    restored preflight rules/probe/listing evidence is usable as it stands, each
+    record's derived facts follow from its request and staged entry, the staged
+    set is a roster subset with deterministic paths and digests, and the target
+    revision follows from the recorded base.
     """
     journal = _mapping(raw, where)
     version = require_int(journal.get("journal_version"), f"{where}.journal_version")
@@ -489,6 +794,15 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
     roster = pack_manifest.validate_roster_entries(journal.get("roster"), f"{where}.roster")
     roster_ids = [entry["instrument_id"] for entry in roster]
     request = _validate_request(journal.get("request"), f"{where}.request")
+    # The frozen request and closure are settled before any record is related to
+    # them, so a disagreeing request is reported as such rather than as a
+    # downstream per-instrument contradiction.
+    closure = _validate_closure(
+        journal.get("closure"),
+        f"{where}.closure",
+        request=request,
+        venues=[entry["venue"] for entry in roster],
+    )
     staged_raw = _mapping(journal.get("staged"), f"{where}.staged")
     staged: dict[str, Any] = {}
     for key, value in staged_raw.items():
@@ -497,7 +811,11 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
                 f"{where}.staged[{key}]: {key!r} is not a member of the recorded roster."
             )
         record = _validate_staged_record(
-            value, operation_id, f"{where}.staged[{key}]", base_files=validated_base["files"]
+            value,
+            operation_id,
+            f"{where}.staged[{key}]",
+            base_files=validated_base["files"],
+            request=request,
         )
         if record["instrument_id"] != key:
             raise _journal_error(f"{where}.staged[{key}]: record declares {record['instrument_id']!r}.")
@@ -548,8 +866,16 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
         "base": validated_base,
         "target_revision": target_revision,
         "phase": phase,
-        "closure": _validate_closure(journal.get("closure"), f"{where}.closure", request=request),
-        "preflight": _validate_preflight(journal.get("preflight"), f"{where}.preflight", roster_ids),
+        "closure": closure,
+        "preflight": _validate_preflight(
+            journal.get("preflight"),
+            f"{where}.preflight",
+            roster=roster,
+            request=request,
+            kind=kind,
+            phase=phase,
+            completed=sorted(staged),
+        ),
         "staged": staged,
         "targets": targets or None,
     }
