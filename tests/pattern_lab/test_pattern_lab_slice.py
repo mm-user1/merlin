@@ -395,3 +395,70 @@ class TestPackStateDetection:
             pack_data.load_slice(
                 root, "TEST_AAA-USDT-SWAP", start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 12 * STEP_MS)
             )
+
+
+class TestPublicResampler:
+    """Direct calls to the documented resampler must enforce its own assumptions."""
+
+    VALID_ROWS = np.array([[10.0, 12.0, 9.0, 11.0, 100.0], [11.0, 13.0, 10.0, 12.0, 5.0]])
+
+    def test_duplicate_timestamps_cannot_become_a_complete_bar(self):
+        with pytest.raises(PatternLabDataError, match="duplicate timestamps"):
+            pack_data.resample_complete_groups(np.array([0, 0]), self.VALID_ROWS, 10)
+
+    @pytest.mark.parametrize(
+        "timestamps, message",
+        [
+            (np.array([0, 60_000]), "grid"),
+            (np.array([300_000, 0]), "strictly increasing"),
+            (np.array([0.0, 300_000.0]), "integer epoch"),
+            (np.array([[0], [300_000]]), "one-dimensional"),
+            (np.array([0, 300_000, 600_000]), "do not match"),
+        ],
+    )
+    def test_invalid_direct_input_is_rejected(self, timestamps, message):
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_data.resample_complete_groups(timestamps, self.VALID_ROWS, 10)
+
+    def test_fractional_timestamps_are_not_truncated(self):
+        stamps = np.array(["1970-01-01T00:00:00.000100", "1970-01-01T00:05:00.000000"], dtype="datetime64[us]")
+        with pytest.raises(PatternLabDataError, match="sub-millisecond"):
+            pack_data.resample_complete_groups(stamps, self.VALID_ROWS, 10)
+
+    def test_invalid_values_are_rejected(self):
+        broken = self.VALID_ROWS.copy()
+        broken[0, 2] = 1e9
+        with pytest.raises(PatternLabDataError, match="low <= min"):
+            pack_data.resample_complete_groups(np.array([0, 300_000]), broken, 10)
+
+    def test_well_formed_empty_input_is_preserved(self):
+        stamps, values, omitted = pack_data.resample_complete_groups(
+            np.empty(0, dtype=np.int64), np.empty((0, 5), dtype=np.float64), 30
+        )
+        assert stamps.size == 0
+        assert values.shape == (0, 5)
+        assert omitted == 0
+
+    @pytest.mark.parametrize("ohlcv", [np.empty(0), np.empty((0, 4))])
+    def test_malformed_empty_shapes_fail(self, ohlcv):
+        with pytest.raises(PatternLabDataError):
+            pack_data.resample_complete_groups(np.empty(0, dtype=np.int64), ohlcv, 30)
+
+    def test_valid_direct_call_keeps_group_and_signed_zero_semantics(self):
+        stamps = ANCHOR_MS + np.array([0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11], dtype=np.int64) * STEP_MS
+        values = np.column_stack(
+            [
+                100.0 + np.arange(11),
+                102.0 + np.arange(11),
+                99.0 + np.arange(11),
+                101.0 + np.arange(11),
+                np.full(11, -0.0),
+            ]
+        )
+        original = values.copy()
+        groups, aggregated, omitted = pack_data.resample_complete_groups(stamps, values, 30)
+        assert groups.tolist() == [ANCHOR_MS]
+        assert aggregated[0].tolist() == [100.0, 107.0, 99.0, 106.0, 0.0]
+        assert not np.signbit(aggregated[0, 4])
+        assert omitted == 1
+        assert np.array_equal(np.copysign(1.0, values[:, 4]), np.copysign(1.0, original[:, 4]))

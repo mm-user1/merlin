@@ -479,9 +479,9 @@ def _validate_universe(raw: Any) -> dict[str, Any]:
     selection_date = require_optional_text(universe.get("selection_date"), "universe.selection_date")
     if selection_date is not None and selection_source is None:
         raise PatternLabDataError("universe.selection_date: recorded without a selection source.")
-    require_optional_text(universe.get("notes"), "universe.notes")
     universe["selection_source"] = selection_source
     universe["selection_date"] = selection_date
+    universe["notes"] = require_optional_text(universe.get("notes"), "universe.notes")
     return universe
 
 
@@ -514,6 +514,23 @@ def _validate_verification(raw: Any, where: str) -> dict[str, Any]:
         require_aligned(cutoff_ms, BASE_STEP_MS, f"{where}.closed_before_utc")
         require_text(evidence, f"{where}.closure_evidence")
         require_text(origin, f"{where}.closure_source")
+        verification["closed_before_utc"] = format_epoch_ms(cutoff_ms)
+    return verification
+
+
+def require_published_verification(raw: Any, where: str) -> dict[str, Any]:
+    """Validate verification metadata under the stricter new-pack publication policy.
+
+    Schema validation deliberately recognizes unverified quote volume so that a
+    future writer's state can be read and tested, but a Pattern Lab publisher must
+    never emit it.
+    """
+    verification = _validate_verification(raw, where)
+    if verification["volume_quote_verified"] is not True:
+        raise PatternLabDataError(
+            f"{where}.volume_quote_verified: publication requires verified quote-volume units; "
+            "unproven units are rejected rather than published."
+        )
     return verification
 
 
@@ -561,6 +578,9 @@ def _validate_instrument(raw: Any, index: int) -> dict[str, Any]:
     entry["instrument_id"] = instrument_id
     entry["venue"] = venue
     entry["contract"] = contract
+    entry["first_open_utc"] = format_epoch_ms(first_ms)
+    entry["last_open_utc"] = format_epoch_ms(last_ms)
+    entry["coverage_end_utc"] = format_epoch_ms(coverage_end_ms)
     entry["quote_currency"] = require_currency(entry.get("quote_currency"), f"{where}.quote_currency")
     entry["roles"] = normalize_roles(entry.get("roles"), f"{where}.roles")
     entry["file"] = validate_relative_file(entry.get("file"), f"{where}.file")
@@ -591,11 +611,12 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if state not in PACK_STATES:
         raise PatternLabDataError(f"manifest.state: expected one of {list(PACK_STATES)}, got {state!r}.")
     manifest["generated_utc"] = format_utc(manifest.get("generated_utc"), "manifest.generated_utc")
-    base = manifest.get("base_timeframe_minutes")
-    if isinstance(base, bool) or base != BASE_TIMEFRAME_MINUTES:
+    base = require_int(manifest.get("base_timeframe_minutes"), "manifest.base_timeframe_minutes")
+    if base != BASE_TIMEFRAME_MINUTES:
         raise PatternLabDataError(
             f"manifest.base_timeframe_minutes: only {BASE_TIMEFRAME_MINUTES} is stored in schema v1, got {base!r}."
         )
+    manifest["base_timeframe_minutes"] = base
     unit = manifest.get("volume_unit")
     if unit != VOLUME_UNIT:
         raise PatternLabDataError(f"manifest.volume_unit: expected {VOLUME_UNIT!r}, got {unit!r}.")
@@ -702,6 +723,38 @@ def research_limitations(entry: Mapping[str, Any]) -> list[str]:
     return limitations
 
 
+def _evidence_lines(entry: Mapping[str, Any]) -> list[str]:
+    """Render one instrument's verification evidence, source references and limits."""
+    source = entry["source"]
+    verification = entry["verification"]
+    verified = "yes" if verification["volume_quote_verified"] else "no"
+    lines = [
+        f"- Quote volume verified: {verified} \u2014 {verification['volume_quote_evidence']}",
+        f"- Volume unit: {VOLUME_UNIT} in {entry['quote_currency']}",
+    ]
+    evidence_source = source.get("evidence_source")
+    if isinstance(evidence_source, str) and evidence_source.strip():
+        lines.append(f"- Evidence source: {evidence_source}")
+    lines.append(f"- Input: {source['input_format']} ({source['input_dtype']})")
+    lines.append(f"- Source reference: {source['source_reference']}")
+    if source.get("source_hash"):
+        lines.append(f"- Source SHA-256: `{source['source_hash']}`")
+    cutoff = verification["closed_before_utc"]
+    if cutoff is None:
+        lines.append(
+            "- Closed before UTC: unknown \u2014 no closure evidence was supplied, so every "
+            "research read of this instrument is refused."
+        )
+    else:
+        lines.append(
+            f"- Closed before UTC: {cutoff} \u2014 {verification['closure_evidence']} "
+            f"(source: {verification['closure_source']})"
+        )
+    limitations = research_limitations(entry)
+    lines.append(f"- Research limitations: {'; '.join(limitations) if limitations else 'none'}")
+    return lines
+
+
 def render_readme(manifest: Mapping[str, Any]) -> str:
     """Render the human-readable pack README from the manifest alone."""
     universe = manifest["universe"]
@@ -749,27 +802,18 @@ def render_readme(manifest: Mapping[str, Any]) -> str:
         )
     lines += [
         "",
-        "## Verification and source limitations",
+        "## Verification, evidence and source limitations",
         "",
         "A closure cutoff certifies that retained bars ending at or before it were closed",
         "when observed. It does not certify a gap-free history. Research reads require a",
         "verified quote-volume unit and a closure cutoff at or after the requested end.",
         "",
-        "| Instrument | Quote volume verified | Closed before UTC | Input | Research limitations |",
-        "| --- | --- | --- | --- | --- |",
+        "Recorded evidence is the assertion supplied by the operator who published or",
+        "imported this pack. The legacy NPZ importer performs no exchange verification of",
+        "its own; it copies the declared evidence into this pack's provenance.",
     ]
     for entry in manifest["instruments"]:
-        limitations = research_limitations(entry)
-        lines.append(
-            "| {id} | {verified} | {cutoff} | {fmt} ({dtype}) | {limits} |".format(
-                id=entry["instrument_id"],
-                verified="yes" if entry["verification"]["volume_quote_verified"] else "no",
-                cutoff=entry["verification"]["closed_before_utc"] or "unknown",
-                fmt=entry["source"]["input_format"],
-                dtype=entry["source"]["input_dtype"],
-                limits="; ".join(limitations) if limitations else "none",
-            )
-        )
+        lines += ["", f"### {entry['instrument_id']}", ""] + _evidence_lines(entry)
     lines += [
         "",
         "## Files",

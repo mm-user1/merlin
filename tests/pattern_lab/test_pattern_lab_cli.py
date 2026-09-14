@@ -11,7 +11,18 @@ from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import manifest as pack_manifest
 from tools.pattern_lab.__main__ import main
 
-from ._helpers import ANCHOR_MS, REPO_ROOT, STEP_MS, mutate_manifest, single_pack, utc
+from ._helpers import (
+    ANCHOR_MS,
+    OKX_ID,
+    REPO_ROOT,
+    STEP_MS,
+    legacy_series,
+    mutate_manifest,
+    sidecar,
+    single_pack,
+    utc,
+    write_legacy_pack,
+)
 
 ISOLATION_CHILD = textwrap.dedent(
     """
@@ -156,6 +167,12 @@ class TestCommandLine:
         assert payload["input_fingerprint"] == expected["input_fingerprint"]
         assert "open" not in payload  # slice never dumps rows
 
+        # Provenance names what it is: the manifest's declared digest, not a
+        # digest of the bytes this read verified.
+        provenance = payload["physical_provenance"]
+        assert "file_sha256" not in provenance
+        assert provenance["declared_file_sha256"] == pack_manifest.read_manifest(root)["instruments"][0]["sha256"]
+
     def test_inspect_verify_reports_problems_with_a_nonzero_status(self, tmp_path):
         root = tmp_path / "pack"
         single_pack(root, slot_count=24)
@@ -182,8 +199,6 @@ class TestCommandLine:
         assert "TEST_MISSING" in result.stderr
 
     def test_import_emits_a_concise_summary(self, tmp_path):
-        from .test_pattern_lab_import_npz import OKX_ID, legacy_series, sidecar, write_legacy_pack
-
         source = write_legacy_pack(tmp_path / "legacy", [legacy_series()])
         metadata_path = tmp_path / "metadata.json"
         metadata_path.write_text(json.dumps(sidecar()), encoding="utf-8", newline="\n")
@@ -205,8 +220,6 @@ class TestCommandLine:
         assert record["source"]["kind"] == "legacy_npz_import"
 
     def test_import_refuses_an_existing_output_root(self, tmp_path):
-        from .test_pattern_lab_import_npz import legacy_series, sidecar, write_legacy_pack
-
         source = write_legacy_pack(tmp_path / "legacy", [legacy_series()])
         metadata_path = tmp_path / "metadata.json"
         metadata_path.write_text(json.dumps(sidecar()), encoding="utf-8", newline="\n")

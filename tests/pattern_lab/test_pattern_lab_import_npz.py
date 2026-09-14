@@ -13,90 +13,17 @@ from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import import_npz as legacy
 from tools.pattern_lab import manifest as pack_manifest
 
-from ._helpers import ANCHOR_MS, STEP_MS, synthetic_series, utc
-
-OKX_ID = "OKX_AAA-USDT-SWAP"
-BYBIT_ID = "BYBIT_ENAUSDT"
-OKX_ENDPOINT = "GET https://www.okx.com/api/v5/market/history-candles (bar=5m)"
-
-
-def legacy_series(symbol="AAA", venue="OKX", contract="AAA-USDT-SWAP", role="trading", slot_count=48, **extra):
-    stamps, values = synthetic_series(slot_count)
-    spec = {
-        "symbol": symbol,
-        "venue": venue,
-        "contract": contract,
-        "role": role,
-        "timestamps": stamps,
-        "ohlcv": values.astype(np.float32),
-        "scalars": True,
-        "arrays": None,
-    }
-    spec.update(extra)
-    return spec
-
-
-def write_legacy_pack(root: Path, specs, *, manifest_overrides=None, entry_overrides=None) -> Path:
-    """Write a prototype-layout NPZ pack at ``root`` and return it."""
-    root = Path(root)
-    (root / "5m").mkdir(parents=True)
-    series = []
-    for spec in specs:
-        path = root / "5m" / f"{spec['symbol']}.npz"
-        arrays = spec["arrays"]
-        if arrays is None:
-            arrays = {"ts": spec["timestamps"], "ohlcv": spec["ohlcv"]}
-            if spec["scalars"]:
-                arrays["ex"] = np.array(spec.get("scalar_venue", spec["venue"]))
-                arrays["sym"] = np.array(spec.get("scalar_symbol", spec["symbol"]))
-        np.savez_compressed(path, **arrays)
-        entry = {
-            "symbol": spec["symbol"],
-            "venue": spec["venue"],
-            "contract": spec["contract"],
-            "role": spec["role"],
-            "source_endpoint": OKX_ENDPOINT,
-            "base_timeframe": "5m",
-            "file": f"5m/{spec['symbol']}.npz",
-            "bars": int(np.size(spec["timestamps"])),
-            "first_ts_ms": int(np.min(spec["timestamps"])),
-            "last_ts_ms": int(np.max(spec["timestamps"])),
-            "sha256": pack_manifest.file_sha256(path),
-        }
-        entry.update(spec.get("entry_overrides") or {})
-        entry.update(entry_overrides or {})
-        series.append(entry)
-    manifest = {
-        "manifest_version": 1,
-        "generated_utc": "2026-09-13T02:26:59Z",
-        "volume_convention": "quote_volume_usd (USD notional), NOT base-asset volume.",
-        "gap_policy": "Gaps < 3 bars are forward-filled with a stale flag.",
-        "splits": {"discovery": [0.0, 0.65], "validation": [0.65, 0.85], "holdout": [0.85, 1.0],
-                   "status": "discovery used; validation and holdout UNTOUCHED as of 2026-09-13"},
-        "series": series,
-    }
-    manifest.update(manifest_overrides or {})
-    (root / "MANIFEST.json").write_text(
-        json.dumps(manifest, indent=1), encoding="utf-8", newline="\n"
-    )
-    return root
-
-
-def sidecar(instruments=None, **overrides):
-    payload = {
-        "schema_version": 1,
-        "instruments": instruments
-        if instruments is not None
-        else {
-            OKX_ID: {
-                "quote_currency": "USDT",
-                "volume_unit_evidence": "OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
-                "evidence_source": "Source review plus the OKX candle field definition",
-            }
-        },
-    }
-    payload.update(overrides)
-    return payload
+from ._helpers import (
+    ANCHOR_MS,
+    BYBIT_ID,
+    OKX_ID,
+    STEP_MS,
+    legacy_series,
+    sidecar,
+    synthetic_series,
+    utc,
+    write_legacy_pack,
+)
 
 
 def source_hashes(root: Path) -> dict[str, str]:

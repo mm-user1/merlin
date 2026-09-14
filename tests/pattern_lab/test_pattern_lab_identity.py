@@ -7,11 +7,13 @@ import json
 import numpy as np
 import pytest
 
+from tools.pattern_lab import PatternLabDataError
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import manifest as pack_manifest
 
 from ._helpers import (
     ANCHOR_MS,
+    REPO_ROOT,
     STEP_MS,
     instrument_source,
     mutate_manifest,
@@ -140,10 +142,26 @@ class TestFrozenEncoding:
         )
         assert dropped != expected
 
-        moved = pack_data.input_fingerprint(
-            header=header, timestamps=GOLDEN_TIMESTAMPS + STEP_MS, ohlcv=GOLDEN_OHLCV
+        # Shifting the consumed timestamps changes identity; the header interval
+        # must be wide enough to declare those rows as consumed.
+        wider = pack_data.fingerprint_header(
+            instrument_id="TEST_AAA-USDT",
+            venue="TEST",
+            contract="AAA-USDT",
+            quote_currency="USDT",
+            timeframe_minutes=5,
+            start_ms=0,
+            end_ms=900_000,
+            warmup_start_ms=0,
         )
-        assert moved != expected
+        unmoved = pack_data.input_fingerprint(
+            header=wider, timestamps=GOLDEN_TIMESTAMPS, ohlcv=GOLDEN_OHLCV
+        )
+        moved = pack_data.input_fingerprint(
+            header=wider, timestamps=GOLDEN_TIMESTAMPS + STEP_MS, ohlcv=GOLDEN_OHLCV
+        )
+        assert moved != unmoved
+        assert unmoved != expected  # the declared interval is part of identity
 
 
 class TestSliceIdentity:
@@ -169,7 +187,7 @@ class TestSliceIdentity:
         assert extended.input_fingerprint == original.input_fingerprint
         assert extended.bars.equals(original.bars)
         # Physical provenance does change with the republished pack.
-        assert extended.physical["file_sha256"] != original.physical["file_sha256"]
+        assert extended.physical["declared_file_sha256"] != original.physical["declared_file_sha256"]
         assert extended.physical["manifest_revision"] == 4
 
     def test_relocating_the_pack_does_not_change_identity(self, tmp_path):
@@ -279,3 +297,182 @@ class TestSliceIdentity:
         publish(early, [instrument_source(stamps, values, closed_before_ms=ANCHOR_MS + 130 * STEP_MS)])
         publish(later, [instrument_source(stamps, values, closed_before_ms=ANCHOR_MS + 144 * STEP_MS)])
         assert self._slice(later).input_fingerprint == self._slice(early).input_fingerprint
+
+
+def _mutated_header(**overrides):
+    header = dict(golden_header())
+    for key, value in overrides.items():
+        if value is _REMOVE:
+            del header[key]
+        else:
+            header[key] = value
+    return header
+
+
+class _Remove:
+    pass
+
+
+_REMOVE = _Remove()
+
+
+class TestPublicHeaderValidation:
+    """Direct calls must meet the frozen v1 header before anything is hashed."""
+
+    def test_an_arbitrary_mapping_is_refused(self):
+        with pytest.raises(PatternLabDataError, match="closed"):
+            pack_data.input_fingerprint(
+                header={"unexpected": True}, timestamps=GOLDEN_TIMESTAMPS, ohlcv=GOLDEN_OHLCV
+            )
+
+    @pytest.mark.parametrize("header", [None, "header", [1, 2], 7])
+    def test_non_mapping_headers_are_refused(self, header):
+        with pytest.raises(PatternLabDataError, match="expected a mapping"):
+            pack_data.validate_fingerprint_header(header)
+
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            ({"venue": _REMOVE}, "closed"),
+            ({"unexpected": True}, "closed"),
+            ({"fingerprint_version": 2}, "unsupported version"),
+            ({"fingerprint_version": True}, "expected an integer"),
+            ({"fingerprint_version": 1.0}, "expected an integer"),
+            ({"base_timeframe_minutes": 10}, "must be 5"),
+            ({"base_timeframe_minutes": True}, "expected an integer"),
+            ({"base_timeframe_minutes": 5.0}, "expected an integer"),
+            ({"volume_unit": "base_volume"}, "volume_unit"),
+            ({"resampling_policy": "calendar_v1"}, "resampling_policy"),
+            ({"missing_bar_policy": "ffill_v1"}, "missing_bar_policy"),
+            ({"venue": "test"}, "canonical value"),
+            ({"contract": "aaa-usdt"}, "canonical value"),
+            ({"instrument_id": "test_aaa-usdt"}, "canonical value"),
+            ({"instrument_id": "TEST_BBB-USDT"}, "does not match"),
+            ({"quote_currency": "usdt"}, "quote_currency"),
+            ({"timeframe_minutes": 7}, "multiple of 5"),
+            ({"timeframe_minutes": True}, "expected an integer"),
+            ({"timeframe_minutes": 5.0}, "expected an integer"),
+            ({"start_ms": "0"}, "expected an integer"),
+            ({"end_ms": True}, "expected an integer"),
+            ({"warmup_start_ms": 300_000}, "warmup_start_ms <= start_ms"),
+            ({"start_ms": 600_000}, "warmup_start_ms <= start_ms"),
+            ({"end_ms": 0}, "warmup_start_ms <= start_ms"),
+            ({"start_ms": 60_000}, "not aligned"),
+            ({"timeframe_minutes": 30}, "not aligned"),
+        ],
+    )
+    def test_malformed_headers_are_refused(self, overrides, message):
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_data.input_fingerprint(
+                header=_mutated_header(**overrides), timestamps=GOLDEN_TIMESTAMPS, ohlcv=GOLDEN_OHLCV
+            )
+
+    def test_the_builder_rejects_inconsistent_identity(self):
+        with pytest.raises(PatternLabDataError, match="does not match"):
+            pack_data.fingerprint_header(
+                instrument_id="TEST_BBB-USDT",
+                venue="TEST",
+                contract="AAA-USDT",
+                quote_currency="USDT",
+                timeframe_minutes=5,
+                start_ms=0,
+                end_ms=600_000,
+                warmup_start_ms=0,
+            )
+
+    def test_validation_does_not_mutate_the_caller(self):
+        header = _mutated_header()
+        before = dict(header)
+        stamps = GOLDEN_TIMESTAMPS.copy()
+        rows = GOLDEN_OHLCV.copy()
+        rows[1, 4] = -0.0
+        digest = pack_data.input_fingerprint(header=header, timestamps=stamps, ohlcv=rows)
+        assert digest == GOLDEN_DIGEST
+        assert header == before
+        assert np.array_equal(stamps, GOLDEN_TIMESTAMPS)
+        assert np.signbit(rows[1, 4])
+
+
+class TestPublicSeriesValidation:
+    """Direct calls must also supply a valid, in-interval 5m series."""
+
+    @pytest.mark.parametrize(
+        "timestamps, ohlcv, message",
+        [
+            (np.array([0, 0]), GOLDEN_OHLCV, "duplicate timestamps"),
+            (np.array([300_000, 0]), GOLDEN_OHLCV, "strictly increasing"),
+            (np.array([0, 60_000]), GOLDEN_OHLCV, "grid"),
+            (np.array([0, 300_000, 600_000]), GOLDEN_OHLCV, "do not match"),
+            (GOLDEN_TIMESTAMPS, GOLDEN_OHLCV[:, :4], r"expected a \(N, 5\)"),
+        ],
+    )
+    def test_invalid_arrays_are_refused(self, timestamps, ohlcv, message):
+        with pytest.raises(PatternLabDataError, match=message):
+            pack_data.input_fingerprint(header=golden_header(), timestamps=timestamps, ohlcv=ohlcv)
+
+    def test_invalid_values_are_refused(self):
+        broken = GOLDEN_OHLCV.copy()
+        broken[0, 4] = -1.0
+        with pytest.raises(PatternLabDataError, match="nonnegative"):
+            pack_data.input_fingerprint(header=golden_header(), timestamps=GOLDEN_TIMESTAMPS, ohlcv=broken)
+
+    @pytest.mark.parametrize("shift", [-STEP_MS, 600_000])
+    def test_rows_outside_the_declared_interval_are_refused(self, shift):
+        with pytest.raises(PatternLabDataError, match="consumed rows must lie in"):
+            pack_data.input_fingerprint(
+                header=golden_header(), timestamps=GOLDEN_TIMESTAMPS + shift, ohlcv=GOLDEN_OHLCV
+            )
+
+    def test_gaps_inside_the_interval_remain_valid(self):
+        wider = pack_data.fingerprint_header(
+            instrument_id="TEST_AAA-USDT",
+            venue="TEST",
+            contract="AAA-USDT",
+            quote_currency="USDT",
+            timeframe_minutes=5,
+            start_ms=0,
+            end_ms=900_000,
+            warmup_start_ms=0,
+        )
+        gapped = pack_data.input_fingerprint(
+            header=wider, timestamps=np.array([0, 600_000]), ohlcv=GOLDEN_OHLCV
+        )
+        assert len(gapped) == 64
+
+    def test_well_formed_empty_input_is_accepted(self):
+        digest = pack_data.input_fingerprint(
+            header=golden_header(),
+            timestamps=np.empty(0, dtype=np.int64),
+            ohlcv=np.empty((0, 5), dtype=np.float64),
+        )
+        assert len(digest) == 64
+        assert digest != GOLDEN_DIGEST
+
+    def test_malformed_empty_input_is_refused(self):
+        with pytest.raises(PatternLabDataError):
+            pack_data.input_fingerprint(
+                header=golden_header(), timestamps=np.empty(0, dtype=np.int64), ohlcv=np.empty(0)
+            )
+
+
+class TestDocumentedReferenceEncoder:
+    """The tracked README snippet must reproduce the golden vector without mutating input."""
+
+    @staticmethod
+    def _snippet() -> str:
+        text = (REPO_ROOT / "tools" / "pattern_lab" / "README.md").read_text(encoding="utf-8")
+        fence = text.index("```python", text.index("Reference encoder."))
+        body = text.index("\n", fence) + 1
+        return text[body:text.index("```", body)]
+
+    def test_snippet_reproduces_the_golden_digest_without_mutating_its_input(self):
+        rows = GOLDEN_OHLCV.copy()
+        rows[1, 4] = -0.0
+        namespace = {
+            "header": golden_header(),
+            "ohlcv": rows,
+            "timestamps": GOLDEN_TIMESTAMPS.copy(),
+        }
+        exec(compile(self._snippet(), "pattern_lab_readme_snippet", "exec"), namespace)
+        assert namespace["fingerprint"] == GOLDEN_DIGEST
+        assert np.signbit(rows[1, 4])

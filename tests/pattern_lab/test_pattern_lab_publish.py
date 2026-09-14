@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta, timezone
 import json
 
 import numpy as np
@@ -347,3 +348,155 @@ class TestInspection:
         root.mkdir()
         with pytest.raises(PatternLabDataError, match="no readable pack manifest"):
             pack_data.inspect_pack(root)
+
+
+class TestPublicationVerificationPolicy:
+    """T01 publishers never emit unverified quote volume, whatever the schema allows."""
+
+    @staticmethod
+    def _verification(**overrides):
+        payload = pack_manifest.build_verification(
+            volume_quote_verified=True, volume_quote_evidence="synthetic quote turnover"
+        )
+        payload.update(overrides)
+        return payload
+
+    @pytest.mark.parametrize(
+        "verification",
+        [
+            {"volume_quote_verified": False, "volume_quote_evidence": "units were never established"},
+            {"volume_quote_verified": "true"},
+            {"volume_quote_verified": 1},
+        ],
+    )
+    def test_unverified_quote_volume_leaves_no_ready_manifest(self, tmp_path, verification):
+        root = tmp_path / "pack"
+        stamps, values = synthetic_series(12)
+        payload = self._verification(**verification)
+        if "volume_quote_verified" in verification and verification["volume_quote_verified"] is False:
+            payload["volume_quote_evidence"] = verification["volume_quote_evidence"]
+        with pytest.raises(PatternLabDataError, match="volume_quote_verified"):
+            publish(root, [instrument_source(stamps, values, verification=payload)])
+        assert not (root / pack_manifest.MANIFEST_NAME).exists()
+        assert not any((root / "ohlcv").glob("*.parquet"))
+
+    def test_missing_flag_names_the_instrument(self, tmp_path):
+        stamps, values = synthetic_series(12)
+        payload = self._verification()
+        del payload["volume_quote_verified"]
+        with pytest.raises(PatternLabDataError, match="TEST_AAA-USDT-SWAP.volume_quote_verified"):
+            publish(tmp_path / "pack", [instrument_source(stamps, values, verification=payload)])
+
+    def test_verified_volume_with_unknown_closure_stays_archivable(self, tmp_path):
+        root = tmp_path / "pack"
+        stamps, values = synthetic_series(48)
+        publish(root, [instrument_source(stamps, values, closed_before_ms=None)])
+        entry = pack_manifest.read_manifest(root)["instruments"][0]
+        assert entry["verification"]["volume_quote_verified"] is True
+        assert entry["verification"]["closed_before_utc"] is None
+        assert pack_data.inspect_pack(root, verify=True)["verification_check"]["ok"] is True
+        with pytest.raises(PatternLabDataError, match="closure is unknown"):
+            pack_data.load_slice(
+                root, "TEST_AAA-USDT-SWAP", start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 12 * STEP_MS)
+            )
+
+
+class TestOffsetManifestRoundTrip:
+    """An accepted explicit-offset manifest must verify and read like a canonical one."""
+
+    @staticmethod
+    def _as_offset(value, hours):
+        moment = pack_manifest.parse_utc(value, "timestamp").astimezone(timezone(timedelta(hours=hours)))
+        return moment.isoformat()
+
+    def test_equivalent_offsets_verify_and_load(self, tmp_path):
+        root = tmp_path / "pack"
+        single_pack(root, slot_count=288)
+        canonical = pack_manifest.read_manifest(root)["instruments"][0]
+
+        def shift(manifest):
+            entry = manifest["instruments"][0]
+            entry["first_open_utc"] = self._as_offset(entry["first_open_utc"], 2)
+            entry["last_open_utc"] = self._as_offset(entry["last_open_utc"], -5)
+            entry["coverage_end_utc"] = self._as_offset(entry["coverage_end_utc"], 9)
+            entry["verification"]["closed_before_utc"] = self._as_offset(
+                entry["verification"]["closed_before_utc"], 3
+            )
+
+        mutate_manifest(root, shift)
+        reread = pack_manifest.read_manifest(root)["instruments"][0]
+        assert reread["first_open_utc"] == canonical["first_open_utc"]
+        assert reread["coverage_end_utc"] == canonical["coverage_end_utc"]
+        assert reread["verification"]["closed_before_utc"] == canonical["verification"]["closed_before_utc"]
+
+        report = pack_data.inspect_pack(root, verify=True)
+        assert report["verification_check"] == {"checked": True, "ok": True, "problems": []}
+        loaded = pack_data.load_slice(
+            root, "TEST_AAA-USDT-SWAP", start=utc(ANCHOR_MS), end=utc(ANCHOR_MS + 288 * STEP_MS)
+        )
+        assert len(loaded.bars) == 288
+
+
+class TestGeneratedPackEvidence:
+    """The rendered pack README must carry the evidence behind its verification flags."""
+
+    def test_evidence_and_references_are_rendered(self, tmp_path):
+        root = tmp_path / "pack"
+        stamps, values = synthetic_series(30, drop_slots=[7])
+        source = pack_manifest.build_source_metadata(
+            input_format="npz",
+            input_dtype="float32",
+            source_reference="5m/AAA.npz in the prototype NPZ pack",
+            volume_unit_evidence="OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
+            source_hash="b" * 64,
+            extra={"evidence_source": "Source review plus the OKX candle field definition"},
+        )
+        verified = pack_manifest.build_verification(
+            volume_quote_verified=True,
+            volume_quote_evidence="OKX swap volCcyQuote; fetch_base.py reads candle field 7.",
+            closed_before_utc=utc(ANCHOR_MS + 30 * STEP_MS),
+            closure_evidence="Every retained bar precedes the recorded fetch cutoff.",
+            closure_source="Prototype fetch log reviewed at import time",
+        )
+        unknown = pack_manifest.build_verification(
+            volume_quote_verified=True, volume_quote_evidence="Bybit linear turnover, kline field 6."
+        )
+        publish(
+            root,
+            [
+                pack_data.InstrumentSource(
+                    symbol="AAA", venue="OKX", contract="AAA-USDT-SWAP", quote_currency="USDT",
+                    roles=["trading"], timestamps=stamps, ohlcv=values,
+                    source=source, verification=verified,
+                ),
+                instrument_source(
+                    stamps, values, symbol="ENA", venue="Bybit", contract="ENAUSDT",
+                    closed_before_ms=None, verification=unknown,
+                    ),
+            ],
+        )
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        assert "### OKX_AAA-USDT-SWAP" in readme
+        assert "OKX swap volCcyQuote; fetch_base.py reads candle field 7." in readme
+        assert "Source review plus the OKX candle field definition" in readme
+        assert "5m/AAA.npz in the prototype NPZ pack" in readme
+        assert "b" * 64 in readme
+        assert "Every retained bar precedes the recorded fetch cutoff." in readme
+        assert "Prototype fetch log reviewed at import time" in readme
+        assert "Quote volume verified: yes" in readme
+        assert "1 missing 5m bars inside the declared coverage" in readme
+
+        assert "### BYBIT_ENAUSDT" in readme
+        assert "Bybit linear turnover, kline field 6." in readme
+        assert "Closed before UTC: unknown" in readme
+        assert "every research read of this instrument is refused" in readme
+        assert "performs no exchange verification of" in readme
+
+    def test_absent_provenance_is_not_fabricated(self, tmp_path):
+        root = tmp_path / "pack"
+        single_pack(root, slot_count=12)
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        assert "Source SHA-256" not in readme
+        assert "Evidence source" not in readme
+        assert "Source reference: tests/pattern_lab/_helpers.py synthetic generator" in readme

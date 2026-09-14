@@ -127,20 +127,43 @@ def _normalize_volume_signed_zero(values: np.ndarray) -> np.ndarray:
     return values
 
 
-def validate_series(timestamps: Any, ohlcv: Any, *, where: str = "series") -> tuple[np.ndarray, np.ndarray]:
-    """Validate one instrument's 5m series and return canonical arrays.
-
-    Invalid input is rejected: values are never interpolated, deduplicated,
-    clamped, or converted from base volume.
-    """
+def _canonical_arrays(timestamps: Any, ohlcv: Any, where: str) -> tuple[np.ndarray, np.ndarray]:
     stamps = canonicalize_timestamps(timestamps, f"{where}.timestamps")
     values = canonicalize_ohlcv(ohlcv, f"{where}.ohlcv")
     if stamps.size != values.shape[0]:
         raise PatternLabDataError(
             f"{where}: {stamps.size} timestamps do not match {values.shape[0]} OHLCV rows."
         )
+    return stamps, values
+
+
+def validate_series(timestamps: Any, ohlcv: Any, *, where: str = "series") -> tuple[np.ndarray, np.ndarray]:
+    """Validate one stored instrument's 5m series and return canonical arrays.
+
+    Invalid input is rejected: values are never interpolated, deduplicated,
+    clamped, or converted from base volume. Empty instruments are rejected here;
+    use :func:`validate_consumed_rows` where an empty read is well defined.
+    """
+    stamps, values = _canonical_arrays(timestamps, ohlcv, where)
     if stamps.size == 0:
         raise PatternLabDataError(f"{where}: empty instruments are rejected; coverage must be defined.")
+    return _validate_rows(stamps, values, where)
+
+
+def validate_consumed_rows(timestamps: Any, ohlcv: Any, *, where: str = "rows") -> tuple[np.ndarray, np.ndarray]:
+    """Validate consumed 5m rows under the same rules, accepting a well-formed empty input.
+
+    A one-dimensional empty timestamp array with a ``(0, 5)`` OHLCV array is the
+    only accepted empty shape; malformed empty shapes still fail.
+    """
+    stamps, values = _canonical_arrays(timestamps, ohlcv, where)
+    if stamps.size == 0:
+        return stamps, values
+    return _validate_rows(stamps, values, where)
+
+
+def _validate_rows(stamps: np.ndarray, values: np.ndarray, where: str) -> tuple[np.ndarray, np.ndarray]:
+    """Enforce the 5m series contract on a nonempty canonical pair of arrays."""
     steps = np.diff(stamps)
     if steps.size and (steps == 0).any():
         raise PatternLabDataError(f"{where}: duplicate timestamps are rejected.")
@@ -394,7 +417,9 @@ def publish_pack(
 
     Instruments are consumed one at a time; no universe-wide cube is built.  The
     destination must not already exist, and the ``ready`` manifest is published
-    only after every file has been written, re-read and verified.
+    only after every file has been written, re-read and verified.  Each
+    instrument must declare verified quote-volume units before its file is
+    written; unknown closure remains publishable as archival provenance.
     """
     require_pyarrow()
     output_root = Path(output_root)
@@ -418,6 +443,8 @@ def publish_pack(
         if instrument_id in seen:
             raise PatternLabDataError(f"instruments: duplicate instrument {instrument_id!r}.")
         seen.add(instrument_id)
+        # T01 publishers never emit unverified quote volume: reject before writing.
+        pack_manifest.require_published_verification(item.verification, instrument_id)
         relative = pack_manifest.instrument_relative_file(instrument_id)
         written = write_ohlcv_file(
             output_root / relative,
@@ -589,17 +616,18 @@ def resample_complete_groups(
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Aggregate complete UTC epoch-anchored groups; incomplete groups are omitted.
 
-    A group is aggregated only when it holds exactly the expected unique 5m
-    timestamps from its open to its last slot.  No partial leading or trailing
-    group is promoted to a full candle.
+    Input is validated at this public boundary through the same 5m series rules
+    used for storage, because the count-based algorithm is only correct once
+    uniqueness, ordering and grid alignment hold.  A group is aggregated only when
+    it holds exactly the expected unique 5m timestamps from its open to its last
+    slot.  No partial leading or trailing group is promoted to a full candle.
     """
     minutes = normalize_timeframe_minutes(timeframe_minutes)
     step_ms = minutes * 60_000
     per_group = step_ms // BASE_STEP_MS
-    stamps = np.ascontiguousarray(timestamps, dtype=np.int64)
-    values = np.ascontiguousarray(ohlcv, dtype=np.float64)
+    stamps, values = validate_consumed_rows(timestamps, ohlcv, where="resample")
     if stamps.size == 0:
-        return stamps, values.reshape(0, len(OHLCV_COLUMNS)), 0
+        return stamps, values, 0
 
     groups = (stamps // step_ms) * step_ms
     starts = np.flatnonzero(np.concatenate(([True], groups[1:] != groups[:-1])))
@@ -628,6 +656,116 @@ def resample_complete_groups(
 # research input identity
 # --------------------------------------------------------------------------
 
+FINGERPRINT_HEADER_KEYS = (
+    "fingerprint_version",
+    "instrument_id",
+    "venue",
+    "contract",
+    "quote_currency",
+    "volume_unit",
+    "base_timeframe_minutes",
+    "timeframe_minutes",
+    "start_ms",
+    "end_ms",
+    "warmup_start_ms",
+    "resampling_policy",
+    "missing_bar_policy",
+)
+
+
+def _require_canonical(value: Any, normalized: str, field: str) -> str:
+    if value != normalized:
+        raise PatternLabDataError(
+            f"{field}: expected the canonical value {normalized!r}, got {value!r}."
+        )
+    return normalized
+
+
+def validate_fingerprint_header(header: Any, *, where: str = "fingerprint.header") -> dict[str, Any]:
+    """Validate the closed v1 fingerprint header and return a canonical copy.
+
+    The encoder accepts a canonical header; it never silently rewrites one.  The
+    key set, JSON types, frozen constants, instrument identity and the requested
+    interval are all enforced before any bytes are hashed.
+    """
+    if not isinstance(header, Mapping):
+        raise PatternLabDataError(f"{where}: expected a mapping, got {type(header).__name__}.")
+    missing = sorted(set(FINGERPRINT_HEADER_KEYS) - set(header))
+    extra = sorted(set(header) - set(FINGERPRINT_HEADER_KEYS))
+    if missing or extra:
+        raise PatternLabDataError(
+            f"{where}: the v1 header is closed; missing keys {missing}, unexpected keys {extra}."
+        )
+
+    version = require_int(header["fingerprint_version"], f"{where}.fingerprint_version")
+    if version != FINGERPRINT_VERSION:
+        raise PatternLabDataError(
+            f"{where}.fingerprint_version: unsupported version {version}; this build writes "
+            f"{FINGERPRINT_VERSION}."
+        )
+    base = require_int(header["base_timeframe_minutes"], f"{where}.base_timeframe_minutes")
+    if base != BASE_TIMEFRAME_MINUTES:
+        raise PatternLabDataError(
+            f"{where}.base_timeframe_minutes: must be {BASE_TIMEFRAME_MINUTES}, got {base}."
+        )
+    for field, expected in (
+        ("volume_unit", VOLUME_UNIT),
+        ("resampling_policy", RESAMPLING_POLICY),
+        ("missing_bar_policy", MISSING_BAR_POLICY),
+    ):
+        if header[field] != expected:
+            raise PatternLabDataError(f"{where}.{field}: must be {expected!r}, got {header[field]!r}.")
+
+    venue = _require_canonical(
+        header["venue"], normalize_id_part(header["venue"], f"{where}.venue"), f"{where}.venue"
+    )
+    contract = _require_canonical(
+        header["contract"], normalize_id_part(header["contract"], f"{where}.contract"), f"{where}.contract"
+    )
+    instrument_id = _require_canonical(
+        header["instrument_id"],
+        normalize_instrument_id(header["instrument_id"], f"{where}.instrument_id"),
+        f"{where}.instrument_id",
+    )
+    if instrument_id != f"{venue}_{contract}":
+        raise PatternLabDataError(
+            f"{where}.instrument_id: {instrument_id!r} does not match venue/contract {venue}_{contract}."
+        )
+    currency = require_currency(header["quote_currency"], f"{where}.quote_currency")
+
+    minutes = normalize_timeframe_minutes(header["timeframe_minutes"], f"{where}.timeframe_minutes")
+    step_ms = minutes * 60_000
+    warmup_ms = require_aligned(
+        require_int(header["warmup_start_ms"], f"{where}.warmup_start_ms"), step_ms, f"{where}.warmup_start_ms"
+    )
+    start_ms = require_aligned(
+        require_int(header["start_ms"], f"{where}.start_ms"), step_ms, f"{where}.start_ms"
+    )
+    end_ms = require_aligned(
+        require_int(header["end_ms"], f"{where}.end_ms"), step_ms, f"{where}.end_ms"
+    )
+    if not warmup_ms <= start_ms < end_ms:
+        raise PatternLabDataError(
+            f"{where}: requires warmup_start_ms <= start_ms < end_ms, got "
+            f"{warmup_ms} / {start_ms} / {end_ms}."
+        )
+    return {
+        "fingerprint_version": version,
+        "instrument_id": instrument_id,
+        "venue": venue,
+        "contract": contract,
+        "quote_currency": currency,
+        "volume_unit": VOLUME_UNIT,
+        "base_timeframe_minutes": base,
+        "timeframe_minutes": minutes,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "warmup_start_ms": warmup_ms,
+        "resampling_policy": RESAMPLING_POLICY,
+        "missing_bar_policy": MISSING_BAR_POLICY,
+    }
+
+
 def fingerprint_header(
     *,
     instrument_id: str,
@@ -639,22 +777,29 @@ def fingerprint_header(
     end_ms: int,
     warmup_start_ms: int,
 ) -> dict[str, Any]:
-    """Build the frozen v1 fingerprint header (closed key set, exact JSON types)."""
-    return {
-        "fingerprint_version": FINGERPRINT_VERSION,
-        "instrument_id": normalize_instrument_id(instrument_id),
-        "venue": normalize_id_part(venue, "venue"),
-        "contract": normalize_id_part(contract, "contract"),
-        "quote_currency": require_currency(quote_currency, "quote_currency"),
-        "volume_unit": VOLUME_UNIT,
-        "base_timeframe_minutes": BASE_TIMEFRAME_MINUTES,
-        "timeframe_minutes": normalize_timeframe_minutes(timeframe_minutes),
-        "start_ms": require_int(start_ms, "start_ms"),
-        "end_ms": require_int(end_ms, "end_ms"),
-        "warmup_start_ms": require_int(warmup_start_ms, "warmup_start_ms"),
-        "resampling_policy": RESAMPLING_POLICY,
-        "missing_bar_policy": MISSING_BAR_POLICY,
-    }
+    """Build the frozen v1 fingerprint header (closed key set, exact JSON types).
+
+    Arguments are normalized here; the result is then checked by
+    :func:`validate_fingerprint_header`, so inconsistent identity or an invalid
+    requested interval is rejected by the same rules a direct caller meets.
+    """
+    return validate_fingerprint_header(
+        {
+            "fingerprint_version": FINGERPRINT_VERSION,
+            "instrument_id": normalize_instrument_id(instrument_id),
+            "venue": normalize_id_part(venue, "venue"),
+            "contract": normalize_id_part(contract, "contract"),
+            "quote_currency": require_currency(quote_currency, "quote_currency"),
+            "volume_unit": VOLUME_UNIT,
+            "base_timeframe_minutes": BASE_TIMEFRAME_MINUTES,
+            "timeframe_minutes": normalize_timeframe_minutes(timeframe_minutes),
+            "start_ms": require_int(start_ms, "start_ms"),
+            "end_ms": require_int(end_ms, "end_ms"),
+            "warmup_start_ms": require_int(warmup_start_ms, "warmup_start_ms"),
+            "resampling_policy": RESAMPLING_POLICY,
+            "missing_bar_policy": MISSING_BAR_POLICY,
+        }
+    )
 
 
 def input_fingerprint(
@@ -665,23 +810,27 @@ def input_fingerprint(
 ) -> str:
     """Return the versioned SHA-256 identity of one consumed raw 5m input.
 
-    The digest consumes the canonical header bytes, then the raw consumed row
-    count, timestamps and one interleaved ``(N, 5)`` float64 array.  Physical
-    provenance, roles, universe membership, paths and verification flags are
-    deliberately excluded.
+    The header and the raw arrays are validated first: a malformed header, an
+    invalid series or a row outside the header's ``[warmup_start_ms, end_ms)``
+    interval is rejected rather than hashed.  Gaps and incomplete groups remain
+    valid, and every supplied raw row is hashed before resampling.  The digest
+    consumes the canonical header bytes, then the raw consumed row count,
+    timestamps and one interleaved ``(N, 5)`` float64 array.  Physical provenance,
+    roles, universe membership, paths and verification flags are excluded.
     """
-    payload = json.dumps(
-        dict(header), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-    stamps = np.ascontiguousarray(timestamps, dtype="<i8")
-    if stamps.ndim != 1:
-        raise PatternLabDataError("fingerprint: timestamps must be one-dimensional.")
-    rows = np.ascontiguousarray(ohlcv, dtype="<f8")
-    if rows.shape != (stamps.size, len(OHLCV_COLUMNS)):
+    canonical = validate_fingerprint_header(header)
+    stamps, values = validate_consumed_rows(timestamps, ohlcv, where="fingerprint")
+    if stamps.size and (stamps[0] < canonical["warmup_start_ms"] or stamps[-1] >= canonical["end_ms"]):
         raise PatternLabDataError(
-            f"fingerprint: expected a ({stamps.size}, {len(OHLCV_COLUMNS)}) OHLCV array, got {rows.shape}."
+            "fingerprint: consumed rows must lie in "
+            f"[{format_epoch_ms(canonical['warmup_start_ms'])}, {format_epoch_ms(canonical['end_ms'])}); "
+            f"got [{format_epoch_ms(int(stamps[0]))}, {format_epoch_ms(int(stamps[-1]))}]."
         )
-    rows = _normalize_volume_signed_zero(rows)
+    payload = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    stamps = np.ascontiguousarray(stamps, dtype="<i8")
+    rows = np.ascontiguousarray(values, dtype="<f8")
     digest = hashlib.sha256()
     digest.update(struct.pack("<Q", len(payload)))
     digest.update(payload)
@@ -874,7 +1023,7 @@ def load_slice(
             "manifest_state": manifest_before["state"],
             "manifest_generated_utc": manifest_before["generated_utc"],
             "file": entry["file"],
-            "file_sha256": entry["sha256"],
+            "declared_file_sha256": entry["sha256"],
             "declared_row_count": entry["row_count"],
             "declared_first_open_utc": entry["first_open_utc"],
             "declared_coverage_end_utc": entry["coverage_end_utc"],

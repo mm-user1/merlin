@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import copy
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -327,3 +328,80 @@ class TestUniverseAndReadme:
         assert "1 missing 5m bars" in readme
         assert "quote_turnover" in readme
         assert "a" * 64 in readme
+
+
+def _as_offset(value: str, hours: int = 2) -> str:
+    """Render a canonical UTC string as an equivalent explicit-offset string."""
+    moment = pack_manifest.parse_utc(value, "timestamp").astimezone(timezone(timedelta(hours=hours)))
+    return moment.isoformat()
+
+
+class TestNormalizedManifestIsUsable:
+    """Regression cases for accepted metadata that consumers could not use."""
+
+    def test_omitted_optional_notes_normalizes_to_null_and_renders(self):
+        document = _manifest()
+        document["universe"] = dict(document["universe"])
+        del document["universe"]["notes"]
+        validated = pack_manifest.validate_manifest(document)
+        assert validated["universe"]["notes"] is None
+        assert "Notes: none" in pack_manifest.render_readme(validated)
+
+    def test_blank_or_mistyped_notes_still_fail(self):
+        for notes in ("   ", 7, True):
+            document = _manifest()
+            document["universe"] = dict(document["universe"], notes=notes)
+            with pytest.raises(PatternLabDataError, match="universe.notes"):
+                pack_manifest.validate_manifest(document)
+
+    def test_equivalent_offsets_normalize_to_canonical_utc(self):
+        entry = _entry()
+        canonical = pack_manifest.validate_manifest(_manifest([entry]))["instruments"][0]
+        shifted = _entry(
+            first_open_utc=_as_offset(entry["first_open_utc"]),
+            last_open_utc=_as_offset(entry["last_open_utc"], hours=-5),
+            coverage_end_utc=_as_offset(entry["coverage_end_utc"], hours=9),
+            verification=pack_manifest.build_verification(
+                volume_quote_verified=True,
+                volume_quote_evidence="synthetic",
+                closed_before_utc=_as_offset(entry["coverage_end_utc"], hours=3),
+                closure_evidence="fixture",
+                closure_source="fixture",
+            ),
+        )
+        document = _manifest([shifted])
+        before = copy.deepcopy(document)
+        validated = pack_manifest.validate_manifest(document)["instruments"][0]
+
+        assert validated["first_open_utc"] == canonical["first_open_utc"]
+        assert validated["last_open_utc"] == canonical["last_open_utc"]
+        assert validated["coverage_end_utc"] == canonical["coverage_end_utc"]
+        assert validated["verification"]["closed_before_utc"] == canonical["coverage_end_utc"]
+        assert document == before  # caller metadata is never mutated
+
+    @pytest.mark.parametrize("value", [5.0, True, "5", None])
+    def test_base_timeframe_must_be_the_exact_integer(self, value):
+        with pytest.raises(PatternLabDataError, match="base_timeframe_minutes"):
+            pack_manifest.validate_manifest(_manifest(base_timeframe_minutes=value))
+
+
+class TestPublicationVerificationPolicy:
+    def test_unverified_quote_volume_is_refused_at_the_publication_boundary(self):
+        verification = pack_manifest.build_verification(
+            volume_quote_verified=True, volume_quote_evidence="synthetic"
+        )
+        assert pack_manifest.require_published_verification(verification, "TEST_A") == verification
+
+        for payload in (
+            dict(verification, volume_quote_verified=False),
+            dict(verification, volume_quote_verified="true"),
+            {key: value for key, value in verification.items() if key != "volume_quote_verified"},
+        ):
+            with pytest.raises(PatternLabDataError, match="volume_quote_verified"):
+                pack_manifest.require_published_verification(payload, "TEST_A")
+
+    def test_unknown_closure_remains_publishable(self):
+        verification = pack_manifest.build_verification(
+            volume_quote_verified=True, volume_quote_evidence="synthetic"
+        )
+        assert pack_manifest.require_published_verification(verification, "TEST_A")["closed_before_utc"] is None

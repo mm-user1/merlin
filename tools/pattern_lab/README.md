@@ -74,6 +74,13 @@ UTF-8 strict JSON (`allow_nan=False`, duplicate keys rejected), `schema_version=
 An unknown schema version fails clearly. Unknown extra metadata is retained and
 ignored; required fields are never inferred from their absence.
 
+Validation returns a normalized copy and never mutates the supplied document: an
+omitted optional `universe.notes` becomes an explicit null, and accepted
+`first_open_utc`, `last_open_utc`, `coverage_end_utc` and a non-null
+`verification.closed_before_utc` are canonicalized to the `Z` representation, so
+an equivalent explicit offset in a supplied manifest still renders and verifies.
+`base_timeframe_minutes` must be the integer `5`; `5.0`, `True` and `"5"` fail.
+
 Top level: `revision` (positive integer), `state` (`ready` or `incomplete`),
 `generated_utc`, `base_timeframe_minutes=5`, `volume_unit="quote_turnover"`,
 `universe` and `instruments`.
@@ -102,6 +109,16 @@ certify a gap-free history. Unknown evidence stays unknown.
 T01 publishers never emit `state=incomplete` or `volume_quote_verified=false`:
 a failed publication leaves no manifest, and unproven quote units are rejected.
 The validator and reader recognize both states for future writers.
+
+The pack's own generated `README.md` renders a coverage table plus one evidence
+block per instrument: the quote-volume assertion and its evidence, the declared
+volume unit and currency, the evidence source when recorded, the input format and
+dtype, the source reference and source digest when present, the closure cutoff
+with its evidence and source (or an explicit "unknown" stating that research reads
+are refused), and the remaining research limitations. Absent provenance is left
+out rather than invented. That evidence is the assertion of the operator who
+published or imported the pack: the legacy NPZ importer performs no exchange
+verification of its own.
 
 ## Coverage, closure and gaps
 
@@ -162,6 +179,10 @@ Reusable building blocks, all independently callable and shared with M1b:
 
 - `publish_pack` creates a **new** directory exclusively. A pre-existing
   destination (even an empty one) and overlapping source/output roots are refused.
+  Each instrument's verification metadata is checked before its file is written:
+  publication requires `volume_quote_verified` to be the boolean `True`, so a
+  missing, false or mistyped flag fails with no ready manifest. Unknown closure
+  stays publishable as archival provenance.
   Each file is written to a sibling temporary name, closed, re-read, validated and
   then replaced; the README and update record follow, and the `ready` manifest is
   published atomically **last**. A failure leaves no ready manifest and no
@@ -192,6 +213,13 @@ decoded neighbours never reach the frame, the computation or the fingerprint.
 Requested outer coverage must exist: insufficient history or end coverage fails
 rather than shifting dates, dropping the instrument or shortening warmup.
 
+`resample_complete_groups` validates its input at the public boundary through the
+same 5m series rules used for storage, because its count-based algorithm is only
+correct once uniqueness, ordering and grid alignment hold. Duplicate, unsorted,
+off-grid, fractional or shape-invalid input fails instead of being sorted,
+deduplicated, truncated or repaired; a well-formed empty input returns empty
+outputs and zero omissions.
+
 A group is aggregated only when it contains exactly the expected unique source
 timestamps from its open to its last 5m slot: first open, max high, min low, last
 close, summed quote volume. Incomplete groups are omitted and counted; no partial
@@ -204,6 +232,13 @@ start, `research_mask`/`research_start_index`, `segment_start` (first row true,
 and true whenever spacing exceeds the timeframe), `base_row_count`,
 `base_gap_count`, `omitted_group_count`, the input fingerprint and a `physical`
 provenance record. There is no global validity flag and no forward-looking label.
+
+Every `physical` field is what the manifest **declared**, copied verbatim:
+`declared_file_sha256`, `declared_row_count`, `declared_first_open_utc`,
+`declared_coverage_end_utc` and `declared_missing_bar_count`. A slice read
+deliberately does not hash the file it read, so `declared_file_sha256` is
+provenance, not proof that the bytes were checked. Only `inspect --verify`
+compares the digest and coverage against the actual files.
 
 ## Research input identity versus physical provenance
 
@@ -234,7 +269,9 @@ extra keys:
 | `resampling_policy` | string, `utc_epoch_complete_v1` |
 | `missing_bar_policy` | string, `no_fill_v1` |
 
-Reference encoder:
+Reference encoder. It assumes an already validated v1 header and 5m series —
+`input_fingerprint` performs those checks itself — and it copies the OHLCV array
+so a caller's data is never rewritten:
 
 ```python
 import hashlib, json, struct
@@ -243,8 +280,8 @@ import numpy as np
 payload = json.dumps(
     header, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
 ).encode("utf-8")
-rows = np.ascontiguousarray(ohlcv, dtype="<f8")          # (N, 5), interleaved by row
-rows[:, 4][rows[:, 4] == 0.0] = 0.0                       # normalize signed zero
+rows = np.array(ohlcv, dtype="<f8", order="C")            # (N, 5), interleaved by row; always a copy
+rows[:, 4][rows[:, 4] == 0.0] = 0.0                       # normalize signed zero on the copy
 digest = hashlib.sha256()
 digest.update(struct.pack("<Q", len(payload)))            # header byte length
 digest.update(payload)                                    # header bytes
@@ -253,6 +290,17 @@ digest.update(np.ascontiguousarray(timestamps, dtype="<i8").tobytes())
 digest.update(rows.tobytes())
 fingerprint = digest.hexdigest()                          # 64 lowercase hex, no prefix
 ```
+
+`input_fingerprint` validates before hashing: the header must be exactly the
+closed 13-key v1 mapping above with the documented JSON types, the frozen
+constants, canonical venue/contract/instrument identity (the ID must equal
+`<VENUE>_<CONTRACT>`), a supported timeframe and
+`warmup_start_ms <= start_ms < end_ms` with all three boundaries aligned to that
+timeframe. The raw arrays pass the same 5m series rules as storage, and nonempty
+rows must lie inside `[warmup_start_ms, end_ms)` — outside rows are invalid input,
+not silently filtered. Gaps and incomplete groups remain valid, and a well-formed
+empty input (a 1-D empty timestamp array with a `(0, 5)` OHLCV array) is accepted.
+Validation never mutates the caller's header or arrays.
 
 Timestamps encode missing slots, so raw rows are hashed even when an incomplete
 aggregate was omitted: repairing that slot later must change identity.
