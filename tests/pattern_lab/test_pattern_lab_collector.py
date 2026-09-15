@@ -25,6 +25,7 @@ from ._helpers import (
     BYBIT_ID,
     OKX_CONTRACT,
     OKX_ID,
+    REPO_ROOT,
     STEP_MS,
     FakeClock,
     FakeExchange,
@@ -1186,21 +1187,15 @@ class TestQuoteFieldEvidence:
     snippet, never certification of a live endpoint, and no live request is made.
     """
 
-    class _Capture:
-        """The recipe's thin transport wrapper: one small raw candle sample."""
-
-        def __init__(self, transport):
-            self.transport = transport
-            self.sample = None
-            self.pages = 0
-
-        def __call__(self, url, timeout):
-            response = self.transport(url, timeout)
-            if "candles" in url or "kline" in url:
-                self.pages += 1
-                if self.sample is None and response.status == 200:
-                    self.sample = json.loads(response.body)  # one bounded page
-            return response
+    def _capture(self, venue, exchange, monkeypatch):
+        """Use the actual documented wrapper so its copy cannot drift."""
+        text = (REPO_ROOT / "tools/pattern_lab/README.md").read_text(encoding="utf-8")
+        snippet = text.split("python - <<'SMOKE'\n", 1)[1].split("\nSMOKE", 1)[0]
+        definitions = snippet.split("\nfor adapter,", 1)[0]
+        namespace = {}
+        exec(compile(definitions, "README:SMOKE", "exec"), namespace)
+        monkeypatch.setattr(exchange_data, "urllib_transport", exchange)
+        return namespace["Capture"](venue)
 
     @pytest.mark.parametrize(
         "adapter, contract, quote_index, rows_of",
@@ -1210,10 +1205,10 @@ class TestQuoteFieldEvidence:
         ],
     )
     def test_a_raw_row_confirms_the_decoded_quote_turnover(
-        self, adapter, contract, quote_index, rows_of
+        self, adapter, contract, quote_index, rows_of, monkeypatch
     ):
         exchange, clock, stamps, _ = build_exchange(slots=8)
-        capture = self._Capture(exchange)
+        capture = self._capture(adapter.venue, exchange, monkeypatch)
         client = fake_client(exchange, clock)
         client.transport = capture
         fetched, values = adapter.fetch_candles(
@@ -1231,6 +1226,37 @@ class TestQuoteFieldEvidence:
         # The same fixture's base volume differs, so reading the wrong index is
         # detected rather than passing on a coincidence.
         assert float(raw[stamp][5]) != decoded
+
+    @pytest.mark.parametrize("venue", ["OKX", "BYBIT"])
+    def test_a_business_retry_never_becomes_the_candle_sample(self, venue, monkeypatch):
+        exchange, clock, stamps, _ = build_exchange(slots=8)
+        error = ({"code": "50011", "msg": "Rate limit", "data": []} if venue == "OKX"
+                 else {"retCode": 10006, "retMsg": "Rate limit", "result": {}})
+        exchange.scripted.append(exchange_data.HttpResponse(200, json.dumps(error)))
+        capture = self._capture(venue, exchange, monkeypatch)
+        client = fake_client(exchange, clock)
+        client.transport = capture
+        adapter = exchange_data.adapter_for(venue)
+        contract = OKX_CONTRACT if venue == "OKX" else BYBIT_CONTRACT
+        fetched, _ = adapter.fetch_candles(
+            client, contract, start_ms=int(stamps[0]), end_ms=int(stamps[-1]) + STEP_MS
+        )
+        assert fetched.size == 8
+        assert capture.attempts == 2 and capture.pages == 1
+        rows = capture.sample["data"] if venue == "OKX" else capture.sample["result"]["list"]
+        assert len(rows) == 8
+
+    def test_malformed_json_keeps_the_adapters_diagnostic(self, monkeypatch):
+        exchange, clock, _, _ = build_exchange(slots=8)
+        exchange.scripted.append(exchange_data.HttpResponse(200, "{broken"))
+        capture = self._capture("OKX", exchange, monkeypatch)
+        client = fake_client(exchange, clock)
+        client.transport = capture
+        with pytest.raises(PatternLabDataError, match="not valid JSON"):
+            exchange_data.OkxAdapter().fetch_candles(
+                client, OKX_CONTRACT, start_ms=ANCHOR_MS, end_ms=ANCHOR_MS + STEP_MS
+            )
+        assert capture.attempts == 1 and capture.pages == 0 and capture.sample is None
 
 
 class TestNetworkIsolation:

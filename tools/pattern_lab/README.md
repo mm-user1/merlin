@@ -1009,15 +1009,32 @@ BARS = 1100
 class Capture:
     """Pass every request through, retaining one raw candle page per venue."""
 
-    def __init__(self):
-        self.sample, self.pages = None, 0
+    def __init__(self, venue):
+        self.venue = venue
+        self.sample, self.pages, self.attempts = None, 0, 0
 
     def __call__(self, url, timeout):
         response = ex.urllib_transport(url, timeout)
         if "candles" in url or "kline" in url:
-            self.pages += 1
-            if self.sample is None and response.status == 200:
-                self.sample = json.loads(response.body)
+            self.attempts += 1
+            if response.status != 200:
+                return response
+            try:
+                body = json.loads(response.body)
+            except ValueError:
+                return response  # the adapter owns malformed-response diagnostics
+            if not isinstance(body, dict):
+                return response
+            rows = None
+            if self.venue == "OKX" and body.get("code") == "0":
+                rows = body.get("data")
+            elif self.venue == "BYBIT" and type(body.get("retCode")) is int and body["retCode"] == 0:
+                result = body.get("result")
+                rows = result.get("list") if isinstance(result, dict) else None
+            if isinstance(rows, list):
+                self.pages += 1
+                if rows and self.sample is None:
+                    self.sample = body
         return response
 
 
@@ -1025,7 +1042,7 @@ for adapter, contract, quote_index, rows_of in (
     (ex.OkxAdapter(), "BTC-USDT-SWAP", 7, lambda body: body["data"]),
     (ex.BybitAdapter(), "ENAUSDT", 6, lambda body: body["result"]["list"]),
 ):
-    capture = Capture()
+    capture = Capture(adapter.venue)
     client = ex.HttpClient(transport=capture, rates={"OKX": 2.0, "BYBIT": 2.0})
     server_ms = adapter.server_time_ms(client)
     end_ms = ex.safe_closed_cutoff_ms([server_ms])
@@ -1051,7 +1068,7 @@ for adapter, contract, quote_index, rows_of in (
     stamp = matched[0]
     decoded = float(values[list(stamps).index(stamp), 4])
     assert float(raw[stamp][quote_index]) == decoded, (contract, raw[stamp])
-    print(adapter.venue, contract, "candle pages", capture.pages,
+    print(adapter.venue, contract, "candle pages", capture.pages, "attempts", capture.attempts,
           format_epoch_ms(int(stamps[0])), "->", format_epoch_ms(end_ms),
           "| quote field", format_epoch_ms(stamp), decoded,
           "| server", format_epoch_ms(server_ms), "| unit", rules["quantity_unit"],
@@ -1065,8 +1082,10 @@ read the documented **quote-currency** turnover index of the response it actuall
 decoded. A median-turnover plausibility print is a useful sanity check but is
 **not** independent proof of field selection, so it is no longer used as one.
 `np.isfinite(values).all()` is the finiteness check; the `> 0` assertions alone are
-not one. Confirm the reported candle-page counts match the expected four (OKX) and
-two (Bybit), that the server time is close to the host clock, and that the rules
+not one. With full pages, four (OKX) and two (Bybit) are expected; smaller pages
+can increase those counts. Retries increase the separate attempt counter and
+API error envelopes never become candle samples. Confirm that the server time
+is close to the host clock and that the rules
 match the venue's published contract page. Then run the full-roster preflight by
 starting the real `collect` and letting its preflight pass before the bulk download
 begins.
