@@ -51,7 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
-| [Pattern Lab data foundation, collector and event studies](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, roster, exchange collector, update/recovery and exclusion contract, NPZ import, fixed-interval reads and input identity, plus the sequential event-study request, extension, evidence, identity and report contracts |
+| [Pattern Lab data foundation, collector and event studies](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, roster, exchange collector, update/recovery and exclusion contract, NPZ import, fixed-interval reads and input identity, plus the event-study request, extension, evidence, identity, worker-pool and report contracts |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 ## Baseline evidence

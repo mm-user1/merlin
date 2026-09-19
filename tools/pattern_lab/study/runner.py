@@ -1,9 +1,12 @@
-"""The sequential study coordinator.
+"""The study coordinator.
 
 The coordinator owns one pinned read session, admits instruments, prepares every
 requested timeframe in memory from one consumed 5m payload, and dispatches the
-top-level RAM-only job.  This build executes ``workers=1``: the bounded spawn
-pool is the separately specified M2b block and is not implemented here.
+top-level RAM-only job.  ``workers=1`` calls that job directly in this process;
+``workers>1`` runs the same job under an explicit spawn pool.  Children never
+open the pack, never publish and never receive a lock handle or a market-file
+path: instrument selection, reads, evidence semantics and every output write
+stay here.
 
 Every accepted public request form — a request file, a request mapping and an
 already normalized :class:`~tools.pattern_lab.study.spec.StudyRequest` — passes
@@ -16,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import shutil
 import time
@@ -32,10 +36,13 @@ from . import evidence, extensions as study_extensions, report as study_report
 from . import results as study_results
 from . import spec as study_spec
 from . import validation as study_validation
+from . import workers as study_workers
 from .job import InstrumentJobInput, TimeframeInput, run_instrument_job
 from .spec import StudyRequest
 
-SUPPORTED_WORKERS = 1
+# The default worker count. Any positive integer is accepted; effective
+# parallel capacity is additionally bounded by the selected instrument count.
+DEFAULT_WORKERS = 1
 INTEGRITY_SCOPE = "full_pack"
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -46,15 +53,21 @@ def _now() -> str:
 
 
 def normalize_workers(value: Any) -> int:
-    """Accept only the integer 1; never silently fall back to a serial run."""
+    """Accept any positive integer; never silently fall back or cap.
+
+    A boolean, a float, a string and a nonpositive number are rejected before
+    any output exists.  The requested count is recorded as provenance; the
+    effective parallel capacity is ``min(requested, selected instruments)`` and
+    is never silently reduced to a detected CPU count.
+    """
     if isinstance(value, bool) or not isinstance(value, int):
         raise PatternLabDataError(
-            f"workers: expected the integer {SUPPORTED_WORKERS}, got {type(value).__name__}."
+            f"workers: expected a positive integer, got {type(value).__name__}. "
+            f"The default is {DEFAULT_WORKERS}; nothing falls back silently."
         )
-    if value != SUPPORTED_WORKERS:
+    if value < 1:
         raise PatternLabDataError(
-            f"workers: this build executes only workers={SUPPORTED_WORKERS}, got {value}. "
-            "The bounded spawn pool is separately specified M2b work; nothing falls back silently."
+            f"workers: expected a positive integer, got {value}."
         )
     return value
 
@@ -437,6 +450,132 @@ def _job_payload(
     )
 
 
+@dataclass(frozen=True)
+class _SourceChecks:
+    """The declared-source checks applied around every dispatch and result."""
+
+    loaded: Sequence[study_extensions.LoadedExtension]
+    used: Sequence[Any]
+    declared: Mapping[str, str]
+
+    def verify(self, where: str) -> None:
+        study_extensions.verify_extensions(self.loaded, where=where)
+        study_validation.require_declared_sources(self.used, self.declared, where=where)
+
+
+def _execute_direct(
+    run_root: Path, session, entries: Sequence[Mapping[str, Any]], request: StudyRequest,
+    family: Mapping[str, Any], state: _RunState, checks: _SourceChecks,
+) -> None:
+    """Run every instrument job in this process, one at a time."""
+    for entry in entries:
+        identifier = entry["instrument_id"]
+        prepared = _admit(run_root, session, entry, request, family, state)
+        checks.verify(f"job {identifier} start")
+        payload = _job_payload(entry, request, prepared)
+        del prepared
+        try:
+            result = run_instrument_job(payload)
+        finally:
+            del payload
+        checks.verify(f"job {identifier} result")
+        _publish_result(run_root, state, identifier, result)
+        del result
+
+
+def _execute_pooled(
+    run_root: Path, session, entries: Sequence[Mapping[str, Any]], request: StudyRequest,
+    family: Mapping[str, Any], state: _RunState, checks: _SourceChecks, *,
+    effective_workers: int, provenance: dict[str, Any],
+) -> None:
+    """Run the same job under an explicit spawn pool, with a bounded backlog.
+
+    At most ``effective_workers`` submitted, running or returned-but-unpublished
+    jobs are retained at once, plus at most one instrument being prepared here.
+    A free slot is filled only after every ready result has been drained and
+    published and every failure has been checked.  IPC and pickle copies add a
+    bounded constant factor to that job count; this is a job-count bound, not a
+    universal byte or RAM guarantee.
+    """
+    settings = study_workers.WorkerSettings(
+        extensions=tuple(request.extensions),
+        required=tuple((item.kind, item.identifier) for item in checks.used),
+        declared=dict(checks.declared),
+    )
+    # The startup override is scoped to the whole pool lifetime, including any
+    # lazy initial spawn, and is restored in the finally clause after teardown.
+    with study_workers.single_threaded_children() as caller_environment:
+        pool = study_workers.SpawnJobPool(effective_workers, settings)
+        aborting = False
+        try:
+            pool.start()
+            provenance["execution"]["worker_pids"] = pool.worker_pids
+            provenance["execution"]["thread_settings"] = {
+                "caller_environment": caller_environment,
+                "requested": {name: "1" for name in study_workers.THREAD_ENVIRONMENT},
+                "observed_in_children": pool.thread_evidence,
+            }
+            inflight: set[str] = set()
+            index = 0
+            while index < len(entries) or inflight:
+                drained = False
+                while True:
+                    message = pool.poll()
+                    if message is None:
+                        break
+                    _accept(run_root, state, checks, message, inflight)
+                    drained = True
+                if drained:
+                    continue
+                if index < len(entries) and len(inflight) < effective_workers:
+                    entry = entries[index]
+                    index += 1
+                    identifier = entry["instrument_id"]
+                    # The single preparation slot: one payload is live here.
+                    prepared = _admit(run_root, session, entry, request, family, state)
+                    checks.verify(f"job {identifier} start")
+                    payload = _job_payload(entry, request, prepared)
+                    del prepared
+                    pool.submit(identifier, payload)
+                    # Transport owns the buffers now; the coordinator's extra
+                    # reference is dropped. Retained IPC buffers still belong to
+                    # this job's slot.
+                    del payload
+                    inflight.add(identifier)
+                    continue
+                if inflight:
+                    _accept(run_root, state, checks, pool.take(), inflight)
+        except study_workers.WorkerLostError as exc:
+            aborting = True
+            # Attribute the loss to the one job that worker had started, when
+            # exactly one is known; never invent an instrument otherwise.
+            state.current = exc.orphaned[0] if len(exc.orphaned) == 1 else None
+            raise
+        except BaseException:
+            aborting = True
+            raise
+        finally:
+            pool.shutdown(abort=aborting)
+
+
+def _accept(
+    run_root: Path, state: _RunState, checks: _SourceChecks, message, inflight: set[str]
+) -> None:
+    """Publish one finished job, or raise its failure with the instrument named."""
+    kind, identifier, payload = message
+    inflight.discard(identifier)
+    state.current = identifier
+    if kind == "error":
+        raise study_workers.WorkerJobError(
+            f"{identifier}: the instrument job failed in a worker with "
+            f"{payload['type']}: {payload['message']}",
+            error_code=payload.get("error_code") or "job_failed",
+            worker_traceback=payload.get("traceback", ""),
+        )
+    checks.verify(f"job {identifier} result")
+    _publish_result(run_root, state, identifier, payload)
+
+
 def _publish_result(run_root: Path, state: _RunState, identifier: str, result) -> None:
     """Publish one finished job's bundle and commit its completed record."""
     state.phase = "publish"
@@ -475,7 +614,7 @@ def run_study(
     request: Any,
     data_root: Any,
     output_root: Any,
-    workers: int = SUPPORTED_WORKERS,
+    workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """Run one complete study and return its structured result.
 
@@ -560,8 +699,9 @@ def run_study(
             "execution": {
                 "requested_workers": requested_workers,
                 "effective_workers": effective_workers,
-                "mode": "direct",
-                "coordinator_pid": None,
+                "mode": "direct" if requested_workers == 1 else study_workers.START_METHOD,
+                "start_method": None if requested_workers == 1 else study_workers.START_METHOD,
+                "coordinator_pid": os.getpid(),
                 "worker_pids": [],
                 "thread_settings": None,
             },
@@ -592,26 +732,15 @@ def run_study(
             state.document(terminal="running", started=started, finished="", failure=None),
         )
 
+        checks = _SourceChecks(loaded=loaded, used=used, declared=declared_digests)
         try:
-            for entry in entries:
-                identifier = entry["instrument_id"]
-                prepared = _admit(run_root, session, entry, normalized, family, state)
-                study_extensions.verify_extensions(loaded, where=f"job {identifier} start")
-                study_validation.require_declared_sources(
-                    used, declared_digests, where=f"job {identifier} start"
+            if requested_workers == 1:
+                _execute_direct(run_root, session, entries, normalized, family, state, checks)
+            else:
+                _execute_pooled(
+                    run_root, session, entries, normalized, family, state, checks,
+                    effective_workers=effective_workers, provenance=provenance,
                 )
-                payload = _job_payload(entry, normalized, prepared)
-                del prepared
-                try:
-                    result = run_instrument_job(payload)
-                finally:
-                    del payload
-                study_extensions.verify_extensions(loaded, where=f"job {identifier} result")
-                study_validation.require_declared_sources(
-                    used, declared_digests, where=f"job {identifier} result"
-                )
-                _publish_result(run_root, state, identifier, result)
-                del result
         except KeyboardInterrupt:
             failure = _execution_failure(
                 run_root, state,
@@ -775,6 +904,14 @@ def _handle_publication_failure(run_root, state, provenance, started, clock, exc
     ) from exc
 
 
+# Every other dispatched job that produced no accepted result is failed with a
+# reason distinct from the original computation error.
+CANCELLED_REASON = (
+    "aborted: the run stopped after an earlier failure or interrupt, so this dispatched job "
+    "produced no accepted result."
+)
+
+
 def _execution_failure(run_root, state: _RunState, exc, *, phase: str) -> dict[str, Any]:
     """Mark the job that failed and describe the failure for the run status."""
     identifier = state.current
@@ -783,15 +920,21 @@ def _execution_failure(run_root, state: _RunState, exc, *, phase: str) -> dict[s
         state.errors.setdefault(identifier, str(exc))
     for other in state.order:
         if state.states[other] == evidence.STATE_ADMITTED:
-            _record_state(run_root, state, other, evidence.STATE_FAILED, {"error": str(exc)})
-            state.errors.setdefault(other, str(exc))
-    return {
+            _record_state(
+                run_root, state, other, evidence.STATE_FAILED, {"error": CANCELLED_REASON}
+            )
+            state.errors.setdefault(other, CANCELLED_REASON)
+    failure = {
         "reason": type(exc).__name__,
         "operation": "study",
         "phase": phase,
         "message": str(exc),
         "instrument_id": identifier,
     }
+    child_traceback = getattr(exc, "worker_traceback", None)
+    if child_traceback:
+        failure["worker_traceback"] = child_traceback
+    return failure
 
 
 def _finalize_failure(run_root, state, provenance, started, clock, terminal, failure) -> None:

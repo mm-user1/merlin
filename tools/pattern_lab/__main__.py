@@ -199,8 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
             "The request is a versioned JSON study specification; its relative protocol and "
             "extension paths resolve against the request file, while --data-root and --output-root "
             "resolve against the current directory. --output-root is exactly the run directory and "
-            "must not exist. This build executes only --workers 1; the bounded spawn pool is "
-            "separate M2b work."
+            "must not exist. --workers 1 runs the instrument jobs directly; a larger count uses an "
+            "explicit spawn pool bounded by the selected instrument count."
         ),
     )
     study_command.add_argument("--spec", type=Path, required=True, metavar="STUDY.json")
@@ -208,7 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
     study_command.add_argument("--output-root", type=Path, required=True, metavar="NEW_RUN")
     study_command.add_argument(
         "--workers", type=int, default=1, metavar="INT",
-        help="Instrument worker count; this build accepts only 1.",
+        help=(
+            "Positive instrument worker count (default 1). Effective parallel capacity is "
+            "min(--workers, selected instruments); it is never capped to the detected CPU count."
+        ),
     )
 
     reporter = commands.add_parser(

@@ -207,20 +207,24 @@ before a strategy exists. Merlin and Strategy Lab do not import it, and it does
 not change Merlin runtime behavior or CSV handling. Implemented capabilities are
 the Parquet market-data pack with its manifest, NPZ import and fixed-interval
 reader; the closed-bar exchange collector with recoverable updates, cooperative
-process exclusion and collector/instrument-rule provenance; and the sequential
-descriptive event study, which turns a versioned study request and protocol into
-immutable per-instrument evidence, a machine-readable summary and one offline
-HTML report. It requires `pyarrow==22.0.0` and reaches the network only inside an
-explicit collect, update or recover operation.
+process exclusion and collector/instrument-rule provenance; and the descriptive
+event study, which turns a versioned study request and protocol into immutable
+per-instrument evidence, a machine-readable summary and one offline HTML report,
+with a bounded spawn pool for its per-instrument jobs. It requires
+`pyarrow==22.0.0` and reaches the network only inside an explicit collect,
+update or recover operation.
 
-Event studies are descriptive and sequential: `workers=1` only, with no p-value,
-confidence interval, matched control or edge verdict. The bounded spawn pool,
-calibrated inference and bracket execution with sizing, leverage and expiry are
-separate later milestones. Shipped code is neither an operationally prepared
-market pack nor a validated research result.
+`workers` accepts any positive integer: `workers=1` runs each instrument job
+directly and a larger count runs the same job under an explicit spawn pool
+bounded by the selected instrument count, with coordinator-only pack reads and
+publication and canonical evidence identical to the direct run. Event studies
+remain descriptive, with no p-value, confidence interval, matched control or
+edge verdict. Calibrated inference and bracket execution with sizing, leverage
+and expiry are separate later milestones. Shipped code is neither an
+operationally prepared market pack nor a validated research result.
 
-The complete schema, roster, adapter, exclusion, recovery, study, evidence and
-command contracts are in the
+The complete schema, roster, adapter, exclusion, recovery, study, evidence,
+worker-pool and command contracts are in the
 [Pattern Lab guide](../tools/pattern_lab/README.md).
 
 ## Current strategies

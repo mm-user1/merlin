@@ -40,6 +40,7 @@ CORE_MODULES = (
     "tools.pattern_lab.study.extensions",
     "tools.pattern_lab.study.observations",
     "tools.pattern_lab.study.job",
+    "tools.pattern_lab.study.workers",
     "tools.pattern_lab.study.evidence",
     "tools.pattern_lab.study.runner",
     "tools.pattern_lab.study.results",

@@ -103,7 +103,16 @@ of saved tables whose file hashes still match, completion and partial-inspection
 integrity, every accepted public request form, used-source attribution, resolved
 dependency warmup, failure attribution and bounded evidence reuse. It counts
 decoded evidence tables to keep the summary read count independent of the group
-count, rather than asserting a wall-clock threshold. Each case uses a unique extension module name because a
+count, rather than asserting a wall-clock threshold.
+`test_pattern_lab_study_workers.py` starts real `spawn` children through the
+production coordinator and owns worker parity, effective capacity, out-of-order
+completion, the retention bound, child isolation, the thread policy, failure and
+cancellation mapping and coordinator death. Because `monkeypatch` state is not
+inherited by a spawned interpreter, its child-local network, pack and
+publication guards live in a declared temporary test extension that installs
+them only inside a worker; there is no production test mode. Its module is
+marked `slow`, and its ordering proof uses explicit test-owned handshake markers
+rather than sleeps. Each case uses a unique extension module name because a
 Python interpreter imports a module once, which is the condition the study's
 fresh-interpreter source-integrity error describes. Its import-isolation and missing-dependency checks run in fresh
 child processes, because the root fixtures already import storage into the pytest

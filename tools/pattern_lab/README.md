@@ -17,12 +17,15 @@ Pattern Lab is local, research-only tooling. Three milestones are implemented:
   reader modes, one semantic validation path for every accepted request form,
   used-source attribution, resolved dependency warmup, truthful failure and
   partial-progress accounting, and bounded per-instrument evidence reuse.
+- **M2b block B, the bounded spawn pool**: the same top-level instrument job run
+  under an explicit `spawn` pool with a bounded backlog, coordinator-only pack
+  reads and publication, pinned child thread counts, and canonical evidence
+  identical to a direct `workers=1` run. See
+  [Workers and the bounded spawn pool](#workers-and-the-bounded-spawn-pool).
 
-**M2 is not complete.** This build runs `workers=1` only; the bounded spawn pool
-and its `workers=1/2` equivalence are the remaining M2b block B work. Matched controls and
-calibrated inference (M3) and sequential bracket execution, sizing, leverage and
-expiry (M4) are **not** implemented, and this milestone reports no p-value,
-confidence interval, significance badge or edge verdict.
+Matched controls and calibrated inference (M3) and sequential bracket execution,
+sizing, leverage and expiry (M4) are **not** implemented, and this milestone
+reports no p-value, confidence interval, significance badge or edge verdict.
 
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
 to an explicit output directory; it never touches Merlin databases, Queue state,
@@ -1129,6 +1132,8 @@ events may overlap, and the outputs describe what happened after an event.
 ```bash
 python -m tools.pattern_lab study --spec STUDY.json --data-root PACK \
     --output-root NEW_RUN --workers 1
+python -m tools.pattern_lab study --spec STUDY.json --data-root PACK \
+    --output-root NEW_RUN_2 --workers 2
 python -m tools.pattern_lab report --run-root NEW_RUN
 ```
 
@@ -1432,9 +1437,11 @@ measure a bounded run rather than assuming a size.
 
 ### Admission, execution and failure states
 
-`workers` accepts only the integer `1`. Any other value — including `True`, `0`,
-a negative number, a float and a string — is an actionable validation error
-**before** any output is created; nothing falls back silently.
+`workers` accepts any **positive integer**, default `1`. A boolean, `0`, a
+negative number, a float and a string are actionable validation errors **before**
+any output is created; nothing falls back silently and nothing is capped to a
+detected CPU count. See
+[Workers and the bounded spawn pool](#workers-and-the-bounded-spawn-pool).
 
 **Every accepted public request form passes the same execution-boundary
 validation.** A request file, a request mapping and an already normalized
@@ -1535,6 +1542,37 @@ overwrites that sealed status, never deletes its published derived report and
 never reclassifies the run. These are handled-error contracts, not promises about
 `SIGKILL` or an unwritable filesystem.
 
+**Failure, cancellation and process lifetime.** On the first observed
+admission, job, source or publication error, or on a user interrupt, admission
+and dispatch stop immediately and already published bundles are retained; no
+further result is published once the run enters abort handling. Unstarted work
+cancels and this run's workers are shut down within a bounded overall deadline
+(a documented internal constant, at most 10 seconds before forceful cleanup
+starts): graceful cleanup is attempted, then owned processes are terminated and,
+if necessary, killed, with bounded joins and closed IPC handles. Unsubmitted
+instruments remain `not_started`; a dispatched job without an accepted result
+becomes `failed` with an explicit aborted reason **distinct** from the original
+computation error. A worker initialization error before any dispatch is a
+run-level failure with every instrument not started — no instrument is invented.
+An abrupt child exit, a serialization failure or a lost job is an actionable
+failed run, never an infinite wait or a silently replaced job, and there is no
+automatic resubmission and no silent serial fallback.
+
+During teardown, pending transfers are consumed before waiting for a producer
+that may be blocked flushing a large message; during an abort, received results
+are discarded rather than published. A broken channel is abandoned and its
+owners are bounded-joined instead of being drained indefinitely — "drain before
+join" is not an unconditional obligation once a producer has died mid-message.
+See the [Python multiprocessing programming
+guidelines](https://docs.python.org/3.11/library/multiprocessing.html#programming-guidelines).
+
+For an arbitrary coordinator termination only the smaller existing contract
+holds: the OS releases its pack guard, no child reads or writes the pack, no
+child publishes, and no completion marker exists unless publication had already
+finished. Immediate orphan CPU cleanup and a freshly written terminal status
+cannot be guaranteed after `SIGKILL`/`TerminateProcess`, and there is no parent
+heartbeat, lease or watchdog service.
+
 **Bounded evidence reuse.** During ordinary summary aggregation each needed raw
 table is decoded at most once per instrument, reused across every declared group,
 and released before the next instrument; the summary read count therefore does
@@ -1547,6 +1585,118 @@ and a later group reads the tables again rather than retaining every group at
 once. Exact summary quantiles still retain compact per-group sample arrays across
 instruments: that is a separate memory cost from the one live instrument's
 frames, and it is not covered by any per-job bound.
+
+### Workers and the bounded spawn pool
+
+`--workers N` / `workers=N` accepts any positive integer and defaults to `1`.
+Effective parallel capacity is `min(requested_workers, selected_instruments)`;
+both counts are recorded in `provenance.json` under `execution`, together with
+the start method, the coordinator PID, the worker PIDs and the thread settings.
+The capacity is never silently reduced to a detected CPU count, and no arbitrary
+backend cap is invented: on the supported platforms the chosen public
+`multiprocessing` facilities impose no further documented worker-count limit,
+and the only clamp is the selected instrument count.
+
+`workers=1` calls the same top-level numerical job **directly**, with no child
+process. `workers>1` uses an explicit **spawn** context on both hosts, including
+when the selection reduces effective capacity to one. The global start method is
+never changed. CLI help and ordinary imports start no job, spawn nothing, read
+no pack and import no user module. Spawned children re-import the calling
+module, so an agent script must stay importable with its work behind an
+`if __name__ == "__main__"` guard;
+`tools/pattern_lab/examples/run_example_study.py` shows that shape and takes its
+own `--workers`.
+
+One job owns one instrument and all of its requested timeframes, variants and
+models. There are no nested pools, no per-case processes and no configurable
+task types: transport bookkeeping uses an opaque job ID and a prepared payload,
+while instrument selection, OHLC/timeframe semantics and evidence publication
+stay in the coordinator. Explicit `Process` handles and two bounded queues are
+used rather than a higher-level executor, because on the supported Python
+version cancelling a future does not cancel a running call and returning from
+`shutdown(wait=False)` is not process termination.
+
+**Coordinator ownership and backpressure.** Request and metadata admission,
+every collected metadata error and exactly one full-pack `inspect(verify=True)`
+still happen before any output. One coordinator-owned pinned read session covers
+every input read of one pack generation; each admitted instrument's consumed 5m
+slice is read once and its timeframes are prepared in RAM with the shared M1
+helper and unchanged fingerprints. With `W` the effective parallel capacity, at
+most **W submitted, running or returned-but-not-published instrument jobs
+combined** are retained, plus at most **one** instrument being prepared. A free
+slot is filled only after ready results have been drained and published and
+failures have been checked; nothing eagerly prepares the whole universe, maps
+over it or accumulates finished results. A slot stays occupied from dispatch
+through accepted publication or abort: its input transport buffers and its
+returned result are parts of the same job, not separately free slots. The
+coordinator drops its extra reference to a prepared payload once transport owns
+it, but retained IPC buffers still belong to that slot, and serialization is not
+claimed to keep only one physical copy. This supersedes the earlier prospective
+`2*workers` payload wording; it is a job-count bound with a bounded constant IPC
+factor, not a universal byte or RAM guarantee.
+
+Admitted input identity is persisted before dispatch. Publication and every run
+output write happen in the coordinator, once per completed instrument plus small
+status updates and the final reports. Children never receive an open session, a
+lock handle or a market-file path as a reading instruction, never call the pack
+API and never publish; no temporary file is used for payload transport. The read
+session is held while further pack reads are possible and is released before
+final aggregation: in practice the coordinator keeps it through pool teardown
+for simpler ownership, which is its actual documented lifetime. A spawned child
+inherits no lock file descriptor, so it cannot extend the guard's lifetime after
+the coordinator dies; no reader bypass or lock redesign is needed.
+
+**Worker initialization and numerical threads.** Each worker explicitly calls
+the idempotent `register_builtins()` and then initializes the declared extension
+set, rather than relying on an unused import or a package import order to
+populate the registry. The declared live modules are imported from their explicit
+roots and checked against the coordinator's frozen digests, the required
+descriptors must be present, and a missing built-in or custom registration is a
+named initialization error. Only serializable settings and numeric arrays cross
+the boundary, reconstructed cases and descriptors are checked against the frozen
+job semantics, and input arrays are marked read-only again after IPC
+reconstruction — serialization does not preserve the flag. The same protection
+is applied to direct execution: a feature or model may allocate its own working
+arrays but never mutates the shared bars.
+
+Numerical-library inner thread limits are pinned to one in workers. The startup
+variables are set in the caller's environment **before** a child can import
+NumPy or BLAS — an initializer running after those imports cannot reliably
+retune an already loaded library — and the override is scoped to the whole pool
+lifetime, including any lazy initial spawn, and restored in a `finally` clause
+after teardown, including the absence of a variable. Arrow's own pools are
+additionally set through `set_cpu_count`/`set_io_thread_count` in the child.
+Requested settings and the values each child could actually read back are both
+recorded, and they are distinguished: environment variables are **startup policy
+evidence**, while BLAS runtime thread limits are not observable from Python here
+and are not claimed to be measured. A default `pyarrow.cpu_count() == 1` on a
+one-core host proves nothing by itself, which is why the check seeds the
+caller's variables with non-1 values and verifies that every initialized child
+still sees `1` while the caller regains its original mapping after success and
+after failure. The embedding application's environment, global start method and
+parent thread pools are not permanently changed; the temporary process-global
+change is serialized inside this tool's startup helper, and concurrent
+independent startups from unrelated threads are **not supported**. None of this
+permits replacing a failed worker or retrying a job.
+
+A worker ignores `SIGINT` before importing or executing any trusted extension,
+so the coordinator owns handled Ctrl+C and no worker races it to publish an
+interrupted status, and a worker's Python stdout is redirected to stderr before
+extension import, so a printing extension cannot corrupt the machine-readable
+CLI stdout. Neither is a sandbox against arbitrary native file-descriptor
+writes.
+
+**Determinism.** For identical inputs, source and library versions on one host,
+`workers=1` and `workers>1` produce identical canonical numerical evidence,
+event and episode identities, resolved family, data-input identity,
+implementation identity, counts and descriptive metrics, whatever the completion
+order. Fingerprints are composed in frozen planned order, saved instruments are
+consumed in stable order, and no completion-order-dependent floating-point
+reduction exists. Execution provenance may differ: worker counts, PIDs, roots,
+timestamps, timings and thread observations. The completion record's
+`evidence_set_sha256` therefore **can** differ between a direct and a pooled run
+of the same study, because it covers `provenance.json` too; Parquet byte
+identity is not a substitute for decoded row and value equivalence.
 
 ### Agent extensions and source integrity
 
@@ -1653,7 +1803,7 @@ python -m tools.pattern_lab inspect --data-root PATH [--verify]
 python -m tools.pattern_lab slice --data-root PATH --instrument ID --start UTC --end UTC \
     [--warmup-start UTC] [--timeframe-minutes INT]
 python -m tools.pattern_lab study --spec STUDY.json --data-root PACK --output-root NEW_RUN \
-    [--workers 1]
+    [--workers N]
 python -m tools.pattern_lab report --run-root NEW_RUN
 ```
 
@@ -1675,7 +1825,8 @@ promotion of unknown evidence; a normal slice read hashes nothing and loads no
 unrelated file. `slice` prints metadata, coverage and the input fingerprint, never
 rows or files. `study` runs one event study into a new run directory and `report`
 regenerates that run's derived summary and HTML; neither reaches the network, and
-help and imports start no job, scan no pack and execute no extension.
+help and imports start no job, spawn no process, scan no pack and execute no
+extension.
 
 JSON goes to stdout and is never polluted by progress logs; diagnostics and
 progress go to stderr. A failed collector command prints a JSON object carrying a
@@ -1720,11 +1871,18 @@ python -m tools.pattern_lab inspect --data-root <pack> --verify
 
 The event-study cases live in `tests/pattern_lab/test_pattern_lab_study_events.py`,
 `_study_model.py`, `_study_admission.py`, `_study_extensions.py`,
-`_study_report.py` and `_study_contracts.py`. The last module owns the enforced
-boundary contracts: custom-model evidence admission and read-side revalidation,
-completion and partial-inspection integrity, every accepted request form,
-used-source attribution, resolved dependency warmup, failure attribution and
-bounded evidence reuse. They generate synthetic packs and trusted extension modules at
+`_study_report.py`, `_study_contracts.py` and `_study_workers.py`.
+`_study_contracts.py` owns the enforced boundary contracts: custom-model evidence
+admission and read-side revalidation, completion and partial-inspection
+integrity, every accepted request form, used-source attribution, resolved
+dependency warmup, failure attribution and bounded evidence reuse.
+`_study_workers.py` starts real spawn children through the production
+coordinator and owns worker parity, effective capacity, out-of-order completion,
+the retention bound, child isolation, the thread policy, failure and
+cancellation mapping and coordinator death. Because pytest `monkeypatch` state
+is not inherited by a spawned interpreter, its child-local guards live in a
+declared temporary test extension that installs them only inside a worker; there
+is no production test mode or hook. They generate synthetic packs and trusted extension modules at
 runtime under the launcher's external temporary root and never read market data.
 
 ```powershell
@@ -1752,12 +1910,23 @@ universe, roles and settings into run identity. M2b adds the bounded spawn pool
 and `workers=1/2` equivalence; M3 owns matched controls and calibrated inference;
 M4 owns bracket execution, sizing, leverage, expiry and the interpretation of the
 stored instrument rules. M2b block A enforces the boundary contracts M2a
-advertised but did not check; block B adds the pool.
+advertised but did not check; block B adds the bounded spawn pool and the
+`workers=1`/`workers>1` equivalence.
 
 Known limits of these milestones:
 
-- This build is sequential: `workers` accepts only the integer `1`, and any other
-  value is an actionable validation error before any output is created.
+- Parallelism is a bounded instrument-job pool, not a scheduler: there is no
+  adaptive scheduling, no automatic worker-count tuning, no worker replacement,
+  no task retry and no resume or reuse of an earlier run.
+- The retention bound counts jobs, not bytes. IPC and pickle copies add a
+  bounded constant factor, and exact summary quantiles keep separate per-group
+  samples, so it is not a whole-run RAM guarantee.
+- Child thread evidence is startup policy plus what Arrow reports. BLAS runtime
+  thread limits are not observable from Python here and are not claimed to be
+  measured on either host.
+- Cleanup guarantees cover handled failures and interrupts. After a `SIGKILL` of
+  the coordinator only the smaller contract holds: the OS releases the pack
+  guard and no child reads, writes, publishes or completes anything.
 - Read-side custom-evidence validation is structural and value-level. It proves
   that a saved sample is complete and coherent against the run's own frozen
   family and saved anchors; it cannot prove that a model's numbers are right.

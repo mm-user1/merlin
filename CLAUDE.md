@@ -60,11 +60,13 @@ baselines, or mutate external systems unless explicitly authorized.
   implemented.
 - Pattern Lab is separate local, research-only tooling that Merlin never
   imports. Its implemented milestones are the market-data pack and collector
-  (M1a/M1b) and the sequential descriptive event study with its evidence and
-  offline report (M2a). Event studies run `workers=1` only; the bounded spawn
-  pool (M2b), matched controls and inference (M3) and bracket execution (M4)
-  are not implemented. Do not present a Pattern Lab result as a validated edge
-  or an executable strategy.
+  (M1a/M1b) and the descriptive event study with its evidence and offline
+  report (M2a), plus its enforced boundary contracts and bounded spawn pool
+  (M2b). Event studies accept any positive `workers`: `workers=1` runs the jobs
+  directly and a larger count uses an explicit spawn pool whose canonical
+  evidence and identities match. Matched controls and inference (M3) and
+  bracket execution (M4) are not implemented. Do not present a Pattern Lab
+  result as a validated edge or an executable strategy.
 
 ## Directory roles
 

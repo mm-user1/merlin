@@ -12,10 +12,16 @@ Run it from the repository root with your own verified pack:
         --output-root /tmp/pattern-lab-example-run \\
         --instrument OKX_LINK-USDT-SWAP \\
         --start 2025-07-01T00:00:00Z --end 2025-08-01T00:00:00Z \\
-        --warmup-start 2025-06-01T00:00:00Z
+        --warmup-start 2025-06-01T00:00:00Z \\
+        --workers 1
 
 Nothing is downloaded, no ignored local artifact is assumed to exist, and the
 output root must be a new directory.
+
+``--workers`` above 1 starts an explicit spawn pool, so this file must stay an
+importable module whose work is behind the ``if __name__ == "__main__"`` guard
+below: each spawned child re-imports it, and unguarded top-level work would run
+again in every child.
 """
 
 from __future__ import annotations
@@ -92,6 +98,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
     parser.add_argument("--warmup-start", required=True)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Positive instrument worker count (default 1). Above 1 the jobs run in an explicit "
+            "spawn pool bounded by the number of selected instruments."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if not Path(args.data_root).is_dir():
@@ -114,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             request=request,
             data_root=args.data_root,
             output_root=args.output_root,
-            workers=1,
+            workers=args.workers,
         )
     except PatternLabError as exc:
         print(f"pattern-lab: {exc}", file=sys.stderr)

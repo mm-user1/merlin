@@ -334,6 +334,9 @@ def test_the_worker_count_and_the_roots_are_provenance_not_identity(tmp_path):
     )
     provenance = json.loads((Path(result["run_root"]) / "provenance.json").read_text())
     assert provenance["workers"] == 1
+    assert provenance["execution"]["requested_workers"] == 1
+    assert provenance["execution"]["effective_workers"] == 1
+    assert provenance["execution"]["mode"] == "direct"
     assert provenance["integrity_scope"] == "full_pack"
     assert provenance["data_root"] == str(pack.resolve())
     identity_document = json.loads((Path(result["run_root"]) / "spec" / "request.json").read_text())
@@ -344,8 +347,8 @@ def test_the_worker_count_and_the_roots_are_provenance_not_identity(tmp_path):
 # sequential execution and the error boundary
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("workers", [0, 2, True, 1.0, "1"])
-def test_only_the_integer_one_is_accepted_and_nothing_is_created(tmp_path, workers):
+@pytest.mark.parametrize("workers", [0, -1, True, 1.0, "2", None])
+def test_only_a_positive_integer_worker_count_is_accepted(tmp_path, workers):
     pack = build_pack(tmp_path / "pack", {"AAA-USDT-SWAP": {}})
     run_root = tmp_path / "run"
     with pytest.raises(PatternLabDataError, match="workers"):
@@ -469,13 +472,21 @@ def test_the_cli_maps_success_failures_busy_and_pending_states(tmp_path, capsys)
     assert cli_main(["report", "--run-root", str(tmp_path / "run")]) == 0
     capsys.readouterr()
 
-    # An invalid request is exit 2 with a structured JSON status.
+    # An existing output root is exit 2 with a structured JSON status.
     assert cli_main([
         "study", "--spec", str(spec), "--data-root", str(pack),
-        "--output-root", str(tmp_path / "run"), "--workers", "2",
+        "--output-root", str(tmp_path / "run"), "--workers", "1",
     ]) == 2
     failed = json.loads(capsys.readouterr().out)
     assert failed["status"] == "failed" and failed["command"] == "study"
+
+    # A nonpositive worker count is rejected before anything is created.
+    assert cli_main([
+        "study", "--spec", str(spec), "--data-root", str(pack),
+        "--output-root", str(tmp_path / "run-zero"), "--workers", "0",
+    ]) == 2
+    assert "workers" in json.loads(capsys.readouterr().out)["error"]
+    assert not (tmp_path / "run-zero").exists()
 
     # A busy pack stays exit 3 and a pending operation stays exit 4.
     with pack_data.read_session(pack):

@@ -125,10 +125,11 @@ Parquet market-data pack, an explicit manifest, a one-way importer for the
 historical prototype NPZ pack, and a fixed-interval reader/resampler with a
 reproducible research input fingerprint), the collector (closed-bar 5m
 collection from public exchange APIs, recoverable updates, cooperative process
-exclusion and collector/instrument-rule provenance) and the sequential event
+exclusion and collector/instrument-rule provenance) and the descriptive event
 study (a versioned study request and protocol, extensible
 feature/hypothesis/model/metric contracts, fixed-horizon and path outcomes,
-immutable evidence and a regenerable offline HTML report). It requires
+immutable evidence, a regenerable offline HTML report and a bounded spawn pool
+for its per-instrument jobs). It requires
 `pyarrow==22.0.0` from the root `requirements.txt` and never installs
 dependencies itself.
 
@@ -144,6 +145,8 @@ python -m tools.pattern_lab slice --data-root <pack> --instrument OKX_LINK-USDT-
     --start 2025-07-01T00:00:00Z --end 2026-07-01T00:00:00Z --timeframe-minutes 30
 python -m tools.pattern_lab study --spec tools/pattern_lab/configs/example_study_two_green_30m.json \
     --data-root <pack> --output-root <new-run> --workers 1
+python -m tools.pattern_lab study --spec tools/pattern_lab/configs/example_study_two_green_30m.json \
+    --data-root <pack> --output-root <new-run-2> --workers 2
 python -m tools.pattern_lab report --run-root <new-run>
 ```
 
@@ -154,14 +157,17 @@ rather than queued and two independent readers conflict deliberately. Exit `4`
 means a pending operation must be recovered or aborted first. Collector code
 availability is not an operationally prepared market pack.
 
-`study` accepts only `--workers 1`; `--output-root` is exactly the new run
-directory. Exit `130` reports a user interrupt of `study` or `report`. Matched
+`study` accepts any positive `--workers`, default `1`; above `1` the same
+instrument job runs in an explicit spawn pool bounded by the selected instrument
+count, and the canonical evidence and identities match the direct run.
+`--output-root` is exactly the new run directory. Exit `130` reports a user
+interrupt of `study` or `report`. Matched
 controls and inference and the sequential bracket probe are not implemented, and
 a study result is descriptive evidence, not a validated edge. Merlin and Strategy
 Lab do not import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See
 the [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,
 adapters, identity encoding, exclusion/recovery contract, the event-study
-request/evidence/report contracts and the operational recipes.
+request/evidence/report and worker-pool contracts and the operational recipes.
 
 ## Related documentation
 
