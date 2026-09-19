@@ -2,13 +2,19 @@
 
 The coordinator owns one pinned read session, admits instruments, prepares every
 requested timeframe in memory from one consumed 5m payload, and dispatches the
-top-level RAM-only job.  T03 accepts only ``workers=1``; the bounded spawn pool
-is separately specified T04 work and is not implemented here.
+top-level RAM-only job.  This build executes ``workers=1``: the bounded spawn
+pool is the separately specified M2b block and is not implemented here.
+
+Every accepted public request form — a request file, a request mapping and an
+already normalized :class:`~tools.pattern_lab.study.spec.StudyRequest` — passes
+the same execution-boundary validation, and every used non-built-in descriptor
+must come from a declared, verified source generation, before any output
+directory exists.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import shutil
@@ -25,6 +31,7 @@ from ..manifest import format_epoch_ms, to_epoch_ms
 from . import evidence, extensions as study_extensions, report as study_report
 from . import results as study_results
 from . import spec as study_spec
+from . import validation as study_validation
 from .job import InstrumentJobInput, TimeframeInput, run_instrument_job
 from .spec import StudyRequest
 
@@ -46,7 +53,7 @@ def normalize_workers(value: Any) -> int:
         )
     if value != SUPPORTED_WORKERS:
         raise PatternLabDataError(
-            f"workers: this build (M2a) executes only workers={SUPPORTED_WORKERS}, got {value}. "
+            f"workers: this build executes only workers={SUPPORTED_WORKERS}, got {value}. "
             "The bounded spawn pool is separately specified M2b work; nothing falls back silently."
         )
     return value
@@ -200,15 +207,20 @@ def planned_family(request: StudyRequest, entries: Sequence[Mapping[str, Any]]) 
 
 
 # --------------------------------------------------------------------------
-# run
+# run state
 # --------------------------------------------------------------------------
 
 @dataclass
 class _RunState:
+    """The coordinator's own view of planned, attempted and finished jobs."""
+
     order: list[str]
     states: dict[str, str]
-    errors: dict[str, str]
-    fingerprints: list[dict[str, Any]]
+    errors: dict[str, str] = field(default_factory=dict)
+    fingerprints: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # The instrument currently being read, prepared, computed or published.
+    current: str | None = None
+    phase: str = "execute"
 
     def counts(self) -> dict[str, int]:
         tally = {
@@ -221,6 +233,13 @@ class _RunState:
             tally[state] = tally.get(state, 0) + 1
         tally["planned"] = len(self.order)
         return tally
+
+    def ordered_fingerprints(self) -> list[dict[str, Any]]:
+        """Fingerprints in frozen planned order, never in completion order."""
+        composed: list[dict[str, Any]] = []
+        for identifier in self.order:
+            composed.extend(self.fingerprints.get(identifier, []))
+        return composed
 
     def document(self, *, terminal: str, started: str, finished: str,
                  failure: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -240,6 +259,44 @@ class _RunState:
             "started_utc": started,
             "finished_utc": finished,
         }
+
+
+def _record_state(run_root: Path, state: _RunState, identifier: str, name: str,
+                  extra: Mapping[str, Any] | None = None) -> None:
+    """Update one job's committed record; a record failure never hides a cause."""
+    state.states[identifier] = name
+    try:
+        evidence.record_job_state(run_root, identifier, name, extra=extra)
+    except Exception:  # pragma: no cover - the original diagnostic always wins
+        pass
+
+
+# --------------------------------------------------------------------------
+# admission and preparation
+# --------------------------------------------------------------------------
+
+def _declared_identity(entry: Mapping[str, Any], request: StudyRequest,
+                       family: Mapping[str, Any]) -> dict[str, Any]:
+    """The input context known from metadata alone, before any row is read."""
+    return {
+        "instrument_id": entry["instrument_id"],
+        "roles": list(entry["roles"]),
+        "symbol": entry["symbol"],
+        "declared": {
+            "file_sha256": entry["sha256"],
+            "row_count": entry["row_count"],
+            "first_open_utc": entry["first_open_utc"],
+            "coverage_end_utc": entry["coverage_end_utc"],
+            "missing_bar_count": entry["missing_bar_count"],
+        },
+        "requested": {
+            "warmup_start_utc": format_epoch_ms(request.warmup_start_ms),
+            "start_utc": format_epoch_ms(request.study_start_ms),
+            "end_utc": format_epoch_ms(request.study_end_ms),
+        },
+        "warmup_requirements": family["warmup_requirements"],
+        "timeframes": [],
+    }
 
 
 def _prepare_timeframes(
@@ -292,6 +349,75 @@ def _prepare_timeframes(
     return prepared, fingerprints
 
 
+def _admit(
+    run_root: Path,
+    session,
+    entry: Mapping[str, Any],
+    request: StudyRequest,
+    family: Mapping[str, Any],
+    state: _RunState,
+) -> list[TimeframeInput]:
+    """Read one instrument's consumed slice, prepare its timeframes and admit it.
+
+    The instrument is the coordinator's current job from the first base read, so
+    a read or preparation failure after preflight names that instrument with its
+    phase and the actual diagnostic instead of an anonymous run failure.  When
+    the read failed, only the metadata context is recorded: no input fingerprint
+    is invented for rows that were never observed.
+    """
+    identifier = entry["instrument_id"]
+    state.current = identifier
+    identity = _declared_identity(entry, request, family)
+    try:
+        state.phase = "read"
+        base = session.load_slice(
+            identifier,
+            start=format_epoch_ms(request.study_start_ms),
+            end=format_epoch_ms(request.study_end_ms),
+            warmup_start=format_epoch_ms(request.warmup_start_ms),
+            timeframe_minutes=pack_manifest.BASE_TIMEFRAME_MINUTES,
+        )
+    except PatternLabDataError as exc:
+        identity["read_error"] = str(exc)
+        evidence.record_admission(run_root, identifier, identity)
+        _record_state(run_root, state, identifier, evidence.STATE_FAILED,
+                      {"error": str(exc), "phase": "read"})
+        state.errors[identifier] = str(exc)
+        raise PatternLabDataError(
+            f"{identifier}: the consumed base slice could not be read after preflight: {exc}",
+            error_code="job_failed",
+        ) from exc
+
+    identity["consumed"] = {
+        "warmup_start_utc": format_epoch_ms(request.warmup_start_ms),
+        "start_utc": format_epoch_ms(request.study_start_ms),
+        "end_utc": format_epoch_ms(request.study_end_ms),
+        "base_row_count": base.base_row_count,
+        "base_gap_count": base.base_gap_count,
+    }
+    try:
+        state.phase = "prepare"
+        prepared, fingerprints = _prepare_timeframes(entry, base, request)
+    except PatternLabDataError as exc:
+        evidence.record_admission(run_root, identifier, identity)
+        _record_state(run_root, state, identifier, evidence.STATE_FAILED,
+                      {"error": str(exc), "phase": "prepare"})
+        state.errors[identifier] = str(exc)
+        raise PatternLabDataError(
+            f"{identifier}: data admission failed after preflight: {exc}",
+            error_code="job_failed",
+        ) from exc
+    finally:
+        del base
+
+    identity["timeframes"] = fingerprints
+    evidence.record_admission(run_root, identifier, identity)
+    state.states[identifier] = evidence.STATE_ADMITTED
+    state.fingerprints[identifier] = fingerprints
+    state.phase = "execute"
+    return prepared
+
+
 def _job_payload(
     entry: Mapping[str, Any], request: StudyRequest, prepared: Sequence[TimeframeInput]
 ) -> InstrumentJobInput:
@@ -311,6 +437,22 @@ def _job_payload(
     )
 
 
+def _publish_result(run_root: Path, state: _RunState, identifier: str, result) -> None:
+    """Publish one finished job's bundle and commit its completed record."""
+    state.phase = "publish"
+    bundle = evidence.publish_job(
+        run_root, identifier, tables=result.tables, stats=result.stats
+    )
+    state.states[identifier] = evidence.STATE_COMPLETED
+    evidence.record_job_state(
+        run_root,
+        identifier,
+        evidence.STATE_COMPLETED,
+        extra={"bundle_sha256": bundle["bundle_sha256"]},
+    )
+    state.phase = "execute"
+
+
 def _write_snapshots(run_root: Path, loaded: Sequence[study_extensions.LoadedExtension]) -> list[str]:
     """Copy declared custom source into the run as inert provenance."""
     names: list[str] = []
@@ -324,6 +466,10 @@ def _write_snapshots(run_root: Path, loaded: Sequence[study_extensions.LoadedExt
     return sorted(names)
 
 
+# --------------------------------------------------------------------------
+# run
+# --------------------------------------------------------------------------
+
 def run_study(
     *,
     request: Any,
@@ -335,22 +481,21 @@ def run_study(
 
     ``request`` is a study-request file path, an already normalized
     :class:`~tools.pattern_lab.study.spec.StudyRequest`, or a request mapping.
-    ``data_root`` and ``output_root`` are execution arguments: they are recorded
-    as provenance and never enter semantic or data identity.
+    Every form is revalidated here: a normalized object's semantic settings are
+    resolved again and its derived facts must agree.  ``data_root`` and
+    ``output_root`` are execution arguments: they are recorded as provenance and
+    never enter semantic or data identity.
     """
     started = _now()
     clock = time.monotonic()
-    normalize_workers(workers)
+    requested_workers = normalize_workers(workers)
 
-    if isinstance(request, StudyRequest):
-        normalized = request
-    elif isinstance(request, (str, Path)):
-        normalized = study_spec.load_request(Path(request))
-    else:
-        normalized = study_spec.normalize_request(request, source="request", base=None)
+    normalized = study_validation.validated_request(request)
 
     loaded = study_extensions.load_extensions(normalized.extensions)
     study_extensions.verify_extensions(loaded, where="study preflight")
+    used = study_validation.require_used_sources(normalized, loaded, where="study preflight")
+    declared_digests = study_validation.declared_digests(loaded)
     source_identity = {
         "core_source": study_extensions.core_source_digests(),
         "extensions": [record.as_json() for record in loaded],
@@ -400,19 +545,26 @@ def run_study(
             "data_input_sha256": None,
         }
 
+        effective_workers = min(requested_workers, len(entries))
         run_root = evidence.create_run_directory(output_root, data_root=pack_root)
         state = _RunState(
             order=[entry["instrument_id"] for entry in entries],
             states={entry["instrument_id"]: evidence.STATE_NOT_STARTED for entry in entries},
-            errors={},
-            fingerprints=[],
         )
         manifest_file = pack_manifest.manifest_path(Path(pack_root))
         provenance = {
             "schema_version": evidence.RUN_SCHEMA_VERSION,
             "data_root": str(Path(pack_root).resolve()),
             "output_root": str(run_root),
-            "workers": workers,
+            "workers": requested_workers,
+            "execution": {
+                "requested_workers": requested_workers,
+                "effective_workers": effective_workers,
+                "mode": "direct",
+                "coordinator_pid": None,
+                "worker_pids": [],
+                "thread_settings": None,
+            },
             "integrity_scope": INTEGRITY_SCOPE,
             "manifest": {
                 "revision": report["revision"],
@@ -440,59 +592,14 @@ def run_study(
             state.document(terminal="running", started=started, finished="", failure=None),
         )
 
-        failure: dict[str, Any] | None = None
-        terminal = evidence.TERMINAL_COMPLETED
         try:
             for entry in entries:
                 identifier = entry["instrument_id"]
-                base = session.load_slice(
-                    identifier,
-                    start=format_epoch_ms(normalized.study_start_ms),
-                    end=format_epoch_ms(normalized.study_end_ms),
-                    warmup_start=format_epoch_ms(normalized.warmup_start_ms),
-                    timeframe_minutes=pack_manifest.BASE_TIMEFRAME_MINUTES,
-                )
-                identity = {
-                    "instrument_id": identifier,
-                    "roles": list(entry["roles"]),
-                    "symbol": entry["symbol"],
-                    "declared": {
-                        "file_sha256": entry["sha256"],
-                        "row_count": entry["row_count"],
-                        "first_open_utc": entry["first_open_utc"],
-                        "coverage_end_utc": entry["coverage_end_utc"],
-                        "missing_bar_count": entry["missing_bar_count"],
-                    },
-                    "consumed": {
-                        "warmup_start_utc": format_epoch_ms(normalized.warmup_start_ms),
-                        "start_utc": format_epoch_ms(normalized.study_start_ms),
-                        "end_utc": format_epoch_ms(normalized.study_end_ms),
-                        "base_row_count": base.base_row_count,
-                        "base_gap_count": base.base_gap_count,
-                    },
-                    "warmup_requirements": family["warmup_requirements"],
-                }
-                try:
-                    prepared, fingerprints = _prepare_timeframes(entry, base, normalized)
-                except PatternLabDataError as exc:
-                    identity["timeframes"] = []
-                    evidence.record_admission(run_root, identifier, identity)
-                    state.states[identifier] = evidence.STATE_FAILED
-                    state.errors[identifier] = str(exc)
-                    evidence.record_job_state(
-                        run_root, identifier, evidence.STATE_FAILED, extra={"error": str(exc)}
-                    )
-                    raise PatternLabDataError(
-                        f"{identifier}: data admission failed after preflight: {exc}",
-                        error_code="job_failed",
-                    ) from exc
-                finally:
-                    del base
-                identity["timeframes"] = fingerprints
-                evidence.record_admission(run_root, identifier, identity)
-                state.states[identifier] = evidence.STATE_ADMITTED
-
+                prepared = _admit(run_root, session, entry, normalized, family, state)
                 study_extensions.verify_extensions(loaded, where=f"job {identifier} start")
+                study_validation.require_declared_sources(
+                    used, declared_digests, where=f"job {identifier} start"
+                )
                 payload = _job_payload(entry, normalized, prepared)
                 del prepared
                 try:
@@ -500,26 +607,24 @@ def run_study(
                 finally:
                     del payload
                 study_extensions.verify_extensions(loaded, where=f"job {identifier} result")
-                bundle = evidence.publish_job(
-                    run_root, identifier, tables=result.tables, stats=result.stats
+                study_validation.require_declared_sources(
+                    used, declared_digests, where=f"job {identifier} result"
                 )
+                _publish_result(run_root, state, identifier, result)
                 del result
-                state.states[identifier] = evidence.STATE_COMPLETED
-                state.fingerprints.extend(fingerprints)
-                evidence.record_job_state(
-                    run_root,
-                    identifier,
-                    evidence.STATE_COMPLETED,
-                    extra={"bundle_sha256": bundle["bundle_sha256"]},
-                )
         except KeyboardInterrupt:
-            failure = {"reason": "keyboard_interrupt", "operation": "study", "phase": "execute"}
+            failure = _execution_failure(
+                run_root, state,
+                KeyboardInterrupt("the operation was interrupted by the user"),
+                phase=state.phase,
+            )
+            failure["reason"] = "keyboard_interrupt"
             _finalize_failure(
                 run_root, state, provenance, started, clock, evidence.TERMINAL_INTERRUPTED, failure
             )
             raise
         except Exception as exc:
-            failure = _execution_failure(run_root, state, exc, phase="execute")
+            failure = _execution_failure(run_root, state, exc, phase=state.phase)
             _finalize_failure(
                 run_root, state, provenance, started, clock, evidence.TERMINAL_FAILED, failure
             )
@@ -538,10 +643,12 @@ def run_study(
                 started,
                 clock,
                 evidence.TERMINAL_FAILED,
-                {"reason": "interrupted", "operation": "study", "phase": "execute"},
+                {"reason": "interrupted", "operation": "study", "phase": state.phase,
+                 "instrument_id": state.current},
             )
             raise
 
+    state.current = None
     finished = _now()
     provenance["timings"] = {
         "started_utc": started,
@@ -549,7 +656,7 @@ def run_study(
         "elapsed_seconds": round(time.monotonic() - clock, 3),
     }
     identities["data_input_sha256"] = evidence.data_input_identity(
-        fingerprints=state.fingerprints,
+        fingerprints=state.ordered_fingerprints(),
         semantic_specification=semantic,
         universe=family["instruments"],
         protocol=study_spec.protocol_document(normalized.protocol),
@@ -558,49 +665,26 @@ def run_study(
     evidence.write_json(run_root / evidence.PROVENANCE_FILE, provenance)
     evidence.write_status(
         run_root,
-        state.document(terminal=evidence.TERMINAL_COMPLETED, started=started, finished=finished, failure=None),
+        state.document(terminal=evidence.TERMINAL_COMPLETED, started=started, finished=finished,
+                       failure=None),
     )
 
     try:
-        loaded_results = study_results.load_results(run_root, allow_partial=True)
-        if normalized.metrics:
-            evidence.write_json(
-                run_root / evidence.METRICS_FILE,
-                study_results.compute_metric_values(loaded_results, normalized.metrics),
-            )
-        summary = study_results.summarize_results(loaded_results)
-        html = study_report.render_report(summary)
-        evidence.replace_derived(run_root, summary=summary, html=html)
-        record = evidence.write_completion(
-            run_root,
-            summary={
-                "run_root": str(run_root),
-                "identities": identities,
-                "counts": state.counts(),
-            },
+        record = _publish_run(
+            run_root, normalized, state, identities,
+            loaded=loaded, used=used, declared=declared_digests,
         )
-    except KeyboardInterrupt:
-        _finalize_failure(
-            run_root, state, provenance, started, clock, evidence.TERMINAL_INTERRUPTED,
-            {"reason": "keyboard_interrupt", "operation": "study", "phase": "publish"},
-        )
-        raise
-    except Exception as exc:
-        failure = {
-            "reason": type(exc).__name__,
-            "operation": "study",
-            "phase": "publish",
-            "message": str(exc),
-            "instrument_id": None,
-        }
-        _finalize_failure(
-            run_root, state, provenance, started, clock, evidence.TERMINAL_FAILED, failure
-        )
-        raise PatternLabStudyError(
-            f"study failed during publish: {exc}",
-            error_code=getattr(exc, "error_code", "study_failed"),
-            context=failure,
-        ) from exc
+    except BaseException as exc:
+        sealed = _verified_completion(run_root)
+        if sealed is None:
+            _handle_publication_failure(run_root, state, provenance, started, clock, exc)
+            raise AssertionError("publication failure handling must raise")  # pragma: no cover
+        # The completion record was already atomically published: this run is
+        # sealed, and a later error never rewrites a sealed status or removes a
+        # published derived report.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        record = sealed
     return {
         "status": "completed",
         "run_root": str(run_root),
@@ -612,32 +696,101 @@ def run_study(
     }
 
 
-def _execution_failure(run_root, state, exc, *, phase: str) -> dict[str, Any]:
-    """Mark the job that failed and describe the failure for the run status."""
-    instrument_id = next(
-        (
-            identifier
-            for identifier in state.order
-            if state.states[identifier] in (evidence.STATE_FAILED, evidence.STATE_ADMITTED)
-        ),
-        None,
+def _publish_run(
+    run_root: Path,
+    request: StudyRequest,
+    state: _RunState,
+    identities: Mapping[str, Any],
+    *,
+    loaded: Sequence[study_extensions.LoadedExtension],
+    used: Sequence[Any],
+    declared: Mapping[str, str],
+) -> dict[str, Any]:
+    """Compute declared metrics, publish the first report, then seal the run.
+
+    The completion record is written last, after every job, immutable metadata,
+    declared metric and the initial derived report has succeeded.  The initial
+    summary is built through the internal prepublication reader so it describes
+    the run exactly as a later regeneration does, without letting the public
+    partial reader claim premature success.
+    """
+    results = study_results.load_prepublication_results(run_root)
+    if request.metrics:
+        study_extensions.verify_extensions(loaded, where="metric computation start")
+        study_validation.require_declared_sources(used, declared, where="metric computation start")
+        evidence.write_json(
+            run_root / evidence.METRICS_FILE,
+            study_results.compute_metric_values(results, request.metrics),
+        )
+        study_extensions.verify_extensions(loaded, where="metric computation result")
+        study_validation.require_declared_sources(used, declared, where="metric computation result")
+    summary = study_results.summarize_results(results)
+    html = study_report.render_report(summary)
+    evidence.replace_derived(run_root, summary=summary, html=html)
+    return evidence.write_completion(
+        run_root,
+        summary={
+            "run_root": str(run_root),
+            "identities": dict(identities),
+            "counts": state.counts(),
+        },
     )
-    for identifier in state.order:
-        if state.states[identifier] == evidence.STATE_ADMITTED:
-            state.states[identifier] = evidence.STATE_FAILED
-            state.errors.setdefault(identifier, str(exc))
-            try:
-                evidence.record_job_state(
-                    run_root, identifier, evidence.STATE_FAILED, extra={"error": str(exc)}
-                )
-            except Exception:  # pragma: no cover - the original diagnostic always wins
-                pass
+
+
+def _verified_completion(run_root: Path) -> dict[str, Any] | None:
+    """Return the run's completion record when one is published and verifiable."""
+    try:
+        return evidence.verify_completion(Path(run_root))
+    except Exception:
+        return None
+
+
+def _handle_publication_failure(run_root, state, provenance, started, clock, exc) -> None:
+    """Record a handled publication failure and remove only this run's derived files."""
+    cleanup = evidence.remove_new_derived(run_root)
+    interrupted = isinstance(exc, KeyboardInterrupt)
+    failure = {
+        "reason": "keyboard_interrupt" if interrupted else type(exc).__name__,
+        "operation": "study",
+        "phase": "publish",
+        "message": str(exc),
+        "instrument_id": None,
+        "derived_cleanup": cleanup,
+    }
+    _finalize_failure(
+        run_root,
+        state,
+        provenance,
+        started,
+        clock,
+        evidence.TERMINAL_INTERRUPTED if interrupted else evidence.TERMINAL_FAILED,
+        failure,
+    )
+    if isinstance(exc, BaseException) and not isinstance(exc, Exception):
+        raise exc
+    raise PatternLabStudyError(
+        f"study failed during publish: {exc}",
+        error_code=getattr(exc, "error_code", "study_failed"),
+        context=failure,
+    ) from exc
+
+
+def _execution_failure(run_root, state: _RunState, exc, *, phase: str) -> dict[str, Any]:
+    """Mark the job that failed and describe the failure for the run status."""
+    identifier = state.current
+    if identifier is not None and state.states.get(identifier) == evidence.STATE_ADMITTED:
+        _record_state(run_root, state, identifier, evidence.STATE_FAILED, {"error": str(exc)})
+        state.errors.setdefault(identifier, str(exc))
+    for other in state.order:
+        if state.states[other] == evidence.STATE_ADMITTED:
+            _record_state(run_root, state, other, evidence.STATE_FAILED, {"error": str(exc)})
+            state.errors.setdefault(other, str(exc))
     return {
         "reason": type(exc).__name__,
         "operation": "study",
         "phase": phase,
         "message": str(exc),
-        "instrument_id": instrument_id,
+        "instrument_id": identifier,
     }
 
 
@@ -665,30 +818,23 @@ def _finalize_failure(run_root, state, provenance, started, clock, terminal, fai
 def regenerate_report(run_root: Any) -> dict[str, Any]:
     """Rebuild the derived summary and HTML of a completed run.
 
-    Raw evidence and the completion record are verified first and never
-    rewritten.  The regeneration reads no market pack and imports no saved
-    custom source: recorded custom metric values and the built-in evidence
-    derivation are used as they stand.  A failure here leaves the original
-    successful study exactly as it was.
+    Raw evidence and the completion record are verified once, through the same
+    loading path the public reader uses, and are never rewritten.  The
+    regeneration reads no market pack and imports no saved custom source:
+    recorded custom metric values and the built-in evidence derivation are used
+    as they stand.  A failure here leaves the original successful study exactly
+    as it was; it never reclassifies the run.
     """
     root = evidence.require_run_directory(run_root)
-    record = evidence.verify_completion(root)
     results = study_results.load_results(root)
-    if not results.complete:
-        raise PatternLabDataError(
-            f"{root}: this run's terminal status is {results.status['terminal_status']!r}; report "
-            "regeneration requires a completed study. Use load_results(..., allow_partial=True) to "
-            "inspect it instead.",
-            error_code="incomplete_run",
-        )
     summary = study_results.summarize_results(results)
     html = study_report.render_report(summary)
     evidence.replace_derived(root, summary=summary, html=html)
     return {
         "status": "regenerated",
         "run_root": str(root),
-        "counts": results.counts,
-        "evidence_set_sha256": record["evidence_set_sha256"],
+        "counts": dict(results.counts),
+        "evidence_set_sha256": results.completion["evidence_set_sha256"],
         "report": str(root / evidence.REPORT_FILE),
         "summary": str(root / evidence.SUMMARY_FILE),
     }

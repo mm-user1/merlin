@@ -1146,11 +1146,11 @@ def read_session(data_root: Path) -> Iterator["_ReadSession"]:
     deactivated on normal and exceptional exit, so a saved reference can never
     keep reading a root whose guard has been released.
 
-    The implemented M2a study coordinator owns this session, reads each selected
-    instrument's consumed 5m slice once, and runs its sequential jobs on RAM-only
-    inputs.  The planned M2b pool keeps that boundary: workers receive prepared
+    The study coordinator owns this session, reads each selected instrument's
+    consumed 5m slice once, and runs its sequential jobs on RAM-only inputs.  The
+    planned bounded spawn pool keeps that boundary: workers receive prepared
     in-memory payloads and never open the pack, so no worker-private read and no
-    inherited lock handle is needed.  The earlier statement that M2's workers
+    inherited lock handle is needed.  The earlier statement that study workers
     would call the private read core themselves is superseded and is not
     implemented.
     """

@@ -413,11 +413,9 @@ def _normalize_variants(raw: Any) -> tuple[HypothesisVariant, ...]:
             contracts.require_mapping(values.get("parameters", {}), f"{where}.parameters")
         )
         dependencies = tuple(descriptor.dependencies(parameters))
-        for dependency in dependencies:
-            feature_descriptor = contracts.feature(dependency.feature_id)
-            contracts.require_scope(
-                feature_descriptor.scope, f"{where} feature {dependency.feature_id} scope"
-            )
+        # The transitive closure checks registration, scope, parameters and
+        # cycles, and supplies the dependency warmup totals resolved below.
+        closure = contracts.resolve_feature_closure(dependencies, where=where)
         condition_id = contracts.short_digest(
             {
                 "hypothesis_id": hypothesis_id,
@@ -435,7 +433,9 @@ def _normalize_variants(raw: Any) -> tuple[HypothesisVariant, ...]:
                 f"{where}: this variant is semantically identical to {seen_semantics[semantic]!r}; "
                 "duplicate semantic variants are rejected instead of counted twice."
             )
-        prior_bars = require_int(descriptor.prior_bars(parameters), f"{where} required_prior_bars", minimum=0)
+        prior_bars = contracts.resolved_prior_bars(
+            descriptor.prior_bars(parameters), closure, where=where
+        )
         seen_ids.add(variant_id)
         seen_semantics[semantic] = variant_id
         variants.append(

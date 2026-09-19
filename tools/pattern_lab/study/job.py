@@ -16,6 +16,7 @@ import pandas as pd
 
 from .. import PatternLabDataError
 from . import contracts
+from . import observations as study_observations
 from .contracts import Anchors, BarSeries, FeatureValue, FeatureRequest
 
 EVERY_QUALIFYING_BAR = "every_qualifying_bar"
@@ -303,65 +304,72 @@ def _empty_emissions() -> pd.DataFrame:
     )
 
 
-def _validate_custom_evidence(
-    evidence, instance: Mapping[str, Any], series: BarSeries, anchors: Anchors
+def _custom_frame(
+    model_evidence, instance: Mapping[str, Any], series: BarSeries, anchors: Anchors
 ) -> pd.DataFrame:
-    """Check a custom model's declared case envelope and typed outcomes."""
-    where = f"model instance {instance['model_instance_id']!r}"
-    rows = evidence.rows
+    """Validate a custom model's returned rows, then wrap them in the envelope."""
+    where = (
+        f"model instance {instance['model_instance_id']!r} on {series.instrument_id} at "
+        f"{series.timeframe_minutes}m"
+    )
+    rows = model_evidence.rows
     if not isinstance(rows, Mapping):
         raise PatternLabDataError(f"{where}: evidence rows must be a mapping of column arrays.")
     declared_cases = instance["cases"][str(series.timeframe_minutes)]
-    case_ids = {case["case_id"] for case in declared_cases}
-    outcome_names: list[str] = []
-    for case in declared_cases:
-        for outcome in case["outcomes"]:
-            if outcome["name"] not in outcome_names:
-                outcome_names.append(outcome["name"])
-    required = ["case_id", "anchor_open_ms"]
-    for name in outcome_names:
-        required.extend([name, f"{name}__reason"])
-    missing = sorted(set(required) - set(rows))
-    extra = sorted(set(rows) - set(required))
-    if missing or extra:
-        raise PatternLabDataError(
-            f"{where}: the custom evidence table is closed; missing columns {missing}, unexpected "
-            f"columns {extra}."
-        )
-    length = int(np.asarray(rows["anchor_open_ms"]).size)
-    for name, column in rows.items():
-        array = np.asarray(column)
-        if array.shape != (length,):
-            raise PatternLabDataError(
-                f"{where}: column {name!r} has shape {array.shape}, expected ({length},)."
-            )
-    anchors_set = set(int(item) for item in anchors.open_ms.tolist())
-    supplied_anchors = np.asarray(rows["anchor_open_ms"], dtype=np.int64)
-    unknown = sorted(set(int(item) for item in supplied_anchors.tolist()) - anchors_set)
-    if unknown:
-        raise PatternLabDataError(
-            f"{where}: rows reference {len(unknown)} anchor(s) that are not eligible study anchors."
-        )
-    supplied_cases = set(str(item) for item in np.asarray(rows["case_id"]).tolist())
-    unknown_cases = sorted(supplied_cases - case_ids)
-    if unknown_cases:
-        raise PatternLabDataError(
-            f"{where}: rows reference undeclared case IDs {unknown_cases}."
-        )
+    outcomes = study_observations.outcome_union(declared_cases)
+    study_observations.validate_custom_slice(
+        dict(rows),
+        declared_cases=declared_cases,
+        required_outcomes=outcomes,
+        expected_anchors=anchors.open_ms,
+        where=where,
+    )
     frame = pd.DataFrame(
         {
             "instrument_id": series.instrument_id,
             "timeframe_minutes": np.int64(series.timeframe_minutes),
             "model_instance_id": instance["model_instance_id"],
             "case_id": np.asarray(rows["case_id"], dtype=object),
-            "anchor_open_ms": supplied_anchors,
+            "anchor_open_ms": np.asarray(rows["anchor_open_ms"], dtype=np.int64),
         }
     )
-    for name in outcome_names:
-        values = np.asarray(rows[name], dtype=np.float64)
-        frame[name] = values
+    for name in outcomes:
+        frame[name] = np.asarray(rows[name], dtype=np.float64)
         frame[f"{name}__reason"] = np.asarray(rows[f"{name}__reason"], dtype=object)
     return frame
+
+
+def _custom_table(instance: Mapping[str, Any], frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate one instance's timeframes over its instance-wide outcome union.
+
+    Timeframes whose cases declare fewer outcomes keep the remaining union
+    columns explicitly null with a core-owned nonapplicable reason, so the saved
+    table never contains a hole that is neither a measurement nor a stated
+    absence.
+    """
+    outcomes = study_observations.instance_outcome_union(instance)
+    columns = list(study_observations.CUSTOM_ENVELOPE) + study_observations.custom_columns(outcomes)[2:]
+    filled: list[pd.DataFrame] = []
+    for frame in frames:
+        for name in outcomes:
+            if name not in frame.columns:
+                frame[name] = np.nan
+                frame[f"{name}__reason"] = study_observations.REASON_NOT_APPLICABLE
+        filled.append(frame.loc[:, columns])
+    return pd.concat(filled, ignore_index=True)
+
+
+def protect_inputs(payload: InstrumentJobInput) -> None:
+    """Mark every prepared input array read-only, in the parent and in a child.
+
+    Serialization does not preserve the flag, so the job restores it itself: a
+    feature or model may allocate its own working arrays, but never mutates the
+    shared bars it was given.
+    """
+    for prepared in payload.timeframes:
+        for array in (prepared.timestamps_ms, prepared.values):
+            if isinstance(array, np.ndarray) and array.flags.writeable:
+                array.flags.writeable = False
 
 
 def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
@@ -370,6 +378,7 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
     The features of one condition identity are computed once per instrument and
     timeframe and reused across the variants and models that need them.
     """
+    protect_inputs(payload)
     condition_frames: list[pd.DataFrame] = []
     episode_frames: list[pd.DataFrame] = []
     emission_frames: list[pd.DataFrame] = []
@@ -428,19 +437,34 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
                     f"model instance {instance['model_instance_id']!r}: the resolved case list "
                     "changed after the family was frozen; the run is stopped."
                 )
-            evidence = descriptor.evaluate(series, settings, anchors)
-            if evidence.kind == contracts.FIXED_HORIZON_EVIDENCE_KIND:
-                frame = pd.DataFrame(dict(evidence.rows))
+            if descriptor.evidence_kind != instance["evidence_kind"]:
+                raise PatternLabDataError(
+                    f"model instance {instance['model_instance_id']!r}: the registered evidence "
+                    f"kind is {descriptor.evidence_kind!r}, but the frozen family declares "
+                    f"{instance['evidence_kind']!r}; the run is stopped."
+                )
+            model_evidence = descriptor.evaluate(series, settings, anchors)
+            if not isinstance(model_evidence, contracts.ModelEvidence):
+                raise PatternLabDataError(
+                    f"model instance {instance['model_instance_id']!r}: evaluate must return a "
+                    f"ModelEvidence, got {type(model_evidence).__name__}."
+                )
+            if model_evidence.kind != descriptor.evidence_kind:
+                raise PatternLabDataError(
+                    f"model instance {instance['model_instance_id']!r}: returned evidence kind "
+                    f"{model_evidence.kind!r} does not match the registered "
+                    f"{descriptor.evidence_kind!r}."
+                )
+            if model_evidence.kind == contracts.FIXED_HORIZON_EVIDENCE_KIND:
+                frame = pd.DataFrame(dict(model_evidence.rows))
                 frame.insert(0, "model_instance_id", instance["model_instance_id"])
                 frame.insert(0, "timeframe_minutes", np.int64(series.timeframe_minutes))
                 frame.insert(0, "instrument_id", payload.instrument_id)
                 primitive_frames.append(frame)
-            elif evidence.kind == contracts.CUSTOM_CASE_EVIDENCE_KIND:
+            else:
                 custom_frames.setdefault(instance["model_instance_id"], []).append(
-                    _validate_custom_evidence(evidence, instance, series, anchors)
+                    _custom_frame(model_evidence, instance, series, anchors)
                 )
-            else:  # pragma: no cover - registration rejects other kinds
-                raise PatternLabDataError(f"unsupported evidence kind {evidence.kind!r}.")
 
         stats["timeframes"][str(prepared.timeframe_minutes)] = {
             "bar_count": series.row_count,
@@ -461,6 +485,7 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
     }
     if primitive_frames:
         tables["primitives"] = pd.concat(primitive_frames, ignore_index=True)
+    by_instance = {instance["model_instance_id"]: instance for instance in payload.models}
     for instance_id, frames in custom_frames.items():
-        tables[f"custom__{instance_id}"] = pd.concat(frames, ignore_index=True)
+        tables[f"custom__{instance_id}"] = _custom_table(by_instance[instance_id], frames)
     return InstrumentJobResult(instrument_id=payload.instrument_id, tables=tables, stats=stats)

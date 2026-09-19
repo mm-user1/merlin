@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .. import PatternLabDataError
-from ..manifest import require_text
+from ..manifest import require_int, require_text
 
 INSTRUMENT_SCOPE = "instrument"
 SUPPORTED_SCOPES = (INSTRUMENT_SCOPE,)
@@ -479,6 +479,79 @@ def registered(kind: str) -> list[str]:
 
 def registrations(kind: str) -> dict[str, Registration]:
     return dict(_REGISTRY[kind])
+
+
+# --------------------------------------------------------------------------
+# the transitive feature closure
+# --------------------------------------------------------------------------
+
+def resolve_feature_closure(
+    requests: Sequence[FeatureRequest], *, where: str
+) -> tuple[FeatureRequest, ...]:
+    """Return the transitive feature dependencies with normalized parameters.
+
+    Registration, instrument scope, declared parameters and dependency cycles
+    are all checked here, so warmup resolution and used-source attribution share
+    one traversal instead of each walking the graph their own way.
+    """
+    resolved: dict[str, FeatureRequest] = {}
+
+    def visit(request: FeatureRequest, chain: tuple[str, ...]) -> None:
+        if request.feature_id in chain:
+            raise PatternLabDataError(
+                f"{where}: feature {request.feature_id!r} depends on itself through "
+                f"{list(chain + (request.feature_id,))}; a dependency cycle is rejected before "
+                "any market data is read."
+            )
+        descriptor = feature(request.feature_id)
+        require_scope(descriptor.scope, f"{where} feature {request.feature_id}.scope")
+        parameters = descriptor.validate_parameters(
+            require_mapping(request.parameters, f"{where} feature {request.feature_id}.parameters")
+        )
+        normalized = FeatureRequest(feature_id=request.feature_id, parameters=parameters)
+        if normalized.key in resolved:
+            return
+        resolved[normalized.key] = normalized
+        for dependency in descriptor.dependencies(parameters):
+            if not isinstance(dependency, FeatureRequest):
+                raise PatternLabDataError(
+                    f"{where}: feature {request.feature_id!r} declared a dependency of type "
+                    f"{type(dependency).__name__}; dependencies() must return FeatureRequest values."
+                )
+            visit(dependency, chain + (request.feature_id,))
+
+    for item in requests:
+        if not isinstance(item, FeatureRequest):
+            raise PatternLabDataError(
+                f"{where}: declared dependencies must be FeatureRequest values, got "
+                f"{type(item).__name__}."
+            )
+        visit(item, ())
+    return tuple(resolved.values())
+
+
+def resolved_prior_bars(
+    declared: int, closure: Sequence[FeatureRequest], *, where: str
+) -> int:
+    """Return the effective total prior observation bars one condition needs.
+
+    ``prior_bars`` declarations are *totals*, so the effective requirement is the
+    maximum of the hypothesis's own declaration and every transitive dependency's
+    declaration.  Totals are never added, which would count a shared lookback
+    twice.
+    """
+    total = require_int(declared, f"{where} required_prior_bars", minimum=0)
+    for request in closure:
+        descriptor = feature(request.feature_id)
+        total = max(
+            total,
+            require_int(
+                descriptor.prior_bars(request.parameters),
+                f"{where} feature {request.feature_id}.prior_bars",
+                minimum=0,
+            ),
+        )
+    return total
 
 
 def require_verified_registrations(declared: Mapping[str, str]) -> None:

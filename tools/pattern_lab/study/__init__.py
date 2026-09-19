@@ -2,7 +2,9 @@
 
 The CLI is a thin wrapper around this package.  An agent script imports the same
 functions, registers its own descriptors through a declared trusted module and
-reads the same saved evidence.
+reads the same saved evidence.  Every accepted request form passes the same
+execution-boundary validation, and every used non-built-in descriptor must come
+from a declared, verified source generation.
 
     from tools.pattern_lab import study
 

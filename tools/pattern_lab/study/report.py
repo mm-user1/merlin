@@ -11,8 +11,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from html import escape
 from typing import Any, Mapping, Sequence
+from urllib.parse import quote
 
 BANNER = "Descriptive event study — statistical validation is not implemented in M2."
+
+# This page is regenerable and is never part of the completion record's hash
+# set, so it can never certify a run by itself.
+COMPLETION_AUTHORITY = (
+    "Authoritative completion is a matching verified completion.json: the run's immutable evidence "
+    "must still hash to the values that record names. Opening this regenerable page, or reading "
+    "'Run complete' below, is not a completion check."
+)
 
 STYLE = """
 :root { color-scheme: light; }
@@ -78,6 +87,29 @@ def _rows(rows: Sequence[Sequence[str]], *, header: Sequence[str], caption: str 
         parts.append("</tr>")
     parts.append("</tbody></table>")
     return "".join(parts)
+
+
+def _evidence_link(relative: str, label: str) -> str:
+    """An offline link from derived/report.html to a sibling evidence path."""
+    # The page lives in derived/, so every evidence path is one level up.
+    return f'<a href="../{quote(relative)}">{escape(label)}</a>'
+
+
+def _evidence_links(summary: Mapping[str, Any]) -> str:
+    """Working relative links to the machine-readable evidence of this run."""
+    items = [
+        _evidence_link("spec/request.json", "spec/request.json"),
+        _evidence_link("spec/family.json", "spec/family.json"),
+        _evidence_link("provenance.json", "provenance.json"),
+        _evidence_link("status.json", "status.json"),
+        _evidence_link("completion.json", "completion.json"),
+        f'<a href="{quote("summary.json")}">derived/summary.json</a>',
+    ]
+    for instrument_id in summary["completed_instruments"]:
+        items.append(
+            _evidence_link(f"jobs/{instrument_id}/bundle.json", f"jobs/{instrument_id}/bundle.json")
+        )
+    return "".join(f"<li>{item}</li>" for item in items)
 
 
 def _definition(pairs: Sequence[tuple[str, Any]]) -> str:
@@ -241,6 +273,7 @@ def render_report(summary: Mapping[str, Any]) -> str:
     ("Minimum support", summary["minimum_support"]),
     ("Jobs", f"planned {counts.get('planned', 0)}, completed {counts.get('completed', 0)}, failed {counts.get('failed', 0)}, not started {counts.get('not_started', 0)}"),
     ("Run complete", "yes" if summary["complete"] else "no"),
+    ("Completion authority", COMPLETION_AUTHORITY),
     ("Specification identity", summary["identities"]["specification_sha256"]),
     ("Data input identity", summary["identities"]["data_input_sha256"]),
     ("Implementation identity", summary["identities"]["implementation_sha256"]),
@@ -260,6 +293,12 @@ def render_report(summary: Mapping[str, Any]) -> str:
 <h2>Universe</h2>
 {_rows(instrument_rows, header=["Instrument", "Symbol", "Venue", "Roles"])}
 <p class="small">Completed jobs: {escape(", ".join(summary["completed_instruments"])) or "none"}.</p>
+</div>
+<div class="card">
+<h2>Saved machine-readable evidence</h2>
+<p class="small">These offline relative links resolve from this page inside <code>derived/</code>.
+Raw evidence is immutable; only this page and <code>derived/summary.json</code> are regenerated.</p>
+<ul class="notes">{_evidence_links(summary)}</ul>
 </div>
 <div class="card">
 <h2>Declared outcome groups</h2>

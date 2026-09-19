@@ -12,9 +12,14 @@ Pattern Lab is local, research-only tooling. Three milestones are implemented:
   extensible feature/hypothesis/model/metric contracts, fixed-horizon and path
   outcomes, immutable per-instrument evidence and a regenerable offline HTML
   report. See [Event studies](#event-studies).
+- **M2b block A, enforced boundary contracts**: custom-model evidence admitted
+  before publication and revalidated on every read, verified completion in both
+  reader modes, one semantic validation path for every accepted request form,
+  used-source attribution, resolved dependency warmup, truthful failure and
+  partial-progress accounting, and bounded per-instrument evidence reuse.
 
-**M2 is not complete.** M2a runs `workers=1` only; the bounded spawn pool and its
-`workers=1/2` equivalence are separately specified M2b work. Matched controls and
+**M2 is not complete.** This build runs `workers=1` only; the bounded spawn pool
+and its `workers=1/2` equivalence are the remaining M2b block B work. Matched controls and
 calibrated inference (M3) and sequential bracket execution, sizing, leverage and
 expiry (M4) are **not** implemented, and this milestone reports no p-value,
 confidence interval, significance badge or edge verdict.
@@ -1200,9 +1205,18 @@ Each candle is known at its close, and only current or past observations may
 affect a feature or a condition there. A lookback never crosses a gap: state
 resets and re-warms at every contiguous segment. Each parameterized
 feature/hypothesis declares the prior observation bars it needs at the first
-research bar, **including its dependencies**; the declared elapsed warmup is
-validated against that requirement for every timeframe before a run is created,
-and an insufficient warmup is refused rather than shortening a lookback. Calendar
+research bar as a **total, including its dependencies**. The transitive feature
+closure is resolved before a run is created — checking registration, instrument
+scope, normalized dependency parameters and dependency cycles — and the
+effective requirement is the **maximum** of the hypothesis's own declared total
+and every transitive dependency's declared total. Totals are never added, which
+would count one shared lookback twice, and a hypothesis that understates its own
+lookback still gets its dependencies' requirement. The declared elapsed warmup is
+validated against that resolved requirement for every timeframe and recorded in
+`spec/family.json`; an insufficient warmup is refused rather than shortening a
+lookback. A downstream rolling transformation must still declare the total
+history its own calculation needs: the framework cannot infer an arbitrary
+Python lookback. Calendar
 sufficiency does not prove contiguous observations: actual validity masks still
 re-warm after a gap, and early gap-affected anchors can be invalid without
 invalidating an otherwise usable study. The entire declared consumed warmup
@@ -1344,6 +1358,39 @@ empty table keeps its declared schema. There is no SQLite registry.
 | Fixed-model primitives | Instrument, timeframe, model instance, anchor, horizon, intended entry/exit times, entry `P`, exit `X`, path high `U`, path low `L`, and separate return/path validity and reasons |
 | Custom model evidence | The common instrument/timeframe/model-instance/case/anchor envelope plus that model's own declared typed outcomes |
 
+**A custom model's returned evidence is admitted before it is published, and the
+same structural and value validator runs again whenever a saved custom table is
+decoded.** The returned evidence kind must match the registered descriptor and
+the frozen family. Exactly one row must exist for every `(resolved case,
+eligible anchor)` pair of that instrument and timeframe, including explicitly
+unavailable outcomes; duplicate, missing and unknown keys all fail rather than
+silently changing the sample or being inner-joined away. Anchor timestamps must
+be exact integer UTC milliseconds — a boolean, a fractional or a string
+timestamp is not an integer timestamp. Every declared outcome keeps the float64
+contract: `available` requires a finite value, an unavailable value is null with
+a nonblank non-`available` reason, and an infinity, a null marked available or a
+finite value marked unavailable is rejected. Unavailable reasons stay
+model-owned strings; no build hardcodes a future model's reason enum. When a
+model's cases declare different outcomes, each row is validated against its own
+case's declarations and the union columns that case does not declare stay null
+with an explicit nonavailable reason. Empty eligible anchors produce the declared
+empty schema, not an exception and not a schema-less table.
+
+On read, the expected anchors come from the run's own saved all-anchor
+conditions table and the resolved cases from the frozen family — never from the
+emissions, the market pack or rerunning the model. **A matching file hash proves
+the bytes, not the rows**, so a missing or duplicated row, a non-finite available
+outcome or an inconsistent reason fails observation, summary, metric and report
+reading with an instrument- and model-specific error even when every recorded
+digest matches. Valid older evidence stays readable: nothing is filtered,
+repaired or migrated.
+
+`signal_time_ms = anchor_open_ms + timeframe_minutes * 60000` is part of the
+common custom observation view and is **derived on read** by the core, so valid
+evidence saved before this rule gains the column with no pack read, no migration
+and no fabricated fixed-horizon field. `EVIDENCE_VIEW_VERSION` stays `1`: the
+column is additive and derivable, and no existing value or formula changed.
+
 **The built-in's physical rows are direction-independent.** One primitive row is
 saved per model instance, instrument, timeframe, anchor and horizon — not
 duplicated long and short rows — and the case registry maps both directional
@@ -1385,8 +1432,22 @@ measure a bounded run rather than assuming a size.
 
 ### Admission, execution and failure states
 
-`workers` accepts only the integer `1`. Any other value is an actionable
-validation error **before** any output is created; nothing falls back silently.
+`workers` accepts only the integer `1`. Any other value — including `True`, `0`,
+a negative number, a float and a string — is an actionable validation error
+**before** any output is created; nothing falls back silently.
+
+**Every accepted public request form passes the same execution-boundary
+validation.** A request file, a request mapping and an already normalized
+`StudyRequest` all reach one semantic path. A frozen dataclass is not trusted on
+its own: `dataclasses.replace` never revalidates, and a frozen request's nested
+parameter and settings mappings stay mutable. At the boundary the semantic
+settings are resolved again through the same validators, the protocol bounds are
+rebuilt from the protocol document rather than read from its private `_bounds`
+cache, and the condition identities, resolved cases, warmup and subsequent
+identities are recomputed. A supplied derived fact that contradicts that fresh
+resolution is rejected. The result is a **fresh validated value**: a caller's
+mapping is never mutated, and a valid normalized request keeps working
+unchanged.
 
 Before the run directory exists, and before any study feature or outcome is
 computed, the coordinator validates the request, protocol, extension
@@ -1410,7 +1471,13 @@ Each timeframe's fingerprint is computed over the raw consumed 5m rows, includin
 rows in subsequently omitted aggregate groups, and matches
 `load_slice(..., timeframe_minutes=tf)` exactly. An admitted job's input identity
 is persisted **before** calculation, so even a failed numerical job retains what
-was observed. On the first job or admission failure the coordinator stops
+was observed.
+
+**The coordinator tracks the instrument it is working on from the first base
+read.** A base-slice or preparation failure after preflight marks that exact
+instrument failed with its phase and the actual diagnostic, and records the
+metadata context that was known; no input fingerprint is invented for rows that
+were never read. On the first job or admission failure the coordinator stops
 dispatching, marks that job failed and the remaining jobs not started, retains
 completed bundles and exits `2`. A user interrupt records the interrupted state
 and exits `130`. **No completion marker is published for these states**, and a
@@ -1420,19 +1487,66 @@ failure to save status never replaces the original diagnostic.
 record hashes the frozen spec, protocol and source evidence, the admitted job
 identities, the complete raw job bundles and the final terminal status; it never
 hashes itself and never hashes `derived/summary.json` or `derived/report.html`.
-It is written last, only after every planned job and the initial report
-generation succeed, and the terminal status is not rewritten afterwards.
-`report` verifies the raw evidence and the completion record, regenerates the
-derived outputs from the saved observations and frozen settings, and atomically
-replaces only those two files. It needs no pack and imports no saved custom
-module. A regeneration failure leaves the evidence and the original completion
-record intact; raw corruption blocks it entirely.
+It is written last, only after every planned job, all immutable metadata, every
+declared metric and the initial derived report have succeeded, and the terminal
+status is not rewritten afterwards. The initial summary is built through a small
+internal prepublication path, so a run's own first report and every later
+regeneration describe it identically without the public partial reader ever
+claiming premature success. There is no public `skip_verify` or `assume_complete`
+flag and no second hash registry.
 
-`load_results(run_root)` and `report` require a completed run.
-`load_results(run_root, allow_partial=True)` is the explicit partial-inspection
-API: it exposes the planned, admitted, completed, failed and not-started counts,
-verifies and loads only intact completed bundles, and exposes incompleteness
-prominently. It is **not** a corruption bypass.
+`report` verifies the raw evidence and the completion record **once**, through
+the same loading path the public reader uses, regenerates the derived outputs
+from the saved observations and frozen settings, and atomically replaces only
+those two files. It needs no pack and imports no saved custom module. A
+regeneration failure leaves the evidence and the original completion record
+intact and never reclassifies a successful study; raw corruption blocks it
+entirely. Regenerated derived files are not required to be byte-identical across
+code versions — the frozen semantics are.
+
+**An existing completion record is verified in every reader mode.**
+`load_results(run_root)` and `report` require a verified completed run: the
+record, the immutable evidence it names and a consistent terminal state and
+planned-job count must all agree. `load_results(run_root, allow_partial=True)` is
+the explicit partial-inspection API: it reconciles the planned, admitted,
+completed, failed and not-started counts from the committed per-job records,
+published bundles and run-level status conservatively, verifies and loads only
+intact completed bundles, and always reports `complete=False` without a verified
+record — including when the terminal status says `completed`. A job claimed
+completed whose bundle is missing or corrupt **fails** rather than disappearing,
+an unfinished staging directory is never completed evidence, and partial loading
+is read-only: it repairs nothing, resumes nothing and promises no power-loss
+recovery. Partial inspection is **not** a corruption bypass, and malformed or
+unsupported completion metadata gives an actionable validation error rather than
+an incidental `KeyError`.
+
+A completed job's published bundle and its committed record are discoverable by
+explicit partial inspection **before** the final run status is written, so
+durable progress is visible at the moment it becomes durable.
+
+**Handled publication failure and the point of no return.** If the initial
+publication fails before a valid completion record exists, the coordinator
+removes only this run's own generated `derived/summary.json` and
+`derived/report.html` on a best-effort basis — never a recursive directory
+removal — retains all raw evidence, reports any cleanup failure separately in the
+recorded status, and keeps the original diagnostic. Once the completion record
+has been atomically replaced the run is sealed: a later exception never
+overwrites that sealed status, never deletes its published derived report and
+never reclassifies the run. These are handled-error contracts, not promises about
+`SIGKILL` or an unwritable filesystem.
+
+**Bounded evidence reuse.** During ordinary summary aggregation each needed raw
+table is decoded at most once per instrument, reused across every declared group,
+and released before the next instrument; the summary read count therefore does
+not grow with the group count. The public observation API and the summary share
+one expansion implementation, and no all-instrument or all-directional cache is
+kept. A group's assembled observation columns are shared between that group's
+declared metrics instead of being decoded again for every metric; metrics may
+need whole-group rows, so those frames stay bounded to the group being computed
+and a later group reads the tables again rather than retaining every group at
+once. Exact summary quantiles still retain compact per-group sample arrays across
+instruments: that is a separate memory cost from the one live instrument's
+frames, and it is not covered by any per-job bound.
 
 ### Agent extensions and source integrity
 
@@ -1452,10 +1566,22 @@ pickle-based configuration, no silent built-in replacement and no runtime
 monkeypatching. A declared module must expose `register(context)` and register
 its own descriptors.
 
+**Every descriptor a study actually uses must come from a declared, verified
+source generation.** The used set is resolved explicitly — the requested
+hypotheses, their transitive feature dependencies, the model instances and the
+declared metrics — and each non-built-in member of it must be attributable to an
+extension this request declares and verifies. A registration with no source, an
+unknown source or a mismatched generation fails **before** the run directory is
+created. A source generation is a digest, not a path, so two declarations of
+byte-identical source are the same generation. Registry entries this study does
+not use are not consulted, so an unrelated leftover registration cannot block a
+built-in run.
+
 **One source-integrity mechanism is used: digest verification, with inert
 snapshots.** Declared module and helper files are hashed before import and
-registration, verified again before each job and before that job's result is
-accepted, and any detected change fails the run. Copied source in
+registration, verified again before each job, before that job's result is
+accepted and around parent-side custom metric computation, and any detected
+change fails the run. Copied source in
 `spec/snapshots/` is provenance only and is never executed. Only registrations
 whose recorded digests match a currently declared file are reused; a module this
 interpreter imported by another path cannot have its source generation
@@ -1480,6 +1606,13 @@ horizons, the signal/entry/exit convention, the occurrence policy and the costs,
 and displays conspicuously:
 
 > Descriptive event study — statistical validation is not implemented in M2.
+
+It lists working offline **relative** links to the run's machine-readable
+evidence — the frozen spec, the provenance, the status, the completion record,
+its own `derived/summary.json` and each completed job's bundle — resolved from
+`derived/report.html` with escaped paths. It states explicitly that authoritative
+completion is a matching verified `completion.json` and that opening the page is
+not a completion check.
 
 It also discloses overlapping observations, unknown historical universe
 membership, prior use of the reserve and the excluded slippage and funding.
@@ -1586,8 +1719,12 @@ python -m tools.pattern_lab inspect --data-root <pack> --verify
 ```
 
 The event-study cases live in `tests/pattern_lab/test_pattern_lab_study_events.py`,
-`_study_model.py`, `_study_admission.py`, `_study_extensions.py` and
-`_study_report.py`. They generate synthetic packs and trusted extension modules at
+`_study_model.py`, `_study_admission.py`, `_study_extensions.py`,
+`_study_report.py` and `_study_contracts.py`. The last module owns the enforced
+boundary contracts: custom-model evidence admission and read-side revalidation,
+completion and partial-inspection integrity, every accepted request form,
+used-source attribution, resolved dependency warmup, failure attribution and
+bounded evidence reuse. They generate synthetic packs and trusted extension modules at
 runtime under the launcher's external temporary root and never read market data.
 
 ```powershell
@@ -1614,12 +1751,18 @@ its report, and composes the per-series data fingerprint with the selected
 universe, roles and settings into run identity. M2b adds the bounded spawn pool
 and `workers=1/2` equivalence; M3 owns matched controls and calibrated inference;
 M4 owns bracket execution, sizing, leverage, expiry and the interpretation of the
-stored instrument rules.
+stored instrument rules. M2b block A enforces the boundary contracts M2a
+advertised but did not check; block B adds the pool.
 
 Known limits of these milestones:
 
-- M2a is sequential: `workers` accepts only the integer `1`, and any other value
-  is an actionable validation error before any output is created.
+- This build is sequential: `workers` accepts only the integer `1`, and any other
+  value is an actionable validation error before any output is created.
+- Read-side custom-evidence validation is structural and value-level. It proves
+  that a saved sample is complete and coherent against the run's own frozen
+  family and saved anchors; it cannot prove that a model's numbers are right.
+- Summary and metric memory is bounded per instrument and per group, not for the
+  whole run: exact quantiles keep compact per-group samples across instruments.
 - M2a is descriptive: no p-value, confidence interval, significance badge, edge
   verdict, matched control or automatic winner selection exists.
 - Source integrity is a digest check over cooperating stable files. It is not a

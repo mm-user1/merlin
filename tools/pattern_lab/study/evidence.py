@@ -266,6 +266,31 @@ def record_job_state(
     write_json(path, payload)
 
 
+def read_job_records(run_root: Path) -> dict[str, dict[str, Any]]:
+    """Read every committed per-job admission record of a run.
+
+    These small records are written as each job is admitted, published or
+    failed, so explicit partial inspection sees committed progress without
+    trusting a run-level status that may be older.
+    """
+    directory = Path(run_root) / ADMITTED_DIR
+    records: dict[str, dict[str, Any]] = {}
+    if not directory.is_dir():
+        return records
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix != ".json":
+            continue
+        payload = read_json(path)
+        if not isinstance(payload, Mapping) or "instrument_id" not in payload:
+            raise PatternLabDataError(
+                f"{path}: this admission record has no instrument_id; the run's recorded progress "
+                "cannot be reconciled.",
+                error_code="corrupt_evidence",
+            )
+        records[str(payload["instrument_id"])] = dict(payload)
+    return records
+
+
 def publish_job(
     run_root: Path,
     instrument_id: str,
@@ -414,8 +439,34 @@ def verify_completion(run_root: Path) -> dict[str, Any]:
             "load_results(run_root, allow_partial=True) to inspect an incomplete run.",
             error_code="incomplete_run",
         )
-    record = dict(read_json(path))
-    recorded = dict(record["evidence_sha256"])
+    document = read_json(path)
+    if not isinstance(document, Mapping):
+        raise PatternLabDataError(
+            f"{path}: the completion record is not a JSON object.", error_code="corrupt_evidence"
+        )
+    record = dict(document)
+    version = record.get("schema_version")
+    if version != RUN_SCHEMA_VERSION:
+        raise PatternLabDataError(
+            f"{path}: completion schema_version {version!r} is not the supported "
+            f"{RUN_SCHEMA_VERSION}; this record cannot be verified.",
+            error_code="corrupt_evidence",
+        )
+    if record.get("terminal_status") != TERMINAL_COMPLETED:
+        raise PatternLabDataError(
+            f"{path}: the completion record's terminal status is "
+            f"{record.get('terminal_status')!r}, not {TERMINAL_COMPLETED!r}.",
+            error_code="corrupt_evidence",
+        )
+    digests = record.get("evidence_sha256")
+    if not isinstance(digests, Mapping) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in digests.items()
+    ):
+        raise PatternLabDataError(
+            f"{path}: the completion record has no usable evidence_sha256 mapping.",
+            error_code="corrupt_evidence",
+        )
+    recorded = dict(digests)
     present = set(immutable_files(root))
     missing = sorted(set(recorded) - present)
     unexpected = sorted(present - set(recorded))
@@ -446,3 +497,29 @@ def replace_derived(run_root: Path, *, summary: Mapping[str, Any], html: str) ->
     (root / DERIVED_DIR).mkdir(parents=True, exist_ok=True)
     write_json(root / SUMMARY_FILE, summary)
     pack_manifest.write_text_atomic(root / REPORT_FILE, html)
+
+
+def remove_new_derived(run_root: Path) -> dict[str, list[str]]:
+    """Best-effort removal of this run's own generated derived files.
+
+    Only the two named regenerable outputs are unlinked; no directory is removed
+    recursively.  The caller keeps its original diagnostic and reports what
+    could not be cleaned, so a surviving derived report is never presented as
+    evidence of a completed run.
+    """
+    root = Path(run_root)
+    removed: list[str] = []
+    retained: list[str] = []
+    for relative in DERIVED_FILES:
+        path = root / relative
+        if not path.exists():
+            continue
+        try:
+            # Only the two named files are unlinked; no directory is removed
+            # recursively, so anything else is reported rather than destroyed.
+            path.unlink()
+        except OSError as exc:  # pragma: no cover - reported, never masking the cause
+            retained.append(f"{relative}: {exc}")
+        else:
+            removed.append(relative)
+    return {"removed": removed, "retained": retained}

@@ -4,6 +4,11 @@
 observation view.  ``summarize_results`` accumulates compact numeric samples per
 declared outcome group, so exact empirical quantiles are available without
 materializing every directional row of the universe at once.
+
+Reading is bounded per instrument: each needed raw table is decoded once, reused
+across the declared groups and released before the next instrument.  Exact
+quantiles still retain compact per-group sample arrays across instruments, which
+is a separate memory cost from the one live instrument's frames.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import pandas as pd
 from .. import PatternLabDataError
 from . import builtins as study_builtins
 from . import contracts, evidence
+from . import observations as study_observations
 from .builtins import EVIDENCE_VIEW_VERSION
 from .contracts import ModelCase, OutcomeSpec
 
@@ -25,6 +31,15 @@ SUMMARY_SCHEMA_VERSION = 1
 
 QUANTILES = (0.10, 0.25, 0.75, 0.90)
 QUANTILE_LABELS = ("p10", "p25", "p75", "p90")
+
+# How terminal one recorded job state is.  A published bundle outranks a later
+# run-level failure, so completed work is never lost by reconciliation.
+_STATE_PRECEDENCE = {
+    evidence.STATE_NOT_STARTED: 0,
+    evidence.STATE_ADMITTED: 1,
+    evidence.STATE_FAILED: 2,
+    evidence.STATE_COMPLETED: 3,
+}
 
 DISCLOSURES = (
     "Descriptive event study — statistical validation is not implemented in M2.",
@@ -64,10 +79,8 @@ class StudyResults:
     completion: Mapping[str, Any] | None
     complete: bool
     jobs: Mapping[str, Mapping[str, Any]]
-
-    @property
-    def counts(self) -> dict[str, int]:
-        return dict(self.status["counts"])
+    job_states: Mapping[str, str]
+    counts: Mapping[str, int]
 
     @property
     def completed_instruments(self) -> list[str]:
@@ -116,59 +129,173 @@ class StudyResults:
 
         With ``variant_id`` the rows are that variant's emitted events only; with
         no variant the rows are every eligible anchor, including non-events.
+        Saved custom evidence is structurally validated first: a matching file
+        hash proves the bytes, not that the rows are a complete, coherent sample.
         """
-        instance = self.model_instance(model_instance_id)
-        case = self.case(model_instance_id, timeframe_minutes, case_id)
+        reader = _InstrumentReader(self, instrument_id)
+        try:
+            return reader.observations(
+                instance=self.model_instance(model_instance_id),
+                case=self.case(model_instance_id, timeframe_minutes, case_id),
+                timeframe_minutes=int(timeframe_minutes),
+                variant_id=variant_id,
+            )
+        finally:
+            reader.release()
+
+
+class _InstrumentReader:
+    """One instrument's decoded raw tables, reused across groups then released.
+
+    Custom evidence is validated once per instrument and model instance, before
+    any group filtering, so a missing or duplicated row cannot disappear into a
+    group's inner join.
+    """
+
+    def __init__(self, results: StudyResults, instrument_id: str) -> None:
+        self._results = results
+        self._instrument_id = instrument_id
+        self._tables: dict[str, pd.DataFrame] = {}
+        self._validated: set[str] = set()
+        self._anchors: dict[int, np.ndarray] | None = None
+
+    @property
+    def instrument_id(self) -> str:
+        return self._instrument_id
+
+    def table(self, name: str) -> pd.DataFrame:
+        frame = self._tables.get(name)
+        if frame is None:
+            frame = self._results.table(self._instrument_id, name)
+            self._tables[name] = frame
+        return frame
+
+    def eligible_anchors(self) -> dict[int, np.ndarray]:
+        """Every eligible study anchor per timeframe, from the saved conditions.
+
+        The all-anchor conditions table is the run's own record of what the
+        model was asked about; emissions are a filtered subset and could never
+        prove that a row is missing.
+        """
+        if self._anchors is None:
+            conditions = self.table("conditions")
+            anchors: dict[int, np.ndarray] = {}
+            if len(conditions):
+                stamps = conditions["anchor_open_ms"].to_numpy(dtype=np.int64)
+                timeframes = conditions["timeframe_minutes"].to_numpy(dtype=np.int64)
+                for timeframe in np.unique(timeframes).tolist():
+                    anchors[int(timeframe)] = np.unique(stamps[timeframes == timeframe])
+            self._anchors = anchors
+        return self._anchors
+
+    def evidence_table(self, instance: Mapping[str, Any]) -> pd.DataFrame:
+        """Return the verified raw table this model instance's cases expand from."""
         if instance["evidence_kind"] == contracts.FIXED_HORIZON_EVIDENCE_KIND:
-            primitives = self.table(instrument_id, "primitives")
-            selection = primitives.loc[
-                (primitives["model_instance_id"] == model_instance_id)
-                & (primitives["timeframe_minutes"] == int(timeframe_minutes))
-            ]
-            frame = study_builtins.expand_fixed_horizon_case(selection.reset_index(drop=True), case)
-        else:
-            custom = self.table(instrument_id, f"custom__{model_instance_id}")
-            frame = custom.loc[
-                (custom["case_id"] == case_id)
-                & (custom["timeframe_minutes"] == int(timeframe_minutes))
-            ].reset_index(drop=True)
+            return self.table("primitives")
+        name = f"custom__{instance['model_instance_id']}"
+        frame = self.table(name)
+        if name not in self._validated:
+            study_observations.validate_custom_table(
+                frame,
+                instance=instance,
+                instrument_id=self._instrument_id,
+                expected_anchors=self.eligible_anchors(),
+                where=f"{self._instrument_id}: saved {name}.parquet",
+            )
+            self._validated.add(name)
+        return frame
+
+    def observations(
+        self,
+        *,
+        instance: Mapping[str, Any],
+        case: ModelCase,
+        timeframe_minutes: int,
+        variant_id: str | None = None,
+    ) -> pd.DataFrame:
+        frame = study_observations.expand_case(
+            evidence_kind=instance["evidence_kind"],
+            table=self.evidence_table(instance),
+            model_instance_id=instance["model_instance_id"],
+            case=case,
+            timeframe_minutes=timeframe_minutes,
+        )
         if variant_id is None:
             return frame
-        emissions = self.table(instrument_id, "emissions")
-        events = emissions.loc[
-            (emissions["variant_id"] == variant_id)
-            & (emissions["timeframe_minutes"] == int(timeframe_minutes)),
-            ["anchor_open_ms", "event_id", "episode_id"],
-        ]
-        return frame.merge(events, on="anchor_open_ms", how="inner")
+        return study_observations.join_events(
+            frame, self.table("emissions"), variant_id=variant_id,
+            timeframe_minutes=timeframe_minutes,
+        )
+
+    def release(self) -> None:
+        """Drop this instrument's frames before the next instrument is read."""
+        self._tables.clear()
+        self._validated.clear()
+        self._anchors = None
 
 
-def _verify_jobs(run_root: Path, status: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    jobs: dict[str, dict[str, Any]] = {}
-    for record in status["instruments"]:
-        if record["state"] != evidence.STATE_COMPLETED:
-            continue
-        jobs[record["instrument_id"]] = evidence.verify_job_bundle(run_root, record["instrument_id"])
-    return jobs
+# --------------------------------------------------------------------------
+# loading and reconciliation
+# --------------------------------------------------------------------------
 
+def _reconcile(run_root: Path, status: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, int]]:
+    """Merge the run-level status with the committed per-job records.
 
-def load_results(run_root: Any, *, allow_partial: bool = False) -> StudyResults:
-    """Load a run's saved evidence.
-
-    Without ``allow_partial`` a completed run is required and its immutable
-    evidence is verified against the completion record.  ``allow_partial=True``
-    is the explicit partial-inspection API: it exposes the planned, admitted,
-    completed, failed and not-started counts and loads only intact completed
-    bundles.  It is never a corruption bypass.
+    A published bundle or a committed record is newer than the run-level status,
+    and a claimed completed job must verify rather than quietly disappear.
     """
+    records = evidence.read_job_records(run_root)
+    states: dict[str, str] = {}
+    for item in status["instruments"]:
+        identifier = item["instrument_id"]
+        candidates = [item["state"]]
+        record = records.get(identifier)
+        if record is not None:
+            candidates.append(str(record.get("state", evidence.STATE_NOT_STARTED)))
+        if evidence.job_path(run_root, identifier).is_dir():
+            candidates.append(evidence.STATE_COMPLETED)
+        states[identifier] = max(candidates, key=lambda state: _STATE_PRECEDENCE.get(state, 0))
+    counts = {
+        evidence.STATE_ADMITTED: 0,
+        evidence.STATE_COMPLETED: 0,
+        evidence.STATE_FAILED: 0,
+        evidence.STATE_NOT_STARTED: 0,
+    }
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+    counts["planned"] = len(states)
+    return states, counts
+
+
+def _load(run_root: Any, *, mode: str) -> StudyResults:
     root = evidence.require_run_directory(run_root)
     completion: Mapping[str, Any] | None = None
-    if not allow_partial:
+    # An existing completion record is verified in every mode: explicit partial
+    # inspection is never a corruption bypass.
+    if mode == "strict" or evidence.completion_path(root).is_file():
         completion = evidence.verify_completion(root)
-    elif evidence.completion_path(root).is_file():
-        completion = dict(evidence.read_json(evidence.completion_path(root)))
     status = evidence.read_status(root)
-    jobs = _verify_jobs(root, status)
+    states, counts = _reconcile(root, status)
+    jobs = {
+        identifier: evidence.verify_job_bundle(root, identifier)
+        for identifier, state in sorted(states.items())
+        if state == evidence.STATE_COMPLETED
+    }
+    consistent = (
+        status["terminal_status"] == evidence.TERMINAL_COMPLETED
+        and counts["planned"] == counts[evidence.STATE_COMPLETED]
+        and counts[evidence.STATE_FAILED] == 0
+        and counts[evidence.STATE_NOT_STARTED] == 0
+        and counts[evidence.STATE_ADMITTED] == 0
+    )
+    complete = consistent if mode == "prepublication" else (completion is not None and consistent)
+    if mode in ("strict", "prepublication") and not complete:
+        raise PatternLabDataError(
+            f"{root}: this run is not a verified completed study; terminal status is "
+            f"{status['terminal_status']!r} with counts {counts}. Use "
+            "load_results(run_root, allow_partial=True) to inspect it instead.",
+            error_code="incomplete_run",
+        )
     return StudyResults(
         run_root=root,
         request=dict(evidence.read_json(root / evidence.REQUEST_FILE)),
@@ -178,11 +305,38 @@ def load_results(run_root: Any, *, allow_partial: bool = False) -> StudyResults:
         provenance=dict(evidence.read_json(root / evidence.PROVENANCE_FILE)),
         status=status,
         completion=completion,
-        # The terminal status decides completeness, so a run's own first report
-        # and every later regeneration describe the same run identically.
-        complete=status["terminal_status"] == evidence.TERMINAL_COMPLETED,
+        complete=complete,
         jobs=jobs,
+        job_states=states,
+        counts=counts,
     )
+
+
+def load_results(run_root: Any, *, allow_partial: bool = False) -> StudyResults:
+    """Load a run's saved evidence.
+
+    Without ``allow_partial`` a verified completed run is required: the
+    completion record, the immutable evidence it names and the terminal state
+    must all agree.  ``allow_partial=True`` is the explicit partial-inspection
+    API: it exposes the planned, admitted, completed, failed and not-started
+    counts reconciled from the committed per-job records and loads only intact
+    completed bundles.  An existing completion record is still verified, and a
+    job claimed completed whose bundle is missing or corrupt fails; partial
+    inspection is never a corruption bypass and never certifies completion.
+    """
+    return _load(run_root, mode="partial" if allow_partial else "strict")
+
+
+def load_prepublication_results(run_root: Any) -> StudyResults:
+    """Internal: read a run the coordinator has just finished, before sealing it.
+
+    The coordinator has published and verified every planned bundle and written
+    the terminal status, but the completion record is deliberately written last.
+    This trusted internal call lets that first report describe the run exactly as
+    a later regeneration does, without giving the public partial reader a way to
+    claim premature success.  It is not exported as a public flag.
+    """
+    return _load(run_root, mode="prepublication")
 
 
 # --------------------------------------------------------------------------
@@ -272,11 +426,12 @@ def _attach_metrics(results: StudyResults, groups: Sequence[Mapping[str, Any]]) 
 
 
 def summarize_results(results: StudyResults) -> dict[str, Any]:
-    """Summarize saved observations by resolved model case, one group at a time."""
+    """Summarize saved observations by resolved model case, one instrument at a time."""
     family = results.family
     accumulators: dict[tuple[str, str, int, str], _GroupAccumulator] = {}
     instances = {item["model_instance_id"]: item for item in family["models"]}
     variants = {item["variant_id"]: item for item in family["variants"]}
+    cases: dict[tuple[str, str, int, str], ModelCase] = {}
 
     for group in family["groups"]:
         key = (
@@ -291,6 +446,7 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
             for item in instance["cases"][str(int(group["timeframe_minutes"]))]
             if item["case_id"] == group["case_id"]
         )
+        cases[key] = _case_from_json(case)
         accumulator = _GroupAccumulator(
             group=group,
             outcomes=tuple(item["name"] for item in case["outcomes"]),
@@ -301,44 +457,47 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
 
     planned_tickers = [item["instrument_id"] for item in family["instruments"]]
     for instrument_id in results.completed_instruments:
-        episodes = results.table(instrument_id, "episodes")
-        for key, accumulator in accumulators.items():
-            variant_id, instance_id, timeframe, case_id = key
-            variant = variants[variant_id]
-            instance = instances[instance_id]
-            frame = results.observations(
-                instrument_id,
-                model_instance_id=instance_id,
-                timeframe_minutes=timeframe,
-                case_id=case_id,
-                variant_id=variant_id,
-            )
-            accumulator.events += int(len(frame))
-            accumulator.episodes += int(
-                len(
-                    episodes.loc[
-                        (episodes["condition_id"] == variant["condition_id"])
-                        & (episodes["timeframe_minutes"] == timeframe)
-                    ]
+        reader = _InstrumentReader(results, instrument_id)
+        try:
+            episodes = reader.table("episodes")
+            for key, accumulator in accumulators.items():
+                variant_id, instance_id, timeframe, case_id = key
+                variant = variants[variant_id]
+                instance = instances[instance_id]
+                frame = reader.observations(
+                    instance=instance,
+                    case=cases[key],
+                    timeframe_minutes=timeframe,
+                    variant_id=variant_id,
                 )
-            )
-            has_valid = False
-            for name in accumulator.outcomes:
-                values, valid, reason = _outcome_columns(frame, name, instance["evidence_kind"])
-                sample = values[valid]
-                sample = sample[np.isfinite(sample)]
-                if sample.size:
-                    accumulator.samples[name].append(sample)
-                    accumulator.ticker_means[name].append((instrument_id, float(np.mean(sample))))
-                    accumulator.valid_counts[name] += int(sample.size)
-                    has_valid = True
-                for label in reason[~valid]:
-                    text = str(label)
-                    accumulator.invalid[name][text] = accumulator.invalid[name].get(text, 0) + 1
-            if len(frame):
-                accumulator.tickers_with_events.append(instrument_id)
-            if not has_valid:
-                accumulator.zero_support_tickers.append(instrument_id)
+                accumulator.events += int(len(frame))
+                accumulator.episodes += int(
+                    len(
+                        episodes.loc[
+                            (episodes["condition_id"] == variant["condition_id"])
+                            & (episodes["timeframe_minutes"] == timeframe)
+                        ]
+                    )
+                )
+                has_valid = False
+                for name in accumulator.outcomes:
+                    values, valid, reason = _outcome_columns(frame, name, instance["evidence_kind"])
+                    sample = values[valid]
+                    sample = sample[np.isfinite(sample)]
+                    if sample.size:
+                        accumulator.samples[name].append(sample)
+                        accumulator.ticker_means[name].append((instrument_id, float(np.mean(sample))))
+                        accumulator.valid_counts[name] += int(sample.size)
+                        has_valid = True
+                    for label in reason[~valid]:
+                        text = str(label)
+                        accumulator.invalid[name][text] = accumulator.invalid[name].get(text, 0) + 1
+                if len(frame):
+                    accumulator.tickers_with_events.append(instrument_id)
+                if not has_valid:
+                    accumulator.zero_support_tickers.append(instrument_id)
+        finally:
+            reader.release()
 
     groups: list[dict[str, Any]] = []
     for key, accumulator in accumulators.items():
@@ -408,7 +567,7 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
         "study_name": results.request["study_name"],
         "notes": results.request.get("notes"),
         "complete": results.complete,
-        "counts": results.counts,
+        "counts": dict(results.counts),
         "study": dict(results.request["study"]),
         "protocol": dict(results.protocol),
         "timeframes_minutes": list(family["timeframes_minutes"]),
@@ -455,28 +614,53 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
     view does not expose them the metric is recorded as explicitly unavailable;
     nothing is guessed, and a descriptive metric never becomes a selection
     objective.
+
+    One group's observation view is assembled once per instrument and shared by
+    every declared metric of that group.  A metric may need whole-group rows, so
+    the frames stay bounded to the group being computed; the deliberate tradeoff
+    is that a later group reads those tables again rather than retaining every
+    group's frames at once.
     """
     family = results.family
+    instances = {item["model_instance_id"]: item for item in family["models"]}
     values: list[dict[str, Any]] = []
     for group in family["groups"]:
         timeframe = int(group["timeframe_minutes"])
-        for declaration in declarations:
-            descriptor = contracts.metric(declaration.metric_id)
-            frames: list[pd.DataFrame] = []
-            missing: list[str] = []
-            for instrument_id in results.completed_instruments:
-                frame = results.observations(
-                    instrument_id,
-                    model_instance_id=group["model_instance_id"],
+        instance = instances[group["model_instance_id"]]
+        case = results.case(group["model_instance_id"], timeframe, group["case_id"])
+        collected: dict[str, list[pd.DataFrame]] = {
+            declaration.declaration_id: [] for declaration in declarations
+        }
+        missing: dict[str, list[str]] = {
+            declaration.declaration_id: [] for declaration in declarations
+        }
+        for instrument_id in results.completed_instruments:
+            reader = _InstrumentReader(results, instrument_id)
+            try:
+                frame = reader.observations(
+                    instance=instance,
+                    case=case,
                     timeframe_minutes=timeframe,
-                    case_id=group["case_id"],
                     variant_id=group["variant_id"],
                 )
-                absent = [name for name in descriptor.required_columns if name not in frame.columns]
-                if absent:
-                    missing = absent
-                    break
-                frames.append(frame.loc[:, list(descriptor.required_columns)])
+                for declaration in declarations:
+                    if missing[declaration.declaration_id]:
+                        continue
+                    descriptor = contracts.metric(declaration.metric_id)
+                    absent = [
+                        name for name in descriptor.required_columns if name not in frame.columns
+                    ]
+                    if absent:
+                        missing[declaration.declaration_id] = absent
+                        collected[declaration.declaration_id] = []
+                        continue
+                    collected[declaration.declaration_id].append(
+                        frame.loc[:, list(descriptor.required_columns)]
+                    )
+            finally:
+                reader.release()
+        for declaration in declarations:
+            descriptor = contracts.metric(declaration.metric_id)
             record = {
                 "declaration_id": declaration.declaration_id,
                 "metric_id": declaration.metric_id,
@@ -487,11 +671,13 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
                 "timeframe_minutes": timeframe,
                 "case_id": group["case_id"],
             }
-            if missing:
+            absent = missing[declaration.declaration_id]
+            if absent:
                 record.update(
-                    {"availability": "missing_inputs", "missing_columns": missing, "value": None}
+                    {"availability": "missing_inputs", "missing_columns": absent, "value": None}
                 )
             else:
+                frames = collected[declaration.declaration_id]
                 pooled = (
                     pd.concat(frames, ignore_index=True)
                     if frames

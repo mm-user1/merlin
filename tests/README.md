@@ -97,7 +97,13 @@ commits no binary fixtures. The `test_pattern_lab_study_*.py` modules build
 hand-calculated bars, write their trusted extension modules into the launcher's
 external temporary root, and drive the real coordinator, so admission ordering,
 recorded status, retained evidence and exit codes are observed rather than
-asserted structurally. Each case uses a unique extension module name because a
+asserted structurally. `test_pattern_lab_study_contracts.py` owns the enforced
+boundary contracts: custom-model evidence admission and read-side revalidation
+of saved tables whose file hashes still match, completion and partial-inspection
+integrity, every accepted public request form, used-source attribution, resolved
+dependency warmup, failure attribution and bounded evidence reuse. It counts
+decoded evidence tables to keep the summary read count independent of the group
+count, rather than asserting a wall-clock threshold. Each case uses a unique extension module name because a
 Python interpreter imports a module once, which is the condition the study's
 fresh-interpreter source-integrity error describes. Its import-isolation and missing-dependency checks run in fresh
 child processes, because the root fixtures already import storage into the pytest
