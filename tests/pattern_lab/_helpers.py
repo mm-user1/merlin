@@ -656,3 +656,253 @@ def pending_journal(root: Path, *, roster=None, end_ms=None, **overrides) -> dic
     }
     journal.update(overrides)
     return journal
+
+
+# --------------------------------------------------------------------------
+# study builders shared by the event-study test modules
+# --------------------------------------------------------------------------
+
+def timeframe_bars(
+    timeframe_minutes: int,
+    specs: Sequence[Sequence[float]],
+    *,
+    anchor_ms: int = ANCHOR_MS,
+    first_group: int = 0,
+    drop_groups: Iterable[int] = (),
+    drop_slots: Iterable[int] = (),
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build 5m bars whose complete groups aggregate to the requested bars.
+
+    ``specs`` holds one ``(open, high, low, close, volume_quote)`` tuple per
+    timeframe bar, with ``low <= min(open, close) <= max(open, close) <= high``.
+    ``drop_groups`` removes whole timeframe groups, so the gap is a real segment
+    break; ``drop_slots`` removes single 5m slots, so that group stays
+    incomplete and the resampler omits it.
+    """
+    per_group = (timeframe_minutes * 60_000) // STEP_MS
+    dropped_groups = {int(item) for item in drop_groups}
+    dropped_slots = {int(item) for item in drop_slots}
+    stamps: list[int] = []
+    rows: list[list[float]] = []
+    for offset, spec in enumerate(specs):
+        group = first_group + offset
+        if group in dropped_groups:
+            continue
+        open_, high, low, close, volume = (float(item) for item in spec)
+        if not (low <= min(open_, close) and max(open_, close) <= high):
+            raise AssertionError(f"group {group}: {spec} violates low <= min(o, c) <= max(o, c) <= high")
+        for index in range(per_group):
+            slot = group * per_group + index
+            if slot in dropped_slots:
+                continue
+            if per_group == 1:
+                bar = [open_, high, low, close, volume]
+            elif index == 0:
+                bar = [open_, high, low, open_, volume]
+            elif index == per_group - 1:
+                bar = [open_, max(open_, close), min(open_, close), close, 0.0]
+            else:
+                bar = [open_, open_, open_, open_, 0.0]
+            stamps.append(anchor_ms + slot * STEP_MS)
+            rows.append(bar)
+    return (
+        np.asarray(stamps, dtype=np.int64),
+        np.asarray(rows, dtype=np.float64).reshape(len(rows), 5),
+    )
+
+
+def study_protocol(*, first_ms: int, coverage_end_ms: int, protocol_id: str = "synthetic_protocol"):
+    """A small explicit protocol whose development window is the whole fixture."""
+    return {
+        "schema_version": 1,
+        "protocol_id": protocol_id,
+        "development": {"start_utc": utc(first_ms), "end_utc": utc(coverage_end_ms)},
+        "reserved": {
+            "start_utc": utc(coverage_end_ms),
+            "end_utc": utc(coverage_end_ms + 86_400_000),
+        },
+        "earliest_warmup_start_utc": utc(first_ms),
+        "notes": "synthetic test protocol",
+    }
+
+
+def fixed_horizon_model(
+    timeframe_minutes: int,
+    horizons: Sequence[int],
+    *,
+    instance_id: str = "fh",
+    directions: Sequence[str] = ("long", "short"),
+    commission_pct_per_side: float = 0.05,
+    primary: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": instance_id,
+        "model": "fixed_horizon_path",
+        "settings": {
+            "directions": list(directions),
+            "commission_pct_per_side": commission_pct_per_side,
+            "by_timeframe": {
+                str(int(timeframe_minutes)): {
+                    "horizons_minutes": list(horizons),
+                    "primary_horizon_minutes": int(primary if primary is not None else horizons[-1]),
+                }
+            },
+        },
+    }
+
+
+def study_request(
+    *,
+    protocol: Mapping[str, Any],
+    start_ms: int,
+    end_ms: int,
+    warmup_ms: int,
+    timeframes: Sequence[int],
+    hypotheses: Sequence[Mapping[str, Any]],
+    models: Sequence[Mapping[str, Any]],
+    instruments: Mapping[str, Any] | None = None,
+    metrics: Sequence[Mapping[str, Any]] | None = None,
+    extensions: Sequence[Mapping[str, Any]] | None = None,
+    study_name: str = "synthetic study",
+) -> dict[str, Any]:
+    """Build one normalized-ready study request document."""
+    request: dict[str, Any] = {
+        "schema_version": 1,
+        "study_name": study_name,
+        "protocol": dict(protocol),
+        "study": {"start_utc": utc(start_ms), "end_utc": utc(end_ms), "warmup_start_utc": utc(warmup_ms)},
+        "instruments": dict(instruments) if instruments else {"roles": ["trading"]},
+        "timeframes_minutes": [int(item) for item in timeframes],
+        "hypotheses": [dict(item) for item in hypotheses],
+        "models": [dict(item) for item in models],
+    }
+    if metrics is not None:
+        request["metrics"] = [dict(item) for item in metrics]
+    if extensions is not None:
+        request["extensions"] = [dict(item) for item in extensions]
+    return request
+
+
+TWO_GREEN_EVERY_BAR = {
+    "id": "two_green_every",
+    "hypothesis": "two_green_rising_quote_volume",
+    "parameters": {},
+    "occurrence": "every_qualifying_bar",
+}
+TWO_GREEN_STATE_ENTRY = {
+    "id": "two_green_entry",
+    "hypothesis": "two_green_rising_quote_volume",
+    "parameters": {},
+    "occurrence": "state_entry",
+}
+
+
+STUDY_INSTRUMENT = "TEST_AAA-USDT-SWAP"
+STUDY_TIMEFRAME = 30
+
+
+def study_group_ms(group: int, timeframe: int = STUDY_TIMEFRAME, *, anchor_ms: int = ANCHOR_MS) -> int:
+    """UTC epoch milliseconds of one timeframe group's open."""
+    return anchor_ms + int(group) * int(timeframe) * 60_000
+
+
+def normalized_study(
+    *,
+    start_group: int,
+    end_group: int,
+    warmup_group: int = 0,
+    timeframe: int = STUDY_TIMEFRAME,
+    hypotheses=None,
+    models=None,
+    metrics=None,
+    extensions=None,
+    instruments=None,
+):
+    """Normalize a small synthetic study request expressed in group indices."""
+    from tools.pattern_lab import study as pack_study
+
+    request = study_request(
+        protocol=study_protocol(
+            first_ms=study_group_ms(warmup_group, timeframe),
+            coverage_end_ms=study_group_ms(end_group + 96, timeframe),
+        ),
+        start_ms=study_group_ms(start_group, timeframe),
+        end_ms=study_group_ms(end_group, timeframe),
+        warmup_ms=study_group_ms(warmup_group, timeframe),
+        timeframes=[timeframe],
+        hypotheses=list(hypotheses if hypotheses is not None else [TWO_GREEN_EVERY_BAR]),
+        models=list(models if models is not None else [fixed_horizon_model(timeframe, [timeframe])]),
+        metrics=metrics,
+        extensions=extensions,
+        instruments=instruments,
+    )
+    return pack_study.normalize_request(request, source="test", base=None)
+
+
+def study_job(
+    specs,
+    *,
+    start_group: int,
+    end_group: int,
+    warmup_group: int = 0,
+    timeframe: int = STUDY_TIMEFRAME,
+    drop_groups=(),
+    drop_slots=(),
+    hypotheses=None,
+    models=None,
+    instrument_id: str = STUDY_INSTRUMENT,
+    contract: str = "AAA-USDT-SWAP",
+):
+    """Build one prepared instrument job payload from hand-written bars."""
+    from tools.pattern_lab.study.job import InstrumentJobInput, TimeframeInput
+
+    request = normalized_study(
+        start_group=start_group,
+        end_group=end_group,
+        warmup_group=warmup_group,
+        timeframe=timeframe,
+        hypotheses=hypotheses,
+        models=models,
+    )
+    stamps, values = timeframe_bars(
+        timeframe, specs, first_group=warmup_group, drop_groups=drop_groups, drop_slots=drop_slots
+    )
+    series = pack_data.prepare_series(
+        instrument_id=instrument_id,
+        venue="TEST",
+        contract=contract,
+        quote_currency="USDT",
+        timestamps=stamps,
+        ohlcv=values,
+        start_ms=request.study_start_ms,
+        end_ms=request.study_end_ms,
+        warmup_start_ms=request.warmup_start_ms,
+        timeframe_minutes=timeframe,
+    )
+    payload = InstrumentJobInput(
+        instrument_id=instrument_id,
+        symbol="AAA",
+        venue="TEST",
+        contract=contract,
+        quote_currency="USDT",
+        roles=("trading",),
+        study_start_ms=request.study_start_ms,
+        study_end_ms=request.study_end_ms,
+        warmup_start_ms=request.warmup_start_ms,
+        timeframes=(
+            TimeframeInput(
+                timeframe_minutes=timeframe,
+                timestamps_ms=series.timestamps,
+                values=series.values,
+                research_start_index=series.research_start_index,
+                input_fingerprint=series.input_fingerprint,
+                base_row_count=series.base_row_count,
+                base_gap_count=series.base_gap_count,
+                omitted_group_count=series.omitted_group_count,
+                segment_count=int(np.count_nonzero(series.segment_start)),
+            ),
+        ),
+        variants=tuple(variant.as_json() for variant in request.variants),
+        models=tuple(instance.as_json() for instance in request.models),
+    )
+    return request, payload

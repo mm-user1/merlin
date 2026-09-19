@@ -968,6 +968,94 @@ def input_fingerprint(
 
 
 # --------------------------------------------------------------------------
+# in-memory preparation shared by the reader and the study coordinator
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PreparedSeries:
+    """One consumed raw 5m input prepared at one requested timeframe.
+
+    The study coordinator reads each instrument's consumed 5m slice once and
+    prepares every requested timeframe from that same raw payload, so a prepared
+    timeframe carries exactly the resampled bars, coverage facts and input
+    fingerprint that ``load_slice(..., timeframe_minutes=tf)`` produces.
+    """
+
+    timeframe_minutes: int
+    timestamps: np.ndarray
+    values: np.ndarray
+    research_mask: np.ndarray
+    research_start_index: int
+    segment_start: np.ndarray
+    base_row_count: int
+    base_gap_count: int
+    omitted_group_count: int
+    input_fingerprint: str
+
+
+def prepare_series(
+    *,
+    instrument_id: str,
+    venue: str,
+    contract: str,
+    quote_currency: str,
+    timestamps: Any,
+    ohlcv: Any,
+    start_ms: int,
+    end_ms: int,
+    warmup_start_ms: int,
+    timeframe_minutes: int,
+) -> PreparedSeries:
+    """Fingerprint the consumed raw rows, then resample them in memory.
+
+    The fingerprint is taken over the raw consumed 5m rows, including rows in
+    groups that the requested timeframe subsequently omits, so repairing such a
+    slot still changes research input identity.
+    """
+    minutes = normalize_timeframe_minutes(timeframe_minutes)
+    fingerprint = input_fingerprint(
+        header=fingerprint_header(
+            instrument_id=instrument_id,
+            venue=venue,
+            contract=contract,
+            quote_currency=quote_currency,
+            timeframe_minutes=minutes,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            warmup_start_ms=warmup_start_ms,
+        ),
+        timestamps=timestamps,
+        ohlcv=ohlcv,
+    )
+    stamps, values = validate_consumed_rows(timestamps, ohlcv, where="prepare")
+    bar_stamps, bar_values, omitted = resample_complete_groups(stamps, values, minutes)
+    research = bar_stamps >= start_ms
+    if not research.any():
+        raise PatternLabDataError(
+            f"{instrument_id}: no complete {minutes}m research bar remains in "
+            f"[{format_epoch_ms(start_ms)}, {format_epoch_ms(end_ms)}); "
+            f"{int(stamps.size)} base rows were consumed with {omitted} incomplete groups."
+        )
+    step_ms = minutes * 60_000
+    segment_start = np.ones(bar_stamps.size, dtype=bool)
+    if bar_stamps.size > 1:
+        segment_start[1:] = np.diff(bar_stamps) > step_ms
+    expected_base = (end_ms - warmup_start_ms) // BASE_STEP_MS
+    return PreparedSeries(
+        timeframe_minutes=minutes,
+        timestamps=bar_stamps,
+        values=bar_values,
+        research_mask=research,
+        research_start_index=int(np.argmax(research)),
+        segment_start=segment_start,
+        base_row_count=int(stamps.size),
+        base_gap_count=int(expected_base - stamps.size),
+        omitted_group_count=omitted,
+        input_fingerprint=fingerprint,
+    )
+
+
+# --------------------------------------------------------------------------
 # fixed-range reads
 # --------------------------------------------------------------------------
 
@@ -1058,10 +1146,13 @@ def read_session(data_root: Path) -> Iterator["_ReadSession"]:
     deactivated on normal and exceptional exit, so a saved reference can never
     keep reading a root whose guard has been released.
 
-    M2's process pool must let the coordinator own this guard and have its
-    workers call the same private read core, holding it until every child has
-    completed its reads or has been stopped and joined on error.  T02 exposes no
-    pool and makes no claim that such a cross-process lifetime is implemented.
+    The implemented M2a study coordinator owns this session, reads each selected
+    instrument's consumed 5m slice once, and runs its sequential jobs on RAM-only
+    inputs.  The planned M2b pool keeps that boundary: workers receive prepared
+    in-memory payloads and never open the pack, so no worker-private read and no
+    inherited lock handle is needed.  The earlier statement that M2's workers
+    would call the private read core themselves is superseded and is not
+    implemented.
     """
     with pack_lock.pack_guard(data_root) as guard:
         session = _ReadSession(guard)
@@ -1207,37 +1298,22 @@ def _load_slice_unlocked(
             f"{manifest_after['revision']}/{manifest_after['state']}); no mixed result is returned."
         )
 
-    fingerprint = input_fingerprint(
-        header=fingerprint_header(
-            instrument_id=resolved_id,
-            venue=entry["venue"],
-            contract=entry["contract"],
-            quote_currency=entry["quote_currency"],
-            timeframe_minutes=minutes,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            warmup_start_ms=warmup_ms,
-        ),
+    prepared = prepare_series(
+        instrument_id=resolved_id,
+        venue=entry["venue"],
+        contract=entry["contract"],
+        quote_currency=entry["quote_currency"],
         timestamps=stamps,
         ohlcv=values,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        warmup_start_ms=warmup_ms,
+        timeframe_minutes=minutes,
     )
 
-    bar_stamps, bar_values, omitted = resample_complete_groups(stamps, values, minutes)
-    research = bar_stamps >= start_ms
-    if not research.any():
-        raise PatternLabDataError(
-            f"{resolved_id}: no complete {minutes}m research bar remains in "
-            f"[{format_epoch_ms(start_ms)}, {format_epoch_ms(end_ms)}); "
-            f"{int(stamps.size)} base rows were consumed with {omitted} incomplete groups."
-        )
+    index = pd.DatetimeIndex(pd.to_datetime(prepared.timestamps, unit="ms", utc=True), name="timestamp")
+    frame = pd.DataFrame(prepared.values, index=index, columns=list(OHLCV_COLUMNS), dtype=np.float64)
 
-    index = pd.DatetimeIndex(pd.to_datetime(bar_stamps, unit="ms", utc=True), name="timestamp")
-    frame = pd.DataFrame(bar_values, index=index, columns=list(OHLCV_COLUMNS), dtype=np.float64)
-    segment_start = np.ones(bar_stamps.size, dtype=bool)
-    if bar_stamps.size > 1:
-        segment_start[1:] = np.diff(bar_stamps) > step_ms
-
-    expected_base = (end_ms - warmup_ms) // BASE_STEP_MS
     return DataSlice(
         instrument_id=resolved_id,
         symbol=entry["symbol"],
@@ -1249,14 +1325,14 @@ def _load_slice_unlocked(
         start=from_epoch_ms(start_ms),
         end=from_epoch_ms(end_ms),
         bars=frame,
-        research_mask=research,
-        research_start_index=int(np.argmax(research)),
-        segment_start=segment_start,
-        base_row_count=int(stamps.size),
-        base_gap_count=int(expected_base - stamps.size),
-        omitted_group_count=omitted,
+        research_mask=prepared.research_mask,
+        research_start_index=prepared.research_start_index,
+        segment_start=prepared.segment_start,
+        base_row_count=prepared.base_row_count,
+        base_gap_count=prepared.base_gap_count,
+        omitted_group_count=prepared.omitted_group_count,
         fingerprint_version=FINGERPRINT_VERSION,
-        input_fingerprint=fingerprint,
+        input_fingerprint=prepared.input_fingerprint,
         physical={
             "manifest_revision": manifest_before["revision"],
             "manifest_state": manifest_before["state"],

@@ -35,6 +35,21 @@ class PatternLabDependencyError(PatternLabError):
     error_code = "missing_dependency"
 
 
+class PatternLabStudyError(PatternLabError):
+    """A study or report operation failed; ``context`` names the phase and job.
+
+    Unexpected execution failures are translated into this structured error with
+    the original exception preserved as the cause, so a diagnostic never loses
+    the underlying traceback.
+    """
+
+    error_code = "study_failed"
+
+    def __init__(self, *args, error_code: str | None = None, context=None):
+        super().__init__(*args, error_code=error_code)
+        self.context = dict(context or {})
+
+
 class PatternLabBusyError(PatternLabError):
     """Another process holds the data root's cooperative exclusion lock."""
 
@@ -51,6 +66,7 @@ __all__ = [
     "PatternLabError",
     "PatternLabDataError",
     "PatternLabDependencyError",
+    "PatternLabStudyError",
     "PatternLabBusyError",
     "PatternLabPendingError",
 ]

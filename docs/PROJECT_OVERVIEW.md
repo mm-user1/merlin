@@ -16,7 +16,8 @@ src/indicators/       shared technical indicators
 src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
 tools/strategy_lab/   local V2-only research pipeline
-tools/pattern_lab/    local research-only market-data pack and collector
+tools/pattern_lab/    local research-only market-data pack, collector and
+                      descriptive event studies
 tests/                core/server, V2, JavaScript, Strategy Lab, and
                       Pattern Lab suites
 ```
@@ -205,15 +206,22 @@ Pattern Lab is separate local, research-only tooling for testing hypotheses
 before a strategy exists. Merlin and Strategy Lab do not import it, and it does
 not change Merlin runtime behavior or CSV handling. Implemented capabilities are
 the Parquet market-data pack with its manifest, NPZ import and fixed-interval
-reader, plus the closed-bar exchange collector with recoverable updates,
-cooperative process exclusion and collector/instrument-rule provenance. It
-requires `pyarrow==22.0.0` and reaches the network only inside an explicit
-collect, update or recover operation. Hypothesis, evaluation-model, bracket-probe
-and reporting milestones are not implemented, and shipped collector code is not an
-operationally prepared market pack.
+reader; the closed-bar exchange collector with recoverable updates, cooperative
+process exclusion and collector/instrument-rule provenance; and the sequential
+descriptive event study, which turns a versioned study request and protocol into
+immutable per-instrument evidence, a machine-readable summary and one offline
+HTML report. It requires `pyarrow==22.0.0` and reaches the network only inside an
+explicit collect, update or recover operation.
 
-The complete schema, roster, adapter, exclusion, recovery and command contracts
-are in the [Pattern Lab data guide](../tools/pattern_lab/README.md).
+Event studies are descriptive and sequential: `workers=1` only, with no p-value,
+confidence interval, matched control or edge verdict. The bounded spawn pool,
+calibrated inference and bracket execution with sizing, leverage and expiry are
+separate later milestones. Shipped code is neither an operationally prepared
+market pack nor a validated research result.
+
+The complete schema, roster, adapter, exclusion, recovery, study, evidence and
+command contracts are in the
+[Pattern Lab guide](../tools/pattern_lab/README.md).
 
 ## Current strategies
 

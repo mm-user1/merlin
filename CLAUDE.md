@@ -58,6 +58,13 @@ baselines, or mutate external systems unless explicitly authorized.
   explicit output directory. Canonical datasets are ignored local artifacts
   and may be absent from another clone. CSV-level multiprocessing is not
   implemented.
+- Pattern Lab is separate local, research-only tooling that Merlin never
+  imports. Its implemented milestones are the market-data pack and collector
+  (M1a/M1b) and the sequential descriptive event study with its evidence and
+  offline report (M2a). Event studies run `workers=1` only; the bounded spawn
+  pool (M2b), matched controls and inference (M3) and bracket execution (M4)
+  are not implemented. Do not present a Pattern Lab result as a validated edge
+  or an executable strategy.
 
 ## Directory roles
 
@@ -88,7 +95,7 @@ Read the destination for the surface being changed before editing it.
 | Benchmark protocol and historical timing results | [docs/engine_v2/PERFORMANCE.md](docs/engine_v2/PERFORMANCE.md) |
 | Tool catalog | [tools/README.md](tools/README.md) |
 | Strategy Lab usage, schemas, safety, analysis, and allocation | [tools/strategy_lab/README.md](tools/strategy_lab/README.md) |
-| Pattern Lab data pack, schema, import, reads, and identity | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
+| Pattern Lab data pack, collector, event studies, evidence, and identity | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
 | Test tiers, isolation, and command selection | [tests/README.md](tests/README.md) |
 | Baseline provenance and interpretation | [data/baseline/README.md](data/baseline/README.md) and the [V2 baseline index](docs/README.md#baseline-evidence) |
 

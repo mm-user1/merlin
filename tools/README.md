@@ -123,9 +123,12 @@ Pattern Lab is local, research-only tooling for testing hypotheses before a
 strategy exists. Its implemented milestones are the data foundation (a stable
 Parquet market-data pack, an explicit manifest, a one-way importer for the
 historical prototype NPZ pack, and a fixed-interval reader/resampler with a
-reproducible research input fingerprint) and the collector (closed-bar 5m
+reproducible research input fingerprint), the collector (closed-bar 5m
 collection from public exchange APIs, recoverable updates, cooperative process
-exclusion and collector/instrument-rule provenance). It requires
+exclusion and collector/instrument-rule provenance) and the sequential event
+study (a versioned study request and protocol, extensible
+feature/hypothesis/model/metric contracts, fixed-horizon and path outcomes,
+immutable evidence and a regenerable offline HTML report). It requires
 `pyarrow==22.0.0` from the root `requirements.txt` and never installs
 dependencies itself.
 
@@ -139,6 +142,9 @@ python -m tools.pattern_lab abort-update --data-root <pack>
 python -m tools.pattern_lab inspect --data-root <pack> --verify
 python -m tools.pattern_lab slice --data-root <pack> --instrument OKX_LINK-USDT-SWAP \
     --start 2025-07-01T00:00:00Z --end 2026-07-01T00:00:00Z --timeframe-minutes 30
+python -m tools.pattern_lab study --spec tools/pattern_lab/configs/example_study_two_green_30m.json \
+    --data-root <pack> --output-root <new-run> --workers 1
+python -m tools.pattern_lab report --run-root <new-run>
 ```
 
 Network access happens only inside `collect`, `update` and `recover`, through
@@ -148,12 +154,14 @@ rather than queued and two independent readers conflict deliberately. Exit `4`
 means a pending operation must be recovered or aborted first. Collector code
 availability is not an operationally prepared market pack.
 
-Feature, hypothesis, evaluation-model, bracket-probe and report commands are not
-implemented. Merlin and Strategy Lab do not import Pattern Lab, and ordinary
-Merlin CSV behavior is unchanged. See the
-[Pattern Lab data guide](pattern_lab/README.md) for the schema, manifest,
-roster, adapters, identity encoding, exclusion/recovery contract and the
-operational recipes.
+`study` accepts only `--workers 1`; `--output-root` is exactly the new run
+directory. Exit `130` reports a user interrupt of `study` or `report`. Matched
+controls and inference and the sequential bracket probe are not implemented, and
+a study result is descriptive evidence, not a validated edge. Merlin and Strategy
+Lab do not import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See
+the [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,
+adapters, identity encoding, exclusion/recovery contract, the event-study
+request/evidence/report contracts and the operational recipes.
 
 ## Related documentation
 

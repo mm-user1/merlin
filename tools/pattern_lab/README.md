@@ -1,6 +1,6 @@
-# Pattern Lab data foundation
+# Pattern Lab data foundation and event studies
 
-Pattern Lab is local, research-only tooling. Two milestones are implemented:
+Pattern Lab is local, research-only tooling. Three milestones are implemented:
 
 - **M1a, the data boundary**: a stable Parquet pack, an explicit manifest, a
   one-way importer for the historical prototype NPZ pack, and an interval reader
@@ -8,21 +8,29 @@ Pattern Lab is local, research-only tooling. Two milestones are implemented:
 - **M1b, the collector**: closed-bar 5m collection from public exchange APIs,
   recoverable updates with overlap conflict reporting, cooperative process
   exclusion, and collector/instrument-rule provenance.
+- **M2a, the sequential event study**: a versioned study request and protocol,
+  extensible feature/hypothesis/model/metric contracts, fixed-horizon and path
+  outcomes, immutable per-instrument evidence and a regenerable offline HTML
+  report. See [Event studies](#event-studies).
 
-Feature, hypothesis, evaluation-model, bracket-probe and HTML-report commands are
-future work and are **not** implemented here.
+**M2 is not complete.** M2a runs `workers=1` only; the bounded spawn pool and its
+`workers=1/2` equivalence are separately specified M2b work. Matched controls and
+calibrated inference (M3) and sequential bracket execution, sizing, leverage and
+expiry (M4) are **not** implemented, and this milestone reports no p-value,
+confidence interval, significance badge or edge verdict.
 
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
 to an explicit output directory; it never touches Merlin databases, Queue state,
 Presets, baselines or Strategy Lab artifacts. Network access happens **only**
 inside an explicit `collect`, `update` or `recover` operation, never on import,
-`--help`, `inspect` or `slice`. Only unauthenticated public REST endpoints are
+`--help`, `inspect`, `slice`, `study` or `report`. Only unauthenticated public REST endpoints are
 used: there are no credentials, websockets, orders, proxy rotation and no silent
 fallback to another venue.
 
 **Code availability is not an operationally prepared pack.** These commands and
 their synthetic verification are complete; populating a real market-data root is
-a separate, explicitly authorized operational run.
+a separate, explicitly authorized operational run, and running a study on real
+data is another.
 
 ## Dependency setup
 
@@ -326,10 +334,17 @@ with pack_data.read_session(data_root) as session:      # one pinned generation
     second = session.load_slice("BYBIT_ENAUSDT", start=..., end=...)
 ```
 
+The event-study API is documented under [Event studies](#event-studies):
+`study.run_study`, `study.load_results`, `study.summarize_results`,
+`study.render_report` and `study.regenerate_report`, plus the feature,
+hypothesis, model and metric descriptors.
+
 Reusable building blocks, all independently callable:
 `validate_series`, `series_from_frame`, `write_ohlcv_file`, `read_ohlcv_rows`,
 `parquet_column_names`, `resample_complete_groups`, `fingerprint_header`,
-`input_fingerprint`, `inspect_pack`, `verify_instrument_files`, plus the manifest
+`input_fingerprint`, `prepare_series` (the in-memory resample-and-fingerprint
+helper the study coordinator and `load_slice` share), `inspect_pack`,
+`verify_instrument_files`, plus the manifest
 serializer (`build_manifest`, `validate_manifest`, `read_manifest`,
 `write_manifest`), README renderer (`render_readme`), update history
 (`build_update_record`, `render_update_line`, `append_update_record`), roster
@@ -377,12 +392,16 @@ file never truncates or replaces it.
   journal can move and be used at its new location.
 - Local NTFS and Linux filesystems are supported. There is no filesystem detection.
 
-For M2, the coordinator owns this guard and its workers must call the same private
-read core, with the parent holding the guard until every child has completed its
-reads or has been stopped and joined on error. No inherited OS handle and no
-user-supplied bypass token exist. **T02 exposes no worker pool and makes no claim
-that such a cross-process lifetime is implemented or certified**; M2 must implement
-and test it under `spawn`, including parent failure, before exposing parallel reads.
+The implemented M2a study coordinator owns this session for the whole run: it
+reads each selected instrument's consumed 5m slice once, prepares every requested
+timeframe in memory, and then runs its sequential jobs on RAM-only inputs. A
+competing reader or writer is therefore reported as busy while a study is running.
+The planned M2b pool keeps that boundary — workers receive prepared in-memory
+payloads and never open the pack — so **no worker-private read, inherited OS
+handle or bypass token exists or is needed**. The earlier prospective statement
+that M2's workers would call the private read core themselves is superseded.
+**M2a exposes no worker pool**; M2b must implement and test spawn execution,
+including parent failure, before any parallel execution is exposed.
 
 ### Read and write boundaries
 
@@ -1096,6 +1115,395 @@ fixture whose base and quote volumes differ so a wrong-index comparison fails.
 That is evidence about the snippet only: it certifies nothing about the live
 endpoints, which this recipe alone can exercise.
 
+## Event studies
+
+M2a turns a frozen study request into reproducible evidence and one offline HTML
+report. It is an event study, not an executable strategy or an equity backtest:
+events may overlap, and the outputs describe what happened after an event.
+
+```bash
+python -m tools.pattern_lab study --spec STUDY.json --data-root PACK \
+    --output-root NEW_RUN --workers 1
+python -m tools.pattern_lab report --run-root NEW_RUN
+```
+
+`--output-root` is **exactly** the run directory; no run-ID subdirectory is
+created inside it, the target must not exist, and it may not overlap the pack.
+`report --run-root` takes that same directory. The CLI is a thin wrapper around
+the Python API, which agent scripts call directly:
+
+```python
+from tools.pattern_lab import study
+
+result = study.run_study(
+    request="tools/pattern_lab/configs/example_study_two_green_30m.json",
+    data_root="docs/_work/pattern-lab-data",
+    output_root="runs/two-green-30m",
+    workers=1,
+)
+results = study.load_results(result["run_root"])          # a completed run
+partial = study.load_results(result["run_root"], allow_partial=True)
+summary = study.summarize_results(results)
+html = study.render_report(summary)
+```
+
+### Study request and protocol
+
+Both documents are strict JSON at `schema_version=1`; unknown semantic keys,
+duplicate JSON keys, duplicate IDs or cases, non-finite values, booleans used as
+integers and unsupported versions are rejected, and every error names its field.
+Relative `protocol` and `extensions[].source_root` paths resolve against the
+**declaring request file**; CLI `--data-root` and `--output-root` resolve against
+the current directory and are recorded as provenance only.
+
+| Request key | Contract |
+| --- | --- |
+| `study_name` | Nonblank label shown in the report |
+| `notes` | Free-form text, kept outside semantic identity |
+| `protocol` | A path to a protocol document, or an inline protocol object |
+| `study` | `start_utc`, `end_utc` (exclusive) and `warmup_start_utc`, all aligned to **every** selected timeframe |
+| `instruments` | Exactly one of `{"roles": [...]}` or `{"ids": [...]}`; selectable roles are `trading` and `research_only` |
+| `timeframes_minutes` | Positive integer multiples of 5m, deduplicated and sorted |
+| `hypotheses` | Explicit variants: `id`, `hypothesis`, `parameters`, `occurrence` |
+| `models` | Explicit instances: `id`, `model`, `settings`; the model owns its case axes |
+| `metrics` | Optional declared summary metrics: `id`, `metric` |
+| `extensions` | Optional trusted modules: `module`, `source_root`, `helpers` |
+
+The tracked protocol `configs/protocol_development_v1.json` records the
+development interval `[2025-07-01, 2026-07-01)`, the reserved interval
+`[2026-07-01, 2026-10-01)` and the earliest permitted warmup `2025-06-01`. The
+study interval and the consumed warmup are validated against it in both the CLI
+and the Python API **before** any computation; there is no holdout mode and no
+bypass flag. Changing the protocol changes the experiment identity — it never
+establishes untouched historical data, and the earlier prototype already consumed
+part of the reserve. `configs/example_study_two_green_30m.json` is the tracked
+example: the full development year, June warmup, 30m, both directions, horizons
+60/120/240/480 with primary 240, the built-in condition, `every_qualifying_bar`
+and every `trading` instrument of the supplied pack.
+
+A factor-only series is context, not a standalone target. A research-only target
+is allowed when it is explicitly selected. Missing IDs, unsupported roles, an
+empty selection and unsupported panel or external-series scope all fail before
+any work; panel execution is M3.
+
+### Features, hypotheses and occurrence
+
+A feature declares its ID, version, parameters, dependencies, required prior
+bars, initialization and instrument scope, and returns aligned float64 values
+with a boolean validity mask. A hypothesis returns an aligned boolean condition
+and its own validity mask from declared features. **Unknown is invalid, not
+false.** Shapes, dtypes and finite valid values are checked, duplicate IDs and
+unsupported dependencies are rejected, and a shared feature is computed once per
+instrument, timeframe and parameter set.
+
+Each candle is known at its close, and only current or past observations may
+affect a feature or a condition there. A lookback never crosses a gap: state
+resets and re-warms at every contiguous segment. Each parameterized
+feature/hypothesis declares the prior observation bars it needs at the first
+research bar, **including its dependencies**; the declared elapsed warmup is
+validated against that requirement for every timeframe before a run is created,
+and an insufficient warmup is refused rather than shortening a lookback. Calendar
+sufficiency does not prove contiguous observations: actual validity masks still
+re-warm after a gap, and early gap-affected anchors can be invalid without
+invalidating an otherwise usable study. The entire declared consumed warmup
+enters input identity, so a repaired consumed June bar changes that identity.
+Warmup bars are consumed but emit no study event.
+
+The built-in condition `two_green_rising_quote_volume` is, at bar `i`:
+
+```text
+close[i-1] > open[i-1] and close[i] > open[i] and volume_quote[i] > volume_quote[i-1]
+```
+
+Both candles must be contiguous and valid. Equal open/close is not green and
+equal volume does not rise. This is **at least two**, not exactly two: a longer
+green run qualifies on several closes.
+
+An **eligible study anchor** is a complete bar whose open is `>=` the study start
+and whose close is strictly `<` the study end; its signal timestamp is that
+close. The final bar closing exactly at the end therefore emits no event, while
+an earlier event's outcome may end exactly at the end.
+
+| Occurrence policy | Emission rule |
+| --- | --- |
+| `every_qualifying_bar` | Every eligible anchor whose condition is valid and true |
+| `state_entry` | Only where the immediately preceding contiguous observation is valid and **false** and the current one is valid and true |
+
+`state_entry` uses warmup history across the study start. A true condition after
+unknown history, a gap or an invalid boundary is conservatively **not** a
+false-to-true transition and does not emit.
+
+An **episode** is a maximal contiguous run of a valid, true condition; gaps and
+invalid regions break it. Episodes intersecting eligible anchors are recorded
+separately from events, with their observed bounds, left/right censoring and
+eligible-anchor count. Episode identity never depends on future duration, and
+later duration or censoring fields are descriptive labels, never features. None
+of these counts estimates an independent sample size.
+
+Condition identity covers the hypothesis semantics, parameters and dependencies
+but **not** the occurrence policy. Emitted-event identity adds the occurrence
+policy to the condition identity, instrument, timeframe and signal time, so two
+otherwise identical every-bar and state-entry variants can never collide.
+Direction, horizon and model availability do not enter event identity: adding a
+horizon or a metric cannot change an existing event, and an event is emitted even
+when every requested outcome is invalid.
+
+### The built-in fixed-horizon and path model
+
+Models own their case axes. A model descriptor validates its own settings and
+resolves a finite ordered list of cases per selected timeframe, each with a
+stable semantic ID, JSON parameters and declared outcome names and units. A model
+with no direction or horizon resolves one axis-free case and never invents dummy
+axes. Fees belong to the models that use them.
+
+```json
+{
+  "directions": ["long", "short"],
+  "commission_pct_per_side": 0.05,
+  "by_timeframe": {
+    "30": {"horizons_minutes": [60, 120, 240, 480], "primary_horizon_minutes": 240},
+    "120": {"horizons_minutes": [120, 240, 480], "primary_horizon_minutes": 240}
+  }
+}
+```
+
+One entry is required for every selected observation timeframe and no extra
+entry is allowed. Every horizon must be a positive integer multiple of **its own**
+timeframe — there is no global common-multiple restriction and no silent
+rounding — and the primary horizon must belong to that timeframe's list.
+
+Timing uses the real resampled OHLC, never Heikin-Ashi or another transform. For
+a bar `i` opening at `t` with observation duration `D` and horizon `H = k*D`: the
+event is known at `t+D`, notional entry is `open[i+1]` at `t+D`, the exit is
+`close[i+k]` at `t+D+H`, and the path is bars `i+1..i+k` inclusive, excluding the
+signal bar. A 30m bar opening at 10:00 closes at 10:30; entry is at 10:30 and the
+1h outcome exits at 11:30 using the close of the 11:00 bar, with path extremes
+from the 10:30 and 11:00 bars. This is a measurement convention, not a promise
+that a market order would fill at that close.
+
+Exact expected timestamps and contiguous complete bars are required from the
+signal to the exit. No horizon may cross a gap, an invalid price region or the
+study end; an exit at the study end is allowed when its last bar opens before it.
+**Validity is per model, outcome and horizon**: a short horizon is never trimmed
+to the longest horizon's support. Unavailability is recorded with a bounded reason
+enum whose deterministic precedence is `terminal_study_end`, then
+`missing_entry_bar`, then `incomplete_path`. Known input prices are retained and
+unavailable prices and extrema are null — never zero.
+
+For entry `P`, exit `X` and direction `d = +1` (long) or `-1` (short), with a
+per-side commission rate `c` (`commission_pct_per_side / 100`):
+
+```text
+gross_return      = d * (X / P - 1)
+commission_return = c * (1 + X / P)
+net_return        = gross_return - commission_return
+
+long  MFE = max(0, U/P - 1)   long  MAE = max(0, 1 - L/P)
+short MFE = max(0, 1 - L/P)   short MAE = max(0, U/P - 1)
+```
+
+`U` and `L` are the highest high and lowest low of the same path. Commission is
+charged on the entry notional and separately on the exit notional for a constant
+quantity; the fixed 0.1% approximation is not used, and an unchanged exit price
+still pays both sides. Values are stored in fractional-return units, and any
+percent or basis-point rendering is labelled. Excursions are nonnegative
+fractions of the entry price, gross of fees: a non-flat path that never rises
+above entry has a long MFE of exactly zero. They describe price movement — they
+are not realized profit, an R multiple or evidence of stop/target hit order.
+Gross returns are sign mirrors on common support; **net returns are not**, and
+the short side is computed from its own formulas rather than as `-net_long`.
+
+Slippage and funding are excluded by explicit decision. The 10,000 USDT deposit,
+the 2% risk setting and the 8x cap belong to M4 sizing and are not implied here.
+
+### Evidence layout and identity
+
+```text
+<run-root>/
+  spec/request.json spec/protocol.json spec/family.json spec/source.json
+  spec/snapshots/<module>__<file>.py     inert copies of declared custom source
+  admitted/<INSTRUMENT_ID>.json          per-job input identity and state
+  jobs/<INSTRUMENT_ID>/                  conditions/episodes/emissions/primitives
+  jobs/<INSTRUMENT_ID>/bundle.json       the job's own file digests and counts
+  provenance.json status.json metrics.json
+  completion.json                        written last
+  derived/summary.json derived/report.html
+```
+
+Tables are versioned Parquet with UTC epoch-millisecond times, float64 numerical
+evidence and explicit null/validity; JSON is strict, with no NaN or Infinity. An
+empty table keeps its declared schema. There is no SQLite registry.
+
+| Evidence | Contents |
+| --- | --- |
+| Frozen spec/protocol/family | All normalized settings, the exact selection, the model-owned resolved cases, warmup requirements and source references |
+| Per-job identity/status | Per-timeframe admission fingerprints, declared coverage, gaps and groups, and the completed/failed/not-started state |
+| Conditions | Anchor open and signal time, condition identity, value, validity and episode link, for **every** eligible anchor |
+| Emissions | One row per emitted event, with its variant, occurrence policy, event ID and episode link |
+| Episodes | Stable identity, observed bounds, bar and eligible-anchor counts, and left/right censoring |
+| Fixed-model primitives | Instrument, timeframe, model instance, anchor, horizon, intended entry/exit times, entry `P`, exit `X`, path high `U`, path low `L`, and separate return/path validity and reasons |
+| Custom model evidence | The common instrument/timeframe/model-instance/case/anchor envelope plus that model's own declared typed outcomes |
+
+**The built-in's physical rows are direction-independent.** One primitive row is
+saved per model instance, instrument, timeframe, anchor and horizon — not
+duplicated long and short rows — and the case registry maps both directional
+cases to that row. Every eligible anchor is kept, including non-events and
+invalid outcomes, so M3 can obtain aligned event and non-event evidence with
+distinct masks. Condition validity is separate from model availability, and
+conditions do not determine it.
+
+A versioned public evidence-expansion function derives the directional outcomes
+from `P`/`X`/`U`/`L` and the frozen case settings. It reads no market data and
+executes no hypothesis. `load_results` exposes both the raw primitives and that
+documented observation view per job and group, so a report or a custom metric
+never materializes every directional row of the universe at once.
+
+Four identities are kept apart:
+
+1. **Specification/family identity** — the normalized semantic request, the
+   protocol and the complete planned family.
+2. **Data-input identity** — composed at successful completion from the ordered
+   per-timeframe fingerprints, the semantic settings, the selected universe with
+   its roles, and the protocol.
+3. **Implementation identity** — consumed core source digests, declared
+   extension digests and the numerical library versions actually used.
+4. **Physical/environment provenance** — manifest revision and digest, the
+   `integrity_scope=full_pack` record, the source snapshot, commit and dirty
+   state, Python and platform, worker count, roots and timings.
+
+Adding data outside the consumed interval, moving the root, the worker count and
+unrelated Git edits leave identical fixed inputs identical. Relevant code changes
+stay visible in implementation identity. An incomplete run keeps its planned
+identity and its known job identities, never a complete all-input identity. There
+is no resume or reuse in this milestone: retained bundles are evidence, not a
+cache.
+
+For scale, a full-year 44-instrument 30m run with four horizons produces about
+**3.08 million** primitive rows, representing about 6.17 million logical
+directional observations. Actual bytes depend on the schema and compression;
+measure a bounded run rather than assuming a size.
+
+### Admission, execution and failure states
+
+`workers` accepts only the integer `1`. Any other value is an actionable
+validation error **before** any output is created; nothing falls back silently.
+
+Before the run directory exists, and before any study feature or outcome is
+computed, the coordinator validates the request, protocol, extension
+declarations, resolved cases, feature warmup requirements, selection and
+input/output path separation; then, under one pinned read session, it collects
+**all** metadata admission failures across the selected instruments and
+timeframes — state, declared coverage, closure, quote verification and boundary
+alignment — and finally calls `inspect(verify=True)` **once for the entire pack**.
+A corrupt *unselected* file therefore blocks the run too. Any preflight failure
+exits `2` and leaves no run directory; a busy or pending pack keeps exits `3`
+and `4`.
+
+**Metadata cannot prove that a timeframe contains complete research groups or
+that warmup is contiguous.** After preflight the run is created and instruments
+are admitted one at a time, reproducing `load_slice`'s per-timeframe check on the
+actual resampled inputs: no complete research bar is a data-admission failure,
+not a successful empty series. A valid timeframe with no eligible anchor or no
+event is different and finishes with explicit empty evidence.
+
+Each timeframe's fingerprint is computed over the raw consumed 5m rows, including
+rows in subsequently omitted aggregate groups, and matches
+`load_slice(..., timeframe_minutes=tf)` exactly. An admitted job's input identity
+is persisted **before** calculation, so even a failed numerical job retains what
+was observed. On the first job or admission failure the coordinator stops
+dispatching, marks that job failed and the remaining jobs not started, retains
+completed bundles and exits `2`. A user interrupt records the interrupted state
+and exits `130`. **No completion marker is published for these states**, and a
+failure to save status never replaces the original diagnostic.
+
+**Immutable evidence and regenerable reports are separate.** The completion
+record hashes the frozen spec, protocol and source evidence, the admitted job
+identities, the complete raw job bundles and the final terminal status; it never
+hashes itself and never hashes `derived/summary.json` or `derived/report.html`.
+It is written last, only after every planned job and the initial report
+generation succeed, and the terminal status is not rewritten afterwards.
+`report` verifies the raw evidence and the completion record, regenerates the
+derived outputs from the saved observations and frozen settings, and atomically
+replaces only those two files. It needs no pack and imports no saved custom
+module. A regeneration failure leaves the evidence and the original completion
+record intact; raw corruption blocks it entirely.
+
+`load_results(run_root)` and `report` require a completed run.
+`load_results(run_root, allow_partial=True)` is the explicit partial-inspection
+API: it exposes the planned, admitted, completed, failed and not-started counts,
+verifies and loads only intact completed bundles, and exposes incompleteness
+prominently. It is **not** a corruption bypass.
+
+### Agent extensions and source integrity
+
+Extending Pattern Lab needs no core dispatch edit and no inheritance: ordinary
+importable functions plus small frozen descriptors and explicit registration are
+enough. `tools/pattern_lab/examples/custom_extension.py` is a complete working
+example — a causal SMA feature, a `close_above_sma` hypothesis, an axis-free
+custom model and a descriptive metric — and
+`tools/pattern_lab/examples/run_example_study.py` runs it through the public API
+with explicit paths. Tracked examples work in a fresh clone once the caller
+supplies their own valid pack; they never download data and never assume an
+ignored local artifact exists.
+
+The caller names each trusted module, its explicit source root and its local
+helper dependencies. There is no directory-wide discovery, no `eval`, no
+pickle-based configuration, no silent built-in replacement and no runtime
+monkeypatching. A declared module must expose `register(context)` and register
+its own descriptors.
+
+**One source-integrity mechanism is used: digest verification, with inert
+snapshots.** Declared module and helper files are hashed before import and
+registration, verified again before each job and before that job's result is
+accepted, and any detected change fails the run. Copied source in
+`spec/snapshots/` is provenance only and is never executed. Only registrations
+whose recorded digests match a currently declared file are reused; a module this
+interpreter imported by another path cannot have its source generation
+established, so the error asks for a fresh interpreter. This checks cooperating
+stable source files — it is **not** a sandbox against an adversarial filesystem
+or hidden dependencies of trusted Python.
+
+A metric declares the saved columns it requires, its value and unit. When a
+group's observation view does not expose them the metric is recorded as
+explicitly unavailable; nothing is guessed. Declared metric values are stored in
+the immutable `metrics.json`, so normal report regeneration reuses them without
+importing any saved module. Recomputing a custom metric requires supplying its
+registration again. Missing future per-bar information may require a new explicit
+study rather than fabricated data.
+
+### The descriptive report
+
+`derived/report.html` is a standalone light-theme page with no CDN and no network
+dependency: escaped HTML tables plus a few lines of local JavaScript. It shows
+the study question, exact dates and warmup, universe and roles, timeframes and
+horizons, the signal/entry/exit convention, the occurrence policy and the costs,
+and displays conspicuously:
+
+> Descriptive event study — statistical validation is not implemented in M2.
+
+It also discloses overlapping observations, unknown historical universe
+membership, prior use of the reserve and the excluded slippage and funding.
+Results are grouped by **resolved model case**, not by an assumed global
+direction or horizon axis, and a custom model's own declared outcomes and units
+are reported rather than fabricated fixed-model values. Each declared outcome
+group shows events, episodes, valid outcomes, invalid counts by reason and ticker
+coverage; returns show the arithmetic mean, median, 10th/25th/75th/90th empirical
+percentiles (NumPy's linear convention) and the fraction strictly above zero,
+with gross and net separate; MFE and MAE show the same location statistics. No
+standard error, confidence interval, Sharpe, CAGR, WFE, compounded balance or
+leveraged profit appears in this event model.
+
+Primary pooling is event-weighted over the valid emitted-event observations.
+Beside it the report shows the equal-ticker **mean of defined per-ticker means**
+for the same outcome; averaged per-ticker quantiles are never called pooled
+quantiles. Minimum support for descriptive inclusion is one valid event per group
+and ticker, zero-support tickers and actual denominators are reported, and no
+inferential adequacy is claimed. Zero-event and all-invalid groups stay visible
+with null metrics rather than zero profit, and raw all-anchor observations are
+never counted as signal events. The default order follows the declared family,
+not performance, and the declared primary horizon's emphasis never hides the
+other horizons or directions.
+
 ## Commands
 
 ```bash
@@ -1111,6 +1519,9 @@ python -m tools.pattern_lab import-npz --source-root PATH --output-root NEW_PATH
 python -m tools.pattern_lab inspect --data-root PATH [--verify]
 python -m tools.pattern_lab slice --data-root PATH --instrument ID --start UTC --end UTC \
     [--warmup-start UTC] [--timeframe-minutes INT]
+python -m tools.pattern_lab study --spec STUDY.json --data-root PACK --output-root NEW_RUN \
+    [--workers 1]
+python -m tools.pattern_lab report --run-root NEW_RUN
 ```
 
 `collect` accepts an absent destination, an empty one, or one containing nothing
@@ -1129,20 +1540,31 @@ phase and completed staged instruments; `--verify` additionally checks file hash
 schema and actual coverage for every declared file. It is an integrity check, not a
 promotion of unknown evidence; a normal slice read hashes nothing and loads no
 unrelated file. `slice` prints metadata, coverage and the input fingerprint, never
-rows or files.
+rows or files. `study` runs one event study into a new run directory and `report`
+regenerates that run's derived summary and HTML; neither reaches the network, and
+help and imports start no job, scan no pack and execute no extension.
 
 JSON goes to stdout and is never polluted by progress logs; diagnostics and
 progress go to stderr. A failed collector command prints a JSON object carrying a
-stable `error_code` on stdout alongside its stderr explanation; `import-npz`,
-`inspect` and `slice` keep their stderr-only error behavior. Exit status:
+stable `error_code` on stdout alongside its stderr explanation; the `study` and
+`report` commands do the same; `import-npz`, `inspect` and `slice` keep their
+stderr-only error behavior. Exit status:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | success, including a semantic no-op without a coverage shortfall |
 | `1` | inspection verification problems, or a completed publication or no-op with a reported tail shortfall — published does not mean the requested range is complete |
-| `2` | invalid request, data or dependency; source failure; missing start coverage; historical conflict; invalid or unrecoverable journal |
+| `2` | invalid request, data or dependency; source failure; missing start coverage; historical conflict; invalid or unrecoverable journal; a `study`/`report` preflight, job, data-admission or report failure, or a recorded failed or partial study |
 | `3` | pack busy; the rejected caller mutated nothing |
-| `4` | a valid pending operation must be recovered or aborted before the requested action, including a research `slice` and a pending **initial** collect that has no manifest yet |
+| `4` | a valid pending operation must be recovered or aborted before the requested action, including a research `slice`, a `study`, and a pending **initial** collect that has no manifest yet |
+| `130` | a user `KeyboardInterrupt` during `study` or `report`, after a best-effort status write and cleanup |
+
+Exit `1` keeps its existing data-command meaning and is never the study-failure
+default. A `study` or `report` translates an unexpected execution failure —
+extension import, an ordinary job exception, a storage or report error — into a
+structured JSON status naming the operation, the phase and the job identity,
+while preserving the original exception as its cause. Collector command behavior
+is unchanged.
 
 A detected conflict returns `2` even though it leaves a valid staging journal
 behind; a subsequent ordinary update then sees that journal and returns `4`. A plain
@@ -1163,6 +1585,11 @@ python tools/run_tests.py -- tests/pattern_lab
 python -m tools.pattern_lab inspect --data-root <pack> --verify
 ```
 
+The event-study cases live in `tests/pattern_lab/test_pattern_lab_study_events.py`,
+`_study_model.py`, `_study_admission.py`, `_study_extensions.py` and
+`_study_report.py`. They generate synthetic packs and trusted extension modules at
+runtime under the launcher's external temporary root and never read market data.
+
 ```powershell
 $py = 'C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe'
 $env:MERLIN_TEST_ROOT = Join-Path $env:LOCALAPPDATA 'Temp\merlin-tests'
@@ -1179,17 +1606,27 @@ fail loudly, so a forgotten injection cannot reach a real venue. The guard is
 installed outside `monkeypatch`, so a test's own `monkeypatch.undo()` restores the
 guard rather than the real socket path.
 
-## M2 handoff and known limits
+## Milestone handoff and known limits
 
 M1a defines the schemas and the reader; M1b adds the collector, the exclusion lock
-and the recovery contract. M2 owns hypotheses, features, compute multiprocessing
-and HTML reporting; M3 owns statistics; M4 owns bracket execution and the
-interpretation of the stored instrument rules. M2 composes the per-series data
-fingerprint with the selected universe, roles and settings into run identity, and
-must implement and test the coordinator-owned read-session lifetime under `spawn`
-before exposing parallel reads.
+and the recovery contract; M2a adds the sequential event study, its evidence and
+its report, and composes the per-series data fingerprint with the selected
+universe, roles and settings into run identity. M2b adds the bounded spawn pool
+and `workers=1/2` equivalence; M3 owns matched controls and calibrated inference;
+M4 owns bracket execution, sizing, leverage, expiry and the interpretation of the
+stored instrument rules.
 
 Known limits of these milestones:
+
+- M2a is sequential: `workers` accepts only the integer `1`, and any other value
+  is an actionable validation error before any output is created.
+- M2a is descriptive: no p-value, confidence interval, significance badge, edge
+  verdict, matched control or automatic winner selection exists.
+- Source integrity is a digest check over cooperating stable files. It is not a
+  sandbox: trusted Python can still open paths of its own, and arbitrary
+  causality cannot be proved by shape checks.
+- A study's real-pack evidence covers only the intervals its protocol admits;
+  gap, feature-reset and omitted-group behavior is covered by synthetic fixtures.
 
 - No historical-value repair operation: a conflict is reported and blocks
   publication, and there is no force or overwrite-history switch.

@@ -1,10 +1,11 @@
-"""Pattern Lab data command line.
+"""Pattern Lab data and study command line.
 
-The CLI calls exactly the Python API that later researcher scripts use.  JSON
-goes to stdout, diagnostics and progress go to stderr.  Exit status: 0 success,
-1 verification problems or a reported tail shortfall, 2 an invalid request,
-invalid data, a source failure or a missing dependency, 3 a busy pack, 4 a valid
-pending operation that must be recovered or aborted first.
+The CLI calls exactly the Python API that researcher scripts use.  JSON goes to
+stdout, diagnostics and progress go to stderr.  Exit status: 0 success, 1
+verification problems or a reported tail shortfall, 2 an invalid request,
+invalid data, a source failure, a study/report failure or a missing dependency,
+3 a busy pack, 4 a valid pending operation that must be recovered or aborted
+first, and 130 a user KeyboardInterrupt during ``study`` or ``report``.
 """
 
 from __future__ import annotations
@@ -19,11 +20,13 @@ from . import (
     PatternLabDependencyError,
     PatternLabError,
     PatternLabPendingError,
+    PatternLabStudyError,
 )
 from . import collect as pack_collect
 from . import data as pack_data
 from . import exchange_data
 from . import manifest as pack_manifest
+from . import study as pack_study
 from .import_npz import import_npz_pack, load_source_metadata
 
 EXIT_OK = 0
@@ -31,11 +34,16 @@ EXIT_VERIFICATION_PROBLEMS = 1
 EXIT_ERROR = 2
 EXIT_BUSY = 3
 EXIT_PENDING = 4
+EXIT_INTERRUPTED = 130
 
 # Collector operations report a failure as structured JSON on stdout as well as
 # an actionable stderr explanation; the older archival commands keep their
 # stderr-only error behavior.
 COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
+# Study commands translate unexpected execution failures into a structured JSON
+# status; the older data commands keep their existing behavior unchanged.
+STUDY_COMMANDS = ("study", "report")
+JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
 def _add_http_options(parser: argparse.ArgumentParser) -> None:
@@ -75,10 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m tools.pattern_lab",
         description=(
-            "Pattern Lab data foundation: collect and update a Parquet market-data pack from public "
-            "exchange APIs, recover an interrupted operation, import the historical NPZ pack, inspect "
-            "a pack and read a fixed UTC interval. Hypothesis, bracket and report commands are future "
-            "work and are not implemented here."
+            "Pattern Lab: collect and update a Parquet market-data pack from public exchange APIs, "
+            "recover an interrupted operation, import the historical NPZ pack, inspect a pack, read a "
+            "fixed UTC interval, run a descriptive event study and regenerate its report. Matched "
+            "controls and inference (M3) and bracket execution (M4) are not implemented here."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
@@ -183,6 +191,35 @@ def build_parser() -> argparse.ArgumentParser:
     reader.add_argument(
         "--timeframe-minutes", type=int, default=pack_manifest.BASE_TIMEFRAME_MINUTES, metavar="INT"
     )
+
+    study_command = commands.add_parser(
+        "study",
+        help="Run one event study and write its evidence and report into a NEW run directory.",
+        description=(
+            "The request is a versioned JSON study specification; its relative protocol and "
+            "extension paths resolve against the request file, while --data-root and --output-root "
+            "resolve against the current directory. --output-root is exactly the run directory and "
+            "must not exist. This milestone (M2a) executes only --workers 1."
+        ),
+    )
+    study_command.add_argument("--spec", type=Path, required=True, metavar="STUDY.json")
+    study_command.add_argument("--data-root", type=Path, required=True, metavar="PACK")
+    study_command.add_argument("--output-root", type=Path, required=True, metavar="NEW_RUN")
+    study_command.add_argument(
+        "--workers", type=int, default=1, metavar="INT",
+        help="Instrument worker count; M2a accepts only 1.",
+    )
+
+    reporter = commands.add_parser(
+        "report",
+        help="Regenerate a completed run's derived summary and HTML report.",
+        description=(
+            "Raw evidence and the completion record are verified and left unchanged; only "
+            "derived/summary.json and derived/report.html are replaced. No market pack is read and "
+            "no saved custom module is imported."
+        ),
+    )
+    reporter.add_argument("--run-root", type=Path, required=True, metavar="RUN")
     return parser
 
 
@@ -271,13 +308,37 @@ def _run(args: argparse.Namespace) -> int:
         )
         _emit(pack_data.slice_metadata(loaded))
         return EXIT_OK
+    if args.command == "study":
+        result = pack_study.run_study(
+            request=args.spec,
+            data_root=args.data_root,
+            output_root=args.output_root,
+            workers=args.workers,
+        )
+        _emit(result)
+        return EXIT_OK
+    if args.command == "report":
+        _emit(pack_study.regenerate_report(args.run_root))
+        return EXIT_OK
     raise AssertionError(f"unhandled command {args.command!r}")
 
 
 def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
-    """Explain a failure on stderr, and add structured JSON for collector commands."""
-    if command in COLLECTOR_COMMANDS:
-        _emit({"status": "failed", "command": command, "error_code": exc.error_code, "error": str(exc)})
+    """Explain a failure on stderr, and add structured JSON where it is contracted."""
+    if command in JSON_STATUS_COMMANDS:
+        payload = {
+            "status": "failed",
+            "command": command,
+            "error_code": exc.error_code,
+            "error": str(exc),
+        }
+        context = getattr(exc, "context", None)
+        if context:
+            payload["context"] = context
+        cause = exc.__cause__
+        if cause is not None:
+            payload["cause"] = {"type": type(cause).__name__, "message": str(cause)}
+        _emit(payload)
     print(f"pattern-lab: {label}{exc}", file=sys.stderr)
 
 
@@ -287,6 +348,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = getattr(args, "command", "")
     try:
         return _run(args)
+    except KeyboardInterrupt:
+        # An explicit boundary for the study commands only; nothing else changes.
+        if command not in STUDY_COMMANDS:
+            raise
+        _emit({"status": "interrupted", "command": command, "error_code": "interrupted",
+               "error": "the operation was interrupted by the user"})
+        print(
+            f"pattern-lab: {command} was interrupted by the user; completed job bundles are "
+            "retained and the run's recorded status reports the interruption.",
+            file=sys.stderr,
+        )
+        return EXIT_INTERRUPTED
     except PatternLabDependencyError as exc:
         _report_failure(command, exc, "missing dependency: ")
         return EXIT_ERROR
@@ -298,6 +371,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_PENDING
     except PatternLabError as exc:
         _report_failure(command, exc, "")
+        return EXIT_ERROR
+    except Exception as exc:
+        # Only the study commands translate an unexpected failure; the data
+        # commands keep their existing traceback behavior.
+        if command not in STUDY_COMMANDS:
+            raise
+        failure = PatternLabStudyError(
+            f"{command}: unexpected {type(exc).__name__}: {exc}", context={"operation": command}
+        )
+        failure.__cause__ = exc
+        _report_failure(command, failure, "")
         return EXIT_ERROR
 
 

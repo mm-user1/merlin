@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "study_name": "Two green candles with rising quote volume, 30m",
+  "notes": "Tracked example. Supply your own verified pack with --data-root; nothing is downloaded and no ignored local artifact is assumed to exist.",
+  "protocol": "protocol_development_v1.json",
+  "study": {
+    "start_utc": "2025-07-01T00:00:00Z",
+    "end_utc": "2026-07-01T00:00:00Z",
+    "warmup_start_utc": "2025-06-01T00:00:00Z"
+  },
+  "instruments": {
+    "roles": ["trading"]
+  },
+  "timeframes_minutes": [30],
+  "hypotheses": [
+    {
+      "id": "two_green_every_bar",
+      "hypothesis": "two_green_rising_quote_volume",
+      "parameters": {},
+      "occurrence": "every_qualifying_bar"
+    }
+  ],
+  "models": [
+    {
+      "id": "fixed_horizon",
+      "model": "fixed_horizon_path",
+      "settings": {
+        "directions": ["long", "short"],
+        "commission_pct_per_side": 0.05,
+        "by_timeframe": {
+          "30": {
+            "horizons_minutes": [60, 120, 240, 480],
+            "primary_horizon_minutes": 240
+          }
+        }
+      }
+    }
+  ],
+  "metrics": [],
+  "extensions": []
+}

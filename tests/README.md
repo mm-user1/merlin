@@ -91,9 +91,15 @@ shared modules with `pytest.register_assert_rewrite` in the local conftest **bef
 importing them, using their actual qualified name (`server._helpers`). Keep the
 package marker empty. Do not import conftest or add test-to-test imports.
 
-`tests/pattern_lab` covers the Pattern Lab data foundation and collector with
-runtime-generated synthetic packs only; it reads no market data and commits no
-binary fixtures. Its import-isolation and missing-dependency checks run in fresh
+`tests/pattern_lab` covers the Pattern Lab data foundation, collector and event
+studies with runtime-generated synthetic packs only; it reads no market data and
+commits no binary fixtures. The `test_pattern_lab_study_*.py` modules build
+hand-calculated bars, write their trusted extension modules into the launcher's
+external temporary root, and drive the real coordinator, so admission ordering,
+recorded status, retained evidence and exit codes are observed rather than
+asserted structurally. Each case uses a unique extension module name because a
+Python interpreter imports a module once, which is the condition the study's
+fresh-interpreter source-integrity error describes. Its import-isolation and missing-dependency checks run in fresh
 child processes, because the root fixtures already import storage into the pytest
 process. They simulate an absent PyArrow with an import blocker instead of
 uninstalling the pinned dependency, so a missing wheel can never turn the suite

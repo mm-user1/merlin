@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "protocol_id": "pattern_lab_development_v1",
+  "development": {
+    "start_utc": "2025-07-01T00:00:00Z",
+    "end_utc": "2026-07-01T00:00:00Z"
+  },
+  "reserved": {
+    "start_utc": "2026-07-01T00:00:00Z",
+    "end_utc": "2026-10-01T00:00:00Z"
+  },
+  "earliest_warmup_start_utc": "2025-06-01T00:00:00Z",
+  "notes": "Development studies only. The reserved interval is prospective: the earlier prototype already consumed part of it, so it is not certified historically untouched, and the pack manifest's universe membership provenance remains unknown. Changing this protocol changes the experiment identity; it never establishes untouched historical data."
+}
