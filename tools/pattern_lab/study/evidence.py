@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
@@ -55,6 +56,16 @@ STATE_NOT_STARTED = "not_started"
 TERMINAL_COMPLETED = "completed"
 TERMINAL_FAILED = "failed"
 TERMINAL_INTERRUPTED = "interrupted"
+
+# The published completion record of schema v1.  Every one of these fields is
+# validated before the record is treated as a verified completion.
+COMPLETION_COUNT_KEYS = ("planned", "admitted", "completed", "failed", "not_started")
+COMPLETION_IDENTITY_KEYS = (
+    "specification_sha256",
+    "implementation_sha256",
+    "data_input_sha256",
+)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 # --------------------------------------------------------------------------
@@ -429,8 +440,36 @@ def write_completion(run_root: Path, *, summary: Mapping[str, Any]) -> dict[str,
     return record
 
 
+def _corrupt(message: str) -> PatternLabDataError:
+    return PatternLabDataError(message, error_code="corrupt_evidence")
+
+
+def _is_digest(value: Any) -> bool:
+    """A SHA-256 in this evidence's own lowercase hexadecimal representation."""
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _is_count(value: Any) -> bool:
+    """A nonnegative integer count; a boolean and a float are not counts."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def verify_completion(run_root: Path) -> dict[str, Any]:
-    """Verify a completed run's immutable evidence against its completion record."""
+    """Verify a completed run's published record and its immutable evidence.
+
+    The whole published schema-v1 record is checked, not only the fields the
+    file-digest pass happens to touch: a missing, mistyped or self-contradictory
+    field is an actionable ``corrupt_evidence`` error rather than an incidental
+    ``KeyError`` later on.  The aggregate digest is recomputed from the verified
+    file map and compared by value.
+
+    ``run_root`` is recorded physical provenance: it is checked as a string and
+    never compared with the current directory, so moving a valid run between
+    directories or hosts keeps working.  The regenerable derived outputs are
+    named but not hashed — they may legitimately be absent or edited.  Facts
+    that need the run's reconciled jobs, such as the counts and the identities,
+    are cross-checked once at the results-loading boundary that owns them.
+    """
     root = Path(run_root)
     path = completion_path(root)
     if not path.is_file():
@@ -441,53 +480,108 @@ def verify_completion(run_root: Path) -> dict[str, Any]:
         )
     document = read_json(path)
     if not isinstance(document, Mapping):
-        raise PatternLabDataError(
-            f"{path}: the completion record is not a JSON object.", error_code="corrupt_evidence"
-        )
+        raise _corrupt(f"{path}: the completion record is not a JSON object.")
     record = dict(document)
     version = record.get("schema_version")
-    if version != RUN_SCHEMA_VERSION:
-        raise PatternLabDataError(
-            f"{path}: completion schema_version {version!r} is not the supported "
-            f"{RUN_SCHEMA_VERSION}; this record cannot be verified.",
-            error_code="corrupt_evidence",
+    # A boolean compares equal to an integer, so it is rejected explicitly.
+    if isinstance(version, bool) or not isinstance(version, int) or version != RUN_SCHEMA_VERSION:
+        raise _corrupt(
+            f"{path}: completion schema_version {version!r} is not the supported integer "
+            f"{RUN_SCHEMA_VERSION}; this record cannot be verified."
         )
     if record.get("terminal_status") != TERMINAL_COMPLETED:
-        raise PatternLabDataError(
+        raise _corrupt(
             f"{path}: the completion record's terminal status is "
-            f"{record.get('terminal_status')!r}, not {TERMINAL_COMPLETED!r}.",
-            error_code="corrupt_evidence",
+            f"{record.get('terminal_status')!r}, not {TERMINAL_COMPLETED!r}."
         )
     digests = record.get("evidence_sha256")
     if not isinstance(digests, Mapping) or not all(
-        isinstance(name, str) and isinstance(value, str) for name, value in digests.items()
+        isinstance(name, str) and _is_digest(value) for name, value in digests.items()
     ):
-        raise PatternLabDataError(
-            f"{path}: the completion record has no usable evidence_sha256 mapping.",
-            error_code="corrupt_evidence",
-        )
+        raise _corrupt(f"{path}: the completion record has no usable evidence_sha256 mapping.")
     recorded = dict(digests)
     present = set(immutable_files(root))
     missing = sorted(set(recorded) - present)
     unexpected = sorted(present - set(recorded))
     if missing:
-        raise PatternLabDataError(
-            f"{root}: recorded raw evidence files are missing: {missing}.",
-            error_code="corrupt_evidence",
-        )
+        raise _corrupt(f"{root}: recorded raw evidence files are missing: {missing}.")
     if unexpected:
-        raise PatternLabDataError(
-            f"{root}: unrecorded files appeared inside the immutable evidence: {unexpected}.",
-            error_code="corrupt_evidence",
+        raise _corrupt(
+            f"{root}: unrecorded files appeared inside the immutable evidence: {unexpected}."
         )
     for name, expected in sorted(recorded.items()):
         actual = file_digest(root / name)
         if actual != expected:
-            raise PatternLabDataError(
-                f"{root / name}: SHA-256 {actual} does not match the completion record's {expected}; "
-                "changed raw evidence cannot be regenerated.",
-                error_code="corrupt_evidence",
+            raise _corrupt(
+                f"{root / name}: SHA-256 {actual} does not match the completion record's "
+                f"{expected}; changed raw evidence cannot be regenerated."
             )
+
+    aggregate = record.get("evidence_set_sha256")
+    if not _is_digest(aggregate):
+        raise _corrupt(
+            f"{path}: evidence_set_sha256 {aggregate!r} is not a SHA-256 digest; this record has "
+            "no usable identity of its own."
+        )
+    expected_aggregate = contracts.semantic_digest(recorded)
+    if aggregate != expected_aggregate:
+        raise _corrupt(
+            f"{path}: evidence_set_sha256 {aggregate} does not match the canonical digest "
+            f"{expected_aggregate} of the verified evidence map it claims to summarize."
+        )
+
+    derived = record.get("derived_files")
+    if (
+        not isinstance(derived, list)
+        or not all(isinstance(name, str) for name in derived)
+        or len(derived) != len(set(derived))
+        or set(derived) != set(DERIVED_FILES)
+    ):
+        raise _corrupt(
+            f"{path}: derived_files {derived!r} does not describe the supported schema-v1 "
+            f"regenerable outputs {list(DERIVED_FILES)}."
+        )
+
+    counts = record.get("counts")
+    if not isinstance(counts, Mapping):
+        raise _corrupt(f"{path}: the completion record has no counts mapping.")
+    bad_counts = sorted(
+        key for key in COMPLETION_COUNT_KEYS if not _is_count(counts.get(key))
+    )
+    if bad_counts:
+        raise _corrupt(
+            f"{path}: completion counts {bad_counts} are missing or are not nonnegative "
+            f"integers: {dict(counts)!r}."
+        )
+    unfinished = {
+        key: int(counts[key])
+        for key in (STATE_ADMITTED, STATE_FAILED, STATE_NOT_STARTED)
+        if int(counts[key])
+    }
+    if unfinished or int(counts["completed"]) != int(counts["planned"]):
+        raise _corrupt(
+            f"{path}: a completed run cannot record {dict(counts)!r}; every planned job must be "
+            "completed, with no failed, admitted or not-started job left."
+        )
+
+    identities = record.get("identities")
+    if not isinstance(identities, Mapping):
+        raise _corrupt(f"{path}: the completion record has no identities mapping.")
+    bad_identities = sorted(
+        key for key in COMPLETION_IDENTITY_KEYS if not _is_digest(identities.get(key))
+    )
+    if bad_identities:
+        raise _corrupt(
+            f"{path}: completion identities {bad_identities} are missing or are not SHA-256 "
+            "digests."
+        )
+
+    # Recorded physical provenance only: it is never resolved, required to
+    # exist here, or required to use this host's path syntax.
+    if not isinstance(record.get("run_root"), str) or not record["run_root"].strip():
+        raise _corrupt(
+            f"{path}: run_root {record.get('run_root')!r} is not a recorded provenance string."
+        )
     return record
 
 

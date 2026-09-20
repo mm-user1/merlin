@@ -362,6 +362,43 @@ def _prepare_timeframes(
     return prepared, fingerprints
 
 
+def _diagnostic(exc: BaseException) -> str:
+    """One readable diagnostic that never loses the exception type."""
+    message = str(exc)
+    if isinstance(exc, PatternLabDataError):
+        return message
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _fail_admission(
+    run_root: Path,
+    state: _RunState,
+    identifier: str,
+    identity: Mapping[str, Any],
+    exc: BaseException,
+    *,
+    phase: str,
+) -> None:
+    """Record the attempted instrument as failed with its phase and diagnostic.
+
+    The coordinator's own view is updated first, so a secondary admission or
+    status write failure can never leave a run naming an instrument it also
+    reports as untouched.  Neither write can replace the original cause or stop
+    the outer failure handling and pool cleanup.
+    """
+    message = _diagnostic(exc)
+    state.phase = phase
+    state.states[identifier] = evidence.STATE_FAILED
+    state.errors[identifier] = message
+    try:
+        evidence.record_admission(run_root, identifier, identity)
+    except Exception:  # pragma: no cover - the original diagnostic always wins
+        pass
+    _record_state(
+        run_root, state, identifier, evidence.STATE_FAILED, {"error": message, "phase": phase}
+    )
+
+
 def _admit(
     run_root: Path,
     session,
@@ -373,10 +410,14 @@ def _admit(
     """Read one instrument's consumed slice, prepare its timeframes and admit it.
 
     The instrument is the coordinator's current job from the first base read, so
-    a read or preparation failure after preflight names that instrument with its
-    phase and the actual diagnostic instead of an anonymous run failure.  When
-    the read failed, only the metadata context is recorded: no input fingerprint
-    is invented for rows that were never observed.
+    *every* exceptional read or preparation exit after preflight — an ordinary
+    exception and a control-flow exception such as ``KeyboardInterrupt`` alike —
+    names that instrument with its phase and the actual diagnostic instead of
+    leaving it reported as not started.  Only an already actionable
+    :class:`PatternLabDataError` is rewrapped; anything else keeps its own type
+    so the interrupt semantics of the caller are preserved.  When the read
+    failed, only the metadata context is recorded: no input fingerprint is
+    invented for rows that were never observed.
     """
     identifier = entry["instrument_id"]
     state.current = identifier
@@ -390,16 +431,15 @@ def _admit(
             warmup_start=format_epoch_ms(request.warmup_start_ms),
             timeframe_minutes=pack_manifest.BASE_TIMEFRAME_MINUTES,
         )
-    except PatternLabDataError as exc:
-        identity["read_error"] = str(exc)
-        evidence.record_admission(run_root, identifier, identity)
-        _record_state(run_root, state, identifier, evidence.STATE_FAILED,
-                      {"error": str(exc), "phase": "read"})
-        state.errors[identifier] = str(exc)
-        raise PatternLabDataError(
-            f"{identifier}: the consumed base slice could not be read after preflight: {exc}",
-            error_code="job_failed",
-        ) from exc
+    except BaseException as exc:
+        identity["read_error"] = _diagnostic(exc)
+        _fail_admission(run_root, state, identifier, identity, exc, phase="read")
+        if isinstance(exc, PatternLabDataError):
+            raise PatternLabDataError(
+                f"{identifier}: the consumed base slice could not be read after preflight: {exc}",
+                error_code="job_failed",
+            ) from exc
+        raise
 
     identity["consumed"] = {
         "warmup_start_utc": format_epoch_ms(request.warmup_start_ms),
@@ -411,15 +451,16 @@ def _admit(
     try:
         state.phase = "prepare"
         prepared, fingerprints = _prepare_timeframes(entry, base, request)
-    except PatternLabDataError as exc:
-        evidence.record_admission(run_root, identifier, identity)
-        _record_state(run_root, state, identifier, evidence.STATE_FAILED,
-                      {"error": str(exc), "phase": "prepare"})
-        state.errors[identifier] = str(exc)
-        raise PatternLabDataError(
-            f"{identifier}: data admission failed after preflight: {exc}",
-            error_code="job_failed",
-        ) from exc
+    except BaseException as exc:
+        # The successful read's consumed context is kept; the timeframes this
+        # instrument never produced stay empty.
+        _fail_admission(run_root, state, identifier, identity, exc, phase="prepare")
+        if isinstance(exc, PatternLabDataError):
+            raise PatternLabDataError(
+                f"{identifier}: data admission failed after preflight: {exc}",
+                error_code="job_failed",
+            ) from exc
+        raise
     finally:
         del base
 
@@ -500,7 +541,10 @@ def _execute_pooled(
     settings = study_workers.WorkerSettings(
         extensions=tuple(request.extensions),
         required=tuple((item.kind, item.identifier) for item in checks.used),
-        declared=dict(checks.declared),
+        # The coordinator's frozen records for every declared module and helper
+        # file travel with the declarations, so a child checks the generation
+        # this run froze rather than whatever it observes for itself.
+        frozen=tuple(checks.loaded),
     )
     # The startup override is scoped to the whole pool lifetime, including any
     # lazy initial spawn, and is restored in the finally clause after teardown.
@@ -550,6 +594,12 @@ def _execute_pooled(
             # Attribute the loss to the one job that worker had started, when
             # exactly one is known; never invent an instrument otherwise.
             state.current = exc.orphaned[0] if len(exc.orphaned) == 1 else None
+            raise
+        except study_workers.WorkerTransportError:
+            aborting = True
+            # A dead result transport belongs to the run, not to whichever
+            # instrument the coordinator last touched.
+            state.current = None
             raise
         except BaseException:
             aborting = True

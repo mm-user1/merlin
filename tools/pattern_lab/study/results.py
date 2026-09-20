@@ -267,6 +267,52 @@ def _reconcile(run_root: Path, status: Mapping[str, Any]) -> tuple[dict[str, str
     return states, counts
 
 
+def _verify_completion_agreement(
+    run_root: Path,
+    completion: Mapping[str, Any],
+    *,
+    status: Mapping[str, Any],
+    counts: Mapping[str, int],
+    provenance: Mapping[str, Any],
+) -> None:
+    """Cross-check a shape-verified completion record against the run's own facts.
+
+    :func:`evidence.verify_completion` owns the published record's shape and the
+    immutable file digests; the reconciled job counts and the run's verified
+    provenance only exist here, so duplicated metadata that is merely
+    well-typed is refused at this one boundary rather than in a second
+    whole-run verification pass.
+    """
+    path = evidence.completion_path(run_root)
+    if status.get("terminal_status") != evidence.TERMINAL_COMPLETED:
+        raise PatternLabDataError(
+            f"{path}: the completion record claims a completed study, but the run's terminal "
+            f"status is {status.get('terminal_status')!r}.",
+            error_code="corrupt_evidence",
+        )
+    recorded = {key: completion["counts"][key] for key in evidence.COMPLETION_COUNT_KEYS}
+    reconciled = {key: int(counts.get(key, 0)) for key in evidence.COMPLETION_COUNT_KEYS}
+    if recorded != reconciled:
+        raise PatternLabDataError(
+            f"{path}: the completion record's counts {recorded} contradict the run's reconciled "
+            f"job counts {reconciled}.",
+            error_code="corrupt_evidence",
+        )
+    declared = provenance.get("identities")
+    declared = dict(declared) if isinstance(declared, Mapping) else {}
+    disagree = sorted(
+        key
+        for key in evidence.COMPLETION_IDENTITY_KEYS
+        if declared.get(key) != completion["identities"][key]
+    )
+    if disagree:
+        raise PatternLabDataError(
+            f"{path}: the completion record's identities {disagree} contradict the verified "
+            "provenance of the same run.",
+            error_code="corrupt_evidence",
+        )
+
+
 def _load(run_root: Any, *, mode: str) -> StudyResults:
     root = evidence.require_run_directory(run_root)
     completion: Mapping[str, Any] | None = None
@@ -276,6 +322,11 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         completion = evidence.verify_completion(root)
     status = evidence.read_status(root)
     states, counts = _reconcile(root, status)
+    provenance = dict(evidence.read_json(root / evidence.PROVENANCE_FILE))
+    if completion is not None:
+        _verify_completion_agreement(
+            root, completion, status=status, counts=counts, provenance=provenance
+        )
     jobs = {
         identifier: evidence.verify_job_bundle(root, identifier)
         for identifier, state in sorted(states.items())
@@ -302,7 +353,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         protocol=dict(evidence.read_json(root / evidence.PROTOCOL_FILE)),
         family=dict(evidence.read_json(root / evidence.FAMILY_FILE)),
         source=dict(evidence.read_json(root / evidence.SOURCE_FILE)),
-        provenance=dict(evidence.read_json(root / evidence.PROVENANCE_FILE)),
+        provenance=provenance,
         status=status,
         completion=completion,
         complete=complete,

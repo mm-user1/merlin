@@ -23,6 +23,7 @@ consulted and cannot block a built-in run.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -114,6 +115,14 @@ def validated_request(request: Any) -> StudyRequest:
             external_document(request), source="normalized request", base=None
         )
         _require_consistent(request, fresh)
+        # The protocol was revalidated as an inline document so its bounds are
+        # rebuilt from the dates themselves.  Where the supplied request came
+        # from stays true afterwards: it is non-semantic provenance the
+        # consistency check has already bound to this exact protocol document,
+        # and carrying it never reopens or rereads that file.
+        supplied_source = request.protocol_source
+        if isinstance(supplied_source, str) and supplied_source.strip():
+            fresh = replace(fresh, protocol_source=supplied_source)
         return fresh
     if isinstance(request, (str, Path)):
         return study_spec.load_request(Path(request))

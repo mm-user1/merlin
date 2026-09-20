@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 import traceback
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Sequence
 
 from .. import PatternLabDataError
 
@@ -77,13 +77,29 @@ class WorkerLostError(PatternLabDataError):
         self.orphaned = tuple(orphaned)
 
 
+class WorkerTransportError(PatternLabDataError):
+    """The pool's own result transport stopped while the pool was still open.
+
+    This is a run-level failure that belongs to no instrument: the coordinator
+    can no longer receive any result, so waiting for the outer result deadline
+    would only delay an already certain failure.
+    """
+
+
 @dataclass(frozen=True)
 class WorkerSettings:
-    """The serializable settings one worker needs to initialize itself."""
+    """The serializable settings one worker needs to initialize itself.
+
+    ``frozen`` carries the coordinator's own :class:`LoadedExtension` records
+    for the same declarations, so a child checks every declared module *and
+    helper* file against the generation the coordinator froze rather than
+    against its own freshly observed hashes.  This is private transport: it may
+    change without any public request-schema change.
+    """
 
     extensions: tuple[Any, ...]
     required: tuple[tuple[str, str], ...]
-    declared: Mapping[str, str]
+    frozen: tuple[Any, ...]
 
 
 # --------------------------------------------------------------------------
@@ -167,10 +183,12 @@ def initialize_worker(settings: WorkerSettings) -> dict[str, Any]:
     """Register the built-ins and the declared extension set inside a worker.
 
     ``register_builtins()`` is called explicitly and idempotently rather than
-    relying on a package import order to populate the registry.  The declared
-    live modules are then imported from their explicit roots and checked against
-    the coordinator's frozen digests, so a source edited after the coordinator
-    hashed it can never become a freshly accepted generation here.
+    relying on a package import order to populate the registry.  Every declared
+    module *and helper* file is then checked against the coordinator's frozen
+    generation **before** anything is imported or registered, and again after
+    import, so neither a helper-only edit nor an import-time edit can become a
+    freshly accepted generation here.  The child never substitutes its own
+    observed hashes for the generation the coordinator froze.
     """
     from . import builtins as study_builtins
     from . import contracts
@@ -178,18 +196,13 @@ def initialize_worker(settings: WorkerSettings) -> dict[str, Any]:
     from . import validation as study_validation
 
     study_builtins.register_builtins()
+    study_extensions.require_frozen_generation(
+        settings.extensions, settings.frozen, where="worker initialization"
+    )
     loaded = study_extensions.load_extensions(settings.extensions)
-    study_extensions.verify_extensions(loaded, where="worker initialization")
-    for record in loaded:
-        expected = settings.declared.get(record.module_path)
-        actual = dict(record.files)[f"{record.module}.py"]
-        if expected != actual:
-            raise PatternLabDataError(
-                f"worker initialization: declared extension {record.module!r} hashes to {actual} "
-                f"in this worker, but the coordinator froze {expected}. The run is stopped rather "
-                "than mixing source generations.",
-                error_code="source_changed",
-            )
+    study_extensions.require_frozen_generation(
+        settings.extensions, settings.frozen, where="worker initialization after import"
+    )
     absent = [
         f"{kind} {identifier!r}"
         for kind, identifier in settings.required
@@ -281,6 +294,10 @@ class SpawnJobPool:
         # queue, so the coordinator always waits with a deadline it controls.
         self._inbox: queue_module.Queue = queue_module.Queue()
         self._pump: threading.Thread | None = None
+        # How the pump exited, if it has.  Only teardown may legitimately end
+        # it, so any value observed while the pool is open is a transport
+        # failure rather than a reason to wait for the outer deadline.
+        self._pump_exit: str | None = None
         self._workers: list[Any] = []
         self._ready: list[dict[str, Any]] = []
         self._owner: dict[str, int] = {}
@@ -333,18 +350,25 @@ class SpawnJobPool:
         by that.  The coordinator waits on an ordinary in-process queue with its
         own deadline and liveness checks, and teardown abandons the channel
         rather than draining it.
+
+        A *blocked* pump is not an *exited* pump: this records only how it
+        actually finished, so :meth:`_check_pump` can turn an unexpected exit
+        into an actionable transport failure while worker-loss detection and
+        the outer deadlines keep covering the blocked case.
         """
         results = self._results
-        while True:
-            try:
+        try:
+            while True:
                 message = results.get()
-            except (OSError, EOFError, ValueError):  # pragma: no cover - closed channel
-                return
-            except BaseException:  # pragma: no cover - interpreter teardown
-                return
-            if message is None:
-                return
-            self._inbox.put(message)
+                if message is None:
+                    self._pump_exit = "the teardown sentinel was received"
+                    return
+                self._inbox.put(message)
+        except BaseException as exc:  # noqa: BLE001 - reported, never raised into teardown
+            self._pump_exit = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        finally:
+            if self._pump_exit is None:  # pragma: no cover - defensive
+                self._pump_exit = "the pump thread returned without a reported reason"
 
     @property
     def worker_pids(self) -> list[int]:
@@ -382,11 +406,16 @@ class SpawnJobPool:
         self._tasks.put((job_id, blob))
 
     def poll(self) -> tuple[str, str, Any] | None:
-        """Return one ready result or failure without blocking, or ``None``."""
+        """Return one ready result or failure without blocking, or ``None``.
+
+        The pump is checked on the empty branch too, so an observed transport
+        failure stops new admission and dispatch as well as waiting.
+        """
         while True:
             try:
                 message = self._inbox.get_nowait()
             except queue_module.Empty:
+                self._check_pump(where="job execution")
                 return None
             handled = self._interpret(message)
             if handled is not None:
@@ -438,12 +467,33 @@ class SpawnJobPool:
                     return self._inbox.get(timeout=_POLL_SECONDS * 8)
                 except queue_module.Empty:
                     raise self._lost_error(lost, where=where) from None
+            # A dead pump has already delivered everything it ever will, so no
+            # grace window is needed and none is taken.
+            self._check_pump(where=where)
             if time.monotonic() >= deadline:
                 raise PatternLabDataError(
                     f"{where}: no worker message arrived within the hard outer deadline; the run "
                     "is stopped rather than waiting indefinitely.",
                     error_code="worker_timeout",
                 )
+
+    def _check_pump(self, *, where: str) -> None:
+        """Fail promptly when the result pump stopped while the pool is open.
+
+        Only teardown ends the pump, and a thread reports itself dead only once
+        its last delivery has been made, so an exit observed here means no
+        further result can ever arrive.  Waiting for the outer result deadline
+        would just postpone a certain failure.
+        """
+        if self._closed or self._pump is None or self._pump.is_alive():
+            return
+        raise WorkerTransportError(
+            f"{where}: the result pump stopped while this run's workers were still active "
+            f"({self._pump_exit}), so no further result can be received. The run is stopped "
+            "rather than waiting for the hard outer deadline; no worker is replaced, no job is "
+            "retried and the transport is not restarted.",
+            error_code="transport_failed",
+        )
 
     def _lost_error(self, lost: Sequence[Any], *, where: str) -> WorkerLostError:
         pids = sorted(int(worker.pid) for worker in lost if worker.pid is not None)

@@ -1456,6 +1456,16 @@ resolution is rejected. The result is a **fresh validated value**: a caller's
 mapping is never mutated, and a valid normalized request keeps working
 unchanged.
 
+Protocol **provenance** survives that revalidation. A normalized request that
+came from a protocol file keeps recording that file in `spec/request.json`,
+because `protocol_source` is a non-semantic string the consistency check has
+already bound to this exact protocol document. Carrying it never reopens the
+path and never lets the file's current contents replace the normalized protocol,
+which is still rebuilt inline; an inline protocol stays `inline`. A request
+supplied as a file, as a mapping and as an already normalized object with
+equivalent settings therefore keeps one semantic identity and one honest
+provenance.
+
 Before the run directory exists, and before any study feature or outcome is
 computed, the coordinator validates the request, protocol, extension
 declarations, resolved cases, feature warmup requirements, selection and
@@ -1481,14 +1491,21 @@ is persisted **before** calculation, so even a failed numerical job retains what
 was observed.
 
 **The coordinator tracks the instrument it is working on from the first base
-read.** A base-slice or preparation failure after preflight marks that exact
-instrument failed with its phase and the actual diagnostic, and records the
-metadata context that was known; no input fingerprint is invented for rows that
-were never read. On the first job or admission failure the coordinator stops
-dispatching, marks that job failed and the remaining jobs not started, retains
-completed bundles and exits `2`. A user interrupt records the interrupted state
-and exits `130`. **No completion marker is published for these states**, and a
-failure to save status never replaces the original diagnostic.
+read.** **Every** exceptional exit from that read or preparation marks that
+exact instrument failed with its phase and the actual diagnostic — an ordinary
+exception and a control-flow exception such as `KeyboardInterrupt` alike, not
+only an already actionable data error. The metadata context that was known is
+recorded: a successful read's consumed context is kept when preparation then
+fails, and no input fingerprint is invented for rows that were never read. On
+the first job or admission failure the coordinator stops dispatching, marks that
+job failed and the remaining jobs not started, retains completed bundles and
+exits `2`. A user interrupt keeps its own type, records the interrupted state
+and exits `130`. **No completion marker is published for these states**; the
+coordinator's own view is updated before anything is written, so a secondary
+admission, per-job or status write failure can neither replace the original
+diagnostic nor prevent the outer failure handling and pool cleanup. Best-effort
+writes are not a recovery guarantee for an unwritable filesystem or an arbitrary
+process kill.
 
 **Immutable evidence and regenerable reports are separate.** The completion
 record hashes the frozen spec, protocol and source evidence, the admitted job
@@ -1527,6 +1544,35 @@ recovery. Partial inspection is **not** a corruption bypass, and malformed or
 unsupported completion metadata gives an actionable validation error rather than
 an incidental `KeyError`.
 
+**What a completion record must actually say.** The whole published schema-v1
+record is validated, not only the fields the file-digest pass happens to touch.
+A supported integer `schema_version` — a boolean is not an integer — a completed
+terminal state, the `evidence_sha256` map, `evidence_set_sha256`,
+`derived_files`, `counts`, `identities` and `run_root` must all be present and
+well formed; digests use this evidence's SHA-256 representation and counts are
+nonnegative integers, never booleans or floats. `evidence_set_sha256` is
+**recomputed** from the verified file map and compared by value, so a missing
+digest, a valid-length wrong digest and 64 zeroes all fail. The required count
+keys are `planned`, `admitted`, `completed`, `failed` and `not_started`, and the
+required identity keys are `specification_sha256`, `implementation_sha256` and
+`data_input_sha256`. A completed run cannot record a failed, unstarted or merely
+admitted job, its counts must agree with the reconciled per-job records and its
+identities must agree with the same run's verified provenance: duplicated
+metadata is not accepted merely because its types are valid. `derived_files`
+must name exactly the supported regenerable outputs, without duplicates or
+arbitrary paths; those files are **not** hashed and may legitimately be absent
+or edited. `run_root` is a recorded provenance string that is never resolved,
+required to exist on this host or required to match this host's path syntax, so
+a valid run stays readable after it is moved between directories or hosts.
+Anything else is a `corrupt_evidence` error in strict loading, in explicit
+partial loading and in report regeneration — raised **before** any derived
+output is replaced, leaving the raw evidence, the status and the existing
+derived outputs untouched. A missing record keeps its existing meaning: strict
+loading reports an incomplete run and partial loading can inspect intact
+progress without certifying completion. Validation needs no market data, no
+custom import and no agreement between the historical run's implementation
+identity and today's checkout.
+
 A completed job's published bundle and its committed record are discoverable by
 explicit partial inspection **before** the final run status is written, so
 durable progress is visible at the moment it becomes durable.
@@ -1546,17 +1592,18 @@ never reclassifies the run. These are handled-error contracts, not promises abou
 admission, job, source or publication error, or on a user interrupt, admission
 and dispatch stop immediately and already published bundles are retained; no
 further result is published once the run enters abort handling. Unstarted work
-cancels and this run's workers are shut down within a bounded overall deadline
-(a documented internal constant, at most 10 seconds before forceful cleanup
-starts): graceful cleanup is attempted, then owned processes are terminated and,
-if necessary, killed, with bounded joins and closed IPC handles. Unsubmitted
+cancels and this run's workers are shut down within the bounded cleanup deadline
+described under [Internal deadlines](#internal-deadlines): graceful cleanup is
+attempted, then owned processes are terminated and, if necessary, killed, with
+bounded joins and closed IPC handles. Unsubmitted
 instruments remain `not_started`; a dispatched job without an accepted result
 becomes `failed` with an explicit aborted reason **distinct** from the original
 computation error. A worker initialization error before any dispatch is a
 run-level failure with every instrument not started — no instrument is invented.
-An abrupt child exit, a serialization failure or a lost job is an actionable
-failed run, never an infinite wait or a silently replaced job, and there is no
-automatic resubmission and no silent serial fallback.
+An abrupt child exit, a serialization failure, a lost job or a stopped result
+transport is an actionable failed run, never an infinite wait or a silently
+replaced job, and there is no automatic resubmission and no silent serial
+fallback.
 
 During teardown, pending transfers are consumed before waiting for a producer
 that may be blocked flushing a large message; during an abort, received results
@@ -1649,10 +1696,19 @@ the coordinator dies; no reader bypass or lock redesign is needed.
 **Worker initialization and numerical threads.** Each worker explicitly calls
 the idempotent `register_builtins()` and then initializes the declared extension
 set, rather than relying on an unused import or a package import order to
-populate the registry. The declared live modules are imported from their explicit
-roots and checked against the coordinator's frozen digests, the required
-descriptors must be present, and a missing built-in or custom registration is a
-named initialization error. Only serializable settings and numeric arrays cross
+populate the registry. **Every** declared module *and helper* file is checked
+against the coordinator's frozen records — which travel with the declarations as
+private worker settings, not as a second registry or manifest format — **before**
+anything is imported or registered, and again after import. The declaration and
+the frozen record must cover exactly the same files, so a helper the coordinator
+never froze is as unusable as one that changed; a helper-only edit fails even
+when the main module is untouched, an edit made during import is caught by the
+recheck, and a child never substitutes its own freshly observed hashes for the
+coordinator's generation. The required descriptors must then be present, and a
+missing built-in or custom registration is a named initialization error. An
+initialization failure is run-level: every instrument stays not started, no
+instrument is invented, no job output is accepted and the pool is cleaned up
+within its bounded deadline. Only serializable settings and numeric arrays cross
 the boundary, reconstructed cases and descriptors are checked against the frozen
 job semantics, and input arrays are marked read-only again after IPC
 reconstruction — serialization does not preserve the flag. The same protection
@@ -1685,6 +1741,42 @@ interrupted status, and a worker's Python stdout is redirected to stderr before
 extension import, so a printing extension cannot corrupt the machine-readable
 CLI stdout. Neither is a sandbox against arbitrary native file-descriptor
 writes.
+
+**A stopped result transport is a run-level failure.** A daemon pump thread
+moves results off the IPC channel, because a worker killed mid-message can leave
+a truncated frame that no timeout can recover from once its length prefix has
+been consumed. If that pump ever exits while the pool is still open — only
+teardown may end it — no further result can arrive, so both the coordinator's
+blocking wait and its nonblocking progress check report an actionable
+`transport_failed` error with the underlying diagnostic instead of waiting out
+the result deadline. It names no instrument: already published bundles are kept,
+no further result is accepted, dispatched work without an accepted result is
+marked aborted, no completion is published and the existing bounded cleanup
+runs. Normal teardown and the pump's own sentinel are not failures, and a
+*blocked* pump is not an *exited* one: worker-loss detection and the outer
+deadlines still cover that case. Nothing here drains a broken channel, restarts
+the pump or a worker, or redesigns the IPC. Abandoning a pump that is stuck on a
+truncated frame remains exceptional and is honestly incomplete: it does not
+guarantee that every daemon thread and buffer is reclaimed inside a long-lived
+embedding process.
+
+#### Internal deadlines
+
+These are failure detectors, not performance budgets or configuration, and none
+of them is a per-instrument or total study duration limit.
+
+| Bound | Value | What it measures |
+| --- | --- | --- |
+| Worker startup | 300 s | Waiting for every child to report itself initialized |
+| Result wait | 3600 s | One `take()` call's own wait, measured from that call |
+| Graceful cleanup | 10 s | The whole graceful stop before forceful steps begin |
+| Terminate join | 2 s per worker | Waiting after `terminate()` before `kill()` |
+| Kill join | 2 s per worker | Waiting after `kill()` |
+| Pump join | 0.5 s | Waiting for the daemon pump before abandoning it |
+
+An abort skips graceful waiting entirely and goes straight to the forceful
+steps. The 10-second constant is therefore **not** an absolute bound on the
+entire teardown: the bounded per-worker joins and the pump join follow it.
 
 **Determinism.** For identical inputs, source and library versions on one host,
 `workers=1` and `workers>1` produce identical canonical numerical evidence,
@@ -1730,8 +1822,9 @@ built-in run.
 **One source-integrity mechanism is used: digest verification, with inert
 snapshots.** Declared module and helper files are hashed before import and
 registration, verified again before each job, before that job's result is
-accepted and around parent-side custom metric computation, and any detected
-change fails the run. Copied source in
+accepted and around parent-side custom metric computation, and — in a spawned
+child — against the coordinator's frozen generation both before and after the
+child's own import, and any detected change fails the run. Copied source in
 `spec/snapshots/` is provenance only and is never executed. Only registrations
 whose recorded digests match a currently declared file are reused; a module this
 interpreter imported by another path cannot have its source generation
@@ -1927,6 +2020,13 @@ Known limits of these milestones:
 - Cleanup guarantees cover handled failures and interrupts. After a `SIGKILL` of
   the coordinator only the smaller contract holds: the OS releases the pack
   guard and no child reads, writes, publishes or completes anything.
+- The internal deadlines above are failure detectors and are not configurable.
+  A single instrument job that needs more than one `take()` wait, or a pool that
+  cannot start within the startup bound, fails the run rather than continuing.
+- Abandoning a result pump blocked on a truncated IPC frame is a deliberate
+  exceptional exit. It bounds the coordinator, but it does not guarantee that
+  every daemon thread and buffer is reclaimed inside a long-lived embedding
+  process; passing process-exit tests are not proof of that.
 - Read-side custom-evidence validation is structural and value-level. It proves
   that a saved sample is complete and coherent against the run's own frozen
   family and saved anchors; it cannot prove that a model's numbers are right.

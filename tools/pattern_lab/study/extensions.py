@@ -227,6 +227,53 @@ class ExtensionContext:
         )
 
 
+def require_frozen_generation(
+    declarations: Sequence[Any], frozen: Sequence[LoadedExtension], *, where: str
+) -> None:
+    """Check every declared file against another process's frozen generation.
+
+    ``frozen`` holds the coordinator's own records for the same declarations.
+    A worker uses this before it imports or registers anything, and again after
+    import, so a module *or helper* edited between the coordinator's freeze and
+    the child's import is rejected instead of being hashed into a fresh local
+    generation.  Declaration and record coverage must agree exactly: a file the
+    coordinator never froze is as unusable as one that changed.
+    """
+    expected = {record.module: dict(record.files) for record in frozen}
+    for declaration in declarations:
+        wanted = expected.get(declaration.module)
+        if wanted is None:
+            raise PatternLabDataError(
+                f"{where}: extension {declaration.module!r} has no frozen source record from the "
+                "coordinator, so its source generation cannot be established here.",
+                error_code="unverified_source",
+            )
+        declared = {f"{declaration.module}.py", *declaration.helpers}
+        if declared != set(wanted):
+            raise PatternLabDataError(
+                f"{where}: extension {declaration.module!r} declares {sorted(declared)} but the "
+                f"coordinator froze {sorted(wanted)}; the declaration and the frozen record must "
+                "cover exactly the same files.",
+                error_code="unverified_source",
+            )
+        root = Path(declaration.source_root)
+        for name in sorted(declared):
+            path = root / name
+            if not path.is_file():
+                raise PatternLabDataError(
+                    f"{where}: declared extension source {path} is missing.",
+                    error_code="source_changed",
+                )
+            actual = file_digest(path)
+            if actual != wanted[name]:
+                raise PatternLabDataError(
+                    f"{where}: declared extension source {path} hashes to {actual} here, but the "
+                    f"coordinator froze {wanted[name]}; the run is stopped rather than mixing "
+                    "source generations.",
+                    error_code="source_changed",
+                )
+
+
 def verify_extensions(loaded: Sequence[LoadedExtension], *, where: str) -> None:
     """Re-hash every declared source file and fail on any detected change."""
     for record in loaded:

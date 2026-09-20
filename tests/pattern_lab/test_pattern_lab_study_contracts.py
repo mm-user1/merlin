@@ -18,17 +18,20 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import re
+import shutil
 import textwrap
 
 import numpy as np
 import pytest
 
 from tools.pattern_lab import PatternLabDataError, PatternLabStudyError
+from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import study as pack_study
 from tools.pattern_lab.study import contracts as study_contracts
 from tools.pattern_lab.study import evidence as study_evidence
 from tools.pattern_lab.study import report as study_report
 from tools.pattern_lab.study import results as study_results
+from tools.pattern_lab.study import runner as study_runner
 from tools.pattern_lab.study import spec as study_spec
 from tools.pattern_lab.study import validation as study_validation
 
@@ -1139,6 +1142,310 @@ def test_r6_a_corrupt_claimed_completed_bundle_fails_partial_inspection(tmp_path
     with pytest.raises(PatternLabDataError) as failure:
         pack_study.load_results(run_root, allow_partial=True)
     assert failure.value.error_code == "corrupt_evidence"
+
+
+# Every exceptional exit from read or preparation, not only a PatternLabDataError,
+# names the attempted instrument (T04-1 R1).
+
+def three_instrument_pack(tmp_path):
+    return build_pack(
+        tmp_path / "pack",
+        {"AAA-USDT-SWAP": rising(), "BBB-USDT-SWAP": rising(), "CCC-USDT-SWAP": rising()},
+    )
+
+
+def fail_preparing(monkeypatch, symbol: str, error: BaseException):
+    """Raise ``error`` while preparing one instrument's timeframes."""
+    real = study_runner._prepare_timeframes
+
+    def prepare(entry, *args, **kwargs):
+        if entry["symbol"] == symbol:
+            raise error
+        return real(entry, *args, **kwargs)
+
+    monkeypatch.setattr(study_runner, "_prepare_timeframes", prepare)
+
+
+def recorded_states(run_root) -> dict:
+    status = study_evidence.read_status(run_root)
+    return {item["instrument_id"]: item for item in status["instruments"]}
+
+
+def test_r6_an_ordinary_read_failure_names_the_attempted_instrument(tmp_path, monkeypatch):
+    pack = three_instrument_pack(tmp_path)
+    run_root = tmp_path / "run"
+    real = pack_data._ReadSession.load_slice
+
+    def load_slice(self, instrument_id, *args, **kwargs):
+        if instrument_id == "TEST_BBB-USDT-SWAP":
+            raise RuntimeError("synthetic base-slice failure")
+        return real(self, instrument_id, *args, **kwargs)
+
+    monkeypatch.setattr(pack_data._ReadSession, "load_slice", load_slice)
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=run_root)
+    monkeypatch.undo()
+
+    assert failure.value.context["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert failure.value.context["phase"] == "read"
+    status = study_evidence.read_status(run_root)
+    assert status["counts"] == {
+        "admitted": 0, "completed": 1, "failed": 1, "not_started": 1, "planned": 3
+    }
+    states = recorded_states(run_root)
+    assert states["TEST_AAA-USDT-SWAP"]["state"] == "completed"
+    assert states["TEST_CCC-USDT-SWAP"]["state"] == "not_started"
+    assert "RuntimeError: synthetic base-slice failure" in states["TEST_BBB-USDT-SWAP"]["error"]
+    admitted = json.loads(
+        (run_root / "admitted" / "TEST_BBB-USDT-SWAP.json").read_text(encoding="utf-8")
+    )
+    # Nothing was read, so no fingerprint and no consumed context is invented.
+    assert admitted["phase"] == "read" and admitted["state"] == "failed"
+    assert admitted["timeframes"] == [] and "consumed" not in admitted
+    assert not study_evidence.completion_path(run_root).is_file()
+
+
+def test_r6_an_ordinary_preparation_failure_keeps_the_consumed_context(tmp_path, monkeypatch):
+    pack = three_instrument_pack(tmp_path)
+    run_root = tmp_path / "run"
+    fail_preparing(monkeypatch, "BBB", RuntimeError("synthetic preparation failure"))
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=run_root)
+    monkeypatch.undo()
+
+    assert failure.value.context["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert failure.value.context["phase"] == "prepare"
+    counts = study_evidence.read_status(run_root)["counts"]
+    assert counts == {
+        "admitted": 0, "completed": 1, "failed": 1, "not_started": 1, "planned": 3
+    }
+    admitted = json.loads(
+        (run_root / "admitted" / "TEST_BBB-USDT-SWAP.json").read_text(encoding="utf-8")
+    )
+    # The read succeeded, so its context survives; the timeframes never did.
+    assert admitted["consumed"]["base_row_count"] > 0
+    assert admitted["timeframes"] == []
+    assert "RuntimeError: synthetic preparation failure" in admitted["error"]
+
+    # Terminal counts, per-job records and partial inspection all agree, and
+    # the earlier completed bundle is preserved.
+    partial = pack_study.load_results(run_root, allow_partial=True)
+    assert dict(partial.counts) == counts
+    assert partial.completed_instruments == ["TEST_AAA-USDT-SWAP"]
+    assert partial.complete is False
+
+
+def test_r6_an_admission_interrupt_is_recorded_and_stays_an_interrupt(tmp_path, monkeypatch):
+    pack = three_instrument_pack(tmp_path)
+    run_root = tmp_path / "run"
+    # An injected interrupt, not physical console Ctrl+C.
+    fail_preparing(monkeypatch, "BBB", KeyboardInterrupt("injected admission interrupt"))
+    with pytest.raises(KeyboardInterrupt):
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=run_root)
+    monkeypatch.undo()
+
+    status = study_evidence.read_status(run_root)
+    assert status["terminal_status"] == "interrupted"
+    assert status["failure"]["reason"] == "keyboard_interrupt"
+    assert status["failure"]["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert status["counts"] == {
+        "admitted": 0, "completed": 1, "failed": 1, "not_started": 1, "planned": 3
+    }
+    states = recorded_states(run_root)
+    assert "KeyboardInterrupt: injected admission interrupt" in states["TEST_BBB-USDT-SWAP"]["error"]
+    assert not study_evidence.completion_path(run_root).is_file()
+    assert pack_study.load_results(run_root, allow_partial=True).completed_instruments == [
+        "TEST_AAA-USDT-SWAP"
+    ]
+
+
+def test_r6_a_secondary_admission_write_failure_never_replaces_the_cause(tmp_path, monkeypatch):
+    pack = three_instrument_pack(tmp_path)
+    run_root = tmp_path / "run"
+    real_record = study_evidence.record_admission
+
+    def refuse(run_root_arg, instrument_id, identity):
+        if instrument_id == "TEST_BBB-USDT-SWAP":
+            raise OSError("synthetic admission write failure")
+        return real_record(run_root_arg, instrument_id, identity)
+
+    monkeypatch.setattr(study_evidence, "record_admission", refuse)
+    fail_preparing(monkeypatch, "BBB", RuntimeError("synthetic preparation failure"))
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=run_root)
+    monkeypatch.undo()
+
+    # The original cause and control flow survive the secondary write failure.
+    assert "synthetic preparation failure" in str(failure.value)
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert failure.value.context["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert failure.value.context["phase"] == "prepare"
+    # The in-memory state is still honest even though nothing could be written.
+    assert not (run_root / "admitted" / "TEST_BBB-USDT-SWAP.json").exists()
+    counts = study_evidence.read_status(run_root)["counts"]
+    assert counts == {
+        "admitted": 0, "completed": 1, "failed": 1, "not_started": 1, "planned": 3
+    }
+    assert dict(pack_study.load_results(run_root, allow_partial=True).counts) == counts
+
+
+
+# The whole published completion record is validated, not only the fields the
+# file-digest pass touches (T04-1 R2).
+
+def completion_of(run_root) -> dict:
+    return dict(study_evidence.read_json(study_evidence.completion_path(run_root)))
+
+
+def _replace_counts(record, **changes):
+    record["counts"] = {**record["counts"], **changes}
+
+
+COMPLETION_MUTATIONS = {
+    "missing_aggregate": lambda record: record.pop("evidence_set_sha256"),
+    "zeroed_aggregate": lambda record: record.update(evidence_set_sha256="0" * 64),
+    # A valid-length, valid-alphabet, wrong value.
+    "wrong_aggregate": lambda record: record.update(evidence_set_sha256="a1" * 32),
+    "short_aggregate": lambda record: record.update(evidence_set_sha256="abc"),
+    "boolean_version": lambda record: record.update(schema_version=True),
+    "boolean_count": lambda record: _replace_counts(record, completed=True),
+    "float_count": lambda record: _replace_counts(record, planned=3.0),
+    "negative_count": lambda record: _replace_counts(record, failed=-1),
+    # The tech lead's reproduction: a 999 planned count in a three-job run.
+    "planned_999": lambda record: _replace_counts(record, planned=999),
+    "unstarted_job_in_a_completed_run": lambda record: _replace_counts(record, not_started=1),
+    # Internally coherent, but not this run's jobs.
+    "coherent_but_wrong_counts": lambda record: _replace_counts(record, planned=2, completed=2),
+    "missing_counts": lambda record: record.pop("counts"),
+    "missing_count_key": lambda record: record["counts"].pop("admitted"),
+    "missing_identities": lambda record: record.pop("identities"),
+    "missing_identity_key": lambda record: record["identities"].pop("specification_sha256"),
+    "forged_identity": lambda record: record["identities"].update(data_input_sha256="b1" * 32),
+    "missing_derived_files": lambda record: record.pop("derived_files"),
+    "duplicated_derived_file": lambda record: record.update(
+        derived_files=[study_evidence.SUMMARY_FILE, study_evidence.SUMMARY_FILE]
+    ),
+    "arbitrary_derived_file": lambda record: record.update(derived_files=["derived/anything.json"]),
+    "missing_run_root": lambda record: record.pop("run_root"),
+    "blank_run_root": lambda record: record.update(run_root="   "),
+    "non_digest_file_hash": lambda record: record["evidence_sha256"].update(
+        {study_evidence.STATUS_FILE: "not a digest"}
+    ),
+}
+
+
+@pytest.mark.parametrize("mutation", sorted(COMPLETION_MUTATIONS))
+def test_r2_contradictory_completion_metadata_fails_every_reader(tmp_path, mutation):
+    _pack, run_root = completed_run(tmp_path, contracts_map={
+        "AAA-USDT-SWAP": rising(), "BBB-USDT-SWAP": rising(), "CCC-USDT-SWAP": rising()
+    })
+    summary_before = (run_root / study_evidence.SUMMARY_FILE).read_bytes()
+    report_before = (run_root / study_evidence.REPORT_FILE).read_bytes()
+    bundle_before = (
+        study_evidence.job_path(run_root, "TEST_AAA-USDT-SWAP") / "bundle.json"
+    ).read_bytes()
+    record = completion_of(run_root)
+    COMPLETION_MUTATIONS[mutation](record)
+    study_evidence.write_json(study_evidence.completion_path(run_root), record)
+
+    for allow_partial in (False, True):
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_study.load_results(run_root, allow_partial=allow_partial)
+        assert failure.value.error_code == "corrupt_evidence"
+    with pytest.raises(PatternLabDataError) as failure:
+        pack_study.regenerate_report(run_root)
+    assert failure.value.error_code == "corrupt_evidence"
+
+    # Rejection happens before anything derived is replaced, and raw evidence,
+    # status and the record itself are left exactly as they were.
+    assert (run_root / study_evidence.SUMMARY_FILE).read_bytes() == summary_before
+    assert (run_root / study_evidence.REPORT_FILE).read_bytes() == report_before
+    assert (
+        study_evidence.job_path(run_root, "TEST_AAA-USDT-SWAP") / "bundle.json"
+    ).read_bytes() == bundle_before
+    assert study_evidence.read_status(run_root)["terminal_status"] == "completed"
+    assert completion_of(run_root) == record
+
+
+def test_r2_a_relocated_run_keeps_loading_and_regenerating(tmp_path):
+    _pack, run_root = completed_run(tmp_path)
+    moved = tmp_path / "moved" / "another-name"
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(run_root, moved)
+    results = pack_study.load_results(moved)
+    assert results.complete is True
+    # run_root is recorded provenance, not a claim about the current host.
+    assert results.completion["run_root"] == str(run_root)
+    assert pack_study.regenerate_report(moved)["status"] == "regenerated"
+
+
+def test_r2_missing_or_edited_derived_outputs_are_regenerable_not_evidence(tmp_path):
+    _pack, run_root = completed_run(tmp_path)
+    (run_root / study_evidence.SUMMARY_FILE).unlink()
+    (run_root / study_evidence.REPORT_FILE).write_text("edited by hand", encoding="utf-8")
+    assert pack_study.load_results(run_root).complete is True
+    assert pack_study.regenerate_report(run_root)["status"] == "regenerated"
+    assert json.loads(
+        (run_root / study_evidence.SUMMARY_FILE).read_text(encoding="utf-8")
+    )["complete"] is True
+    assert "edited by hand" not in (run_root / study_evidence.REPORT_FILE).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_r2_a_valid_completed_run_still_reads_after_the_stricter_checks(tmp_path):
+    _pack, run_root = completed_run(tmp_path, contracts_map={
+        "AAA-USDT-SWAP": rising(), "BBB-USDT-SWAP": rising()
+    })
+    record = completion_of(run_root)
+    assert record["counts"] == {
+        "admitted": 0, "completed": 2, "failed": 0, "not_started": 0, "planned": 2
+    }
+    strict = pack_study.load_results(run_root)
+    partial = pack_study.load_results(run_root, allow_partial=True)
+    assert strict.complete is True and partial.complete is True
+    assert record["identities"] == dict(strict.provenance["identities"])
+
+
+
+# Normalized-request protocol provenance (T04-1 R4).
+
+def test_r3_a_normalized_request_keeps_its_protocol_file_provenance(tmp_path):
+    pack = build_pack(tmp_path / "pack")
+    document = request_for()
+    protocol_path = tmp_path / "protocol.json"
+    study_evidence.write_json(protocol_path, document["protocol"])
+    document["protocol"] = str(protocol_path)
+    normalized = pack_study.normalize_request(document, source="test", base=None)
+    assert normalized.protocol_source == str(protocol_path)
+
+    # Revalidation rebuilds the protocol from the normalized document itself:
+    # removing the file proves it is never reopened, while the provenance the
+    # caller supplied is still true and is what the saved request records.
+    protocol_path.unlink()
+    checked = study_validation.validated_request(normalized)
+    assert checked.protocol_source == str(protocol_path)
+    assert checked.protocol["_bounds"] == normalized.protocol["_bounds"]
+    result = pack_study.run_study(
+        request=normalized, data_root=pack, output_root=tmp_path / "run"
+    )
+    saved = json.loads(
+        (Path(result["run_root"]) / study_evidence.REQUEST_FILE).read_text(encoding="utf-8")
+    )
+    assert saved["protocol_source"] == str(protocol_path)
+
+    # Inline provenance stays inline, and equivalent settings keep one identity.
+    inline = pack_study.normalize_request(request_for(), source="test", base=None)
+    assert study_validation.validated_request(inline).protocol_source == "inline"
+    assert inline.semantic_document() == normalized.semantic_document()
+    inline_result = pack_study.run_study(
+        request=inline, data_root=pack, output_root=tmp_path / "run-inline"
+    )
+    assert (
+        inline_result["identities"]["specification_sha256"]
+        == result["identities"]["specification_sha256"]
+    )
+
 
 
 # --------------------------------------------------------------------------

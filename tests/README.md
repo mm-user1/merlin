@@ -106,8 +106,15 @@ decoded evidence tables to keep the summary read count independent of the group
 count, rather than asserting a wall-clock threshold.
 `test_pattern_lab_study_workers.py` starts real `spawn` children through the
 production coordinator and owns worker parity, effective capacity, out-of-order
-completion, the retention bound, child isolation, the thread policy, failure and
-cancellation mapping and coordinator death. Because `monkeypatch` state is not
+completion, the retention bound, child isolation, the thread policy, declared
+helper source generations in a fresh child, result-transport liveness, failure
+and cancellation mapping and coordinator death. Its small test-local process
+helpers distinguish a successful query saying a PID is absent from a failed
+`tasklist`/`taskkill` invocation, report the return code and stderr, and clean
+up every owned PID even when one operation fails; an unavailable or refused
+process tool is never read as proof of death or of successful cleanup. Their
+command decisions are exercised with injected responses on any host, which does
+not certify actual Windows execution. Because `monkeypatch` state is not
 inherited by a spawned interpreter, its child-local network, pack and
 publication guards live in a declared temporary test extension that installs
 them only inside a worker; there is no production test mode. Its module is

@@ -19,6 +19,7 @@ import gc
 import json
 import os
 from pathlib import Path
+import queue as queue_module
 import signal
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from tools.pattern_lab import PatternLabDataError, PatternLabStudyError
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import study as pack_study
 from tools.pattern_lab.study import evidence as study_evidence
+from tools.pattern_lab.study import extensions as study_extensions
 from tools.pattern_lab.study import runner as study_runner
 from tools.pattern_lab.study import workers as study_workers
 
@@ -343,6 +345,16 @@ def write_extension(root: Path, name: str, template: str = WORKER_EXTENSION) -> 
     return {"module": name, "source_root": str(root), "helpers": []}
 
 
+def frozen_record(declaration, digests: dict) -> study_extensions.LoadedExtension:
+    """One coordinator-side frozen source record, built with explicit digests."""
+    return study_extensions.LoadedExtension(
+        module=declaration.module,
+        source_root=str(declaration.source_root),
+        module_path=str(Path(declaration.source_root) / f"{declaration.module}.py"),
+        files=tuple(sorted(digests.items())),
+    )
+
+
 def probe_model(name: str, *, mode: str = "ok", marker: Path | None = None,
                 signal_marker: Path | None = None, only_instrument: str | None = None,
                 instance_id: str = "probe") -> dict:
@@ -365,36 +377,105 @@ def semantic_summary(run_root) -> dict:
     return summary
 
 
-def live(pid: int) -> bool:
+class ProcessCommandError(AssertionError):
+    """A process query or termination command could not be trusted.
+
+    An unavailable, refused or failed process tool says nothing about the
+    process, so it is reported instead of being read as "the process is gone"
+    or "cleanup succeeded".
+    """
+
+
+def _process_command(command, run) -> subprocess.CompletedProcess:
+    try:
+        return run(command, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProcessCommandError(
+            f"{command[0]} could not be invoked ({type(exc).__name__}: {exc}); an unavailable "
+            "process tool is not evidence about the process."
+        ) from exc
+
+
+def _command_detail(command, completed) -> str:
+    return (
+        f"{command[0]} returned {completed.returncode}; "
+        f"stdout={(completed.stdout or '').strip()!r} stderr={(completed.stderr or '').strip()!r}"
+    )
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def live(pid: int, *, windows: bool | None = None, run=None) -> bool:
     """Is this PID still running? Never a side effect on either platform.
 
     ``os.kill(pid, 0)`` is a POSIX probe; on Windows that call terminates the
-    target, so the supported query tool is used there instead.
+    target, so the supported query tool is used there instead and is never
+    substituted.  A successful query saying the PID is absent and a failed
+    ``tasklist`` invocation are different outcomes: only the first is an
+    answer.  The decision is driven by the PID appearing in a matched row, so
+    no localized "no tasks" message has to be recognized.
     """
-    if os.name == "nt":  # pragma: no cover - exercised by the Windows commands
-        listing = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
-            capture_output=True, text=True, timeout=60,
-        )
-        return str(int(pid)) in listing.stdout
+    pid = int(pid)
+    if _windows() if windows is None else windows:
+        command = ["tasklist", "/FI", f"PID eq {pid}", "/NH"]
+        completed = _process_command(command, run or subprocess.run)
+        if completed.returncode != 0:
+            raise ProcessCommandError(
+                f"tasklist could not report PID {pid}: {_command_detail(command, completed)}. "
+                "A failed query is not proof that the process is gone."
+            )
+        return str(pid) in (completed.stdout or "")
     try:
-        os.kill(int(pid), 0)
-    except OSError:
+        os.kill(pid, 0)
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        # The process exists; this user simply may not signal it.
+        return True
     return True
 
 
-def force_kill(pid: int) -> None:
-    """Terminate one owned process with the platform's supported mechanism."""
-    if os.name == "nt":  # pragma: no cover - exercised by the Windows commands
-        subprocess.run(
-            ["taskkill", "/PID", str(int(pid)), "/F", "/T"], capture_output=True, timeout=60
+def force_kill(pid: int, *, windows: bool | None = None, run=None) -> None:
+    """Terminate one owned process, or establish that it had already exited."""
+    pid = int(pid)
+    if _windows() if windows is None else windows:
+        runner = run or subprocess.run
+        command = ["taskkill", "/PID", str(pid), "/F", "/T"]
+        completed = _process_command(command, runner)
+        if completed.returncode == 0:
+            return
+        # A nonzero return can simply mean this owned process exited between
+        # the decision and the call, so the outcome is re-queried rather than
+        # inferred from the command's localized text.
+        if not live(pid, windows=True, run=runner):
+            return
+        raise ProcessCommandError(
+            f"taskkill did not terminate owned PID {pid}: {_command_detail(command, completed)}. "
+            "A refused termination is not successful cleanup."
         )
-        return
     try:
-        os.kill(int(pid), signal.SIGKILL)
+        os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        return
+    except PermissionError as exc:
+        raise ProcessCommandError(
+            f"owned PID {pid} could not be killed ({type(exc).__name__}: {exc}); a missing "
+            "permission is not proof of process death."
+        ) from exc
+
+
+def force_kill_all(pids, *, windows: bool | None = None, run=None) -> None:
+    """Clean up every owned PID, then report whatever could not be cleaned."""
+    failures: list[str] = []
+    for pid in pids:
+        try:
+            force_kill(pid, windows=windows, run=run)
+        except AssertionError as exc:
+            failures.append(str(exc))
+    if failures:
+        raise ProcessCommandError(" | ".join(failures))
 
 
 def wait_until(predicate, *, timeout: float = 30.0, interval: float = 0.05) -> bool:
@@ -741,7 +822,7 @@ def test_a_child_rejects_a_source_generation_the_coordinator_did_not_freeze(tmp_
     settings = study_workers.WorkerSettings(
         extensions=(declaration,),
         required=(("model", f"{name}_model"),),
-        declared={str(root / f"{name}.py"): "0" * 64},
+        frozen=(frozen_record(declaration, {f"{name}.py": "0" * 64}),),
     )
     with pytest.raises(PatternLabDataError) as failure:
         study_workers.initialize_worker(settings)
@@ -973,7 +1054,7 @@ def test_an_abrupt_child_exit_is_an_actionable_failure_not_an_endless_wait(tmp_p
 
 
 def test_an_unserializable_payload_fails_with_its_job_named(tmp_path):
-    settings = study_workers.WorkerSettings(extensions=(), required=(), declared={})
+    settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
     pool = study_workers.SpawnJobPool(1, settings)
     # No worker is started: serialization happens in the coordinator, so the
     # failure is synchronous and attributable to this job.
@@ -1133,9 +1214,6 @@ def test_an_oversized_transfer_and_a_lost_child_never_deadlock(tmp_path):
     deadline with no owned child left alive. What is not deterministic, and is
     not asserted, is the exact instruction the child died on.
     """
-    from tools.pattern_lab.study import extensions as study_extensions
-    from tools.pattern_lab.study import validation as study_validation
-
     name = "ext_worker_oversized"
     # Enough bars that both the input payload and the returned tables exceed a
     # pipe buffer, so the transfer really is chunked.
@@ -1171,7 +1249,7 @@ def test_an_oversized_transfer_and_a_lost_child_never_deadlock(tmp_path):
             ("model", "fixed_horizon_path"),
             ("model", f"{name}_model"),
         ),
-        declared=study_validation.declared_digests(loaded),
+        frozen=tuple(loaded),
     )
 
     with pack_data.read_session(pack) as session:
@@ -1203,8 +1281,7 @@ def test_an_oversized_transfer_and_a_lost_child_never_deadlock(tmp_path):
                 "TEST_AAA-USDT-SWAP", study_runner._job_payload(entry, blocking, prepared)
             )
             assert wait_until(started.exists, timeout=120.0), "the worker never started the job"
-            for pid in pids:
-                force_kill(pid)
+            force_kill_all(pids)
             clock = time.monotonic()
             with pytest.raises(study_workers.WorkerLostError) as failure:
                 pool.take(timeout=SCENARIO_TIMEOUT)
@@ -1305,8 +1382,8 @@ def test_killing_the_coordinator_releases_the_pack_and_publishes_nothing(tmp_pat
         assert not output.exists()
         assert not any(pack.glob("**/*.tmp*"))
     finally:
-        for pid in owned:
-            force_kill(pid)
+        # Every owned PID is cleaned up even if one cleanup operation fails.
+        force_kill_all(owned)
         try:
             process.wait(timeout=30.0)
         except subprocess.TimeoutExpired:  # pragma: no cover - already killed
@@ -1320,3 +1397,480 @@ def _can_acquire(pack: Path) -> bool:
             return True
     except Exception:
         return False
+
+
+# --------------------------------------------------------------------------
+# declared helper source generations in a fresh child (T04-1 R3)
+# --------------------------------------------------------------------------
+
+HELPER_EXTENSION = '''\
+"""A declared extension whose model value comes from a declared helper file.
+
+A child that reaches module execution leaves an import marker behind, so a
+rejection that must happen *before* the changed extension runs is provable.
+"""
+
+import multiprocessing
+import os
+
+import numpy as np
+
+from tools.pattern_lab.study import contracts
+from tools.pattern_lab.study.contracts import (
+    ModelCase,
+    ModelDescriptor,
+    ModelEvidence,
+    OutcomeSpec,
+)
+
+import __HELPER__ as helper
+
+if multiprocessing.parent_process() is not None:
+    open(os.path.join("__MARKERS__", "child-%d.imported" % os.getpid()), "w").close()
+    __IMPORT_TIME_EDIT__
+
+
+def _validate(settings, timeframes):
+    contracts.closed_keys(settings, (), "settings")
+    return {}
+
+
+def _cases(settings, timeframe):
+    return (
+        ModelCase(
+            case_id="probe",
+            timeframe_minutes=int(timeframe),
+            parameters={},
+            outcomes=(OutcomeSpec("helper_value", "count", "the declared helper's value"),),
+            primary=True,
+        ),
+    )
+
+
+def _evaluate(series, settings, anchors):
+    count = int(anchors.rows.size)
+    return ModelEvidence(
+        kind=contracts.CUSTOM_CASE_EVIDENCE_KIND,
+        rows={
+            "case_id": np.full(count, "probe", dtype=object),
+            "anchor_open_ms": anchors.open_ms.astype(np.int64),
+            "helper_value": np.full(count, float(helper.VALUE), dtype=np.float64),
+            "helper_value__reason": np.full(count, "available", dtype=object),
+        },
+    )
+
+
+def register(context):
+    context.register_model(
+        ModelDescriptor(
+            model_id="__MODEL_ID__",
+            version="1",
+            validate_settings=_validate,
+            resolve_cases=_cases,
+            evaluate=_evaluate,
+        )
+    )
+'''
+
+HELPER_VALUE = 3.0
+
+
+def write_helper_extension(root: Path, name: str, *, markers: Path,
+                           import_time_edit: bool = False) -> dict:
+    """Write a declared module plus the local helper it imports at import time."""
+    root.mkdir(parents=True, exist_ok=True)
+    markers.mkdir(parents=True, exist_ok=True)
+    helper_name = f"{name}_helper"
+    helper_path = root / f"{helper_name}.py"
+    helper_path.write_text(f"VALUE = {HELPER_VALUE}\n", encoding="utf-8")
+    edit = (
+        'open(__HELPER_PATH__, "w", encoding="utf-8").write("VALUE = 42.0\\n")'
+        if import_time_edit
+        else "pass"
+    )
+    body = (
+        HELPER_EXTENSION
+        .replace("__IMPORT_TIME_EDIT__", edit)
+        .replace("__HELPER_PATH__", repr(str(helper_path)))
+        .replace("__HELPER__", helper_name)
+        .replace('"__MARKERS__"', repr(str(markers)))
+        .replace("__MODEL_ID__", f"{name}_model")
+    )
+    (root / f"{name}.py").write_text(body, encoding="utf-8")
+    return {"module": name, "source_root": str(root), "helpers": [f"{helper_name}.py"]}
+
+
+def helper_request(declaration: dict, name: str, instrument_ids):
+    return request_for(
+        instrument_ids,
+        models=[{"id": "probe", "model": f"{name}_model", "settings": {}}],
+        extensions=[declaration],
+    )
+
+
+def edit_before_children_start(monkeypatch, path: Path, text: str) -> list[int]:
+    """Change one declared source file between the freeze and child startup.
+
+    Returns the list the started workers' PIDs are recorded in, so the caller
+    can prove the pool really was cleaned up.
+    """
+    real_start = study_workers.SpawnJobPool.start
+    pids: list[int] = []
+
+    def start(self):
+        path.write_text(text, encoding="utf-8")
+        try:
+            real_start(self)
+        finally:
+            pids.extend(int(worker.pid) for worker in self._workers if worker.pid)
+
+    monkeypatch.setattr(study_workers.SpawnJobPool, "start", start)
+    return pids
+
+
+def test_a_fresh_child_accepts_unchanged_declared_helper_source(tmp_path):
+    name = "ext_worker_helper_ok"
+    root = tmp_path / "ext"
+    markers = tmp_path / "imports"
+    declaration = write_helper_extension(root, name, markers=markers)
+    pack = build_pack(tmp_path / "pack", {"AAA-USDT-SWAP": {}, "BBB-USDT-SWAP": {}})
+    run_root = tmp_path / "run"
+    result = pack_study.run_study(
+        request=helper_request(declaration, name, ["TEST_AAA-USDT-SWAP", "TEST_BBB-USDT-SWAP"]),
+        data_root=pack, output_root=run_root, workers=2,
+    )
+    assert result["status"] == "completed"
+    # The declared helper really was imported and used inside fresh children.
+    assert sorted(path.name for path in markers.iterdir())
+    results = pack_study.load_results(run_root)
+    frame = results.observations(
+        "TEST_AAA-USDT-SWAP", model_instance_id="probe",
+        timeframe_minutes=TIMEFRAME, case_id="probe",
+    )
+    assert set(frame["helper_value"].tolist()) == {HELPER_VALUE}
+
+
+@pytest.mark.parametrize("changed", ["helper", "module"])
+def test_a_source_change_after_the_freeze_fails_every_child(tmp_path, monkeypatch, changed):
+    name = f"ext_worker_frozen_{changed}"
+    root = tmp_path / "ext"
+    markers = tmp_path / "imports"
+    declaration = write_helper_extension(root, name, markers=markers)
+    pack = build_pack(tmp_path / "pack", {"AAA-USDT-SWAP": {}, "BBB-USDT-SWAP": {}})
+    run_root = tmp_path / "run"
+    if changed == "helper":
+        # The main module is untouched: only a declared helper changes.
+        target, text = root / f"{name}_helper.py", "VALUE = 99.0\n"
+    else:
+        target = root / f"{name}.py"
+        text = (root / f"{name}.py").read_text(encoding="utf-8") + "\n# changed\n"
+    pids = edit_before_children_start(monkeypatch, target, text)
+
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(
+            request=helper_request(declaration, name, ["TEST_AAA-USDT-SWAP", "TEST_BBB-USDT-SWAP"]),
+            data_root=pack, output_root=run_root, workers=2,
+        )
+    monkeypatch.undo()
+
+    assert failure.value.error_code == "source_changed"
+    assert "the coordinator froze" in str(failure.value)
+    # Rejection happened before any child executed the changed generation.
+    assert list(markers.iterdir()) == []
+    # An initialization failure is run-level: no instrument is invented.
+    assert failure.value.context["instrument_id"] is None
+    status = study_evidence.read_status(run_root)
+    assert status["counts"] == {
+        "admitted": 0, "completed": 0, "failed": 0, "not_started": 2, "planned": 2
+    }
+    assert not study_evidence.completion_path(run_root).is_file()
+    assert not (run_root / study_evidence.JOBS_DIR).exists()
+    # The bounded pool cleanup really ran: no owned child survives.
+    assert pids and wait_until(lambda: not any(live(pid) for pid in pids), timeout=30.0)
+
+
+def test_an_import_time_source_change_is_rejected_after_import(tmp_path):
+    name = "ext_worker_import_time_edit"
+    root = tmp_path / "ext"
+    markers = tmp_path / "imports"
+    declaration = write_helper_extension(root, name, markers=markers, import_time_edit=True)
+    # One instrument, so exactly one child rewrites its own declared helper.
+    pack = build_pack(tmp_path / "pack", {"AAA-USDT-SWAP": {}})
+    run_root = tmp_path / "run"
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(
+            request=helper_request(declaration, name, ["TEST_AAA-USDT-SWAP"]),
+            data_root=pack, output_root=run_root, workers=2,
+        )
+    assert failure.value.error_code == "source_changed"
+    assert "after import" in str(failure.value)
+    # The module did run here: the post-import recheck is what caught it.
+    assert list(markers.iterdir())
+    assert not study_evidence.completion_path(run_root).is_file()
+
+
+def test_a_child_requires_a_frozen_record_for_every_declared_file(tmp_path):
+    from tools.pattern_lab.study import spec as study_spec
+
+    name = "ext_worker_uncovered_helper"
+    root = tmp_path / "ext"
+    markers = tmp_path / "imports"
+    write_helper_extension(root, name, markers=markers)
+    declaration = study_spec.ExtensionDeclaration(
+        module=name, source_root=str(root), helpers=(f"{name}_helper.py",)
+    )
+    # A record that covers the main module only cannot admit the declaration.
+    settings = study_workers.WorkerSettings(
+        extensions=(declaration,),
+        required=(("model", f"{name}_model"),),
+        frozen=(
+            frozen_record(
+                declaration,
+                {f"{name}.py": study_extensions.file_digest(root / f"{name}.py")},
+            ),
+        ),
+    )
+    with pytest.raises(PatternLabDataError) as failure:
+        study_workers.initialize_worker(settings)
+    assert failure.value.error_code == "unverified_source"
+    assert "exactly the same files" in str(failure.value)
+
+
+# --------------------------------------------------------------------------
+# result-pump liveness (T04-1 R5)
+# --------------------------------------------------------------------------
+
+class BrokenInbox(queue_module.Queue):
+    """An in-process inbox whose ``put`` fails, so the result pump dies."""
+
+    def put(self, item, *args, **kwargs):
+        raise OSError("synthetic inbox failure inside the result pump")
+
+
+def test_a_dead_result_pump_fails_promptly_instead_of_waiting_for_the_deadline(tmp_path):
+    settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
+    with study_workers.single_threaded_children():
+        pool = study_workers.SpawnJobPool(1, settings)
+        pool.start()
+        pids = list(pool.worker_pids)
+        try:
+            # The worker's next message cannot be delivered, so the pump exits
+            # while the worker itself stays alive.
+            pool._inbox = BrokenInbox()
+            pool.submit("TEST_AAA-USDT-SWAP", None)
+            clock = time.monotonic()
+            with pytest.raises(study_workers.WorkerTransportError) as failure:
+                pool.take(timeout=study_workers.RESULT_DEADLINE_SECONDS)
+            waited = time.monotonic() - clock
+            assert waited < 60.0, "the transport failure must not wait for the result deadline"
+            assert failure.value.error_code == "transport_failed"
+            assert "OSError: synthetic inbox failure" in str(failure.value)
+            # A live-but-blocked pump is a different case: this worker is alive.
+            assert pool.live_workers() == pids
+            # The nonblocking progress path reports it too, so admission stops.
+            with pytest.raises(study_workers.WorkerTransportError):
+                pool.poll()
+        finally:
+            pool.shutdown(abort=True)
+    assert pool.live_workers() == []
+    assert wait_until(lambda: not any(live(pid) for pid in pids), timeout=30.0)
+
+
+def test_a_result_pump_that_dies_during_startup_fails_promptly(tmp_path):
+    settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
+    with study_workers.single_threaded_children():
+        pool = study_workers.SpawnJobPool(1, settings)
+        pool._inbox = BrokenInbox()
+        clock = time.monotonic()
+        try:
+            with pytest.raises(study_workers.WorkerTransportError) as failure:
+                pool.start()
+            assert time.monotonic() - clock < 60.0
+            assert failure.value.error_code == "transport_failed"
+            pids = pool.live_workers()
+        finally:
+            pool.shutdown(abort=True)
+    assert pool.live_workers() == []
+    assert wait_until(lambda: not any(live(pid) for pid in pids), timeout=30.0)
+
+
+def test_normal_teardown_is_not_reported_as_a_transport_failure(tmp_path):
+    settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
+    with study_workers.single_threaded_children():
+        pool = study_workers.SpawnJobPool(1, settings)
+        pool.start()
+        assert pool.poll() is None
+        report = pool.shutdown(abort=False)
+    assert report["abort"] is False
+    assert pool.live_workers() == []
+    # The pump ended on its own sentinel, and a closed pool is not a failure.
+    assert pool._pump_exit == "the teardown sentinel was received"
+    assert pool.poll() is None
+
+
+def test_a_transport_failure_stops_a_run_without_naming_an_instrument(tmp_path, monkeypatch):
+    pack = build_pack(
+        tmp_path / "pack", {"AAA-USDT-SWAP": {}, "BBB-USDT-SWAP": {}, "CCC-USDT-SWAP": {}}
+    )
+    run_root = tmp_path / "run"
+    real_start = study_workers.SpawnJobPool.start
+    pids: list[int] = []
+
+    def start_then_break(self):
+        real_start(self)
+        pids.extend(self.worker_pids)
+        # Every child initialized; the first result now kills the pump.
+        self._inbox = BrokenInbox()
+
+    monkeypatch.setattr(study_workers.SpawnJobPool, "start", start_then_break)
+    clock = time.monotonic()
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(
+            request=request_for(), data_root=pack, output_root=run_root, workers=2
+        )
+    monkeypatch.undo()
+
+    assert time.monotonic() - clock < SCENARIO_TIMEOUT
+    assert failure.value.error_code == "transport_failed"
+    # A dead transport belongs to the run, not to one instrument.
+    assert failure.value.context["instrument_id"] is None
+    assert failure.value.context["phase"] == "execute"
+    status = study_evidence.read_status(run_root)
+    assert status["terminal_status"] == "failed"
+    assert status["counts"]["completed"] == 0
+    aborted = [item for item in status["instruments"] if item["state"] == "failed"]
+    assert aborted, "dispatched work without an accepted result must be aborted"
+    assert all(item["error"].startswith("aborted:") for item in aborted)
+    assert not study_evidence.completion_path(run_root).is_file()
+    assert wait_until(lambda: not any(live(pid) for pid in pids), timeout=30.0)
+
+
+# --------------------------------------------------------------------------
+# admission failure inside the pool (T04-1 R1)
+# --------------------------------------------------------------------------
+
+def test_an_ordinary_preparation_failure_names_its_instrument_in_the_pool(tmp_path, monkeypatch):
+    pack = build_pack(
+        tmp_path / "pack", {"AAA-USDT-SWAP": {}, "BBB-USDT-SWAP": {}, "CCC-USDT-SWAP": {}}
+    )
+    run_root = tmp_path / "run"
+    real = study_runner._prepare_timeframes
+
+    def prepare(entry, *args, **kwargs):
+        if entry["symbol"] == "BBB":
+            raise RuntimeError("synthetic preparation failure")
+        return real(entry, *args, **kwargs)
+
+    monkeypatch.setattr(study_runner, "_prepare_timeframes", prepare)
+    with pytest.raises(PatternLabStudyError) as failure:
+        pack_study.run_study(
+            request=request_for(), data_root=pack, output_root=run_root, workers=2
+        )
+    monkeypatch.undo()
+
+    assert failure.value.context["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert failure.value.context["phase"] == "prepare"
+    states = {
+        item["instrument_id"]: item
+        for item in study_evidence.read_status(run_root)["instruments"]
+    }
+    assert states["TEST_BBB-USDT-SWAP"]["state"] == "failed"
+    assert "RuntimeError: synthetic preparation failure" in states["TEST_BBB-USDT-SWAP"]["error"]
+    assert states["TEST_CCC-USDT-SWAP"]["state"] == "not_started"
+    counts = study_evidence.read_status(run_root)["counts"]
+    assert counts["planned"] == 3 and counts["admitted"] == 0
+    assert dict(pack_study.load_results(run_root, allow_partial=True).counts) == counts
+    assert not study_evidence.completion_path(run_root).is_file()
+
+
+# --------------------------------------------------------------------------
+# the Windows process helpers' command decisions
+# --------------------------------------------------------------------------
+# These run the helpers' decision logic with injected command outcomes.  They
+# exercise the decisions on any host; they do not certify actual Windows
+# execution, which needs the focused Windows commands.
+
+def command_result(returncode: int = 0, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout,
+                                       stderr=stderr)
+
+
+class FakeProcessTool:
+    """Answer ``tasklist``/``taskkill`` with queued outcomes, recording calls."""
+
+    def __init__(self, **responses):
+        self.responses = {name: list(items) for name, items in responses.items()}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append(list(command))
+        queued = self.responses.get(command[0])
+        if not queued:
+            raise AssertionError(f"unexpected {command[0]} invocation")
+        outcome = queued.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def test_the_windows_live_probe_separates_absence_from_a_failed_query():
+    running = FakeProcessTool(tasklist=[command_result(stdout="python.exe   4242 Console  1  9 K")])
+    assert live(4242, windows=True, run=running) is True
+    assert running.calls[0][0] == "tasklist"
+
+    # A successful query that matched nothing is an answer; the localized
+    # "no tasks" text is never parsed.
+    absent = FakeProcessTool(tasklist=[command_result(stdout="INFO: keine Tasks\n")])
+    assert live(4242, windows=True, run=absent) is False
+
+    denied = FakeProcessTool(
+        tasklist=[command_result(returncode=1, stderr="ERROR: Access is denied.")]
+    )
+    with pytest.raises(AssertionError) as failure:
+        live(4242, windows=True, run=denied)
+    assert "returned 1" in str(failure.value)
+    assert "Access is denied" in str(failure.value)
+    assert "not proof" in str(failure.value)
+
+    unavailable = FakeProcessTool(tasklist=[FileNotFoundError("tasklist")])
+    with pytest.raises(AssertionError) as failure:
+        live(4242, windows=True, run=unavailable)
+    assert "could not be invoked" in str(failure.value)
+
+
+def test_the_windows_kill_helper_reports_a_failed_termination():
+    ok = FakeProcessTool(taskkill=[command_result()])
+    force_kill(4242, windows=True, run=ok)
+    assert [call[0] for call in ok.calls] == ["taskkill"]
+
+    # A nonzero return for a PID that has already exited is not a failure.
+    already_gone = FakeProcessTool(
+        taskkill=[command_result(returncode=128, stderr="ERROR: not found")],
+        tasklist=[command_result(stdout="INFO: no tasks")],
+    )
+    force_kill(4242, windows=True, run=already_gone)
+    assert [call[0] for call in already_gone.calls] == ["taskkill", "tasklist"]
+
+    refused = FakeProcessTool(
+        taskkill=[command_result(returncode=1, stderr="ERROR: Access is denied.")],
+        tasklist=[command_result(stdout="python.exe   4242 Console")],
+    )
+    with pytest.raises(AssertionError) as failure:
+        force_kill(4242, windows=True, run=refused)
+    assert "did not terminate owned PID 4242" in str(failure.value)
+    assert "Access is denied" in str(failure.value)
+
+
+def test_every_owned_process_is_cleaned_up_even_when_one_operation_fails():
+    tool = FakeProcessTool(
+        taskkill=[
+            command_result(returncode=1, stderr="ERROR: Access is denied."),
+            command_result(),
+        ],
+        tasklist=[command_result(stdout="python.exe   11 Console")],
+    )
+    with pytest.raises(AssertionError) as failure:
+        force_kill_all([11, 22], windows=True, run=tool)
+    assert "did not terminate owned PID 11" in str(failure.value)
+    # The second owned PID was still cleaned up.
+    assert [call for call in tool.calls if call[0] == "taskkill"][1][2] == "22"
