@@ -1694,6 +1694,33 @@ def test_a_result_pump_that_dies_during_startup_fails_promptly(tmp_path):
     assert wait_until(lambda: not any(live(pid) for pid in pids), timeout=30.0)
 
 
+def test_lost_worker_precedes_dead_pump_in_both_receive_paths():
+    settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
+    with study_workers.single_threaded_children():
+        pool = study_workers.SpawnJobPool(1, settings)
+        try:
+            pool.start()
+            worker = pool._workers[0]
+            identifier = "TEST_AAA-USDT-SWAP"
+            # Inject the transport's started message with a known pending job.
+            pool._pending.add(identifier)
+            pool._inbox.put(("started", identifier, worker.pid))
+            worker.terminate()
+            worker.join(timeout=10)
+            assert not worker.is_alive()
+            pool._results.put(None)
+            pool._pump.join(timeout=10)
+            assert not pool._pump.is_alive()
+            for receive in (pool.poll, lambda: pool.take(timeout=1)):
+                with pytest.raises(study_workers.WorkerLostError) as failure:
+                    receive()
+                assert failure.value.error_code == "worker_lost"
+                assert failure.value.orphaned == (identifier,)
+        finally:
+            pool.shutdown(abort=True)
+    assert pool.live_workers() == []
+
+
 def test_normal_teardown_is_not_reported_as_a_transport_failure(tmp_path):
     settings = study_workers.WorkerSettings(extensions=(), required=(), frozen=())
     with study_workers.single_threaded_children():
@@ -1704,7 +1731,7 @@ def test_normal_teardown_is_not_reported_as_a_transport_failure(tmp_path):
     assert report["abort"] is False
     assert pool.live_workers() == []
     # The pump ended on its own sentinel, and a closed pool is not a failure.
-    assert pool._pump_exit == "the teardown sentinel was received"
+    assert wait_until(lambda: pool._pump_exit == "the teardown sentinel was received")
     assert pool.poll() is None
 
 

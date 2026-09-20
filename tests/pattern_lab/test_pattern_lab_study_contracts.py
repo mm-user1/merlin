@@ -1290,6 +1290,46 @@ def test_r6_a_secondary_admission_write_failure_never_replaces_the_cause(tmp_pat
 
 
 
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_admission_record_failure_keeps_the_attempted_job_failed(tmp_path, monkeypatch, error_type):
+    pack = three_instrument_pack(tmp_path)
+    run_root = tmp_path / "run"
+    original = study_evidence.record_admission
+    injected = error_type("synthetic admission publication failure")
+    attempted = False
+
+    def record(root, identifier, identity):
+        nonlocal attempted
+        if identifier == "TEST_BBB-USDT-SWAP" and not attempted:
+            attempted = True
+            raise injected
+        return original(root, identifier, identity)
+
+    monkeypatch.setattr(study_evidence, "record_admission", record)
+    expected = KeyboardInterrupt if error_type is KeyboardInterrupt else PatternLabStudyError
+    with pytest.raises(expected) as failure:
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=run_root)
+    if error_type is KeyboardInterrupt:
+        assert failure.value is injected
+    else:
+        assert failure.value.__cause__ is injected
+    status = study_evidence.read_status(run_root)
+    assert status["terminal_status"] == ("interrupted" if error_type is KeyboardInterrupt else "failed")
+    assert status["failure"]["instrument_id"] == "TEST_BBB-USDT-SWAP"
+    assert status["failure"]["phase"] == "admit"
+    assert status["counts"] == {
+        "admitted": 0, "completed": 1, "failed": 1, "not_started": 1, "planned": 3
+    }
+    admitted = study_evidence.read_json(run_root / "admitted" / "TEST_BBB-USDT-SWAP.json")
+    assert admitted["phase"] == "admit" and admitted["state"] == "failed"
+    assert admitted["consumed"]["base_row_count"] > 0 and admitted["timeframes"]
+    assert "synthetic admission publication failure" in admitted["error"]
+    partial = pack_study.load_results(run_root, allow_partial=True)
+    assert dict(partial.counts) == status["counts"]
+    assert partial.completed_instruments == ["TEST_AAA-USDT-SWAP"]
+    assert not study_evidence.completion_path(run_root).exists()
+
+
 # The whole published completion record is validated, not only the fields the
 # file-digest pass touches (T04-1 R2).
 
@@ -1365,6 +1405,32 @@ def test_r2_contradictory_completion_metadata_fails_every_reader(tmp_path, mutat
     ).read_bytes() == bundle_before
     assert study_evidence.read_status(run_root)["terminal_status"] == "completed"
     assert completion_of(run_root) == record
+
+
+@pytest.mark.parametrize("changed", ["family", "status"])
+def test_completed_job_counts_must_agree_with_the_saved_plan_and_status(tmp_path, changed):
+    _pack, run_root = completed_run(tmp_path)
+    path = run_root / (study_evidence.FAMILY_FILE if changed == "family" else study_evidence.STATUS_FILE)
+    document = study_evidence.read_json(path)
+    if changed == "family":
+        document["planned_job_count"] = 999
+    else:
+        document["counts"]["planned"] = 999
+    study_evidence.write_json(path, document)
+    # Keep hashes valid to exercise semantic agreement, not file corruption.
+    completion = completion_of(run_root)
+    study_evidence.write_completion(
+        run_root, summary={key: completion[key] for key in ("run_root", "counts", "identities")}
+    )
+    before = {name: (run_root / name).read_bytes() for name in study_evidence.DERIVED_FILES}
+    for partial in (False, True):
+        with pytest.raises(PatternLabDataError) as failure:
+            pack_study.load_results(run_root, allow_partial=partial)
+        assert failure.value.error_code == "corrupt_evidence"
+    with pytest.raises(PatternLabDataError) as failure:
+        pack_study.regenerate_report(run_root)
+    assert failure.value.error_code == "corrupt_evidence"
+    assert {name: (run_root / name).read_bytes() for name in before} == before
 
 
 def test_r2_a_relocated_run_keeps_loading_and_regenerating(tmp_path):

@@ -274,6 +274,7 @@ def _verify_completion_agreement(
     status: Mapping[str, Any],
     counts: Mapping[str, int],
     provenance: Mapping[str, Any],
+    family: Mapping[str, Any],
 ) -> None:
     """Cross-check a shape-verified completion record against the run's own facts.
 
@@ -296,6 +297,18 @@ def _verify_completion_agreement(
         raise PatternLabDataError(
             f"{path}: the completion record's counts {recorded} contradict the run's reconciled "
             f"job counts {reconciled}.",
+            error_code="corrupt_evidence",
+        )
+    planned = family.get("planned_job_count")
+    if type(planned) is not int or planned != reconciled["planned"]:
+        raise PatternLabDataError(
+            f"{path}: the family's planned_job_count {planned!r} contradicts the run's "
+            f"reconciled planned count {reconciled['planned']}.",
+            error_code="corrupt_evidence",
+        )
+    if status.get("counts") != reconciled:
+        raise PatternLabDataError(
+            f"{path}: the terminal status counts contradict the run's reconciled job counts.",
             error_code="corrupt_evidence",
         )
     declared = provenance.get("identities")
@@ -323,9 +336,10 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     status = evidence.read_status(root)
     states, counts = _reconcile(root, status)
     provenance = dict(evidence.read_json(root / evidence.PROVENANCE_FILE))
+    family = dict(evidence.read_json(root / evidence.FAMILY_FILE))
     if completion is not None:
         _verify_completion_agreement(
-            root, completion, status=status, counts=counts, provenance=provenance
+            root, completion, status=status, counts=counts, provenance=provenance, family=family
         )
     jobs = {
         identifier: evidence.verify_job_bundle(root, identifier)
@@ -351,7 +365,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         run_root=root,
         request=dict(evidence.read_json(root / evidence.REQUEST_FILE)),
         protocol=dict(evidence.read_json(root / evidence.PROTOCOL_FILE)),
-        family=dict(evidence.read_json(root / evidence.FAMILY_FILE)),
+        family=family,
         source=dict(evidence.read_json(root / evidence.SOURCE_FILE)),
         provenance=provenance,
         status=status,

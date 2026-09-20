@@ -1458,13 +1458,13 @@ unchanged.
 
 Protocol **provenance** survives that revalidation. A normalized request that
 came from a protocol file keeps recording that file in `spec/request.json`,
-because `protocol_source` is a non-semantic string the consistency check has
-already bound to this exact protocol document. Carrying it never reopens the
-path and never lets the file's current contents replace the normalized protocol,
+because `protocol_source` is retained as non-semantic caller-supplied provenance,
+while the consistency check validates the protocol document itself. Carrying it
+never reopens the path or lets the file's current contents replace the normalized protocol,
 which is still rebuilt inline; an inline protocol stays `inline`. A request
 supplied as a file, as a mapping and as an already normalized object with
-equivalent settings therefore keeps one semantic identity and one honest
-provenance.
+equivalent settings therefore keeps one semantic identity. For a caller-created
+normalized object, the recorded source path is not independently authenticated.
 
 Before the run directory exists, and before any study feature or outcome is
 computed, the coordinator validates the request, protocol, extension
@@ -1491,13 +1491,15 @@ is persisted **before** calculation, so even a failed numerical job retains what
 was observed.
 
 **The coordinator tracks the instrument it is working on from the first base
-read.** **Every** exceptional exit from that read or preparation marks that
-exact instrument failed with its phase and the actual diagnostic — an ordinary
+read.** **Every** exceptional exit from that read, preparation or the admission
+record write marks that exact instrument failed with its phase and the actual
+diagnostic — an ordinary
 exception and a control-flow exception such as `KeyboardInterrupt` alike, not
 only an already actionable data error. The metadata context that was known is
 recorded: a successful read's consumed context is kept when preparation then
-fails, and no input fingerprint is invented for rows that were never read. On
-the first job or admission failure the coordinator stops dispatching, marks that
+fails, and prepared fingerprints survive a subsequent admission-write failure
+(phase `admit`). No input fingerprint is invented for rows that were never read.
+On the first job or admission failure the coordinator stops dispatching, marks that
 job failed and the remaining jobs not started, retains completed bundles and
 exits `2`. A user interrupt keeps its own type, records the interrupted state
 and exits `130`. **No completion marker is published for these states**; the
@@ -1556,8 +1558,9 @@ digest, a valid-length wrong digest and 64 zeroes all fail. The required count
 keys are `planned`, `admitted`, `completed`, `failed` and `not_started`, and the
 required identity keys are `specification_sha256`, `implementation_sha256` and
 `data_input_sha256`. A completed run cannot record a failed, unstarted or merely
-admitted job, its counts must agree with the reconciled per-job records and its
-identities must agree with the same run's verified provenance: duplicated
+admitted job, its counts must agree with the reconciled per-job records, terminal
+status counts and the family's planned job count, and its identities must agree
+with the same run's verified provenance: duplicated
 metadata is not accepted merely because its types are valid. `derived_files`
 must name exactly the supported regenerable outputs, without duplicates or
 arbitrary paths; those files are **not** hashed and may legitimately be absent
@@ -1749,7 +1752,9 @@ been consumed. If that pump ever exits while the pool is still open — only
 teardown may end it — no further result can arrive, so both the coordinator's
 blocking wait and its nonblocking progress check report an actionable
 `transport_failed` error with the underlying diagnostic instead of waiting out
-the result deadline. It names no instrument: already published bundles are kept,
+the result deadline. If an owned worker is also known to have exited, both
+receive paths prefer `worker_lost` and preserve any known orphaned-job attribution.
+A transport-only failure names no instrument: already published bundles are kept,
 no further result is accepted, dispatched work without an accepted result is
 marked aborted, no completion is published and the existing bounded cleanup
 runs. Normal teardown and the pump's own sentinel are not failures, and a

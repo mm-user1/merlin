@@ -410,8 +410,8 @@ def _admit(
     """Read one instrument's consumed slice, prepare its timeframes and admit it.
 
     The instrument is the coordinator's current job from the first base read, so
-    *every* exceptional read or preparation exit after preflight — an ordinary
-    exception and a control-flow exception such as ``KeyboardInterrupt`` alike —
+    *every* exceptional read, preparation or admission-write exit after preflight
+    — ordinary exceptions and control flow such as ``KeyboardInterrupt`` alike —
     names that instrument with its phase and the actual diagnostic instead of
     leaving it reported as not started.  Only an already actionable
     :class:`PatternLabDataError` is rewrapped; anything else keeps its own type
@@ -441,20 +441,25 @@ def _admit(
             ) from exc
         raise
 
-    identity["consumed"] = {
-        "warmup_start_utc": format_epoch_ms(request.warmup_start_ms),
-        "start_utc": format_epoch_ms(request.study_start_ms),
-        "end_utc": format_epoch_ms(request.study_end_ms),
-        "base_row_count": base.base_row_count,
-        "base_gap_count": base.base_gap_count,
-    }
     try:
         state.phase = "prepare"
+        identity["consumed"] = {
+            "warmup_start_utc": format_epoch_ms(request.warmup_start_ms),
+            "start_utc": format_epoch_ms(request.study_start_ms),
+            "end_utc": format_epoch_ms(request.study_end_ms),
+            "base_row_count": base.base_row_count,
+            "base_gap_count": base.base_gap_count,
+        }
         prepared, fingerprints = _prepare_timeframes(entry, base, request)
+        state.phase = "admit"
+        identity["timeframes"] = fingerprints
+        evidence.record_admission(run_root, identifier, identity)
+        state.states[identifier] = evidence.STATE_ADMITTED
+        state.fingerprints[identifier] = fingerprints
     except BaseException as exc:
-        # The successful read's consumed context is kept; the timeframes this
-        # instrument never produced stay empty.
-        _fail_admission(run_root, state, identifier, identity, exc, phase="prepare")
+        # Keep all observed context, including prepared fingerprints when the
+        # admission write failed. Unprepared timeframes stay empty.
+        _fail_admission(run_root, state, identifier, identity, exc, phase=state.phase)
         if isinstance(exc, PatternLabDataError):
             raise PatternLabDataError(
                 f"{identifier}: data admission failed after preflight: {exc}",
@@ -464,10 +469,6 @@ def _admit(
     finally:
         del base
 
-    identity["timeframes"] = fingerprints
-    evidence.record_admission(run_root, identifier, identity)
-    state.states[identifier] = evidence.STATE_ADMITTED
-    state.fingerprints[identifier] = fingerprints
     state.phase = "execute"
     return prepared
 

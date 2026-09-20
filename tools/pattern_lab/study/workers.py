@@ -487,6 +487,11 @@ class SpawnJobPool:
         """
         if self._closed or self._pump is None or self._pump.is_alive():
             return
+        # Preserve the known job attribution when both a worker and the pump
+        # are lost, matching the blocking receive path's diagnostic priority.
+        lost = [worker for worker in self._workers if not worker.is_alive()]
+        if lost:
+            raise self._lost_error(lost, where=where)
         raise WorkerTransportError(
             f"{where}: the result pump stopped while this run's workers were still active "
             f"({self._pump_exit}), so no further result can be received. The run is stopped "
