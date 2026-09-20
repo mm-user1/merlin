@@ -116,6 +116,16 @@ class StudyResults:
                 return case
         raise PatternLabDataError(f"unknown case {case_id!r} for model instance {model_instance_id!r}.")
 
+    def instrument_reader(self, instrument_id: str) -> "InstrumentReader":
+        """Return one instrument's bounded reader; the caller releases it.
+
+        The reader decodes each needed raw table once and reuses it across the
+        cases and groups the caller asks for, so an offline analysis does not
+        open a fresh reader per group.  ``release()`` drops the frames; the
+        existing lifecycle and the public observation semantics are unchanged.
+        """
+        return InstrumentReader(self, instrument_id)
+
     def observations(
         self,
         instrument_id: str,
@@ -132,7 +142,7 @@ class StudyResults:
         Saved custom evidence is structurally validated first: a matching file
         hash proves the bytes, not that the rows are a complete, coherent sample.
         """
-        reader = _InstrumentReader(self, instrument_id)
+        reader = InstrumentReader(self, instrument_id)
         try:
             return reader.observations(
                 instance=self.model_instance(model_instance_id),
@@ -144,7 +154,7 @@ class StudyResults:
             reader.release()
 
 
-class _InstrumentReader:
+class InstrumentReader:
     """One instrument's decoded raw tables, reused across groups then released.
 
     Custom evidence is validated once per instrument and model instance, before
@@ -522,7 +532,7 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
 
     planned_tickers = [item["instrument_id"] for item in family["instruments"]]
     for instrument_id in results.completed_instruments:
-        reader = _InstrumentReader(results, instrument_id)
+        reader = InstrumentReader(results, instrument_id)
         try:
             episodes = reader.table("episodes")
             for key, accumulator in accumulators.items():
@@ -700,7 +710,7 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
             declaration.declaration_id: [] for declaration in declarations
         }
         for instrument_id in results.completed_instruments:
-            reader = _InstrumentReader(results, instrument_id)
+            reader = InstrumentReader(results, instrument_id)
             try:
                 frame = reader.observations(
                     instance=instance,

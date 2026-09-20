@@ -60,13 +60,20 @@ baselines, or mutate external systems unless explicitly authorized.
   implemented.
 - Pattern Lab is separate local, research-only tooling that Merlin never
   imports. Its implemented milestones are the market-data pack and collector
-  (M1a/M1b) and the descriptive event study with its evidence and offline
-  report (M2a), plus its enforced boundary contracts and bounded spawn pool
-  (M2b). Event studies accept any positive `workers`: `workers=1` runs the jobs
+  (M1a/M1b), the descriptive event study with its evidence and offline report
+  (M2a) plus its enforced boundary contracts and bounded spawn pool (M2b), and
+  matched comparisons with calibrated inference over a completed study (M3a).
+  Event studies accept any positive `workers`: `workers=1` runs the jobs
   directly and a larger count uses an explicit spawn pool whose canonical
-  evidence and identities match. Matched controls and inference (M3) and
-  bracket execution (M4) are not implemented. Do not present a Pattern Lab
-  result as a validated edge or an executable strategy.
+  evidence and identities match. Offline M3a analysis is a coordinator-side
+  calculation with no worker option. **M3a is implemented but its statistical
+  acceptance gate is open: the delivered calibration met 11 of 15 checks, and
+  the two admitted scenarios with persistent daily signal states measured about
+  7.5-8.3% error against a nominal 5%.** M3b context and frozen validation, and
+  M4 bracket execution, are not implemented. Treat M3a p-values, intervals and
+  Holm rejections as unvalidated and anti-conservative under clustered signals.
+  Do not present any Pattern Lab result — an M2 summary or an M3a nominal
+  rejection — as a validated edge or an executable strategy.
 
 ## Directory roles
 
@@ -97,7 +104,7 @@ Read the destination for the surface being changed before editing it.
 | Benchmark protocol and historical timing results | [docs/engine_v2/PERFORMANCE.md](docs/engine_v2/PERFORMANCE.md) |
 | Tool catalog | [tools/README.md](tools/README.md) |
 | Strategy Lab usage, schemas, safety, analysis, and allocation | [tools/strategy_lab/README.md](tools/strategy_lab/README.md) |
-| Pattern Lab data pack, collector, event studies, evidence, and identity | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
+| Pattern Lab data pack, collector, event studies, evidence, identity, matched comparisons and inference | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
 | Test tiers, isolation, and command selection | [tests/README.md](tests/README.md) |
 | Baseline provenance and interpretation | [data/baseline/README.md](data/baseline/README.md) and the [V2 baseline index](docs/README.md#baseline-evidence) |
 

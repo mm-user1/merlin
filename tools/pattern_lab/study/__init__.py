@@ -23,6 +23,7 @@ from .builtins import (
     EVIDENCE_VIEW_VERSION,
     FIXED_HORIZON_MODEL_ID,
     TWO_GREEN_HYPOTHESIS_ID,
+    TWO_GREEN_PLAIN_HYPOTHESIS_ID,
     expand_fixed_horizon_case,
     register_builtins,
 )
@@ -46,7 +47,7 @@ from .evidence import RUN_SCHEMA_VERSION
 from .extensions import ExtensionContext
 from .job import InstrumentJobInput, InstrumentJobResult, TimeframeInput, run_instrument_job
 from .report import render_report
-from .results import StudyResults, load_results, summarize_results
+from .results import InstrumentReader, StudyResults, load_results, summarize_results
 from .runner import regenerate_report, run_study
 from .spec import (
     OCCURRENCE_POLICIES,
@@ -73,6 +74,7 @@ __all__ = [
     "HypothesisDescriptor",
     "InstrumentJobInput",
     "InstrumentJobResult",
+    "InstrumentReader",
     "MetricDescriptor",
     "ModelCase",
     "ModelDescriptor",
@@ -85,6 +87,7 @@ __all__ = [
     "StudyRequest",
     "StudyResults",
     "TWO_GREEN_HYPOTHESIS_ID",
+    "TWO_GREEN_PLAIN_HYPOTHESIS_ID",
     "TimeframeInput",
     "expand_fixed_horizon_case",
     "load_request",

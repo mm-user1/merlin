@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "analysis_name": "Two green candles: matched comparisons",
+  "notes": "Tracked M3a example. Run it against a completed study of example_study_two_green_pair_30m.json. Inference is an approximate development screen, not a validated edge.",
+  "model_instances": ["fixed_horizon"],
+  "pairwise": [
+    {
+      "id": "volume_filter",
+      "target_variant": "two_green_volume",
+      "control_variant": "two_green_plain"
+    }
+  ],
+  "resamples": 9999,
+  "seed": 20260920
+}

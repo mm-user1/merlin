@@ -1,8 +1,10 @@
-"""Built-in hypothesis and the first evaluation model.
+"""Built-in hypotheses and the first evaluation model.
 
-The built-in condition is the project's two-green-candles example.  The built-in
-model measures a fixed horizon and the price path that follows an anchor bar; it
-owns its own direction and per-timeframe horizon axes, and stores one
+The built-in conditions are the project's two-green-candles example and its
+plain parent without the rising-quote-volume filter, so an analysis can compare
+a filtered child with the inclusive parent it came from.  The built-in model
+measures a fixed horizon and the price path that follows an anchor bar; it owns
+its own direction and per-timeframe horizon axes, and stores one
 direction-independent primitive row per anchor and horizon.
 """
 
@@ -29,6 +31,7 @@ from .contracts import (
 )
 
 TWO_GREEN_HYPOTHESIS_ID = "two_green_rising_quote_volume"
+TWO_GREEN_PLAIN_HYPOTHESIS_ID = "two_green"
 FIXED_HORIZON_MODEL_ID = "fixed_horizon_path"
 
 # Versioned public evidence view: it derives directional outcomes from the saved
@@ -105,6 +108,39 @@ TWO_GREEN_DESCRIPTOR = HypothesisDescriptor(
     prior_bars=lambda parameters: 1,
     description=(
         "At least two consecutive green candles whose quote volume rose on the second. "
+        "Requires one contiguous prior observation bar."
+    ),
+)
+
+
+def _two_green_plain_evaluate(
+    series: BarSeries, parameters: Mapping[str, Any], features: Mapping[str, FeatureValue]
+) -> ConditionValue:
+    """``close[i-1] > open[i-1] and close[i] > open[i]``, without a volume filter.
+
+    Same contiguity, validity and prior-bar requirement as
+    :data:`TWO_GREEN_DESCRIPTOR`; only the rising-quote-volume term is dropped,
+    so this condition is an inclusive parent of that one on common support.
+    """
+    rows = series.row_count
+    value = np.zeros(rows, dtype=bool)
+    valid = np.zeros(rows, dtype=bool)
+    if rows > 1:
+        contiguous = series.contiguous_with_previous()[1:]
+        previous_green = series.close[:-1] > series.open[:-1]
+        current_green = series.close[1:] > series.open[1:]
+        valid[1:] = contiguous
+        value[1:] = contiguous & previous_green & current_green
+    return ConditionValue(value=value, valid=valid)
+
+
+TWO_GREEN_PLAIN_DESCRIPTOR = HypothesisDescriptor(
+    hypothesis_id=TWO_GREEN_PLAIN_HYPOTHESIS_ID,
+    version="1",
+    evaluate=_two_green_plain_evaluate,
+    prior_bars=lambda parameters: 1,
+    description=(
+        "At least two consecutive green candles, with no quote-volume filter. "
         "Requires one contiguous prior observation bar."
     ),
 )
@@ -399,5 +435,7 @@ def register_builtins() -> None:
     """Register the built-in hypothesis and model exactly once."""
     if TWO_GREEN_HYPOTHESIS_ID not in contracts.registered("hypothesis"):
         contracts.register_hypothesis(TWO_GREEN_DESCRIPTOR, builtin=True)
+    if TWO_GREEN_PLAIN_HYPOTHESIS_ID not in contracts.registered("hypothesis"):
+        contracts.register_hypothesis(TWO_GREEN_PLAIN_DESCRIPTOR, builtin=True)
     if FIXED_HORIZON_MODEL_ID not in contracts.registered("model"):
         contracts.register_model(FIXED_HORIZON_DESCRIPTOR, builtin=True)

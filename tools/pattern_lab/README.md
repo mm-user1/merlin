@@ -1,6 +1,6 @@
-# Pattern Lab data foundation and event studies
+# Pattern Lab data foundation, event studies and matched comparisons
 
-Pattern Lab is local, research-only tooling. Three milestones are implemented:
+Pattern Lab is local, research-only tooling. These milestones are implemented:
 
 - **M1a, the data boundary**: a stable Parquet pack, an explicit manifest, a
   one-way importer for the historical prototype NPZ pack, and an interval reader
@@ -22,10 +22,29 @@ Pattern Lab is local, research-only tooling. Three milestones are implemented:
   reads and publication, pinned child thread counts, and canonical evidence
   identical to a direct `workers=1` run. See
   [Workers and the bounded spawn pool](#workers-and-the-bounded-spawn-pool).
+- **M3a, matched comparisons and calibrated inference**: offline analysis of a
+  **completed** study — matched control populations, event-weighted point
+  estimates, one joint calendar block bootstrap and one declared Holm family,
+  sealed into its own artifact with a standalone offline report. See
+  [Matched comparisons and calibrated inference](#matched-comparisons-and-calibrated-inference).
 
-Matched controls and calibrated inference (M3) and sequential bracket execution,
-sizing, leverage and expiry (M4) are **not** implemented, and this milestone
-reports no p-value, confidence interval, significance badge or edge verdict.
+**M3a is implemented; M3b and M4 are not.** M3b owns external-series and panel
+feature context and a frozen-candidate validation path; M4 owns sequential
+bracket execution with sizing, leverage and expiry. The M2 event study itself
+stays descriptive: it reports no p-value, confidence interval, significance
+badge, matched control or edge verdict, and those live only in an M3a analysis
+artifact.
+
+**M3a inference is an approximate development screen, and its delivered
+calibration DID NOT MEET the declared empirical error envelope.** On the tracked
+synthetic fixtures with persistent daily signal states the measured rejection and
+nominal-95% noncoverage rates reached about **7.5-8.3%** against a nominal 5%,
+because the seven-day block bootstrap underestimates the variance there by
+roughly 10%. The implementation is delivered and verified; its statistical
+acceptance gate is **open pending tech-lead review**. Until that is resolved,
+treat every M3a p-value, interval and Holm rejection as an unvalidated,
+anti-conservative screening hint — never as evidence of an edge. See
+[Calibration](#calibration).
 
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
 to an explicit output directory; it never touches Merlin databases, Queue state,
@@ -1885,6 +1904,612 @@ never counted as signal events. The default order follows the declared family,
 not performance, and the declared primary horizon's emphasis never hides the
 other horizons or directions.
 
+## Matched comparisons and calibrated inference
+
+M3a analyses a **completed** M2 study offline. It measures the difference
+between signal outcomes and comparable control outcomes, quantifies that
+difference's uncertainty, and reports the declared multiple-testing family. It
+runs no new backtest, generates no equity and certifies no profitable strategy.
+Every T05 analysis, including a rerun, is an **exploratory development
+analysis**: the family is frozen for one execution, which is not historical
+preregistration.
+
+```bash
+python -m tools.pattern_lab analyze --run-root COMPLETED_STUDY \
+    --spec ANALYSIS.json --output-root NEW_ANALYSIS
+python -m tools.pattern_lab analysis-report --analysis-root ANALYSIS
+```
+
+```python
+from tools.pattern_lab import analysis
+
+result = analysis.run_analysis(
+    request="analysis.json", run_root="completed-study", output_root="new-analysis"
+)
+saved = analysis.load_analysis("new-analysis")
+saved.comparisons()   # estimates, intervals, p-values and availability reasons
+saved.strata()        # every stratum, including zero-event and excluded ones
+saved.daily()         # the daily counts and sums that reproduce the estimator
+analysis.regenerate_report("new-analysis")
+```
+
+These helpers execute no hypothesis module, no saved Python snapshot and no
+metric plugin. Report regeneration needs **only** the sealed analysis artifact:
+not the original study, not its market pack and not any saved source. That
+deliberately differs from M2's `report`, which recomputes its summary from raw
+evidence; `analysis-report` only renders the sealed analysis summary.
+
+### The analysis request
+
+Strict JSON at `schema_version=1`, accepted as a file path or as a mapping
+through one normalization path. There is no trusted normalized-object bypass: an
+already normalized request is rendered back into this schema and revalidated.
+
+```json
+{
+  "schema_version": 1,
+  "analysis_name": "Two green candles: matched comparisons",
+  "model_instances": ["fixed_horizon"],
+  "pairwise": [
+    {
+      "id": "volume_filter",
+      "target_variant": "two_green_volume",
+      "control_variant": "two_green_plain"
+    }
+  ],
+  "resamples": 9999,
+  "seed": 20260920,
+  "notes": null
+}
+```
+
+| Key | Contract |
+| --- | --- |
+| `schema_version` | Exactly `1`; a boolean is not an integer |
+| `analysis_name` | Nonblank label, outside semantic identity |
+| `model_instances` | Nonempty, unique model-instance IDs of the source study |
+| `pairwise` | Optional explicit comparisons; defaults to an empty list |
+| `resamples` | Integer `B` in `[1999, 99999]` |
+| `seed` | Integer in `[0, 2**32-1]` |
+| `notes` | Free-form text or null, outside semantic identity |
+
+Unknown keys, duplicate JSON keys, duplicate IDs, duplicate semantic pairs,
+self-comparisons, non-finite values and unknown references are all rejected, and
+every error names its field. Pairwise IDs may not use the reserved
+`baseline__` prefix. Cost scales linearly in `resamples` and family size;
+batching bounds intermediate RAM, not total computational work.
+
+Version 1 **fixes** the method: `calendar_score_cbb_v1`, matching
+`instrument_utc_month_v1`, block length **7 days**, two-sided alpha **0.05**,
+pointwise confidence level **0.95** and the support rules below. These resolved
+values are recorded in the frozen family and in the analysis identity even
+though they are not request switches. A future method change needs an explicit
+version, not a silent default change; there is no menu of inference or matching
+methods.
+
+### Admission
+
+Before any output directory exists:
+
+- The source run is loaded **strictly** through the existing reader. A partial
+  run, a missing or invalid completion record, inconsistent counts or identities
+  and corrupt evidence are errors. A caller-supplied results object does not
+  bypass this check: `run_root` must be a path.
+- Every selected model must be the built-in fixed-horizon contract: the exact
+  triple `model_id="fixed_horizon_path"`, `model_version="1"` and
+  `evidence_kind="fixed_horizon_path_v1"`, plus evidence view version `1`, and
+  its saved settings and resolved cases must agree with the built-in validator
+  and resolver. **Evidence kind alone is insufficient** — an extension may
+  legally declare the same kind — and no source extension is imported to decide
+  it. A selected custom model is rejected clearly; return and holding semantics
+  are never guessed from column names. Unselected custom models may remain in
+  the source run.
+- The saved study bounds are rechecked against the study's own saved development
+  protocol. M3a introduces no reserved-period bypass.
+- The output root must be new, must not contain or sit inside the source run,
+  and must not overlap the recorded pack root. Paths are compared resolved,
+  including symlinks.
+
+All source instruments, observation timeframes and cases of the selected models
+participate. There is **no** result-driven ticker, horizon or direction filter in
+this interface.
+
+Once admitted, the normalized request, the source binding, the resolved family
+and an initial status are written **before** any outcome aggregation.
+
+### The declared family
+
+A nonsignal baseline comparison is generated for **every** saved hypothesis
+variant, with the ID `baseline__<source_variant_id>`, followed by the explicitly
+declared pairwise comparisons. All of them are then expanded across the selected
+model instances, timeframes and cases. The canonical order and the stable
+semantic IDs depend only on the semantics, never on the request's list order, on
+filesystem traversal or on worker order; labels are preserved separately and
+identifiers are never truncated.
+
+| Comparison | Target E | Control C |
+| --- | --- | --- |
+| Nonsignal baseline | That variant's saved emitted events with a valid return outcome | Anchors with a known-valid **false** condition for that variant and a valid return outcome |
+| Explicit pairwise | The target variant's saved emissions | The control variant's saved emissions, on the **common** availability of both conditions |
+
+For `state_entry`, a known-true nonemitting anchor belongs to **neither** group,
+and unknown history or an unknown condition is never a false control. Overlap
+between E and C is allowed, counted and reported: an inclusive two-green parent
+genuinely contains some target events, the two means are not independent, and
+the overlap is neither removed nor pretended away. Valid overlap and empty
+support are both accepted rather than rejected.
+
+This delivery implements **inclusive parent** comparisons; there is no
+additional disjoint-complement mode. A report calls a comparison an inclusive
+parent only where that relationship actually holds in the retained strata, and
+logical implication is never inferred from a variant name.
+
+### Masks, time ownership and one checked alignment
+
+The analysis uses the reader's **all-anchor** case view and owns one checked
+alignment stage that joins the saved conditions and emissions to those anchors.
+The existing M2 `join_events` inner merge is not used for admission, and M2's
+event-filtering semantics are unchanged. Join keys are normalized losslessly
+(saved timeframe values may be `int32`); a coercion from a boolean, a float or a
+string is rejected. Duplicate or missing evidence fails; it never disappears
+into a merge. Every selected emission must join a known-valid, true condition at
+the expected saved anchor.
+
+Saved conditions and emissions are used as they stand: the hypothesis is never
+reevaluated. UTC day and calendar-month membership use the **signal close time**
+`signal_time_ms`. The existing next-open entry, horizon, fees and per-outcome
+validity are unchanged; an outcome may cross a month boundary when M2 considered
+it valid, but never the source study end, and a short horizon is never trimmed
+to the longest one's support.
+
+Only anchors that are a target or a control of the comparison are materialized
+as records. An anchor that is neither contributes to no statistic; the
+eligible-anchor counts and the availability and validity losses stay recorded in
+the artifact rather than carried as inert rows. Each raw table is decoded once
+per instrument and reused across every case and comparison, then released.
+
+### Strata, exclusions and weights
+
+A stratum `s` is `(instrument_id, UTC signal month)` inside one resolved
+comparison, model instance, timeframe and case. A stratum is retained only when
+it has at least **20** valid target and **20** valid control observations, and
+target observations on at least **10** distinct UTC days and control
+observations on at least **10** distinct UTC days.
+
+These are explicit support safeguards, not assertions of independent samples.
+They depend on availability and counts, **never** on return values. Every
+stratum is recorded — including zero-event and excluded ones — with its counts,
+days and reason codes (`target_count_below_minimum`,
+`control_count_below_minimum`, `target_days_below_minimum`,
+`control_days_below_minimum`). There is no fallback to another month, no zero
+fill of outcomes, no inferred missing control and no performance-based
+exclusion. The retained strata define the supported population.
+
+For retained strata, with counts `nE_s`, `nC_s` and net-return sums `a_s`, `b_s`:
+
+```text
+N       = sum_s nE_s
+muE_s   = a_s / nE_s
+muC_s   = b_s / nC_s
+w_s     = nE_s / N
+signal  = sum_s w_s * muE_s       # equivalently sum_s a_s / N
+control = sum_s w_s * muC_s
+lift    = signal - control
+```
+
+Gross means use the **same** masks and support and fees are preserved
+separately. Returns are fractions internally; the HTML labels percentages and
+percentage points explicitly. Signal, control, net and gross are distinct
+fields; overlapping observation returns are never summed into profit. An empty
+supported population produces null estimates with reasons, never zeros and never
+an exception.
+
+The artifact reports retained and available valid target counts and their ratio,
+lost target counts by availability and support reason, retained control counts,
+unique overlapping anchors, included and excluded instruments and months, and
+the original source family counts. A support-filtered mean is never labelled the
+mean of all original signals, and the raw valid target summaries before matching
+are shown separately.
+
+For a supported stratum where E is a subset of C, the artifact publishes
+`nE_s/nC_s` and the attenuation identity
+
+```text
+lift_s = (1 - nE_s/nC_s) * disjoint_lift_s
+```
+
+when that complement is nonempty. This is a **stratum-level** identity: different
+stratum shares are exactly why one pooled attenuation factor may not be applied
+to the weighted aggregate, and no additional unplanned contrast is estimated.
+
+Ticker and month diagnostics use the same retained stratum definition. The
+equal-ticker descriptive companion averages defined per-ticker estimates, where
+each ticker's own months use its target-count weights; a missing ticker is
+omitted with its denominator disclosed, never assigned zero. These diagnostics
+carry **no** p-value and no significance badge.
+
+A per-case fingerprint of the retained target anchors and their support is
+stored. Fingerprints are compared within one comparison, model instance,
+timeframe and direction across horizons: when they differ, the report states
+that those horizon rows use different populations even where the counts happen
+to agree. There is no automatic common-support retrimming. Occurrence variants
+that share one condition also share its known-false control population; those
+comparisons are named and are not independent tests.
+
+### One statistical method, with an explicit approximation
+
+The estimand is the supported, event-weighted **mean net-return difference**
+above. It is not causation, an equity curve, a random-direction strategy or
+every possible use of the pattern. Matching is conditional on instrument and UTC
+month only; it does not remove every market regime or historical
+universe-selection bias.
+
+Inference is a calendar block bootstrap of the **joint linearized estimator**,
+computed from daily counts and sums. It includes control uncertainty, changing
+event weights and their covariance, without materializing bar tables repeatedly
+and without bootstrap ratios that can have empty control denominators. It is an
+asymptotic approximation that requires weak dependence, adequate moments and
+support and a reasonably stable centered influence process. Seven days is a
+declared research setting, not a guarantee against arbitrary long memory or
+regime change.
+
+Saved results carry `inference_scope="approximate_development_screen"`, and the
+qualification is visible next to every inferential output. More calendar days do
+not prove those assumptions, and this build does **not** assert that a 7-day
+block controls error under long dependence; see
+[known limits](#milestone-handoff-and-known-limits). Holm cannot repair an
+invalid or anti-conservative individual p-value. Nothing here advertises
+guaranteed 5% family-wise error or an independently validated edge.
+
+**The calendar grid** is every UTC day intersecting the source study interval,
+sorted, including days with no eligible observation. Precisely, day `d` is
+included iff `[d, d+1 day)` intersects the half-open study interval, so
+`[2025-07-01, 2026-07-01)` contains **365** days, not 366. Partial boundary days
+stay explicit. A missing contribution means count and sum zero for aggregation
+only: it fabricates no valid market bar and no zero-return observation, and
+zero-contribution padding is never counted as supported inference history. The
+same day grid and the same resampled day indices serve all instruments and all
+comparisons.
+
+For each retained stratum and day the artifact saves `e_sd`, `c_sd` (counts),
+`a_sd`, `b_sd` (net-return sums), the gross sums and the overlap counts.
+Outside a stratum's month its contribution is zero, and the table is stored in
+compact sparse form with that rule and the complete grid recorded beside it.
+Excluded stratum diagnostics are preserved as well.
+
+**Joint daily influence contributions.** For each calendar day `d`:
+
+```text
+uE_d = [sum_s a_sd - signal * sum_s e_sd] / N
+
+uC_d = sum_s [
+           (muC_s - control) * e_sd
+         + (nE_s / nC_s) * (b_sd - muC_s * c_sd)
+       ] / N
+
+uD_d = uE_d - uC_d
+```
+
+Each vector sums to zero up to floating-point error; its tiny empirical mean is
+subtracted before bootstrap evaluation, and a residual that is material against
+the absolute contributions that produced it is an implementation failure rather
+than something centering conceals. Counts stay exact integers and sums are
+float64. The `e_sd` terms matter: omitting them silently freezes the estimated
+event weights. Overlapping E and C observations contribute to both vectors on
+the same day, preserving their covariance.
+
+**Resampling.** Method `calendar_score_cbb_v1` uses a fixed-length circular
+block bootstrap **of the day vectors**, not circular shifting of a signal mask.
+With `T` days, `L=7` and `K=ceil(T/L)`: each replicate independently draws `K`
+starts uniformly from `[0,T)`, expands each to `L` consecutive indices modulo
+`T`, concatenates them and keeps the first `T`. That *same* index sequence is
+applied to every instrument's joint contributions and to every comparison —
+there is no per-ticker, per-side, per-event or per-case independent resampling.
+For each estimator, `z_b = sum_d u[index_b[d]]` is the centered bootstrap error;
+it is not divided by `T` again, because the contributions already include `N`.
+
+Draws come from `numpy.random.Generator(numpy.random.PCG64(seed))` in a stable
+**replicate-major** order, so processing replicates in bounded batches never
+changes the drawn sequence. The implementation uses block prefix sums over two
+concatenated copies of the day vector; the tests keep a slow index-based oracle.
+No `resamples × anchors × cases` tensor is materialized and no replicate
+intermediate is written to disk.
+
+**Intervals and the p-value.** For each of signal, control and lift the 95%
+pointwise **basic** interval is
+
+```text
+[theta - quantile(z, 0.975), theta - quantile(z, 0.025)]
+```
+
+with NumPy's linear quantile convention. Intervals may be asymmetric and are
+never recentred by a normal approximation. They are **not** simultaneous
+Holm-adjusted intervals.
+
+Only lift is tested, against `H0: lift = 0`, two-sided:
+
+```text
+p_upper = (1 + count(z_D >= observed_lift)) / (B + 1)
+p_lower = (1 + count(z_D <= observed_lift)) / (B + 1)
+p_raw   = min(1, 2 * min(p_upper, p_lower))
+```
+
+Ties count inclusively. The finite-draw correction avoids a zero p-value; it
+does **not** make bootstrap inference exact. `B`, the seed, the method version
+and the minimum two-sided resolution `2/(B+1)` are all recorded. Net
+profitability is not inferred from the lift p-value, and no gross-return,
+MFE/MAE or subgroup p-value is reported.
+
+### Inference availability and the declared family correction
+
+Beyond the retained-stratum requirements, an inferential result additionally
+requires all of:
+
+| Gate | Requirement |
+| --- | --- |
+| Day grid and supported span | `T >= 336` **and** `supported_span_days >= 336` |
+| Joint active days | `joint_active_days >= 252` |
+| Supported blocks | `supported_blocks >= 48` |
+| Retained coverage | `>= 80%` of valid target observations on common condition and outcome availability retained after stratum support exclusions |
+| Horizon ceiling | case horizon `<= 8 hours` |
+| Bootstrap variation | finite and nondegenerate for the tested contrast |
+
+A **joint active day** has at least one retained E and one retained C
+observation in the pooled population. `supported_span_days` is the inclusive
+calendar distance between the first and last joint active days, and zero when
+there are none. The full calendar grid is partitioned into non-overlapping
+7-day bins anchored at its first UTC day; `supported_blocks` counts **full**
+seven-day bins with at least 4 joint active days, and an incomplete last bin is
+not one. These are coverage diagnostics, not independent-sample-size estimates.
+Neither extra tickers nor empty padded days may turn an 84- or 180-day
+population into a near-year inferential claim, and the gates are not
+stationarity tests.
+
+There is **no** minimum ticker count: an explicitly selected single ticker is a
+valid population with that scope named, and a day count is never multiplied by a
+ticker count and called independent support.
+
+`T`, `L`, `K_draw = ceil(T/L)`, `supported_span_days`, `joint_active_days`,
+`supported_blocks` and the retained months and counts are published for every
+member. **`K_draw` is the number of bootstrap block draws, not the amount of
+supported data.** A sparse near-year population that fails any gate keeps its
+point estimates and descriptive results with null inferential fields. There is
+no warnings-only bypass.
+
+Reason codes are explicit and every applicable reason is reported in a fixed
+order: `no_matched_support`, `insufficient_span`, `insufficient_active_days`,
+`insufficient_supported_blocks`, `insufficient_retained_coverage`,
+`unsupported_inference_horizon`, `degenerate_contrast`.
+
+A constant contrast — including identical E and C — keeps its point estimate and
+gets no inferential claim. The numerical rule is fixed: with
+`sigma = std(z_D, ddof=1)` and
+`scale = sqrt(T) * max(max|uE|, max|uC|, max|uD|)` over the centered vectors, the
+contrast is degenerate when every `z_D` is identical or
+`sigma <= 128 * finfo(float64).eps * scale`. This detects cancellation relative
+to the **component** uncertainty, not merely relative to the already cancelled
+`uD`. There is no fixed economic epsilon, no jitter and no variance floor. Each
+computed bootstrap records its standard deviation and both interval quantiles
+for all three estimators; an unsupported member keeps null bootstrap diagnostics
+while its coverage geometry stays present.
+
+**One family** comprises all resolved comparison, model, timeframe and case lift
+tests frozen above. Both directions remain explicit members; there is no
+mirrored-direction deduplication. Unavailable members stay in the family size
+`m` with `p = 1` used internally for the adjustment and null inferential fields
+in the output. No member is removed after seeing support, effects or p-values.
+
+Holm sorts by `(p, stable_id)`; for rank `i` from 1 the adjusted value is the
+running maximum of `(m - i + 1) * p_i` clipped to 1, then mapped back to the
+stable IDs. An available member has `nominal_reject_holm=true` only when its
+adjusted `p <= 0.05`. The sign of a detected difference is labelled: a negative
+difference is not a positive edge. The artifact states whether
+`2/(B+1) > 0.05/m` prevents any first rejection; `B` is never increased
+silently.
+
+There is no automatic practical-effect threshold, practical rejection verdict,
+candidate promotion or winner sorting. A non-rejection means insufficient
+evidence for that test, not proof that the effect is absent. Holm covers only
+this declared family, never an agent's unrecorded adaptive search across earlier
+runs.
+
+### The sealed analysis artifact
+
+The analysis writes into its own output root and never mutates an input study
+file, including that study's derived report.
+
+```text
+request.json          normalized analysis request
+family.json           resolved comparisons/cases/method/support constants
+source.json           source study identities, completion and evidence-set hashes
+strata.parquet        included/excluded strata and support/point-estimate facts
+daily.parquet         counts/sums sufficient to reproduce the estimator
+summary.json          immutable result rows, intervals, p-values and disclosures
+provenance.json       paths, environment, timings and implementation attribution
+status.json           terminal state and planned/processed comparison counts
+completion.json       validated hash manifest, published last
+derived/report.html   regenerable; outside the immutable hash set
+```
+
+Each artifact and table carries a documented schema version, stable keys, units
+and availability rules. Strict JSON uses `null` rather than NaN or Infinity. The
+existing serialization and path helpers are reused, but the completion record
+carries its own `analysis_schema_version` and `artifact="pattern_lab_analysis"`
+so it can never masquerade as, or be validated as, an M2 study completion
+record.
+
+The artifact is bound to the source's exact completion and evidence-set hashes
+and to its specification, data and implementation identities. It also records a
+**semantic analysis identity** over the canonical request, the family, the
+method and the source's semantic inputs, and an **analysis implementation
+digest** of the modules actually used — including the shared expansion and
+statistic code, explicitly `study/builtins.py`, `study/observations.py` and the
+resolved `EVIDENCE_VIEW_VERSION`. Paths, labels, wall-clock timings and worker
+provenance are physical metadata, not numerical identity. Dependency versions are
+recorded; bitwise cross-platform equality is not claimed universally.
+
+Source runs from `workers=1` and `workers=2` may have different physical
+evidence hashes while their semantic identities and numerical results are
+identical; both facts are preserved. A relocated source or analysis stays
+readable, because paths are recorded provenance and not integrity proofs. Saved
+source code is inert provenance and is never imported by this workflow.
+
+The admitted source binding is verified **again** before final publication: if
+its immutable evidence changed while it was being read, the analysis fails
+without a completion seal. Cooperative immutable input is assumed; this is not
+an adversarial filesystem security model, and no lock or recovery journal is
+added to an otherwise immutable study run.
+
+Publication uses atomic writes with the completion record last. A normal failure
+or interrupt leaves an honest `failed` or `interrupted` status and no valid
+completion, and the original cause survives even when the status write also
+fails. An output directory this operation already created may remain
+inspectable, but there is **no** automatic retry, overwrite or resume: a failed
+output root cannot be reused, so choose a new root or remove the failed artifact
+explicitly. The completion record is the point of no return: once it has been
+atomically published, a later exception never rewrites that sealed status, and a
+sealed successful analysis is never retroactively failed by a report-regeneration
+exception.
+
+`load_analysis` and `analysis-report` verify the complete versioned seal and its
+file hashes before trusting a result or rewriting the HTML, and they validate
+counts, identities and result/family membership agreement rather than matching
+bytes alone. An unsealed, truncated or inconsistent artifact is rejected before
+any derived file is altered. There is no partial-inference bypass.
+
+### The offline analysis report
+
+`derived/report.html` is a standalone light-theme page with no CDN, no network
+dependency and no required JavaScript package: escaped HTML tables only. It
+shows the source identities and interval, the analysis family and method
+settings; signal and control net means, net lift, gross means and the fee
+assumption; support, exclusion and overlap counts, inclusive-parent shares, the
+retained target share, per-member calendar and block geometry and
+differing-horizon support; pointwise intervals, raw and adjusted lift p-values
+and availability reasons; every declared case with primary-horizon emphasis that
+never hides the alternatives; ticker and month descriptive diagnostics with the
+equal-ticker companion; and explicit exploratory, overlapping-observation and
+method-assumption disclosures. Nominal-level labels, the approximation
+qualification and the documented long-dependence limitation sit adjacent to the
+inference table. Commission is included; funding and slippage are excluded, and
+no equity or profit claim appears.
+
+Artifact completion and statistical availability are distinguished. All labels,
+IDs and notes are escaped. The default order is the canonical family, not best
+return or smallest p.
+
+### Memory, performance and the extension boundary
+
+One pure numerical entry point, `analysis.evaluate_observations`, accepts
+per-observation aligned records — one table or an iterable of per-instrument
+tables — with the closed column set
+
+```text
+member_id, instrument_id, signal_time_ms, is_target, is_control,
+available, net_return, gross_return, return_valid
+```
+
+plus the frozen family, the declared instruments and the study interval. It runs
+the **same production** calendar stratification, support exclusions, weighting,
+daily aggregation, joint influence, inference gates, bootstrap and Holm, and
+returns numeric results and compact tables. It publishes no artifact and
+certifies no source provenance. Dimensions, exact key types, masks and finite
+valid returns are validated at this boundary; an invalid row must be null and is
+never silently removed.
+
+`run_analysis` obtains those records through its checked evidence alignment and
+calls this function, so a large calibration repetition enters here rather than
+at precomputed means, selected strata, daily sums or influence vectors. Lower
+level helpers remain suitable as unit-test oracles but never substitute for
+end-to-end numerical calibration.
+
+Compact day and stratum aggregates are retained and bootstrap replicates are
+processed in bounded batches. Memory may scale with the declared family and the
+daily evidence, and that cost is honest: there is no `O(B × bars × cases)`
+tensor, no per-replicate Parquet scan, no repeated hypothesis computation, no
+worker retry and no hidden parallel layer. M2's workers remain available for
+generating studies; offline M3a aggregation is a vectorized coordinator-side
+calculation and takes **no** worker-count option.
+
+Agent scripts can read the saved tables and add their own descriptive metrics
+and sorts without editing inference internals. An unsupported inferential model
+fails explicitly. The comparison aggregation and numerical functions stay
+reusable for a later model adapter, but no speculative interface and no
+arbitrary inferential plugin system is provided. Source-study report behavior is
+descriptive and backward compatible.
+
+### Calibration
+
+The declared calibration experiments live in
+`tools.pattern_lab.analysis.calibration` and run through
+`evaluate_observations`, so every repetition exercises the production path:
+
+```bash
+python -m tools.pattern_lab.analysis.calibration --output-root EXTERNAL_TEMP_DIR
+```
+
+The module freezes every generator setting — a 30m grid, four instruments,
+`SeedSequence([20260920, scenario_id, repetition_id, stream_id])` with stream 0
+for data and stream 1 for the bootstrap seed, actual UTC calendar months, the
+common and individual factor loadings, the daily AR(1) coefficient and level
+scale, the bar innovation scale and law, the signal chain transition
+probabilities and their stationary initialization, and the bar-level target
+probabilities — and records them, with their digest, beside the results.
+
+The generators produce **synthetic outcome and mask records**, not coherent OHLC
+backtests: a horizon outcome is an additive path sum and the per-observation
+cost is a constant, which leaves the tested lift unchanged because a constant
+cancels in a difference of means. No distributional claim about real markets
+follows from any setting.
+
+Acceptance is an **empirical screen**, not a test that the true error equals 5%.
+For each admitted scenario the raw primary rejection rate, the primary
+nominal-95% interval noncoverage and the nominal Holm family-wise rejection rate
+are published with Wilson 95% intervals and exact denominators, and each needs a
+one-sided 95% exact binomial upper bound at or below **0.08**. That ceiling is a
+declared maximum empirical error envelope on these fixtures — **not** a new test
+alpha, a 92% interval or a certification of exact 5% control. Alpha stays 0.05
+and the reported intervals stay nominally 95%. The checks are an intersection of
+individual bounds and are not jointly 95%. At least 95% primary inferential
+availability is required, and every refusal reason is reported, because refusal
+cannot manufacture a passing rate.
+
+**The delivered run passed 11 of those 15 checks.** Availability was 100% on
+every admitted scenario and all five Holm family-wise rates passed (2.55-2.85%).
+The independent scenario (5.30%) and the conditional-confounding scenario
+(5.20%) are at the nominal level. The two scenarios whose generator combines
+AR(1) daily factors with a **persistent daily signal-state chain** failed: the
+dependent Student-t scenario measured 8.05% rejection and 8.30% noncoverage
+(bounds 9.12% and 9.39%), and the 336-day admission-boundary scenario measured
+7.45% and 7.65% (bounds 8.49% and 8.70%). The cause is a variance
+underestimate, not an arithmetic error: the bootstrap-implied standard error is
+0.99 of the empirical sampling spread when signals are iid — even with AR(1)
+daily returns — and 0.90 when the signal state is persistent. **M3a's
+statistical acceptance is therefore open**; the method needs a reviewed
+revision before its inferential output can be treated as an accepted screen.
+
+Alongside them the driver runs short-population refusal checks at 84 and 180
+days — including the same records embedded in a 365-day grid with
+zero-contribution padding, which must stay unavailable — a **required
+long-dependence limitation experiment** at daily AR 0.9 with two signal
+persistences, planted strong and modest effects, a default-`B` smoke, and a
+bounded replay that routes fixed repetitions through the production checked
+joins as evidence-shaped frames and compares them with the numerical boundary.
+The long-dependence results sit **outside** the admitted-null envelope: they are
+a disclosed limitation, not a claim that a seven-day method handles long memory,
+and the software does not detect such dependence automatically in a real run.
+
+### Reading the saved tables
+
+| Helper | Contents |
+| --- | --- |
+| `comparisons()` | One row per family member: estimates, interval endpoints, raw and Holm-adjusted p-values, the nominal rejection flag, availability reasons and the calendar geometry |
+| `strata()` | Every stratum of every member, retained or not, with counts, distinct days, overlap, net and gross sums and means, the inclusive-parent share, the disjoint-complement mean and the exclusion reason codes |
+| `daily()` | Retained strata's daily target and control counts, net and gross sums and overlap counts, with the day index and its UTC date |
+
+`AnalysisResults` also exposes the verified `request`, `family`, `source`,
+`summary`, `provenance`, `status` and `completion` documents.
+
 ## Commands
 
 ```bash
@@ -1903,6 +2528,9 @@ python -m tools.pattern_lab slice --data-root PATH --instrument ID --start UTC -
 python -m tools.pattern_lab study --spec STUDY.json --data-root PACK --output-root NEW_RUN \
     [--workers N]
 python -m tools.pattern_lab report --run-root NEW_RUN
+python -m tools.pattern_lab analyze --run-root COMPLETED_STUDY --spec ANALYSIS.json \
+    --output-root NEW_ANALYSIS
+python -m tools.pattern_lab analysis-report --analysis-root ANALYSIS
 ```
 
 `collect` accepts an absent destination, an empty one, or one containing nothing
@@ -1926,6 +2554,12 @@ regenerates that run's derived summary and HTML; neither reaches the network, an
 help and imports start no job, spawn no process, scan no pack and execute no
 extension.
 
+`analyze` reads one completed study strictly, writes one sealed analysis into a
+new output root and never modifies the study it read; `analysis-report`
+re-renders a sealed analysis from its own artifact alone. Neither reaches the
+network, reads a market pack, starts a worker or imports a saved module, and
+neither takes a worker count.
+
 JSON goes to stdout and is never polluted by progress logs; diagnostics and
 progress go to stderr. A failed collector command prints a JSON object carrying a
 stable `error_code` on stdout alongside its stderr explanation; the `study` and
@@ -1936,17 +2570,20 @@ stderr-only error behavior. Exit status:
 | --- | --- |
 | `0` | success, including a semantic no-op without a coverage shortfall |
 | `1` | inspection verification problems, or a completed publication or no-op with a reported tail shortfall — published does not mean the requested range is complete |
-| `2` | invalid request, data or dependency; source failure; missing start coverage; historical conflict; invalid or unrecoverable journal; a `study`/`report` preflight, job, data-admission or report failure, or a recorded failed or partial study |
+| `2` | invalid request, data or dependency; source failure; missing start coverage; historical conflict; invalid or unrecoverable journal; a `study`/`report` preflight, job, data-admission or report failure, or a recorded failed or partial study; an `analyze`/`analysis-report` invalid request, refused source admission, computation failure or unsealed artifact |
 | `3` | pack busy; the rejected caller mutated nothing |
 | `4` | a valid pending operation must be recovered or aborted before the requested action, including a research `slice`, a `study`, and a pending **initial** collect that has no manifest yet |
-| `130` | a user `KeyboardInterrupt` during `study` or `report`, after a best-effort status write and cleanup |
+| `130` | a user `KeyboardInterrupt` during `study`, `report`, `analyze` or `analysis-report`, after a best-effort status write and cleanup |
 
 Exit `1` keeps its existing data-command meaning and is never the study-failure
-default. A `study` or `report` translates an unexpected execution failure —
-extension import, an ordinary job exception, a storage or report error — into a
-structured JSON status naming the operation, the phase and the job identity,
-while preserving the original exception as its cause. Collector command behavior
-is unchanged.
+default. A `study`, `report`, `analyze` or `analysis-report` translates an
+unexpected execution failure — extension import, an ordinary job exception, a
+storage or report error — into a structured JSON status naming the operation,
+the phase and the job or analysis identity, while preserving the original
+exception as its cause. They share one dispatch set rather than a parallel
+exception handler, and collector command behavior is unchanged. A **completed**
+analysis artifact exits `0` even when every comparison lacks inferential
+support: that is a published result, not a failure.
 
 A detected conflict returns `2` even though it leaves a valid staging journal
 behind; a subsequent ordinary update then sees that journal and returns `4`. A plain
@@ -1967,9 +2604,20 @@ python tools/run_tests.py -- tests/pattern_lab
 python -m tools.pattern_lab inspect --data-root <pack> --verify
 ```
 
+```bash
+# The declared M3a calibration experiments, once, into an external root:
+python -m tools.pattern_lab.analysis.calibration --output-root "${TMPDIR:-/tmp}/pattern-lab-calibration"
+```
+
 The event-study cases live in `tests/pattern_lab/test_pattern_lab_study_events.py`,
 `_study_model.py`, `_study_admission.py`, `_study_extensions.py`,
-`_study_report.py`, `_study_contracts.py` and `_study_workers.py`.
+`_study_report.py`, `_study_contracts.py` and `_study_workers.py`. The M3a cases
+live in `test_pattern_lab_analysis_estimator.py` (the numerical core, with
+independent row-level, finite-difference and index-based oracles),
+`_analysis_contracts.py` (the request, the resolved family and source
+admission), `_analysis_artifact.py` (publication, failure, the seal, relocation,
+regeneration and the CLI) and `_analysis_calibration.py` (the calibration
+machinery; the large declared experiments run once through the command above).
 `_study_contracts.py` owns the enforced boundary contracts: custom-model evidence
 admission and read-side revalidation, completion and partial-inspection
 integrity, every accepted request form, used-source attribution, resolved
@@ -2005,13 +2653,46 @@ M1a defines the schemas and the reader; M1b adds the collector, the exclusion lo
 and the recovery contract; M2a adds the sequential event study, its evidence and
 its report, and composes the per-series data fingerprint with the selected
 universe, roles and settings into run identity. M2b adds the bounded spawn pool
-and `workers=1/2` equivalence; M3 owns matched controls and calibrated inference;
+and `workers=1/2` equivalence. **M3a adds matched controls and calibrated
+inference over a completed study**; M3b and M4 are not implemented — M3b owns
+external-series/panel feature context and a frozen-candidate validation path, and
 M4 owns bracket execution, sizing, leverage, expiry and the interpretation of the
 stored instrument rules. M2b block A enforces the boundary contracts M2a
 advertised but did not check; block B adds the bounded spawn pool and the
 `workers=1`/`workers>1` equivalence.
 
 Known limits of these milestones:
+
+- **M3a inference is unvalidated: its acceptance gate failed.** The delivered
+  calibration met 11 of 15 checks; the two admitted scenarios with a persistent
+  daily signal-state chain measured about 7.5-8.3% rejection and noncoverage
+  against a nominal 5%. A nominal Holm rejection is not a validated edge, and
+  these p-values and intervals are anti-conservative under clustered signals.
+- **A seven-day block does not control error under dependence substantially
+  longer than a week**, and the measurements above show it is already
+  anti-conservative at the declared signal persistence. The tracked
+  long-dependence experiment measures the worse case at daily AR 0.9 (8.3% and
+  11.1% rejection at signal persistence 0.70 and 0.97); it sits outside the
+  admitted-null envelope, and the
+  software does not detect such dependence automatically in a real run. No
+  automatic AR fitting, ACF-based refusal rule, alternate block length or
+  runtime sensitivity menu exists, and a longer block is not automatically a
+  cure because it also reduces the number of draws.
+- M3a admits only the built-in fixed-horizon model. A custom model is rejected
+  clearly rather than interpreted, and there is no inferential plugin system.
+- Matching is conditional on instrument and UTC calendar month only. It does not
+  remove every market regime or historical universe-selection bias, and the
+  support gates are not stationarity tests.
+- The near-year admission window (336 grid and supported-span days, 252 joint
+  active days, 48 populated full seven-day bins) is a bounded-usage decision.
+  Shorter or sparser studies stay descriptively usable and publish no p-value or
+  confidence interval; zero-contribution padding never restores availability.
+- Reusing the scalar aggregation later does not validate M4 sequential trading
+  comparisons: occupancy, controls and sizing need their own model-specific
+  estimand.
+- An analysis assumes cooperative immutable input. The source binding is
+  verified twice, but this is not an adversarial filesystem security model, and
+  there is no lock, recovery journal, retry or resume for an analysis.
 
 - Parallelism is a bounded instrument-job pool, not a scheduler: there is no
   adaptive scheduling, no automatic worker-count tuning, no worker replacement,
@@ -2038,7 +2719,10 @@ Known limits of these milestones:
 - Summary and metric memory is bounded per instrument and per group, not for the
   whole run: exact quantiles keep compact per-group samples across instruments.
 - M2a is descriptive: no p-value, confidence interval, significance badge, edge
-  verdict, matched control or automatic winner selection exists.
+  verdict, matched control or automatic winner selection exists there. Those
+  live only in an M3a analysis artifact, which adds no automatic practical-effect
+  threshold, practical rejection verdict, candidate promotion or winner sorting
+  either.
 - Source integrity is a digest check over cooperating stable files. It is not a
   sandbox: trusted Python can still open paths of its own, and arbitrary
   causality cannot be proved by shape checks.

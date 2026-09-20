@@ -906,3 +906,256 @@ def study_job(
         models=tuple(instance.as_json() for instance in request.models),
     )
     return request, payload
+
+
+# --------------------------------------------------------------------------
+# analysis builders shared by the M3a test modules
+# --------------------------------------------------------------------------
+
+ANALYSIS_DAY_MS = 86_400_000
+ANALYSIS_YEAR_START_DAY = "2025-07-01"
+ANALYSIS_MEMBER_ID = "AAA_member"
+
+
+def day_ms(days: int) -> int:
+    return int(days) * ANALYSIS_DAY_MS
+
+
+def utc_ms(day: str) -> int:
+    """UTC epoch milliseconds of a calendar day's midnight."""
+    return int(
+        (np.datetime64(day, "D") - np.datetime64("1970-01-01", "D")).astype("int64")
+    ) * ANALYSIS_DAY_MS
+
+
+def month_start_ms(offset: int, *, first_day: str = ANALYSIS_YEAR_START_DAY) -> int:
+    """UTC midnight of the first day of the month ``offset`` months later."""
+    month = np.datetime64(first_day, "M") + int(offset)
+    return utc_ms(str(month.astype("datetime64[D]")))
+
+
+def analysis_member(
+    *,
+    member_id: str = ANALYSIS_MEMBER_ID,
+    comparison_id: str = "baseline__signal",
+    kind: str = "nonsignal_baseline",
+    target_variant: str = "signal",
+    control_variant: str | None = None,
+    model_instance_id: str = "fh",
+    timeframe_minutes: int = 30,
+    case_id: str = "tf30m.h240m.long",
+    direction: str = "long",
+    horizon_minutes: int = 240,
+    primary: bool = True,
+):
+    """One frozen analysis family member for the numerical boundary."""
+    from tools.pattern_lab.analysis.family import FamilyMember
+
+    return FamilyMember(
+        member_id=member_id,
+        comparison_id=comparison_id,
+        kind=kind,
+        target_variant=target_variant,
+        control_variant=control_variant,
+        model_instance_id=model_instance_id,
+        timeframe_minutes=timeframe_minutes,
+        case_id=case_id,
+        direction=direction,
+        horizon_minutes=horizon_minutes,
+        commission_pct_per_side=0.05,
+        primary=primary,
+        label=member_id,
+    )
+
+
+def analysis_records(
+    *,
+    instrument: str,
+    month_offset: int,
+    targets: int,
+    controls: int,
+    overlap: int = 0,
+    target_value: float | None = None,
+    control_value: float | None = None,
+    rng: Any = None,
+    days: int = 28,
+    member_id: str = ANALYSIS_MEMBER_ID,
+    first_day: str = ANALYSIS_YEAR_START_DAY,
+    available: bool = True,
+) -> "pd.DataFrame":
+    """Build one instrument/month's aligned observation records.
+
+    Rows are spread over ``days`` distinct UTC days of that month.  The first
+    ``targets`` rows are targets, their last ``overlap`` rows are also controls,
+    and the remaining rows are controls only.
+    """
+    import pandas as pd
+
+    from tools.pattern_lab.analysis.estimator import RECORD_COLUMNS
+
+    total = targets + controls - overlap
+    if total <= 0:
+        raise AssertionError("an observation frame needs at least one row")
+    positions = np.arange(total, dtype=np.int64)
+    day_index = positions % int(days)
+    slot = positions // int(days)
+    if int(slot.max()) >= 46:
+        raise AssertionError("too many rows for one day's 30m slots")
+    signal = (
+        month_start_ms(month_offset, first_day=first_day)
+        + day_index * ANALYSIS_DAY_MS
+        + (slot + 1) * 30 * 60_000
+    )
+    is_target = positions < targets
+    is_control = (~is_target) | (is_target & (positions >= targets - overlap))
+    generator = rng if rng is not None else np.random.default_rng(0)
+    net = np.where(
+        is_target,
+        target_value if target_value is not None else generator.normal(0.0, 0.005, total),
+        control_value if control_value is not None else generator.normal(0.0, 0.005, total),
+    )
+    return pd.DataFrame(
+        {
+            "member_id": member_id,
+            "instrument_id": instrument,
+            "signal_time_ms": signal,
+            "is_target": is_target,
+            "is_control": is_control,
+            "available": np.full(total, bool(available)),
+            "net_return": net.astype(np.float64),
+            "gross_return": (net + 0.0005).astype(np.float64),
+            "return_valid": np.ones(total, dtype=bool),
+        },
+        columns=list(RECORD_COLUMNS),
+    )
+
+
+def evaluate_simple(
+    frames,
+    *,
+    instruments,
+    members=None,
+    resamples: int = 1999,
+    seed: int = 20260920,
+    batch_size: int | None = None,
+    start_day: str = ANALYSIS_YEAR_START_DAY,
+    days: int = 365,
+):
+    """Run the numerical boundary over one default twelve-month grid."""
+    from tools.pattern_lab.analysis.estimator import evaluate_observations
+
+    start = utc_ms(start_day)
+    keywords = {} if batch_size is None else {"batch_size": batch_size}
+    return evaluate_observations(
+        list(frames),
+        family=list(members) if members is not None else [analysis_member()],
+        instruments=tuple(instruments),
+        study_start_ms=start,
+        study_end_ms=start + day_ms(days),
+        resamples=resamples,
+        seed=seed,
+        **keywords,
+    )
+
+
+ANALYSIS_STUDY_TIMEFRAME = 30
+ANALYSIS_PAIR_VARIANTS = (
+    {
+        "id": "two_green_volume",
+        "hypothesis": "two_green_rising_quote_volume",
+        "parameters": {},
+        "occurrence": "every_qualifying_bar",
+    },
+    {
+        "id": "two_green_plain",
+        "hypothesis": "two_green",
+        "parameters": {},
+        "occurrence": "every_qualifying_bar",
+    },
+)
+
+
+def analysis_bar_specs(count: int, seed: int) -> tuple:
+    """Deterministic 30m bars with both green runs and rising quote volume."""
+    generator = np.random.default_rng(seed)
+    specs = []
+    price = 100.0
+    for _index in range(count):
+        open_ = price
+        close = open_ * (1.0 + generator.normal(0.0, 0.004))
+        high = max(open_, close) * 1.002
+        low = min(open_, close) * 0.998
+        volume = float(abs(generator.normal(50.0, 20.0)) + 1.0)
+        specs.append((open_, high, low, close, volume))
+        price = close
+    return tuple(specs)
+
+
+def analysis_source_study(
+    root: "Path",
+    *,
+    groups: int = 3400,
+    timeframe: int = ANALYSIS_STUDY_TIMEFRAME,
+    horizons: Sequence[int] = (60, 120),
+    primary: int = 120,
+    contracts: Sequence[str] = ("AAA-USDT-SWAP", "BBB-USDT-SWAP"),
+    hypotheses: Sequence[Mapping[str, Any]] | None = None,
+    workers: int = 1,
+    study_name: str = "analysis source study",
+):
+    """Publish a synthetic pack and run one completed study into ``root``.
+
+    Returns ``(pack_root, run_root, request_document)``.  The study is long
+    enough to retain strata, but deliberately far shorter than the near-year
+    inference admission window.
+    """
+    from tools.pattern_lab import study as pack_study
+
+    root = Path(root)
+    pack = root / "pack"
+    sources = []
+    for index, contract in enumerate(contracts):
+        stamps, values = timeframe_bars(timeframe, analysis_bar_specs(groups, 11 + index))
+        sources.append(
+            instrument_source(
+                stamps, values, symbol=contract.split("-")[0], venue="TEST", contract=contract
+            )
+        )
+    publish(pack, sources)
+    request = study_request(
+        protocol=study_protocol(
+            first_ms=study_group_ms(0, timeframe),
+            coverage_end_ms=study_group_ms(groups, timeframe),
+        ),
+        start_ms=study_group_ms(4, timeframe),
+        end_ms=study_group_ms(groups - 20, timeframe),
+        warmup_ms=study_group_ms(0, timeframe),
+        timeframes=[timeframe],
+        hypotheses=list(hypotheses if hypotheses is not None else ANALYSIS_PAIR_VARIANTS),
+        models=[fixed_horizon_model(timeframe, list(horizons), primary=primary)],
+        study_name=study_name,
+    )
+    run_root = root / "study"
+    pack_study.run_study(request=request, data_root=pack, output_root=run_root, workers=workers)
+    return pack, run_root, request
+
+
+def analysis_request_document(**overrides) -> dict[str, Any]:
+    """The tracked-shaped analysis request used by the M3a test modules."""
+    document = {
+        "schema_version": 1,
+        "analysis_name": "Two green candles: matched comparisons",
+        "model_instances": ["fh"],
+        "pairwise": [
+            {
+                "id": "volume_filter",
+                "target_variant": "two_green_volume",
+                "control_variant": "two_green_plain",
+            }
+        ],
+        "resamples": 1999,
+        "seed": 20260920,
+        "notes": None,
+    }
+    document.update(overrides)
+    return document

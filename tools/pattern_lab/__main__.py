@@ -1,11 +1,13 @@
-"""Pattern Lab data and study command line.
+"""Pattern Lab data, study and analysis command line.
 
 The CLI calls exactly the Python API that researcher scripts use.  JSON goes to
 stdout, diagnostics and progress go to stderr.  Exit status: 0 success, 1
 verification problems or a reported tail shortfall, 2 an invalid request,
-invalid data, a source failure, a study/report failure or a missing dependency,
-3 a busy pack, 4 a valid pending operation that must be recovered or aborted
-first, and 130 a user KeyboardInterrupt during ``study`` or ``report``.
+invalid data, a source failure, a study/analysis/report failure or a missing
+dependency, 3 a busy pack, 4 a valid pending operation that must be recovered or
+aborted first, and 130 a user KeyboardInterrupt during a study, an analysis or a
+report.  A completed analysis artifact exits 0 even when every comparison lacks
+inferential support.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from . import (
     PatternLabPendingError,
     PatternLabStudyError,
 )
+from . import analysis as pack_analysis
 from . import collect as pack_collect
 from . import data as pack_data
 from . import exchange_data
@@ -40,9 +43,11 @@ EXIT_INTERRUPTED = 130
 # an actionable stderr explanation; the older archival commands keep their
 # stderr-only error behavior.
 COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
-# Study commands translate unexpected execution failures into a structured JSON
-# status; the older data commands keep their existing behavior unchanged.
-STUDY_COMMANDS = ("study", "report")
+# Study and analysis commands translate unexpected execution failures into a
+# structured JSON status; the older data commands keep their existing behavior
+# unchanged.  One dispatch set serves both, so no parallel exception handler and
+# no remapping of an unrelated command is introduced.
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report")
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -85,8 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Pattern Lab: collect and update a Parquet market-data pack from public exchange APIs, "
             "recover an interrupted operation, import the historical NPZ pack, inspect a pack, read a "
-            "fixed UTC interval, run a descriptive event study and regenerate its report. Matched "
-            "controls and inference (M3) and bracket execution (M4) are not implemented here."
+            "fixed UTC interval, run a descriptive event study, analyze a completed study with "
+            "matched comparisons and calibrated inference (M3a), and regenerate either report. "
+            "M3b context/frozen validation and M4 bracket execution are not implemented here."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
@@ -214,6 +220,33 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    analyzer = commands.add_parser(
+        "analyze",
+        help="Analyze a COMPLETED event study: matched comparisons and calibrated inference.",
+        description=(
+            "Offline analysis of one completed study run. --spec is a versioned analysis request; "
+            "--run-root is that completed study's exact run directory, read strictly and never "
+            "modified; --output-root is exactly the new analysis directory and must not exist or "
+            "overlap the study or its pack. Every declared comparison is expanded across the "
+            "selected models, timeframes and cases before any calculation. Inference is an "
+            "approximate development screen, not a validated edge."
+        ),
+    )
+    analyzer.add_argument("--run-root", type=Path, required=True, metavar="COMPLETED_STUDY")
+    analyzer.add_argument("--spec", type=Path, required=True, metavar="ANALYSIS.json")
+    analyzer.add_argument("--output-root", type=Path, required=True, metavar="NEW_ANALYSIS")
+
+    analysis_reporter = commands.add_parser(
+        "analysis-report",
+        help="Regenerate a sealed analysis artifact's HTML report.",
+        description=(
+            "The complete versioned seal and its file hashes are verified, then the saved summary "
+            "is rendered again. No bootstrap is rerun and neither the original study nor its "
+            "market pack is needed."
+        ),
+    )
+    analysis_reporter.add_argument("--analysis-root", type=Path, required=True, metavar="ANALYSIS")
+
     reporter = commands.add_parser(
         "report",
         help="Regenerate a completed run's derived summary and HTML report.",
@@ -323,6 +356,18 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
     if args.command == "report":
         _emit(pack_study.regenerate_report(args.run_root))
+        return EXIT_OK
+    if args.command == "analyze":
+        # Exit 0 for a completed artifact even when every comparison lacks
+        # inferential support: that is a published result, not a failure.
+        _emit(
+            pack_analysis.run_analysis(
+                request=args.spec, run_root=args.run_root, output_root=args.output_root
+            )
+        )
+        return EXIT_OK
+    if args.command == "analysis-report":
+        _emit(pack_analysis.regenerate_report(args.analysis_root))
         return EXIT_OK
     raise AssertionError(f"unhandled command {args.command!r}")
 

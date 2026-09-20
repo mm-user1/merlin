@@ -129,8 +129,11 @@ exclusion and collector/instrument-rule provenance) and the descriptive event
 study (a versioned study request and protocol, extensible
 feature/hypothesis/model/metric contracts, fixed-horizon and path outcomes,
 immutable evidence, a regenerable offline HTML report and a bounded spawn pool
-for its per-instrument jobs). It requires
-`pyarrow==22.0.0` from the root `requirements.txt` and never installs
+for its per-instrument jobs) and matched comparisons with calibrated inference
+(M3a: offline analysis of a completed study into its own sealed artifact, with
+matched control populations, event-weighted estimates, one joint calendar block
+bootstrap, one declared Holm family and a standalone offline report). It
+requires `pyarrow==22.0.0` from the root `requirements.txt` and never installs
 dependencies itself.
 
 ```bash
@@ -148,6 +151,14 @@ python -m tools.pattern_lab study --spec tools/pattern_lab/configs/example_study
 python -m tools.pattern_lab study --spec tools/pattern_lab/configs/example_study_two_green_30m.json \
     --data-root <pack> --output-root <new-run-2> --workers 2
 python -m tools.pattern_lab report --run-root <new-run>
+python -m tools.pattern_lab study \
+    --spec tools/pattern_lab/configs/example_study_two_green_pair_30m.json \
+    --data-root <pack> --output-root <pair-run>
+python -m tools.pattern_lab analyze --run-root <pair-run> \
+    --spec tools/pattern_lab/configs/example_analysis_two_green_pair.json \
+    --output-root <new-analysis>
+python -m tools.pattern_lab analysis-report --analysis-root <new-analysis>
+python -m tools.pattern_lab.analysis.calibration --output-root <external-temp-dir>
 ```
 
 Network access happens only inside `collect`, `update` and `recover`, through
@@ -161,13 +172,25 @@ availability is not an operationally prepared market pack.
 instrument job runs in an explicit spawn pool bounded by the selected instrument
 count, and the canonical evidence and identities match the direct run.
 `--output-root` is exactly the new run directory. Exit `130` reports a user
-interrupt of `study` or `report`. Matched
-controls and inference and the sequential bracket probe are not implemented, and
-a study result is descriptive evidence, not a validated edge. Merlin and Strategy
-Lab do not import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See
-the [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,
+interrupt of `study`, `report`, `analyze` or `analysis-report`.
+
+`analyze` reads one completed study strictly, never modifies it, and writes one
+sealed analysis artifact into a new output root; it takes no worker count, and a
+completed artifact exits `0` even when every comparison lacks inferential
+support. `analysis-report` re-renders a sealed analysis from that artifact alone,
+without the study or its pack. **M3a is implemented but its statistical
+acceptance gate is open** — the delivered calibration met 11 of 15 checks and
+measured about 7.5-8.3% error against a nominal 5% on fixtures with persistent
+daily signal states. M3b context/frozen validation and the M4 sequential bracket
+probe are not implemented. An M2 study result is descriptive evidence and an M3a
+nominal Holm rejection is an unvalidated, anti-conservative screening hint —
+neither is a validated edge. Merlin and Strategy Lab do not
+import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See the
+[Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,
 adapters, identity encoding, exclusion/recovery contract, the event-study
-request/evidence/report and worker-pool contracts and the operational recipes.
+request/evidence/report and worker-pool contracts, the M3a request, estimator,
+support gates, declared family, sealed artifact and calibration, and the
+operational recipes.
 
 ## Related documentation
 

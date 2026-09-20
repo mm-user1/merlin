@@ -16,8 +16,8 @@ src/indicators/       shared technical indicators
 src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
 tools/strategy_lab/   local V2-only research pipeline
-tools/pattern_lab/    local research-only market-data pack, collector and
-                      descriptive event studies
+tools/pattern_lab/    local research-only market-data pack, collector,
+                      descriptive event studies and matched comparisons
 tests/                core/server, V2, JavaScript, Strategy Lab, and
                       Pattern Lab suites
 ```
@@ -207,25 +207,41 @@ before a strategy exists. Merlin and Strategy Lab do not import it, and it does
 not change Merlin runtime behavior or CSV handling. Implemented capabilities are
 the Parquet market-data pack with its manifest, NPZ import and fixed-interval
 reader; the closed-bar exchange collector with recoverable updates, cooperative
-process exclusion and collector/instrument-rule provenance; and the descriptive
+process exclusion and collector/instrument-rule provenance; the descriptive
 event study, which turns a versioned study request and protocol into immutable
 per-instrument evidence, a machine-readable summary and one offline HTML report,
-with a bounded spawn pool for its per-instrument jobs. It requires
-`pyarrow==22.0.0` and reaches the network only inside an explicit collect,
-update or recover operation.
+with a bounded spawn pool for its per-instrument jobs; and **M3a matched
+comparisons with calibrated inference**, which analyses a completed study
+offline into its own sealed artifact. It requires `pyarrow==22.0.0` and reaches
+the network only inside an explicit collect, update or recover operation.
 
 `workers` accepts any positive integer: `workers=1` runs each instrument job
 directly and a larger count runs the same job under an explicit spawn pool
 bounded by the selected instrument count, with coordinator-only pack reads and
 publication and canonical evidence identical to the direct run. Event studies
-remain descriptive, with no p-value, confidence interval, matched control or
-edge verdict. Calibrated inference and bracket execution with sizing, leverage
-and expiry are separate later milestones. Shipped code is neither an
-operationally prepared market pack nor a validated research result.
+themselves remain descriptive, with no p-value, confidence interval, matched
+control or edge verdict.
+
+M3a adds matched control populations, event-weighted point estimates, one joint
+calendar block bootstrap and one declared Holm family over a completed study's
+saved evidence. It reads that study strictly, never modifies it, and is a
+coordinator-side calculation with no worker option. **M3a is implemented but its
+statistical acceptance gate is open**: the delivered calibration met 11 of its 15
+declared checks, and the two admitted scenarios combining AR(1) daily factors
+with a persistent daily signal-state chain measured about 7.5-8.3% rejection and
+nominal-95% noncoverage against a nominal 5%, because the seven-day block
+bootstrap underestimates the variance there by roughly 10%. M3b
+external-series/panel context with frozen validation, and M4 bracket execution
+with sizing, leverage and expiry, are not implemented. M3a inference is an
+explicitly approximate development screen; it certifies no error rate, it is
+anti-conservative under clustered signals, and a seven-day block does not
+control error under substantially longer dependence. Shipped code is neither an
+operationally prepared market pack nor a validated research result, and a
+nominal Holm rejection is not a validated edge.
 
 The complete schema, roster, adapter, exclusion, recovery, study, evidence,
-worker-pool and command contracts are in the
-[Pattern Lab guide](../tools/pattern_lab/README.md).
+worker-pool, analysis, estimator, support-gate, artifact and command contracts
+are in the [Pattern Lab guide](../tools/pattern_lab/README.md).
 
 ## Current strategies
 

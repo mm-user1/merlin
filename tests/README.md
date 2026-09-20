@@ -91,9 +91,9 @@ shared modules with `pytest.register_assert_rewrite` in the local conftest **bef
 importing them, using their actual qualified name (`server._helpers`). Keep the
 package marker empty. Do not import conftest or add test-to-test imports.
 
-`tests/pattern_lab` covers the Pattern Lab data foundation, collector and event
-studies with runtime-generated synthetic packs only; it reads no market data and
-commits no binary fixtures. The `test_pattern_lab_study_*.py` modules build
+`tests/pattern_lab` covers the Pattern Lab data foundation, collector, event
+studies and M3a matched comparisons with runtime-generated synthetic packs only;
+it reads no market data and commits no binary fixtures. The `test_pattern_lab_study_*.py` modules build
 hand-calculated bars, write their trusted extension modules into the launcher's
 external temporary root, and drive the real coordinator, so admission ordering,
 recorded status, retained evidence and exit codes are observed rather than
@@ -140,6 +140,32 @@ itself is covered by tests. Shared collector, journal and recovery builders live
 Process-exclusion cases use task-owned child processes with bounded timeouts and
 external storage; no production process is signalled. A Linux run does not certify
 the Windows `msvcrt` lock branch.
+
+The M3a analysis modules are `test_pattern_lab_analysis_estimator.py` (the
+numerical core, checked against an independent row-level weighted oracle, a
+central finite-difference derivative of the exact weighted estimator and a slow
+index-based resampling oracle), `_analysis_contracts.py` (the versioned request,
+the resolved family and source admission), `_analysis_artifact.py` (publication,
+failure and interrupt states, the versioned seal, relocation, regeneration and
+the CLI) and `_analysis_calibration.py` (the calibration driver's machinery,
+including the frozen generator contract and the exact-binomial acceptance
+arithmetic). They build studies and analyses under the launcher's external
+temporary root and never read market data.
+
+The large declared calibration experiments deliberately stay **outside** normal
+discovery: they run once for a delivery and save one compact JSON artifact under
+an external task-owned root. Their purpose is to measure and bound the
+finite-sample error of the approximate inference screen on declared synthetic
+fixtures — it is not a certification of exact 5% control, and the required
+long-dependence experiment sits outside the admitted-null envelope by design.
+**The delivered run met 11 of its 15 acceptance checks**, so M3a's statistical
+acceptance is open; rerun this command after any change to the estimator, the
+support gates or the resampling method.
+
+```bash
+python -m tools.pattern_lab.analysis.calibration \
+    --output-root "${TMPDIR:-/tmp}/pattern-lab-calibration"
+```
 
 ```powershell
 & $py tools/run_tests.py -- tests/pattern_lab

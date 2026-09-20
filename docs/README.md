@@ -51,7 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
-| [Pattern Lab data foundation, collector and event studies](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, roster, exchange collector, update/recovery and exclusion contract, NPZ import, fixed-interval reads and input identity, plus the event-study request, extension, evidence, identity, worker-pool and report contracts |
+| [Pattern Lab data foundation, collector, event studies and matched comparisons](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, roster, exchange collector, update/recovery and exclusion contract, NPZ import, fixed-interval reads and input identity, the event-study request, extension, evidence, identity, worker-pool and report contracts, and the M3a analysis request, estimator, support gates, declared family, sealed artifact and calibration |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 ## Baseline evidence
@@ -91,6 +91,6 @@ are evidence records; current architecture and procedure documents do not.
 - V2 core or Grid change: read [V2 architecture](engine_v2/ARCHITECTURE.md),
   then certification and performance evidence if parity or speed is affected.
 - Strategy Lab work: read its [full guide](../tools/strategy_lab/README.md).
-- Pattern Lab data, collector, update, event-study or report work: read its
-  [guide](../tools/pattern_lab/README.md).
+- Pattern Lab data, collector, update, event-study, matched-comparison or report
+  work: read its [guide](../tools/pattern_lab/README.md).
 - Test planning: read the [test guide](../tests/README.md).
