@@ -41,6 +41,8 @@ from .estimator import RECORD_COLUMNS, evaluate_observations
 from .family import FamilyMember
 from .request import ALPHA
 
+# Stays at 1: the saved scale diagnostics are additive fields beside the
+# existing summary and rate fields, and no existing field changed its meaning.
 CALIBRATION_SCHEMA_VERSION = 1
 
 MASTER_SEED = 20260920
@@ -689,6 +691,9 @@ def run_repetition(
     primary_id = primary_member_id(scenario)
     primary = next(item for item in estimates["members"] if item["member_id"] == primary_id)
     interval = primary["intervals"]["lift"]
+    # Already computed by the production bootstrap; retained here rather than
+    # recomputed, so no second resampling and no extra random draw is consumed.
+    bootstrap = primary["bootstrap"]["lift"] or {}
     family_rejected = any(
         item["nominal_reject_holm"] for item in estimates["members"] if item["inference_available"]
     )
@@ -708,6 +713,9 @@ def run_repetition(
         "primary_interval_width": (
             None if interval is None else interval["upper"] - interval["lower"]
         ),
+        "primary_bootstrap_sd": bootstrap.get("standard_deviation"),
+        "primary_error_quantile_0025": bootstrap.get("quantile_0025"),
+        "primary_error_quantile_0975": bootstrap.get("quantile_0975"),
         "primary_geometry": dict(primary["geometry"]),
         "primary_retained_targets": primary["supported_population"][
             "retained_target_observations"
@@ -1160,6 +1168,29 @@ def run_scenario(
     widths = np.array(
         [item["primary_interval_width"] for item in available], dtype=np.float64
     )
+    # A direct scale diagnostic over one shared population: the available
+    # primaries that published a finite bootstrap SD and lift. Numerator and
+    # denominator use exactly these samples, which is not the `effect.*`
+    # population of every repetition with a non-null lift.
+    diagnostic = [
+        item
+        for item in available
+        if item["primary_bootstrap_sd"] is not None
+        and item["primary_lift"] is not None
+        and np.isfinite(item["primary_bootstrap_sd"])
+        and np.isfinite(item["primary_lift"])
+    ]
+    diagnostic_sd = np.array(
+        [item["primary_bootstrap_sd"] for item in diagnostic], dtype=np.float64
+    )
+    diagnostic_lifts = np.array(
+        [item["primary_lift"] for item in diagnostic], dtype=np.float64
+    )
+    empirical_sd = float(np.std(diagnostic_lifts, ddof=1)) if diagnostic_lifts.size > 1 else None
+    mean_bootstrap_sd = float(np.mean(diagnostic_sd)) if diagnostic_sd.size else None
+    rms_bootstrap_sd = (
+        float(np.sqrt(np.mean(np.square(diagnostic_sd)))) if diagnostic_sd.size else None
+    )
     reasons: dict[str, int] = {}
     for item in rows:
         for reason in item["primary_reasons"]:
@@ -1224,6 +1255,23 @@ def run_scenario(
             "median": float(np.median(widths)) if widths.size else None,
             "p10": float(np.quantile(widths, 0.10)) if widths.size else None,
             "p90": float(np.quantile(widths, 0.90)) if widths.size else None,
+        },
+        "bootstrap_scale": {
+            "n": len(diagnostic),
+            "population": (
+                "Available primaries with a finite published bootstrap SD and lift. The ratio "
+                "uses these same samples in its numerator and denominator; it is a standard-"
+                "deviation diagnostic on this scenario's own repetitions, not a variance factor "
+                "and not the effect.* population."
+            ),
+            "empirical_lift_sd": empirical_sd,
+            "mean_bootstrap_sd": mean_bootstrap_sd,
+            "rms_bootstrap_sd": rms_bootstrap_sd,
+            "mean_bootstrap_sd_over_empirical_sd": (
+                mean_bootstrap_sd / empirical_sd
+                if mean_bootstrap_sd is not None and empirical_sd
+                else None
+            ),
         },
         "supported_geometry": _geometry_summary(rows),
         "published_inference": {

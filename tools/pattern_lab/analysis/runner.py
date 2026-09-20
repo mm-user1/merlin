@@ -29,11 +29,10 @@ DISCLOSURES = (
     "historical preregistration, and a rerun is still exploratory.",
     "Inference is an approximate development screen, not certification of exact 5% family-wise "
     "error, 95% coverage or an independently validated edge.",
-    "The delivered calibration did NOT meet its declared empirical error envelope. On tracked "
-    "synthetic fixtures with persistent daily signal states the measured rejection and "
-    "nominal-95% noncoverage rates were about 7.5-8.3% against a nominal 5%, because the "
-    "bootstrap variance estimate is roughly 10% too small there. These p-values and intervals are "
-    "anti-conservative under clustered signals and are unvalidated.",
+    "The delivered calibration did NOT meet its declared empirical error envelope. On the tracked "
+    "fixtures with persistent daily signal states, rejection and nominal-95% noncoverage reached "
+    "approximately 7.5-8.3% against nominal 5%. The cause is still under investigation; these "
+    "inferential outputs remain unvalidated and were anti-conservative on those fixtures.",
     "The calendar block bootstrap assumes weak dependence, adequate moments and support and a "
     "reasonably stable centered influence process. A seven-day block does not control error under "
     "dependence substantially longer than a week; see the tracked long-dependence experiment.",
@@ -105,17 +104,24 @@ def run_analysis(
         "processed_members": 0,
         "members_with_inference": 0,
     }
-    # The request, the source binding, the resolved family and an initial status
-    # are durable before any outcome is aggregated.
-    evidence.write_json(root / artifacts.REQUEST_FILE, request_document)
-    evidence.write_json(root / artifacts.SOURCE_FILE, source_binding)
-    evidence.write_json(root / artifacts.FAMILY_FILE, family_document)
-    artifacts.write_status(
-        root, terminal=artifacts.TERMINAL_RUNNING, counts=counts, started=started, finished=None
-    )
-
-    phase = "aggregate"
+    # The output root is admitted and created before the protected region, so
+    # `root`, `counts`, `started`, `clock` and `phase` are always bound when the
+    # failure handler runs; an admission failure keeps its own cause and never
+    # reaches status writing with an unbound or unowned root.
+    phase = "freeze"
     try:
+        # The request, the source binding, the resolved family and an initial
+        # status are durable before any outcome is aggregated, and a failure in
+        # any of those writes is recorded like every later one.
+        evidence.write_json(root / artifacts.REQUEST_FILE, request_document)
+        evidence.write_json(root / artifacts.SOURCE_FILE, source_binding)
+        evidence.write_json(root / artifacts.FAMILY_FILE, family_document)
+        artifacts.write_status(
+            root, terminal=artifacts.TERMINAL_RUNNING, counts=counts, started=started,
+            finished=None,
+        )
+
+        phase = "aggregate"
         records = analysis_source.RecordSource(source, members)
         estimates = evaluate_observations(
             records.frames(),

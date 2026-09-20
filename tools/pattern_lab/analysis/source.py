@@ -341,9 +341,11 @@ def _aligned_masks(
                 rows["signal_time_ms"].to_numpy(),
                 f"{where}.emissions[{variant_id}].signal_time_ms",
             )
-            if not np.array_equal(
-                np.sort(signal), np.sort(stamps + timeframe * 60_000)
-            ):
+            # Row-wise: each emission's signal time must be its *own* anchor's
+            # close. Sorting the two columns independently would accept a
+            # permutation of signal times across different anchors, while the
+            # element-wise comparison stays independent of the saved row order.
+            if not np.array_equal(signal, stamps + timeframe * 60_000):
                 raise PatternLabDataError(
                     f"{where}: variant {variant_id!r} saves an emission signal time that is not "
                     f"its anchor's close at {timeframe}m."

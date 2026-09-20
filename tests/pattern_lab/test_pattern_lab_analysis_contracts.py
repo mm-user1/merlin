@@ -410,6 +410,42 @@ def test_an_emission_anchor_outside_the_saved_anchors_fails(tmp_path, source_stu
         list(records.frames())
 
 
+def test_emission_signal_times_are_checked_against_their_own_anchor(tmp_path, source_study):
+    """Permuting signal times across two anchors is a real defect, not a reordering."""
+    _pack, run_root, _request = source_study
+    copy = tmp_path / "permuted"
+    _copy_tree(run_root, copy)
+    path = copy / "jobs" / "TEST_AAA-USDT-SWAP" / "emissions.parquet"
+    frame = study_evidence.read_table(path)
+    variant = frame["variant_id"].iloc[0]
+    first, second = frame.index[frame["variant_id"] == variant][:2]
+    assert frame.loc[first, "anchor_open_ms"] != frame.loc[second, "anchor_open_ms"]
+    frame.loc[[first, second], "signal_time_ms"] = frame.loc[
+        [second, first], "signal_time_ms"
+    ].to_numpy()
+    study_evidence.write_table(path, frame, name="emissions")
+    _reseal(copy)
+    admitted = analysis_source.admit_source(copy, model_instances=["fh"])
+    records = analysis_source.RecordSource(admitted, _members(admitted))
+    with pytest.raises(PatternLabDataError, match="emission signal time that is not"):
+        list(records.frames())
+
+
+def test_a_reordered_but_intact_emission_table_is_still_admitted(tmp_path, source_study):
+    _pack, run_root, _request = source_study
+    copy = tmp_path / "reordered"
+    _copy_tree(run_root, copy)
+    path = copy / "jobs" / "TEST_AAA-USDT-SWAP" / "emissions.parquet"
+    frame = study_evidence.read_table(path)
+    study_evidence.write_table(
+        path, frame.iloc[::-1].reset_index(drop=True), name="emissions"
+    )
+    _reseal(copy)
+    admitted = analysis_source.admit_source(copy, model_instances=["fh"])
+    records = analysis_source.RecordSource(admitted, _members(admitted))
+    assert list(records.frames())
+
+
 def test_each_raw_table_is_decoded_once_per_instrument(source_study):
     _pack, run_root, _request = source_study
     admitted = analysis_source.admit_source(run_root, model_instances=["fh"])

@@ -112,6 +112,138 @@ def test_an_interrupt_leaves_an_honest_status_and_no_seal(tmp_path, source_study
     assert not (output / analysis_artifacts.COMPLETION_FILE).exists()
 
 
+def _break_freeze_write(monkeypatch, target: str, error: BaseException) -> None:
+    """Fail exactly one of the freeze writes, by the file it is writing."""
+    original = study_evidence.write_json
+
+    def write_json(path, payload):
+        if Path(path).name == target:
+            raise error
+        return original(path, payload)
+
+    monkeypatch.setattr(study_evidence, "write_json", write_json)
+
+
+@pytest.mark.parametrize(
+    "target", [analysis_artifacts.REQUEST_FILE, analysis_artifacts.FAMILY_FILE]
+)
+def test_a_freeze_write_failure_is_recorded_with_its_phase_and_root(
+    tmp_path, source_study, monkeypatch, target
+):
+    """The first and a later freeze write are inside the protected region."""
+    _pack, run_root, _request = source_study
+    output = tmp_path / f"freeze-{target}"
+    _break_freeze_write(monkeypatch, target, OSError("the freeze write failed"))
+    with pytest.raises(PatternLabStudyError, match="the freeze write failed") as failure:
+        pack_analysis.run_analysis(
+            request=analysis_request_document(), run_root=run_root, output_root=output
+        )
+    assert failure.value.context == {
+        "operation": "analyze", "phase": "freeze", "analysis_root": str(output),
+    }
+    monkeypatch.undo()
+    status = json.loads((output / analysis_artifacts.STATUS_FILE).read_text(encoding="utf-8"))
+    assert status["terminal_status"] == "failed"
+    assert status["failure"]["phase"] == "freeze"
+    assert status["failure"]["reason"] == "OSError"
+    assert not (output / analysis_artifacts.COMPLETION_FILE).exists()
+    # The failing write left no file; the ones before it are already durable.
+    assert not (output / target).exists()
+    assert (output / analysis_artifacts.SOURCE_FILE).exists() is (
+        target == analysis_artifacts.FAMILY_FILE
+    )
+
+
+def test_a_failing_initial_status_write_still_records_the_freeze_failure(
+    tmp_path, source_study, monkeypatch
+):
+    _pack, run_root, _request = source_study
+    output = tmp_path / "initial-status"
+    calls = {"count": 0}
+    original = analysis_artifacts.write_status
+
+    def failing(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError("the initial status is unwritable")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(analysis_artifacts, "write_status", failing)
+    with pytest.raises(PatternLabStudyError, match="the initial status is unwritable"):
+        pack_analysis.run_analysis(
+            request=analysis_request_document(), run_root=run_root, output_root=output
+        )
+    monkeypatch.undo()
+    # The request, source and family are already durable, and the diagnostic
+    # status write is the second call, which succeeds.
+    assert calls["count"] == 2
+    status = json.loads((output / analysis_artifacts.STATUS_FILE).read_text(encoding="utf-8"))
+    assert status["terminal_status"] == "failed"
+    assert status["failure"]["phase"] == "freeze"
+
+
+def test_an_interrupted_freeze_leaves_an_interrupted_status_and_no_seal(
+    tmp_path, source_study, monkeypatch
+):
+    _pack, run_root, _request = source_study
+    output = tmp_path / "freeze-interrupt"
+    _break_freeze_write(monkeypatch, analysis_artifacts.SOURCE_FILE, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        pack_analysis.run_analysis(
+            request=analysis_request_document(), run_root=run_root, output_root=output
+        )
+    monkeypatch.undo()
+    status = json.loads((output / analysis_artifacts.STATUS_FILE).read_text(encoding="utf-8"))
+    assert status["terminal_status"] == "interrupted"
+    assert status["failure"]["reason"] == "keyboard_interrupt"
+    assert status["failure"]["phase"] == "freeze"
+    assert not (output / analysis_artifacts.COMPLETION_FILE).exists()
+
+
+def test_a_freeze_diagnostic_that_also_fails_preserves_the_original_cause(
+    tmp_path, source_study, monkeypatch
+):
+    _pack, run_root, _request = source_study
+    output = tmp_path / "freeze-diagnostic"
+    _break_freeze_write(monkeypatch, analysis_artifacts.REQUEST_FILE, OSError("original cause"))
+    monkeypatch.setattr(
+        analysis_artifacts, "write_status",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("status is unwritable")),
+    )
+    with pytest.raises(PatternLabStudyError, match="original cause") as failure:
+        pack_analysis.run_analysis(
+            request=analysis_request_document(), run_root=run_root, output_root=output
+        )
+    assert failure.value.context["phase"] == "freeze"
+    monkeypatch.undo()
+    assert not (output / analysis_artifacts.STATUS_FILE).exists()
+    assert not (output / analysis_artifacts.COMPLETION_FILE).exists()
+
+
+def test_the_cli_reports_a_freeze_failure_with_its_phase_and_root(
+    tmp_path, source_study, monkeypatch, capsys
+):
+    _pack, run_root, _request = source_study
+    spec = tmp_path / "analysis.json"
+    spec.write_text(json.dumps(analysis_request_document()), encoding="utf-8")
+    output = tmp_path / "cli-freeze"
+    _break_freeze_write(monkeypatch, analysis_artifacts.REQUEST_FILE, OSError("no space left"))
+    exit_code = cli_main(
+        [
+            "analyze", "--run-root", str(run_root), "--spec", str(spec),
+            "--output-root", str(output),
+        ]
+    )
+    monkeypatch.undo()
+    assert exit_code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "failed" and payload["error_code"] == "analysis_failed"
+    assert payload["context"] == {
+        "operation": "analyze", "phase": "freeze", "analysis_root": str(output),
+    }
+    assert payload["cause"] == {"type": "OSError", "message": "no space left"}
+
+
 def test_a_secondary_status_write_failure_preserves_the_original_cause(
     tmp_path, source_study, monkeypatch
 ):

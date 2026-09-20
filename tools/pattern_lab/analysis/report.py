@@ -22,11 +22,11 @@ BANNER = (
 APPROXIMATION = (
     "Tests are nominally two-sided at alpha 0.05 and intervals are nominally 95% pointwise basic "
     "intervals. The calendar block bootstrap is an asymptotic approximation and its delivered "
-    "calibration DID NOT MEET the declared empirical error envelope: on the tracked synthetic "
-    "fixtures with persistent daily signal states the measured rejection and noncoverage rates "
-    "were about 7.5-8.3% against a nominal 5%, because the bootstrap variance is roughly 10% too "
-    "small there. This inference is therefore unvalidated and anti-conservative under clustered "
-    "signals; it certifies no error rate, on these fixtures or on real market data."
+    "calibration DID NOT MEET the declared empirical error envelope: on the tracked fixtures "
+    "with persistent daily signal states, rejection and nominal-95% noncoverage reached "
+    "approximately 7.5-8.3% against nominal 5%. The cause is still under investigation; these "
+    "inferential outputs remain unvalidated and were anti-conservative on those fixtures. They "
+    "certify no error rate, on these fixtures or on real market data."
 )
 
 LONG_DEPENDENCE = (
@@ -447,6 +447,9 @@ primary horizon is emphasized without hiding the other horizons or directions.</
 <div class="card">
 <h2>Disclosures and limitations</h2>
 <ul class="notes">{disclosures}</ul>
+<p class="small">These list items are the artifact's own saved disclosures; the qualifications
+above are rendered by the current renderer. Regenerating an older sealed artifact therefore shows
+current wording beside its historical saved text, and the sealed bytes are never rewritten.</p>
 </div>
 """
     return (

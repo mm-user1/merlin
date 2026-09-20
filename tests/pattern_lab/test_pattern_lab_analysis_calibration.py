@@ -265,6 +265,70 @@ def test_zero_contribution_padding_does_not_restore_availability():
     assert padded["primary_available"] is False
 
 
+def test_a_repetition_retains_the_primary_bootstrap_scale_and_error_quantiles():
+    """The diagnostics are read back from the production bootstrap, not recomputed."""
+    scenario = SCENARIOS_BY_NAME["null_admission_boundary_336"]
+    row = analysis_calibration.run_repetition(scenario, 0)
+    assert row["primary_available"] is True
+    assert row["primary_bootstrap_sd"] > 0.0
+    lower = row["primary_error_quantile_0025"]
+    upper = row["primary_error_quantile_0975"]
+    assert lower < upper
+    # The published basic interval is exactly this error distribution inverted.
+    assert row["primary_interval_lower"] == pytest.approx(row["primary_lift"] - upper)
+    assert row["primary_interval_upper"] == pytest.approx(row["primary_lift"] - lower)
+
+
+def test_a_refused_repetition_reports_null_bootstrap_diagnostics():
+    scenario = SCENARIOS_BY_NAME["short_population_84_days"]
+    row = analysis_calibration.run_repetition(scenario, 0)
+    assert row["primary_available"] is False
+    assert row["primary_bootstrap_sd"] is None
+    assert row["primary_error_quantile_0025"] is None
+    assert row["primary_error_quantile_0975"] is None
+
+
+def test_the_scale_diagnostic_uses_one_shared_available_primary_population():
+    scenario = SCENARIOS_BY_NAME["null_admission_boundary_336"]
+    record = analysis_calibration.run_scenario(scenario, repetitions=2)
+    scale = record["bootstrap_scale"]
+    assert scale["n"] == 2
+    assert scale["mean_bootstrap_sd"] > 0.0
+    assert scale["rms_bootstrap_sd"] >= scale["mean_bootstrap_sd"]
+    assert scale["empirical_lift_sd"] > 0.0
+    assert scale["mean_bootstrap_sd_over_empirical_sd"] == pytest.approx(
+        scale["mean_bootstrap_sd"] / scale["empirical_lift_sd"]
+    )
+    # The existing fields keep their own population and their exact values.
+    assert record["effect"]["mean_lift"] is not None
+    assert set(record["rates"]) == set(analysis_calibration.ACCEPTANCE_RATES)
+
+
+def test_a_single_repetition_leaves_the_scale_ratio_undefined_with_its_count():
+    record = analysis_calibration.run_scenario(
+        SCENARIOS_BY_NAME["null_admission_boundary_336"], repetitions=1
+    )
+    scale = record["bootstrap_scale"]
+    assert scale["n"] == 1
+    assert scale["mean_bootstrap_sd"] > 0.0
+    assert scale["empirical_lift_sd"] is None
+    assert scale["mean_bootstrap_sd_over_empirical_sd"] is None
+
+
+def test_an_unavailable_population_publishes_an_empty_scale_diagnostic():
+    record = analysis_calibration.run_scenario(
+        SCENARIOS_BY_NAME["short_population_84_days"], repetitions=2
+    )
+    scale = record["bootstrap_scale"]
+    assert scale["n"] == 0
+    assert scale["mean_bootstrap_sd"] is None
+    assert scale["rms_bootstrap_sd"] is None
+    assert scale["empirical_lift_sd"] is None
+    assert scale["mean_bootstrap_sd_over_empirical_sd"] is None
+    # Descriptive estimates survive the refusal, on their own denominator.
+    assert record["effect"]["mean_lift"] is not None
+
+
 def test_the_admission_boundary_scenario_exercises_exactly_the_declared_geometry():
     scenario = SCENARIOS_BY_NAME["null_admission_boundary_336"]
     row = analysis_calibration.run_repetition(scenario, 0)
@@ -284,6 +348,12 @@ def test_the_driver_saves_a_compact_evidence_artifact(tmp_path):
     assert saved == document
     assert saved["results"][0]["repetitions"] == 3
     assert set(saved["results"][0]["rates"]) == set(analysis_calibration.ACCEPTANCE_RATES)
+    # The additive scale diagnostics survive serialization at schema version 1.
+    assert saved["schema_version"] == analysis_calibration.CALIBRATION_SCHEMA_VERSION == 1
+    scale = saved["results"][0]["bootstrap_scale"]
+    assert scale["n"] == 3 and scale["mean_bootstrap_sd"] > 0.0
+    assert scale["mean_bootstrap_sd_over_empirical_sd"] > 0.0
+    assert "not a variance factor" in scale["population"]
     assert saved["generator_contract"]["generator_digest"]
     assert "certifies neither unsimulated generators" in saved["scope"]
 

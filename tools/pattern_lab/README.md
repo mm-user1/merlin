@@ -37,13 +37,13 @@ artifact.
 
 **M3a inference is an approximate development screen, and its delivered
 calibration DID NOT MEET the declared empirical error envelope.** On the tracked
-synthetic fixtures with persistent daily signal states the measured rejection and
-nominal-95% noncoverage rates reached about **7.5-8.3%** against a nominal 5%,
-because the seven-day block bootstrap underestimates the variance there by
-roughly 10%. The implementation is delivered and verified; its statistical
-acceptance gate is **open pending tech-lead review**. Until that is resolved,
-treat every M3a p-value, interval and Holm rejection as an unvalidated,
-anti-conservative screening hint — never as evidence of an edge. See
+fixtures with persistent daily signal states, rejection and nominal-95%
+noncoverage reached approximately **7.5-8.3%** against nominal 5%. The cause is
+still under investigation; these inferential outputs remain unvalidated and were
+anti-conservative on those fixtures. The implementation is delivered and
+verified; its statistical acceptance gate is **open pending tech-lead review**.
+Until that is resolved, treat every M3a p-value, interval and Holm rejection as
+an unvalidated, anti-conservative screening hint — never as evidence of an edge. See
 [Calibration](#calibration).
 
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
@@ -2015,7 +2015,12 @@ participate. There is **no** result-driven ticker, horizon or direction filter i
 this interface.
 
 Once admitted, the normalized request, the source binding, the resolved family
-and an initial status are written **before** any outcome aggregation.
+and an initial status are written **before** any outcome aggregation. Those four
+writes are the `freeze` phase and sit **inside** the protected region, so a
+failure or interrupt in any of them records the same honest terminal status,
+phase and analysis root as a later failure. Output-root admission and creation
+stay **outside** it: an admission failure keeps its own cause and never reaches
+status writing with a root this operation does not own.
 
 ### The declared family
 
@@ -2053,7 +2058,11 @@ event-filtering semantics are unchanged. Join keys are normalized losslessly
 (saved timeframe values may be `int32`); a coercion from a boolean, a float or a
 string is rejected. Duplicate or missing evidence fails; it never disappears
 into a merge. Every selected emission must join a known-valid, true condition at
-the expected saved anchor.
+the expected saved anchor. Each saved condition and emission row's
+`signal_time_ms` is checked **row-wise** against that same row's
+`anchor_open_ms + timeframe`: the two columns are never sorted independently, so
+a permutation of signal times across different anchors is rejected, while a
+legitimately reordered but intact table is still admitted.
 
 Saved conditions and emissions are used as they stand: the hypothesis is never
 reevaluated. UTC day and calendar-month membership use the **signal close time**
@@ -2398,6 +2407,14 @@ Artifact completion and statistical availability are distinguished. All labels,
 IDs and notes are escaped. The default order is the canonical family, not best
 return or smallest p.
 
+The banner, the approximation qualification and the long-dependence limitation
+are rendered by the **current** renderer, while the disclosure list is the
+artifact's own saved text. Regenerating an older sealed artifact therefore shows
+corrected current wording beside its historical saved disclosures. That is
+provenance, not a contradiction: the sealed bytes are never rewritten, and
+regeneration still needs only the artifact — no research script, no saved module
+and no market data.
+
 ### Memory, performance and the extension boundary
 
 One pure numerical entry point, `analysis.evaluate_observations`, accepts
@@ -2481,12 +2498,17 @@ The independent scenario (5.30%) and the conditional-confounding scenario
 AR(1) daily factors with a **persistent daily signal-state chain** failed: the
 dependent Student-t scenario measured 8.05% rejection and 8.30% noncoverage
 (bounds 9.12% and 9.39%), and the 336-day admission-boundary scenario measured
-7.45% and 7.65% (bounds 8.49% and 8.70%). The cause is a variance
-underestimate, not an arithmetic error: the bootstrap-implied standard error is
-0.99 of the empirical sampling spread when signals are iid — even with AR(1)
-daily returns — and 0.90 when the signal state is persistent. **M3a's
-statistical acceptance is therefore open**; the method needs a reviewed
-revision before its inferential output can be treated as an accepted screen.
+7.45% and 7.65% (bounds 8.49% and 8.70%). The cause is still under
+investigation. One measured scale diagnostic of that same 2000-repetition run:
+the bootstrap-implied **standard error** (mean interval width / 2 x 1.96) is
+about 0.99 of the empirical **standard deviation** of the primary lift across
+that scenario's own repetitions on the two iid-signal scenarios — including the
+one with AR(1) daily returns — and about 0.90 on the two failing
+persistent-signal scenarios. Those are standard-deviation ratios on the named
+scenarios' own repetitions; they are neither a variance factor nor an
+established cause. **M3a's statistical acceptance is therefore open**; the
+method needs a reviewed revision before its inferential output can be treated
+as an accepted screen.
 
 Alongside them the driver runs short-population refusal checks at 84 and 180
 days — including the same records embedded in a 365-day grid with
@@ -2498,6 +2520,19 @@ joins as evidence-shaped frames and compares them with the numerical boundary.
 The long-dependence results sit **outside** the admitted-null envelope: they are
 a disclosed limitation, not a claim that a seven-day method handles long memory,
 and the software does not detect such dependence automatically in a real run.
+
+Each repetition also retains the primary lift's **already computed** bootstrap
+standard deviation and its two error-distribution quantiles; no second bootstrap
+runs and no extra random draw is consumed. Each scenario record then publishes a
+`bootstrap_scale` block: the diagnostic count, the empirical standard deviation
+of the available-primary lifts, the mean and RMS bootstrap standard deviation,
+and the mean-bootstrap-SD / empirical-SD ratio. Numerator and denominator use
+exactly the same available samples, and the block reports its own count and
+scope because the existing `effect.*` fields keep their own wider population of
+every repetition with a non-null lift. An undefined ratio is published as null
+with its count. These are standard-deviation diagnostics, never variance
+factors, and `CALIBRATION_SCHEMA_VERSION` stays at `1` because the fields are
+additive and no existing field changed meaning.
 
 ### Reading the saved tables
 

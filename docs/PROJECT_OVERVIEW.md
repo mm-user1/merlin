@@ -229,8 +229,9 @@ coordinator-side calculation with no worker option. **M3a is implemented but its
 statistical acceptance gate is open**: the delivered calibration met 11 of its 15
 declared checks, and the two admitted scenarios combining AR(1) daily factors
 with a persistent daily signal-state chain measured about 7.5-8.3% rejection and
-nominal-95% noncoverage against a nominal 5%, because the seven-day block
-bootstrap underestimates the variance there by roughly 10%. M3b
+nominal-95% noncoverage against a nominal 5%. The cause is still under
+investigation; those inferential outputs remain unvalidated and were
+anti-conservative on those fixtures. M3b
 external-series/panel context with frozen validation, and M4 bracket execution
 with sizing, leverage and expiry, are not implemented. M3a inference is an
 explicitly approximate development screen; it certifies no error rate, it is

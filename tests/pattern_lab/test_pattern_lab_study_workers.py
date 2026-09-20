@@ -1702,15 +1702,20 @@ def test_lost_worker_precedes_dead_pump_in_both_receive_paths():
             pool.start()
             worker = pool._workers[0]
             identifier = "TEST_AAA-USDT-SWAP"
-            # Inject the transport's started message with a known pending job.
+            # Finish the pump first, while the idle child is still alive: a
+            # child killed with the shared result queue's write lock held can
+            # leave the sentinel undeliverable, so pump termination would not be
+            # guaranteed the other way round.
+            pool._results.put(None)
+            pool._pump.join(timeout=10)
+            assert not pool._pump.is_alive()
+            # Only then the known pending job, its transport 'started' message
+            # and the child's death.
             pool._pending.add(identifier)
             pool._inbox.put(("started", identifier, worker.pid))
             worker.terminate()
             worker.join(timeout=10)
             assert not worker.is_alive()
-            pool._results.put(None)
-            pool._pump.join(timeout=10)
-            assert not pool._pump.is_alive()
             for receive in (pool.poll, lambda: pool.take(timeout=1)):
                 with pytest.raises(study_workers.WorkerLostError) as failure:
                     receive()
