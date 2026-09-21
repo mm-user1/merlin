@@ -2510,7 +2510,10 @@ and never collapses them:
 Eligibility is bound to the **driver**, never to result-supplied names, counts or
 `admitted` flags. `LEGACY_PROTOCOL_SCENARIOS` pins the protocol's fourteen
 fixtures in their original order and is also the CLI default, so a fixture added
-to the registry later changes neither. `build_run_plan` resolves those names into
+to the registry later changes neither. Eligibility compares shared settings and
+exactly those required fixture configurations, retaining their multiplicity and
+checking the recorded contract's own digest; unrelated registry additions do not
+invalidate historical runs. `build_run_plan` resolves those names into
 the exact entries the run executes, listing the padded 365-day refusal variants
 the driver generates itself. Each executed entry carries an **attempt ledger**
 with its fixture ID, padded or unpadded variant, configuration digest, declared
@@ -2635,6 +2638,82 @@ The first command runs the frozen matrix; the second rebuilds `summary.json` and
 `summary.md` from the saved manifest and records alone, generating no data and
 running no inference. Exit 0 is a PASS of the synthetic contract; exit 2 covers
 both FAIL and INCOMPLETE, which the JSON names explicitly.
+
+**Platform and diagnostic runs.** Import, pure calculations and offline scoring
+work on Windows and Linux. The full driver samples native Windows working-set
+current/peak resident bytes (`GetProcessMemoryInfo`) and available physical bytes
+(`GlobalMemoryStatusEx`); Linux uses `getrusage` and `/proc`. Current RSS and swap
+are diagnostics. Required peak RSS or available physical measurements missing on
+either host stop generation with INCOMPLETE and an explicit reason. Windows commit
+limits are not reported as swap or resident memory. Offline scoring never calls
+these APIs. The three-hour / 1 GiB ceiling, 512 MiB initial headroom requirement
+and 192 MiB reserve remain sampled guards, not OS allocation limits.
+
+Use a **new external output directory** for a small diagnostic run:
+
+```powershell
+& $py -m tools.pattern_lab.analysis.calibration_monthly --output-root <new-external-smoke> `
+    --fixtures 002_null_dependent_t5 102_null_causal_ohlc_v1 --attempts 2
+```
+
+The positive integer override projects only requested work and pilots at most
+`min(5, attempts)` draws per selected main fixture, reusing each completed ID.
+The full experiment still uses five pilot attempts, its original IDs and counts.
+A diagnostic subset, attempt override or skipped supplementary/replay work cannot
+earn PASS even when the requested work completes. Replay cleanup failures name
+the retained owned directory. Existing caller thread settings remain respected;
+changing environment variables after NumPy import cannot reconfigure its pools.
+
+**Evidence admission.** Plan version **1** fixes 17 entries and **19,400** matrix
+attempts: eight main nulls in order 2, 5, 1, 4, 3, 12, 101, 102 at 2,000 each;
+10/11 unpadded and padded to 365 days at 200 each; stress 20/21 at 1,000 each;
+planted 30/31/32 at 200 each. IDs are contiguous from 20000 within each entry,
+master seed 20260920. An unrelated registered fixture does not extend this plan.
+An intentional change to experiment membership/settings needs a later plan version.
+
+Evidence format **2**, plan version **1**, decision policy **2** and mathematical
+method `monthly_cluster_jackknife_v1` are separate identities. The driver and
+offline CLI share one admission/decision path: the manifest's own digest is checked
+alongside driver-owned semantic settings, never against today's source hashes or
+explanatory prose. Run method, format, plan, manifest reference, terminal state and
+declared work must agree. Counts are rebuilt from admitted records, including
+integer IDs, ordered family identities, primary selection, finite/null values,
+p-values in [0,1], raw/Holm flags, interval noncoverage against fixture truth,
+and the existing Holm adjustment over the full family. Unavailable members keep
+their places and null external inference.
+
+PASS needs every entry, all eight main gates, every required refusal withholding
+inference, completed stress/planted disclosures, and both named replays
+`candle_disk_replay` / `candidate_evidence_replay`. Each replay requires IDs
+`[20000, 20001]`, one comparison per ID, empty mismatch lists, Boolean agreement
+and finite nonnegative differences at most `1e-12`, with a consistent aggregate.
+Format 2 additionally records/checks both ordered member lists, their counts and
+the expected family. Missing or contradictory evidence is INCOMPLETE; contradictions
+are listed separately as `integrity_problems`. A completed valid main failure,
+actual refusal failure or record-proven impossibility stop can establish FAIL
+before later fixtures finish. A stop message alone proves nothing. There is no
+early acceptance and no new stress or planted rate ceiling.
+
+`records.sha256` is optional. When supplied, every consumed record must have one
+unique known safe label in `<64-hex SHA-256><two spaces><label>.json` format, hashing
+the exact **uncompressed bytes** in `records/`. Missing expected records mean
+incomplete evidence; malformed/mismatching supplied checksums mean an integrity
+problem. An absent checksum file is disclosed as `not supplied`, not a PASS blocker.
+Having both plain and gzip files for the same entry is always ambiguous and
+rejected. Equal hashes across distinct padded/unpadded refusal entries are valid.
+
+**Historical provenance.** Delivered format-1 manifests without a plan field map
+explicitly to plan 1 and undergo the same semantic/record checks. Their missing
+research source hashes and absent replay member/count evidence remain labelled
+limitations, not fabricated historical verification. Future manifests freeze an
+explicit research dependency hash list, including candidate, generator and extracted
+memory/admission helpers, separately from production `ATTRIBUTED_MODULES`.
+Summaries retain the input file/archive and original manifest identities, producer
+attribution, current verifier hashes, environment and policy version separately.
+Current verifier hashes need not match producer hashes. Any recovered commit
+attribution must be labelled retrospective; it cannot prove a pre-run freeze.
+Before re-scoring an archive, copy it to external scratch and save its original
+summaries separately: `--summarize-only` replaces that copy's top-level summaries.
 
 **The method.** For each family member the candidate keeps the production
 retained instrument x signal-month strata, their target and control counts
@@ -2822,7 +2901,8 @@ identical marginal rates, as the mirror property requires; neither doubling is
 independent evidence. The longest 480-minute horizon of fixture 102 measured a
 5.95% marginal raw rejection rate, the highest of its eight members.
 
-The required disclosures behaved as declared and are **outside** the gate. All
+The required disclosures completed as declared. Their **rates** are outside the
+admitted-null ceiling; completion and actual refusal remain required for PASS. All
 four refusal runs, including both zero-contribution-padded variants, published no
 p-value and no interval on any of their 200 attempts. The long-dependence
 fixtures at daily AR 0.9 measured 3.60% and 4.50% raw rejection at signal

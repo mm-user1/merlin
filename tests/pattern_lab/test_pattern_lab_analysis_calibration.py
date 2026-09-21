@@ -766,6 +766,30 @@ def test_the_attempt_ledger_records_identities_not_only_counts():
     assert analysis_calibration.id_ranges([5, 0, 1, 2, 9, 10]) == [[0, 2], [5, 5], [9, 10]]
 
 
+def test_legacy_eligibility_survives_unrelated_registry_growth(monkeypatch):
+    from dataclasses import replace
+    document = _complete_document()
+    extra = replace(SCENARIOS[0], scenario_id=999, name="unrelated_future_fixture")
+    monkeypatch.setattr(analysis_calibration, "SCENARIOS", (*SCENARIOS, extra))
+    assert analysis_calibration.legacy_protocol_state(document)["complete_run"]
+
+
+@pytest.mark.parametrize("change", ["missing", "duplicate", "changed"])
+def test_legacy_required_contract_entries_still_matter(change):
+    from copy import deepcopy
+    document = deepcopy(_complete_document())
+    contract = document["generator_contract"]
+    scenarios = contract["scenarios"]
+    if change == "missing":
+        scenarios.pop(0)
+    elif change == "duplicate":
+        scenarios.append(deepcopy(scenarios[0]))
+    else:
+        scenarios[0]["days"] += 1
+    contract["generator_digest"] = semantic_digest({k: v for k, v in contract.items() if k != "generator_digest"})
+    assert not analysis_calibration.legacy_protocol_state(document)["complete_run"]
+
+
 def test_the_run_plan_lists_driver_generated_padded_refusal_variants():
     plan = analysis_calibration.build_run_plan(["short_population_84_days", "null_independent"])
     assert [item["name"] for item in plan["entries"]] == [

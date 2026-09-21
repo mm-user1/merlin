@@ -30,12 +30,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, asdict
-import gzip
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import platform
-import resource
 import shutil
 import sys
 import time
@@ -64,6 +64,8 @@ from .. import PatternLabDataError
 from ..study import contracts
 from . import artifacts
 from . import calibration as cal
+from .calibration_memory import host_memory, process_memory
+from . import calibration_evidence as admission
 from .estimator import (
     ALPHA,
     REASON_DEGENERATE,
@@ -81,6 +83,19 @@ from .family import FamilyMember
 
 CANDIDATE_METHOD_ID = "monthly_cluster_jackknife_v1"
 CANDIDATE_SCHEMA_VERSION = 1
+RESEARCH_MODULES = (
+    "tools.pattern_lab.analysis.calibration_monthly",
+    "tools.pattern_lab.analysis.calibration",
+    "tools.pattern_lab.analysis.calibration_memory",
+    "tools.pattern_lab.analysis.calibration_evidence",
+    "tools.pattern_lab.study.job",
+)
+
+
+def research_digests() -> dict[str, str]:
+    """Explicit research dependencies, separate from production artifact attribution."""
+    return {name: hashlib.sha256(Path(importlib.util.find_spec(name).origin).read_bytes()).hexdigest()
+            for name in RESEARCH_MODULES}
 
 # Mathematical validity requirements of the candidate, beyond the unchanged
 # production support gates.  They are not a new support threshold.
@@ -888,38 +903,39 @@ def _supplementary_matrix() -> tuple[CandidateFixture, ...]:
     """Refusal, limitation and planted disclosures, at their declared counts."""
     entries: list[CandidateFixture] = []
     order = len(_main_matrix())
-    for name in (
-        "short_population_84_days",
-        "short_population_180_days",
-        "stress_long_dependence_ar09_p070",
-        "stress_long_dependence_ar09_p097",
-        "planted_positive_strong",
-        "planted_negative_strong",
-        "planted_modest",
+    # Plan 1 membership/counts are independent of the growing scenario registry.
+    for fixture_id, name, kind, attempts in (
+        (10, "short_population_84_days", "refusal", 200),
+        (11, "short_population_180_days", "refusal", 200),
+        (20, "stress_long_dependence_ar09_p070", "stress", 1000),
+        (21, "stress_long_dependence_ar09_p097", "stress", 1000),
+        (30, "planted_positive_strong", "planted", 200),
+        (31, "planted_negative_strong", "planted", 200),
+        (32, "planted_modest", "planted_descriptive", 200),
     ):
         scenario = cal.SCENARIOS_BY_NAME[name]
         order += 1
         entries.append(
             CandidateFixture(
                 order=order,
-                fixture_id=scenario.scenario_id,
+                fixture_id=fixture_id,
                 name=scenario.name,
-                kind=scenario.kind,
-                attempts=scenario.repetitions,
+                kind=kind,
+                attempts=attempts,
                 source="records",
                 interpretation=scenario.note,
                 scenario_name=scenario.name,
             )
         )
-        if scenario.kind == "refusal":
+        if kind == "refusal":
             order += 1
             entries.append(
                 CandidateFixture(
                     order=order,
-                    fixture_id=scenario.scenario_id,
+                    fixture_id=fixture_id,
                     name=f"{scenario.name}_padded_365",
-                    kind=scenario.kind,
-                    attempts=scenario.repetitions,
+                    kind=kind,
+                    attempts=attempts,
                     source="records",
                     interpretation=(
                         "The same records embedded in a padded 365-day grid must stay unavailable."
@@ -975,6 +991,7 @@ def run_candidate_repetition(fixture: CandidateFixture, repetition: int) -> dict
     balance = candidate["balance"] or {}
     return {
         "id": int(repetition),
+        "primary_member_id": primary_id,
         "available": bool(primary["inference_available"]),
         "reasons": list(primary["unavailable_reasons"]),
         "inherited_reasons": list(primary["inherited_reasons"]),
@@ -1230,42 +1247,6 @@ def impossibility(fixture: CandidateFixture, rows: Sequence[Mapping[str, Any]]) 
 # resources
 # --------------------------------------------------------------------------
 
-def _peak_rss_bytes() -> int:
-    """This process's peak resident set, as the kernel reports it."""
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Linux reports kibibytes; macOS reports bytes.
-    return int(usage) * (1 if sys.platform == "darwin" else 1024)
-
-
-def _current_rss_bytes() -> int | None:
-    try:
-        for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("VmRSS:"):
-                return int(line.split()[1]) * 1024
-    except OSError:
-        return None
-    return None
-
-
-def host_memory() -> dict[str, Any]:
-    """Available RAM and swap state, read once before the matrix starts."""
-    values: dict[str, int] = {}
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
-            key, _, rest = line.partition(":")
-            parts = rest.split()
-            if parts:
-                values[key] = int(parts[0]) * 1024
-    except OSError:
-        return {"available_bytes": None, "total_bytes": None, "swap_total_bytes": None}
-    return {
-        "total_bytes": values.get("MemTotal"),
-        "available_bytes": values.get("MemAvailable"),
-        "swap_total_bytes": values.get("SwapTotal"),
-        "swap_free_bytes": values.get("SwapFree"),
-    }
-
-
 class BudgetStop(Exception):
     """Raised when the declared wall-clock or RSS budget can no longer be met."""
 
@@ -1299,19 +1280,33 @@ class Budget:
     def remaining(self) -> float:
         return self.wall_clock_seconds - self.elapsed
 
-    def sample(self, label: str, *, projected_seconds: float | None = None) -> dict[str, Any]:
-        peak = _peak_rss_bytes()
+    def sample(self, label: str, *, projected_seconds: float | None = None,
+               process: Mapping[str, Any] | None = None,
+               memory: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        process = process_memory() if process is None else process
+        memory = host_memory() if memory is None else memory
+        peak = process["peak_rss_bytes"]
         record = {
             "label": label,
             "elapsed_seconds": round(self.elapsed, 3),
             "remaining_seconds": round(self.remaining, 3),
-            "peak_rss_bytes": peak,
-            "current_rss_bytes": _current_rss_bytes(),
+            **process,
+            "host_memory": memory,
             "projected_remaining_seconds": (
                 None if projected_seconds is None else round(projected_seconds, 3)
             ),
         }
         self.samples.append(record)
+        available = memory["available_bytes"]
+        if peak is None or available is None:
+            raise BudgetStop({
+                "message": f"required peak resident / available physical measurement unavailable at {label}: "
+                           f"{process['unavailable']}; {memory['unavailable']}",
+                "kind": "measurement_unavailable", **record,
+            })
+        if available < HEADROOM_RESERVE_BYTES:
+            raise BudgetStop({"message": f"available physical memory below system reserve at {label}",
+                              "kind": "headroom", **record})
         if peak > self.rss_ceiling_bytes:
             raise BudgetStop(
                 {
@@ -1349,6 +1344,18 @@ class Budget:
 # bounded wiring and adapter replays
 # --------------------------------------------------------------------------
 
+def _remove_owned_replay(path: Path, owner: Path) -> None:
+    """Remove only a replay tree created below this call's output root."""
+    resolved, base = path.resolve(), owner.resolve()
+    if not resolved.is_relative_to(base) or resolved == base:
+        raise PatternLabDataError(f"unsafe replay cleanup target {resolved} (owner {base})")
+    if path.exists():
+        try:
+            shutil.rmtree(path)
+        except OSError as error:
+            raise PatternLabDataError(f"owned replay cleanup failed; retained {resolved}: {error}") from error
+
+
 def candle_disk_replay(root: Any, *, repetitions: Sequence[int] = (20000, 20001)) -> dict[str, Any]:
     """Prove the in-memory adapter against a real temporary on-disk study.
 
@@ -1378,6 +1385,8 @@ def candle_disk_replay(root: Any, *, repetitions: Sequence[int] = (20000, 20001)
             )
         )
         directory = base / f"candle-{repetition}"
+        if directory.exists():
+            raise PatternLabDataError(f"replay directory must be new: {directory}")
         try:
             for instrument, frames in tables.items():
                 job = study_evidence.job_path(directory, instrument)
@@ -1428,8 +1437,8 @@ def candle_disk_replay(root: Any, *, repetitions: Sequence[int] = (20000, 20001)
                 )
             )
         finally:
-            shutil.rmtree(directory, ignore_errors=True)
-        difference = _candidate_difference(memory, disk)
+            _remove_owned_replay(directory, base)
+        difference = _candidate_difference(memory, disk, expected_member_ids=[item.member_id for item in members])
         worst = max(worst, difference["max_absolute_difference"])
         mismatched.extend(difference["mismatched"])
         comparisons.append({"repetition": int(repetition), **difference})
@@ -1470,6 +1479,8 @@ def candidate_evidence_replay(
     for repetition in repetitions:
         records = cal.generate_records(scenario, repetition)
         directory = base / f"replay-{repetition}"
+        if directory.exists():
+            raise PatternLabDataError(f"replay directory must be new: {directory}")
         try:
             source = cal.build_replay_source(records, directory)
             joined = evaluate_candidate(
@@ -1482,7 +1493,7 @@ def candidate_evidence_replay(
                 )
             )
         finally:
-            shutil.rmtree(directory, ignore_errors=True)
+            _remove_owned_replay(directory, base)
         direct = evaluate_candidate(
             accumulate_observations(
                 cal.record_frames(records, members, cost=0.0),
@@ -1492,7 +1503,7 @@ def candidate_evidence_replay(
                 study_end_ms=scenario.study_end_ms,
             )
         )
-        difference = _candidate_difference(joined, direct)
+        difference = _candidate_difference(joined, direct, expected_member_ids=[item.member_id for item in members])
         worst = max(worst, difference["max_absolute_difference"])
         mismatched.extend(difference["mismatched"])
         comparisons.append({"repetition": int(repetition), **difference})
@@ -1506,11 +1517,37 @@ def candidate_evidence_replay(
     }
 
 
-def _candidate_difference(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+def _candidate_difference(left: Mapping[str, Any], right: Mapping[str, Any], *,
+                          expected_member_ids: Sequence[str]) -> dict[str, Any]:
     """The largest disagreement between two candidate evaluations."""
     fields = ("signal", "control", "lift", "p_raw", "p_holm")
     worst = 0.0
     mismatched: list[str] = []
+    expected = list(expected_member_ids)
+    identities = {side: [item["member_id"] for item in outcome["members"]]
+                  for side, outcome in (("left", left), ("right", right))}
+    structure = {"expected_member_ids": expected, "expected_member_count": len(expected),
+                 **{f"{side}_member_ids": ids for side, ids in identities.items()},
+                 **{f"{side}_member_count": len(ids) for side, ids in identities.items()}}
+    if not expected or len(set(expected)) != len(expected):
+        mismatched.append("expected family is empty or contains duplicate identities")
+    for side, outcome in (("left", left), ("right", right)):
+        ids = identities[side]
+        if ids != expected or len(ids) != len(set(ids)) or outcome.get("family_size") != len(expected):
+            mismatched.append(f"{side}: member count / unique ordered identities differ from expected family")
+    if mismatched:
+        return {"max_absolute_difference": worst, "mismatched": mismatched, **structure}
+
+    def compare(one, other, name):
+        nonlocal worst
+        if one is None or other is None:
+            if one is not other:
+                mismatched.append(f"{name}: one side is null")
+        elif not _finite(one) or not _finite(other):
+            mismatched.append(f"{name}: non-finite comparison")
+        else:
+            worst = max(worst, abs(float(one) - float(other)))
+
     for first, second in zip(left["members"], right["members"]):
         if first["member_id"] != second["member_id"]:
             mismatched.append(f"{first['member_id']} != {second['member_id']}")
@@ -1520,21 +1557,18 @@ def _candidate_difference(left: Mapping[str, Any], right: Mapping[str, Any]) -> 
         if first["unavailable_reasons"] != second["unavailable_reasons"]:
             mismatched.append(f"{first['member_id']}: reasons differ")
         for name in fields:
-            one, other = first[name], second[name]
-            if one is None or other is None:
-                if one is not other:
-                    mismatched.append(f"{first['member_id']}.{name}: one side is null")
-                continue
-            worst = max(worst, abs(float(one) - float(other)))
+            compare(first[name], second[name], f"{first['member_id']}.{name}")
         for name in ("signal", "control", "lift"):
             one = first["candidate"]["standard_error"][name]
             other = second["candidate"]["standard_error"][name]
-            if one is None or other is None:
-                if one is not other:
-                    mismatched.append(f"{first['member_id']}.se_{name}: one side is null")
-                continue
-            worst = max(worst, abs(float(one) - float(other)))
-    return {"max_absolute_difference": worst, "mismatched": mismatched}
+            compare(one, other, f"{first['member_id']}.se_{name}")
+            one_ci = first["candidate"]["intervals"][name]
+            other_ci = second["candidate"]["intervals"][name]
+            for bound in ("lower", "upper"):
+                compare(None if one_ci is None else one_ci[bound],
+                        None if other_ci is None else other_ci[bound],
+                        f"{first['member_id']}.{name}.{bound}")
+    return {"max_absolute_difference": worst, "mismatched": mismatched, **structure}
 
 
 # --------------------------------------------------------------------------
@@ -1550,7 +1584,9 @@ def candidate_manifest() -> dict[str, Any]:
     tuned after this document is written.
     """
     manifest = {
-        "schema_version": CANDIDATE_SCHEMA_VERSION,
+        "schema_version": admission.EVIDENCE_SCHEMA_VERSION,
+        "plan_version": admission.PLAN_VERSION,
+        "decision_policy_version": admission.DECISION_POLICY_VERSION,
         "method": CANDIDATE_METHOD_ID,
         "scope": "experimental_research_candidate",
         "formula": {
@@ -1699,12 +1735,13 @@ def candidate_manifest() -> dict[str, Any]:
             "automatic adoption."
         ),
         "implementation": artifacts.module_digests(),
+        "research_implementation": research_digests(),
     }
     manifest["manifest_digest"] = contracts.semantic_digest(manifest)
     return manifest
 
 
-def environment_document() -> dict[str, Any]:
+def environment_document(*, include_memory: bool = True) -> dict[str, Any]:
     """The interpreter, packages and host conditions this run actually used."""
     import scipy
 
@@ -1727,7 +1764,7 @@ def environment_document() -> dict[str, Any]:
         "pyarrow": arrow_version,
         "thread_settings_in_effect": {name: os.environ.get(name) for name in THREAD_VARIABLES},
         "thread_settings_inherited": dict(_INHERITED_THREAD_SETTINGS),
-        "host_memory": host_memory(),
+        **({"host_memory": host_memory(), "process_memory": process_memory()} if include_memory else {}),
         "note": (
             "Thread pinning binds only when this module is imported before NumPy. A Linux run "
             "does not certify Windows behaviour."
@@ -1773,7 +1810,7 @@ def run_fixture(
         if done % PROGRESS_BATCH == 0 or done == attempts:
             elapsed = time.monotonic() - started
             per = elapsed / done
-            budget.sample(
+            measurement = budget.sample(
                 f"{fixture.label}:{done}/{attempts}",
                 projected_seconds=per * (attempts - done),
             )
@@ -1781,7 +1818,7 @@ def run_fixture(
                 progress(
                     f"{fixture.label}: {done}/{attempts} "
                     f"({elapsed:.0f}s, {per:.3f}s/rep, peak "
-                    f"{_peak_rss_bytes() / 2**20:.0f}MB)"
+                    f"{measurement['peak_rss_bytes'] / 2**20:.0f}MB)"
                 )
         stop = impossibility(fixture, rows)
         if stop is not None:
@@ -1807,7 +1844,10 @@ def run_experiment(
     budget-stopped run still retains its partial evidence honestly.
     """
     root = Path(output_root).expanduser()
-    (root / "records").mkdir(parents=True, exist_ok=True)
+    _validate_attempts(attempts)
+    if root.exists():
+        raise PatternLabDataError(f"{root}: output root must be a new directory")
+    (root / "records").mkdir(parents=True)
     manifest = candidate_manifest()
     environment = environment_document()
     _write_json(root / "manifest.json", manifest)
@@ -1820,8 +1860,7 @@ def run_experiment(
     if available is not None:
         ceiling = min(RSS_CEILING_BYTES, max(available - HEADROOM_RESERVE_BYTES, 0))
         headroom_note = (
-            f"MemAvailable was {available} bytes with "
-            f"{memory.get('swap_total_bytes')} bytes of swap, so the effective ceiling is "
+            f"Available physical memory was {available} bytes, so the effective ceiling is "
             f"{ceiling} bytes: the declared 1 GiB ceiling tightened to leave "
             f"{HEADROOM_RESERVE_BYTES} bytes of system headroom."
         )
@@ -1834,6 +1873,14 @@ def run_experiment(
     stops: list[dict[str, Any]] = []
     status = "completed"
     incomplete_reason: str | None = None
+
+    try:
+        budget.sample("before_generation", process=environment["process_memory"], memory=memory)
+    except BudgetStop as stop:
+        status = "incomplete"
+        incomplete_reason = stop.detail["message"]
+        stops.append(stop.detail)
+        planned = []
 
     if available is not None and available < HEADROOM_REQUIRED_BYTES:
         status = "incomplete"
@@ -1850,7 +1897,8 @@ def run_experiment(
     if required:
         try:
             pilot, reuse = _run_pilot(
-                required, planned=planned, budget=budget, progress=progress
+                required, planned=planned, budget=budget, attempts=attempts,
+                include_replays=include_replays, progress=progress
             )
             _write_json(root / "pilot.json", pilot)
             projection = pilot["projected_total_seconds"]
@@ -1870,7 +1918,7 @@ def run_experiment(
                 fixture,
                 attempts=count,
                 budget=budget,
-                reuse=reuse.get(fixture.label) if attempts is None else None,
+                reuse=reuse.get(fixture.label),
                 progress=progress,
             )
         except BudgetStop as budget_stop:
@@ -1897,16 +1945,26 @@ def run_experiment(
         if progress is not None:
             progress("bounded replay and adapter checks")
         try:
+            budget.sample("before_replays")
             replays = {
                 "candle_disk_replay": candle_disk_replay(root / "_replay-candle"),
                 "candidate_evidence_replay": candidate_evidence_replay(root / "_replay-records"),
             }
-        finally:
-            shutil.rmtree(root / "_replay-candle", ignore_errors=True)
-            shutil.rmtree(root / "_replay-records", ignore_errors=True)
+            budget.sample("after_replays")
+            _remove_owned_replay(root / "_replay-candle", root)
+            _remove_owned_replay(root / "_replay-records", root)
+        except BudgetStop as stop:
+            status = "incomplete"
+            incomplete_reason = stop.detail["message"]
+            stops.append(stop.detail)
+        except (OSError, PatternLabDataError) as error:
+            status = "incomplete"
+            incomplete_reason = f"bounded replay failed: {error}"
 
     document = {
-        "schema_version": CANDIDATE_SCHEMA_VERSION,
+        "schema_version": admission.EVIDENCE_SCHEMA_VERSION,
+        "plan_version": admission.PLAN_VERSION,
+        "decision_policy_version": admission.DECISION_POLICY_VERSION,
         "method": CANDIDATE_METHOD_ID,
         "generated_utc": artifacts.now_utc(),
         "manifest_digest": manifest["manifest_digest"],
@@ -1915,6 +1973,7 @@ def run_experiment(
         "planned_fixtures": [item.label for item in (fixtures if fixtures is not None else MAIN_MATRIX)]
         + ([item.label for item in SUPPLEMENTARY_MATRIX] if fixtures is None and include_supplementary else []),
         "attempts_override": attempts,
+        "diagnostic_selection": fixtures is not None,
         "results": results,
         "pilot": pilot,
         "stops": stops,
@@ -1925,7 +1984,8 @@ def run_experiment(
             "effective_rss_ceiling_bytes": budget.rss_ceiling_bytes,
             "headroom_note": headroom_note,
             "elapsed_seconds": round(budget.elapsed, 3),
-            "peak_rss_bytes": _peak_rss_bytes(),
+            "peak_rss_bytes": max((item["peak_rss_bytes"] for item in budget.samples
+                                   if item["peak_rss_bytes"] is not None), default=None),
             "samples": budget.samples,
             "note": (
                 "A sampled RSS reading is a guard, not an OS-enforced allocation limit. Ordinary "
@@ -1940,11 +2000,18 @@ def run_experiment(
 REPLAY_ALLOWANCE_SECONDS = 300.0
 
 
+def _validate_attempts(attempts: int | None) -> None:
+    if attempts is not None and (type(attempts) is not int or attempts < 1):
+        raise PatternLabDataError("attempts: expected a positive integer")
+
+
 def _run_pilot(
     fixtures: Sequence[CandidateFixture],
     *,
     planned: Sequence[CandidateFixture],
     budget: Budget,
+    attempts: int | None = None,
+    include_replays: bool = True,
     progress=None,
 ) -> tuple[dict[str, Any], dict[str, dict[int, Mapping[str, Any]]]]:
     """A fixed five-attempt pilot per required fixture, reused by the final matrix.
@@ -1955,6 +2022,8 @@ def _run_pilot(
     real remaining work rather than against the required matrix alone.
     """
     entries: list[dict[str, Any]] = []
+    _validate_attempts(attempts)
+    pilot_count = min(PILOT_ATTEMPTS, attempts) if attempts is not None else PILOT_ATTEMPTS
     reuse: dict[str, dict[int, Mapping[str, Any]]] = {}
     projected = 0.0
     record_costs: list[float] = []
@@ -1962,19 +2031,19 @@ def _run_pilot(
         started = time.monotonic()
         rows = [
             run_candidate_repetition(fixture, FIRST_REPETITION_ID + index)
-            for index in range(PILOT_ATTEMPTS)
+            for index in range(pilot_count)
         ]
         elapsed = time.monotonic() - started
-        per = elapsed / PILOT_ATTEMPTS
+        per = elapsed / pilot_count
         reuse[fixture.label] = {int(item["id"]): item for item in rows}
         if fixture.source == "records":
             record_costs.append(per)
-        remaining = per * (fixture.attempts - PILOT_ATTEMPTS)
+        remaining = per * ((attempts if attempts is not None else fixture.attempts) - pilot_count)
         projected += remaining
         entries.append(
             {
                 "fixture": fixture.label,
-                "attempts": PILOT_ATTEMPTS,
+                "attempts": pilot_count,
                 "elapsed_seconds": round(elapsed, 3),
                 "seconds_per_repetition": round(per, 4),
                 "projected_remaining_seconds": round(remaining, 1),
@@ -1989,15 +2058,17 @@ def _run_pilot(
             progress(f"pilot {fixture.label}: {per:.3f}s/rep, projecting {remaining:.0f}s")
     record_cost = float(np.mean(record_costs)) if record_costs else 0.0
     supplementary = [item for item in planned if not item.required]
-    supplementary_seconds = record_cost * sum(item.attempts for item in supplementary)
-    projected += supplementary_seconds + REPLAY_ALLOWANCE_SECONDS
+    supplementary_seconds = record_cost * sum(attempts if attempts is not None else item.attempts
+                                               for item in supplementary)
+    replay_allowance = REPLAY_ALLOWANCE_SECONDS if include_replays else 0.0
+    projected += supplementary_seconds + replay_allowance
     return (
         {
-            "attempts_per_fixture": PILOT_ATTEMPTS,
+            "attempts_per_fixture": pilot_count,
             "mean_record_seconds_per_repetition": round(record_cost, 4),
             "projected_supplementary_seconds": round(supplementary_seconds, 1),
-            "replay_allowance_seconds": REPLAY_ALLOWANCE_SECONDS,
-            "repetition_ids": list(range(FIRST_REPETITION_ID, FIRST_REPETITION_ID + PILOT_ATTEMPTS)),
+            "replay_allowance_seconds": replay_allowance,
+            "repetition_ids": list(range(FIRST_REPETITION_ID, FIRST_REPETITION_ID + pilot_count)),
             "entries": entries,
             "projected_total_seconds": round(projected, 1),
             "note": (
@@ -2015,116 +2086,176 @@ def _run_pilot(
 # --------------------------------------------------------------------------
 
 def read_records(root: Path, label: str) -> dict[str, Any] | None:
-    """Read one fixture's saved records, plain or gzip-compressed.
+    """Read the unambiguous plain/gzip representation using strict JSON."""
+    raw = admission.record_bytes(root, label)
+    return None if raw is None else admission.load_json(raw)
 
-    The driver writes plain ``<label>.json``.  A retained archive may hold the
-    same bytes gzip-compressed, which is why this reader accepts both: the
-    decompressed content is byte-for-byte what the run wrote, and the summary is
-    rebuilt from it without regenerating any data.
-    """
-    plain = root / "records" / f"{label}.json"
-    if plain.is_file():
-        return json.loads(plain.read_text(encoding="utf-8"))
-    packed = root / "records" / f"{label}.json.gz"
-    if packed.is_file():
-        return json.loads(gzip.decompress(packed.read_bytes()).decode("utf-8"))
-    return None
+
+def _fixture_family(fixture):
+    if fixture.source == "candles":
+        return [item.member_id for item in candle_family()], candle_primary_member_id()
+    scenario = cal.SCENARIOS_BY_NAME[fixture.scenario_name]
+    return [item.member_id for item in cal.scenario_family(scenario)], cal.primary_member_id(scenario)
 
 
 def summarize(output_root: Any) -> dict[str, Any]:
-    """Rebuild the decision from the saved manifest and records alone.
+    """One admission/decision path for fresh runs and offline historical re-scoring.
 
-    This generates no data, calls no estimator and performs no inference: it
-    reads the frozen manifest and the retained per-repetition records, validates
-    their identities and counts, and recomputes exactly the published rates.
+    No generator, estimator or memory API is executed. Counts come only from
+    admitted records. Missing evidence is distinct from contradictory evidence.
     """
     root = Path(output_root).expanduser()
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    recomputed = dict(manifest)
-    recomputed.pop("manifest_digest", None)
-    problems: list[str] = []
-    if contracts.semantic_digest(recomputed) != manifest.get("manifest_digest"):
-        problems.append("the saved manifest digest does not match its own content")
-    if manifest.get("method") != CANDIDATE_METHOD_ID:
-        problems.append(f"the manifest declares method {manifest.get('method')!r}")
-
-    by_label = {
-        item["order"]: CandidateFixture(**item)
-        for item in manifest["matrix"]["main"] + manifest["matrix"]["supplementary"]
-    }
-    fixtures = sorted(by_label.values(), key=lambda item: item.order)
-    results: list[dict[str, Any]] = []
+    fixtures = MAIN_MATRIX + SUPPLEMENTARY_MATRIX
+    labels = [item.label for item in fixtures]
+    problems, incomplete = [], []
+    manifest, run = {}, None
+    input_hashes = {}
+    for filename in ("manifest.json", "run.json"):
+        try:
+            raw = (root / filename).read_bytes()
+            input_hashes[filename] = hashlib.sha256(raw).hexdigest()
+            value = admission.load_json(raw)
+            if not isinstance(value, dict):
+                raise ValueError("expected a JSON object")
+            if filename == "manifest.json":
+                manifest = value
+            else:
+                run = value
+        except FileNotFoundError:
+            incomplete.append(f"{filename} is missing")
+        except (OSError, ValueError, TypeError) as error:
+            problems.append(f"{filename}: {error}")
+    try:
+        names = list(dict.fromkeys(f.scenario_name for f in fixtures if f.scenario_name))
+        problems.extend(admission.manifest_problems(manifest, candidate_manifest(), names, RESEARCH_MODULES))
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        problems.append(f"malformed manifest: {error}")
+    run_missing, run_errors = admission.run_problems(run, manifest, labels)
+    incomplete.extend(run_missing)
+    problems.extend(run_errors)
+    supplied_checksums = None
+    try:
+        supplied_checksums = admission.checksums(root, labels)
+    except (OSError, ValueError) as error:
+        problems.append(str(error))
+    if (root / "records.sha256").is_file():
+        input_hashes["records.sha256"] = hashlib.sha256((root / "records.sha256").read_bytes()).hexdigest()
+    for path in (root / "records").glob("*.json*"):
+        label = path.name.removesuffix(".gz").removesuffix(".json")
+        if label not in labels or path.name not in (f"{label}.json", f"{label}.json.gz"):
+            problems.append(f"unknown record file {path.name}")
+    results, rows_by_label, missing = [], {}, []
+    new_format = manifest.get("schema_version") == admission.EVIDENCE_SCHEMA_VERSION
     for fixture in fixtures:
-        saved = read_records(root, fixture.label)
-        if saved is None:
-            continue
-        rows = saved["rows"]
-        identifiers = [int(item["id"]) for item in rows]
-        if len(set(identifiers)) != len(identifiers):
-            problems.append(f"{fixture.label}: duplicate repetition IDs")
-        if identifiers and identifiers != list(range(identifiers[0], identifiers[0] + len(identifiers))):
-            problems.append(f"{fixture.label}: the repetition IDs are not a contiguous block")
-        if identifiers and identifiers[0] != FIRST_REPETITION_ID:
-            problems.append(f"{fixture.label}: the first repetition ID is {identifiers[0]}")
-        if identifiers and identifiers[-1] > LAST_REPETITION_ID:
-            problems.append(f"{fixture.label}: a repetition ID leaves the frozen range")
-        sizes = {len(item["member_ids"]) for item in rows}
-        if len(sizes) > 1:
-            problems.append(f"{fixture.label}: the family size changed between repetitions")
-        for item in rows:
-            for key in ("member_available", "member_p_raw", "member_p_holm"):
-                if len(item[key]) != len(item["member_ids"]):
-                    problems.append(f"{fixture.label}: repetition {item['id']} has a ragged {key}")
-                    break
-        scored = score_fixture(fixture, rows)
-        results.append(scored)
-
-    required = [item for item in results if item["required"]]
-    declared_required = [item for item in fixtures if item.required]
-    missing = sorted(
-        {item.label for item in declared_required} - {f"{item['fixture_id']:03d}_{item['name']}" for item in required}
-    )
-    incomplete = [item["name"] for item in required if not item["complete"]]
-    # A fixture that did not run its declared attempts cannot produce a FAIL: its
-    # bound is arithmetically correct but is not the declared measurement.
-    failing = [
-        item["name"]
-        for item in required
-        if item["complete"] and item["rate_checks_passed"] is not True
-    ]
-
-    run_document = None
-    run_path = root / "run.json"
-    if run_path.is_file():
-        run_document = json.loads(run_path.read_text(encoding="utf-8"))
-
-    decision, reasons = _decide(
-        problems=problems,
-        missing=missing,
-        incomplete=incomplete,
-        failing=failing,
-        run_document=run_document,
-    )
+        try:
+            raw = admission.record_bytes(root, fixture.label)
+            if raw is None:
+                missing.append(fixture.label)
+                incomplete.append(f"required fixture {fixture.label} produced no records")
+                continue
+            digest = hashlib.sha256(raw).hexdigest()
+            input_hashes[f"records/{fixture.label}.json (uncompressed)"] = digest
+            if supplied_checksums is not None and supplied_checksums.get(fixture.label) != digest:
+                raise ValueError("supplied checksum missing or mismatching consumed bytes")
+            saved = admission.load_json(raw)
+            rows = saved["rows"]
+            member_ids, primary_id = _fixture_family(fixture)
+            admission.validate_rows(rows, fixture=fixture, member_ids=member_ids,
+                                    primary_id=primary_id, new_format=new_format)
+            if run:
+                planned = run.get("planned_fixtures")
+                if isinstance(planned, list) and fixture.label not in planned:
+                    raise ValueError("records exist for an unplanned fixture")
+                override = run.get("attempts_override")
+                if type(override) is int and (len(rows) > override or
+                        any(row["id"] >= FIRST_REPETITION_ID + override for row in rows)):
+                    raise ValueError("record count exceeds requested attempts override")
+            rows_by_label[fixture.label] = rows
+            scored = score_fixture(fixture, rows)
+            results.append(scored)
+            if not scored["complete"]:
+                incomplete.append(f"required fixture {fixture.label} did not complete its declared attempts")
+        except (OSError, EOFError, KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+            problems.append(f"{fixture.label}: {error}")
+    replay_families = {
+        "candle_disk_replay": [item.member_id for item in candle_family()],
+        "candidate_evidence_replay": [item.member_id for item in cal.scenario_family(
+            cal.SCENARIOS_BY_NAME["null_dependent_t5"]) if item.comparison_id == "baseline__signal"],
+    }
+    replay_missing, replay_errors = admission.replay_problems(
+        (run or {}).get("replays"), replay_families, new_format=new_format)
+    incomplete.extend(replay_missing)
+    problems.extend(replay_errors)
+    proven_stops = []
+    stops = (run or {}).get("stops", [])
+    if not isinstance(stops, list) or any(not isinstance(item, dict) for item in stops):
+        problems.append("run stops must be a list of objects")
+        stops = []
+    for stop in stops:
+        if stop.get("reason") in ("rate_cannot_pass", "availability_cannot_pass"):
+            fixture = next((f for f in fixtures if f.label == stop.get("fixture")), None)
+            rows = rows_by_label.get(stop.get("fixture"))
+            proof = impossibility(fixture, rows) if fixture is not None and rows is not None else None
+            keys = ("reason", "rate", "events", "attempts_so_far", "largest_possible_denominator")
+            if proof is None or not admission.same({k: stop.get(k) for k in keys}, {k: proof[k] for k in keys}):
+                problems.append(f"claimed statistical stop is not proved by saved records: {stop.get('fixture')}")
+            else:
+                proven_stops.append(stop)
+        elif stop.get("kind") not in ("rss_ceiling", "wall_clock", "projection", "headroom", "measurement_unavailable"):
+            problems.append("unknown stop record")
+        elif (run or {}).get("status") == "completed":
+            problems.append("completed run contradicts a budget stop")
+    failing = [item["name"] for item in results if item["required"] and item["complete"]
+               and item["rate_checks_passed"] is not True]
+    refusal_failures = [f.label for f in fixtures if f.kind == "refusal" and
+                        any(any(r["member_available"]) for r in rows_by_label.get(f.label, []))]
+    decision, reasons = _decide(problems=problems, incomplete=incomplete, failing=failing,
+                                refusal_failures=refusal_failures, proven_stops=proven_stops,
+                                run_document=run)
+    limitations = []
+    if supplied_checksums is None:
+        limitations.append("records.sha256: not supplied; semantic admission still applies")
+    if manifest.get("schema_version") == 1:
+        limitations.extend([
+            "Historical format 1 omits pre-run candidate/generator research source hashes; no hashes are retroactively inserted.",
+            "Historical replay comparisons contain no ordered member/count evidence; new structural checks were not historically recorded.",
+        ])
     summary = {
-        "schema_version": CANDIDATE_SCHEMA_VERSION,
+        "schema_version": admission.EVIDENCE_SCHEMA_VERSION,
+        "plan_version": admission.PLAN_VERSION,
+        "decision_policy_version": admission.DECISION_POLICY_VERSION,
         "method": CANDIDATE_METHOD_ID,
         "manifest_digest": manifest.get("manifest_digest"),
         "decision": decision,
         "decision_reasons": reasons,
         "integrity_problems": problems,
-        "required_fixtures": [item.label for item in declared_required],
+        "incomplete_evidence": list(dict.fromkeys(incomplete)),
+        "required_fixtures": [item.label for item in fixtures if item.required],
         "missing_required_fixtures": missing,
-        "incomplete_required_fixtures": incomplete,
-        "failing_required_fixtures": failing,
+        "incomplete_required_fixtures": [item["name"] for item in results if not item["complete"]],
+        "failing_required_fixtures": failing + refusal_failures,
         "results": results,
-        "replays": (run_document or {}).get("replays"),
-        "stops": (run_document or {}).get("stops", []),
-        "budget": (run_document or {}).get("budget"),
+        "replays": (run or {}).get("replays"),
+        "stops": stops,
+        "budget": (run or {}).get("budget"),
+        "verification": {
+            "input_files_sha256": input_hashes,
+            "input_identity": contracts.semantic_digest(input_hashes),
+            "original_manifest_digest": manifest.get("manifest_digest"),
+            "producer_implementation": manifest.get("implementation"),
+            "producer_research_implementation": manifest.get("research_implementation"),
+            "producer_commit": None,
+            "producer_commit_note": "No original commit is asserted by these manifest fields.",
+            "verifier_implementation": artifacts.module_digests(),
+            "verifier_research_implementation": research_digests(),
+            "environment": environment_document(include_memory=False),
+            "provenance_limitations": limitations,
+        },
         "scope": (
             "A PASS means the candidate passed this synthetic contract only. It is not adoption, "
             "not market error control, and it supplies no calibration evidence for month counts "
             "other than those observed. Product integration remains a separate task and M3a "
-            "production inference is still unaccepted at this commit."
+            "production inference is still unaccepted."
         ),
     }
     _write_json(root / "summary.json", summary)
@@ -2132,55 +2263,22 @@ def summarize(output_root: Any) -> dict[str, Any]:
     return summary
 
 
-def _decide(
-    *,
-    problems: Sequence[str],
-    missing: Sequence[str],
-    incomplete: Sequence[str],
-    failing: Sequence[str],
-    run_document: Mapping[str, Any] | None,
-) -> tuple[str, list[str]]:
-    """PASS, FAIL or INCOMPLETE, with the exact reasons."""
-    reasons: list[str] = []
-    status = (run_document or {}).get("status")
-    stops = list((run_document or {}).get("stops", []))
-    statistical_stop = [item for item in stops if item.get("reason") in {
-        "rate_cannot_pass", "availability_cannot_pass"
-    }]
+def _decide(*, problems, incomplete, failing, refusal_failures, proven_stops, run_document):
+    """Only coherent saved evidence can establish statistical failure."""
     if problems:
-        reasons.extend(f"evidence integrity: {item}" for item in problems)
-        return "INCOMPLETE", reasons
-    if failing or statistical_stop:
-        reasons.extend(
-            f"required fixture {item} completed its declared attempts and failed its rate or "
-            "availability gate"
-            for item in failing
-        )
-        reasons.extend(
-            f"required fixture {item.get('fixture')} cannot pass: {item.get('rate')} reached "
-            f"{item.get('events')} events after {item.get('attempts_so_far')} attempts"
-            for item in statistical_stop
-        )
-        return "FAIL", reasons
-    if missing:
-        reasons.extend(f"required fixture {item} produced no records" for item in missing)
+        return "INCOMPLETE", [f"evidence integrity: {item}" for item in problems] + list(dict.fromkeys(incomplete))
+    if run_document and run_document.get("status") == "completed" and run_document.get("attempts_override") is None:
+        reasons = [f"required fixture {name} completed its declared attempts and failed its rate or availability gate"
+                   for name in failing]
+        reasons += [f"required refusal fixture {name} published inference" for name in refusal_failures]
+        reasons += [f"required fixture {s['fixture']} cannot pass: {s['rate']} reached {s['events']} events "
+                    f"after {s['attempts_so_far']} attempts" for s in proven_stops]
+        if reasons:
+            return "FAIL", reasons
     if incomplete:
-        reasons.extend(f"required fixture {item} did not complete its declared attempts" for item in incomplete)
-    if status == "incomplete":
-        reasons.append(f"the run stopped: {(run_document or {}).get('incomplete_reason')}")
-    replays = (run_document or {}).get("replays")
-    if replays is None:
-        reasons.append("the bounded replay and adapter checks were not run")
-    else:
-        for name, replay in replays.items():
-            if not replay.get("agrees"):
-                reasons.append(f"{name} disagreed: {replay.get('mismatched')}")
-    if reasons:
-        return "INCOMPLETE", reasons
-    return "PASS", [
-        "Every required fixture completed its declared attempts and passed its availability and "
-        "three rate checks, and the bounded replay and adapter checks agreed."
-    ]
+        return "INCOMPLETE", list(dict.fromkeys(incomplete))
+    return "PASS", ["All 17 plan-1 entries completed, all eight main gates passed, every refusal withheld "
+                    "inference, stress/planted disclosures completed, and both required replays agreed."]
 
 
 def _percent(value: Any) -> str:
@@ -2197,6 +2295,7 @@ def render_summary(summary: Mapping[str, Any]) -> str:
         f"# {summary['method']} — candidate decision: **{summary['decision']}**",
         "",
         f"Manifest digest `{summary['manifest_digest']}`.",
+        f"Plan version {admission.PLAN_VERSION}; decision policy {admission.DECISION_POLICY_VERSION}.",
         "",
         "This is an experimental research candidate. It is not integrated into any analysis",
         "request, sealed artifact or report, and no outcome here accepts M3a or starts M3b.",
@@ -2271,7 +2370,7 @@ def render_summary(summary: Mapping[str, Any]) -> str:
             "Interval width is reported separately, because the t critical value affects the",
             "width and not the variance estimate.",
             "",
-            "## Disclosures outside the admitted-null gate",
+            "## Mandatory disclosures (rates outside the admitted-null ceiling)",
             "",
             "| Fixture | Kind | Attempts | Availability | Raw rejection | Holm FWER |",
             "| --- | --- | ---: | ---: | --- | --- |",
@@ -2292,7 +2391,7 @@ def render_summary(summary: Mapping[str, Any]) -> str:
             "",
             "Refusal, long-dependence and planted fixtures are required disclosures. Their rates",
             "are never added to the admitted-null envelope, and the planted results are wiring",
-            "checks rather than a power gate.",
+            "checks rather than a power gate. Completion and actual refusal are required for PASS.",
             "",
             "## Scope",
             "",
@@ -2300,6 +2399,11 @@ def render_summary(summary: Mapping[str, Any]) -> str:
             "",
         ]
     )
+    limitations = summary.get("verification", {}).get("provenance_limitations", [])
+    if limitations:
+        lines.extend(["## Provenance limitations", ""])
+        lines.extend(f"- {item}" for item in limitations)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -2331,7 +2435,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--skip-supplementary", action="store_true",
-        help="Run only the eight required fixtures, without the disclosure fixtures.",
+        help="Omit mandatory disclosures (leaves the decision INCOMPLETE).",
     )
     parser.add_argument(
         "--skip-replays", action="store_true",
@@ -2347,6 +2451,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _selected(labels: Sequence[str] | None) -> Sequence[CandidateFixture] | None:
     if labels is None:
         return None
+    if len(set(labels)) != len(labels):
+        raise PatternLabDataError("duplicate candidate fixture labels")
     known = {item.label: item for item in MAIN_MATRIX + SUPPLEMENTARY_MATRIX}
     unknown = sorted(set(labels) - set(known))
     if unknown:
@@ -2363,16 +2469,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     def progress(message: str) -> None:
         print(f"pattern-lab-monthly: {message}", file=sys.stderr, flush=True)
 
-    if not args.summarize_only:
-        run_experiment(
-            output_root=root,
-            fixtures=_selected(args.fixtures),
-            attempts=args.attempts,
-            include_supplementary=not args.skip_supplementary,
-            include_replays=not args.skip_replays,
-            progress=progress,
-        )
-    summary = summarize(root)
+    try:
+        if not args.summarize_only:
+            run_experiment(
+                output_root=root,
+                fixtures=_selected(args.fixtures),
+                attempts=args.attempts,
+                include_supplementary=not args.skip_supplementary,
+                include_replays=not args.skip_replays,
+                progress=progress,
+            )
+        summary = summarize(root)
+    except (PatternLabDataError, OSError, ValueError) as error:
+        print(json.dumps({"decision": "INCOMPLETE", "decision_reasons": [str(error)]}), file=sys.stderr)
+        return 2
     print(
         json.dumps(
             {

@@ -152,6 +152,37 @@ including the frozen generator contract and the exact-binomial acceptance
 arithmetic). They build studies and analyses under the launcher's external
 temporary root and never read market data.
 
+`test_pattern_lab_analysis_monthly.py` covers the separate research-only
+`monthly_cluster_jackknife_v1` numerical candidate and its bounded real pipeline
+replays. Companion `_monthly_platform.py`, `_monthly_replay.py`,
+`_monthly_admission.py` and `_monthly_provenance.py` cover native memory readings
+and injected failures, requested-work projection and pilot reuse, complete replay
+families, plan-1 evidence admission and source attribution. Constructed compact
+records test PASS/FAIL/INCOMPLETE without running a Monte Carlo matrix. The tests
+include historical format 1 and new format 2, optional decoded-byte checksums,
+ambiguous plain/gzip rejection and mandatory disclosure/refusal behavior.
+Native Windows readings are exercised on Windows; injected Linux results on that
+host do not certify native Linux `getrusage` or `/proc` calls. Run the platform
+module on each host, and keep the full Pattern Lab suite's worker/platform cases.
+
+The monthly CLI is independent of production analysis requests:
+
+```bash
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root NEW_EXTERNAL_DIR \
+    --fixtures 002_null_dependent_t5 102_null_causal_ohlc_v1 --attempts 2
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root COPIED_ARCHIVE \
+    --summarize-only
+```
+
+The first command must complete its bounded replays but remains diagnostic
+INCOMPLETE (exit 2). The second generates no data and requires no memory API;
+preserve the archive's original summaries before it overwrites the copy's
+top-level summaries. Exit 0 requires the complete valid 17-entry plan, all main
+gates, mandatory disclosures/refusals and both named replays. See the
+[Pattern Lab guide](../tools/pattern_lab/README.md#the-experimental-monthly-jackknife-candidate)
+for resource, acceptance and historical provenance limits. Candidate evidence
+does not accept M3a or start M3b.
+
 The large declared calibration experiments deliberately stay **outside** normal
 discovery: they run once for a delivery and save one compact JSON artifact under
 an external task-owned root. Their purpose is to measure and bound the

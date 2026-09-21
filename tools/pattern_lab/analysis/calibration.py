@@ -1620,12 +1620,17 @@ def legacy_protocol_plan() -> tuple[dict[str, Any], ...]:
 
 
 def _contract_without_implementation(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """The semantic part of a generator contract, without physical digests."""
-    return {
+    """Shared settings and exactly the legacy fixtures, independent of extensions."""
+    semantic = {
         key: value
         for key, value in contract.items()
-        if key not in ("implementation", "generator_digest")
+        if key not in ("implementation", "generator_digest", "scenarios")
     }
+    scenarios = contract.get("scenarios", [])
+    # Preserve multiplicity: filtering into a dict would hide duplicate required fixtures.
+    semantic["scenarios"] = [item for name in LEGACY_PROTOCOL_SCENARIOS
+                             for item in scenarios if item.get("name") == name]
+    return semantic
 
 
 def _eligibility_reasons(document: Mapping[str, Any]) -> list[str]:

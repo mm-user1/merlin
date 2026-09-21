@@ -159,6 +159,9 @@ python -m tools.pattern_lab analyze --run-root <pair-run> \
     --output-root <new-analysis>
 python -m tools.pattern_lab analysis-report --analysis-root <new-analysis>
 python -m tools.pattern_lab.analysis.calibration --output-root <external-temp-dir>
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root <new-external-smoke> \
+    --fixtures 002_null_dependent_t5 102_null_causal_ohlc_v1 --attempts 2
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root <copied-archive> --summarize-only
 ```
 
 Network access happens only inside `collect`, `update` and `recover`, through
@@ -167,6 +170,19 @@ read, takes the in-root `.pack-lock` guard, so a busy root is reported (exit `3`
 rather than queued and two independent readers conflict deliberately. Exit `4`
 means a pending operation must be recovered or aborted first. Collector code
 availability is not an operationally prepared market pack.
+
+`calibration_monthly` is a separate research-only candidate driver on Windows
+and Linux. The displayed subset command completes bounded replays but remains
+INCOMPLETE (exit 2). Its full frozen plan is 17 entries / 19,400 attempts under
+sampled resource guards; missing required peak resident/available physical memory
+measurements stop generation. PASS (exit 0) requires all main gates, complete
+mandatory disclosures, actual refusals and both named replay checks. Offline
+scoring needs no generator or memory API, preserves producer versus verifier
+attribution, and labels historical source/replay limitations. Copy archives and
+save their original summaries before re-scoring; the command replaces top-level
+summaries. The [candidate guide](pattern_lab/README.md#the-experimental-monthly-jackknife-candidate)
+owns the format, optional checksum and platform contracts. This candidate is not
+exposed through `analyze`, sealed artifacts or HTML; M3a acceptance remains open.
 
 `study` accepts any positive `--workers`, default `1`; above `1` the same
 instrument job runs in an explicit spawn pool bounded by the selected instrument
