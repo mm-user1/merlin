@@ -2500,7 +2500,7 @@ dependent Student-t scenario measured 8.05% rejection and 8.30% noncoverage
 (bounds 9.12% and 9.39%), and the 336-day admission-boundary scenario measured
 7.45% and 7.65% (bounds 8.49% and 8.70%). The cause is still under
 investigation. One measured scale diagnostic of that same 2000-repetition run:
-the bootstrap-implied **standard error** (mean interval width / 2 x 1.96) is
+the bootstrap-implied **standard error** (mean interval width / (2 x 1.96)) is
 about 0.99 of the empirical **standard deviation** of the primary lift across
 that scenario's own repetitions on the two iid-signal scenarios — including the
 one with AR(1) daily returns — and about 0.90 on the two failing
@@ -2522,8 +2522,9 @@ a disclosed limitation, not a claim that a seven-day method handles long memory,
 and the software does not detect such dependence automatically in a real run.
 
 Each repetition also retains the primary lift's **already computed** bootstrap
-standard deviation and its two error-distribution quantiles; no second bootstrap
-runs and no extra random draw is consumed. Each scenario record then publishes a
+standard deviation and its two error-distribution quantiles; all three are null
+when primary inference is unavailable, including a degenerate contrast. No second
+bootstrap runs and no extra random draw is consumed. Each scenario record publishes a
 `bootstrap_scale` block: the diagnostic count, the empirical standard deviation
 of the available-primary lifts, the mean and RMS bootstrap standard deviation,
 and the mean-bootstrap-SD / empirical-SD ratio. Numerator and denominator use
@@ -2532,7 +2533,16 @@ scope because the existing `effect.*` fields keep their own wider population of
 every repetition with a non-null lift. An undefined ratio is published as null
 with its count. These are standard-deviation diagnostics, never variance
 factors, and `CALIBRATION_SCHEMA_VERSION` stays at `1` because the fields are
-additive and no existing field changed meaning.
+additive and no existing field changed meaning. Read these diagnostic fields,
+including `bootstrap_scale`, as optional: records saved before their introduction
+do not contain them.
+
+The direct bootstrap-SD ratio differs from the interval-implied SE ratio above.
+Both depend on the sampled repetitions and their empirical SD; shorter runs have
+greater sampling uncertainty, especially with heavy tails. Compare the statistic,
+scenario and available population, and record the repetition count and seeds.
+A different ratio in a smaller experiment does not revise the delivered
+2000-repetition result or imply that empirical SD must increase with sample size.
 
 ### Reading the saved tables
 

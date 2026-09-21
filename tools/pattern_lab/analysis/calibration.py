@@ -693,7 +693,7 @@ def run_repetition(
     interval = primary["intervals"]["lift"]
     # Already computed by the production bootstrap; retained here rather than
     # recomputed, so no second resampling and no extra random draw is consumed.
-    bootstrap = primary["bootstrap"]["lift"] or {}
+    bootstrap = (primary["bootstrap"]["lift"] or {}) if primary["inference_available"] else {}
     family_rejected = any(
         item["nominal_reject_holm"] for item in estimates["members"] if item["inference_available"]
     )

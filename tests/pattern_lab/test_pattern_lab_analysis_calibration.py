@@ -8,6 +8,7 @@ an external task-owned root.  Nothing here certifies an error rate.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -283,6 +284,23 @@ def test_a_refused_repetition_reports_null_bootstrap_diagnostics():
     scenario = SCENARIOS_BY_NAME["short_population_84_days"]
     row = analysis_calibration.run_repetition(scenario, 0)
     assert row["primary_available"] is False
+    assert row["primary_bootstrap_sd"] is None
+    assert row["primary_error_quantile_0025"] is None
+    assert row["primary_error_quantile_0975"] is None
+
+
+def test_a_degenerate_repetition_reports_null_bootstrap_diagnostics(monkeypatch):
+    scenario = SCENARIOS_BY_NAME["null_inclusive_parent"]
+    records = generate_records(scenario, 0)
+    # An identical target and parent gives a zero contrast after bootstrapping,
+    # rather than failing the support gate before a bootstrap record exists.
+    records = replace(records, control_mask=records.target_mask)
+    monkeypatch.setattr(analysis_calibration, "generate_records", lambda *_: records)
+
+    row = analysis_calibration.run_repetition(scenario, 0)
+    assert row["primary_available"] is False
+    assert row["primary_reasons"] == ["degenerate_contrast"]
+    assert row["primary_lift"] == pytest.approx(0.0, abs=1e-15)
     assert row["primary_bootstrap_sd"] is None
     assert row["primary_error_quantile_0025"] is None
     assert row["primary_error_quantile_0975"] is None
