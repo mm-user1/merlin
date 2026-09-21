@@ -265,12 +265,7 @@ def test_the_joint_influence_matches_a_central_finite_difference_derivative():
     ]
     grid = CalendarGrid(YEAR_START, YEAR_END)
     members = [analysis_member()]
-    accumulator = analysis_estimator._Accumulator(
-        members=[members[0].member_id], instruments=["AAA", "BBB"], grid=grid
-    )
-    for position, frame in enumerate(frames):
-        accumulator.add(frame, where=f"records[{position}]")
-    influence = _production_influence(accumulator, members, grid)
+    influence = _production_influence(frames, members, grid)
 
     base = np.ones(grid.days, dtype=np.float64)
     step = 1e-6
@@ -293,42 +288,20 @@ def test_the_joint_influence_matches_a_central_finite_difference_derivative():
         )
 
 
-def _production_influence(accumulator, members, grid):
-    """Return the production joint influence vectors before centering."""
-    captured = {}
-    original = analysis_estimator._run_bootstrap
+def _production_influence(frames, members, grid):
+    """Return the production joint influence vectors of the first member.
 
-    def capture(results, influence, **kwargs):
-        captured.update({index: dict(value) for index, value in influence.items()})
-        return original(results, influence, **kwargs)
-
-    analysis_estimator._run_bootstrap = capture
-    try:
-        analysis_estimator._evaluate_accumulated(
-            accumulator,
-            members=[
-                {
-                    "member_id": members[0].member_id,
-                    "comparison_id": members[0].comparison_id,
-                    "kind": members[0].kind,
-                    "model_instance_id": members[0].model_instance_id,
-                    "timeframe_minutes": members[0].timeframe_minutes,
-                    "case_id": members[0].case_id,
-                    "direction": members[0].direction,
-                    "horizon_minutes": members[0].horizon_minutes,
-                    "primary": members[0].primary,
-                }
-            ],
-            member_ids=[members[0].member_id],
-            instrument_ids=["AAA", "BBB"],
-            grid=grid,
-            resamples=99,
-            seed=1,
-            batch_size=64,
-        )
-    finally:
-        analysis_estimator._run_bootstrap = original
-    return captured[0]
+    They are read from the shared pre-inference stage, which is the same object
+    the bootstrap consumes: no second accumulation and no second estimator.
+    """
+    accumulated = analysis_estimator.accumulate_observations(
+        frames,
+        family=members,
+        instruments=["AAA", "BBB"],
+        study_start_ms=YEAR_START,
+        study_end_ms=YEAR_END,
+    )
+    return accumulated.influence[0]
 
 
 def test_a_frozen_event_weight_would_change_the_control_influence_materially():
@@ -343,12 +316,7 @@ def test_a_frozen_event_weight_would_change_the_control_influence_materially():
     ]
     grid = CalendarGrid(YEAR_START, YEAR_END)
     members = [analysis_member()]
-    accumulator = analysis_estimator._Accumulator(
-        members=[members[0].member_id], instruments=["AAA", "BBB"], grid=grid
-    )
-    for position, frame in enumerate(frames):
-        accumulator.add(frame, where=f"records[{position}]")
-    influence = _production_influence(accumulator, members, grid)
+    influence = _production_influence(frames, members, grid)
 
     frozen = _frozen_weight_control_influence(frames, grid)
     difference = np.max(np.abs(influence["uC"] - frozen))

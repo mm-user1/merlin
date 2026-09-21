@@ -17,6 +17,7 @@ memory or regime change.  Holm cannot repair an invalid individual p-value.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -552,27 +553,52 @@ def _holm(p_values: np.ndarray, member_ids: Sequence[str]) -> np.ndarray:
     return adjusted
 
 
-def evaluate_observations(
-    records: Any,
-    *,
-    family: Sequence[Any],
-    instruments: Sequence[str],
-    study_start_ms: int,
-    study_end_ms: int,
-    resamples: int,
-    seed: int,
-    batch_size: int = BOOTSTRAP_BATCH,
-) -> dict[str, Any]:
-    """Estimate every family member's matched comparison and its uncertainty.
+@dataclass(frozen=True)
+class AccumulatedEstimates:
+    """The shared pre-inference stage of one evaluation.
 
-    ``records`` is one aligned observation table or an iterable of per-instrument
-    tables.  Each row is one eligible anchor of one resolved family member, with
-    its target/control membership, the comparison's common condition
-    availability, the net and gross returns and the return validity.
-
-    The returned mapping holds the numeric results and compact columnar tables;
-    it publishes nothing and verifies no source provenance.
+    Accumulation, stratum support, point estimates, coverage geometry and the
+    joint daily influence of every family member are all decided here, **before**
+    any resampling.  :func:`evaluate_observations` continues from this object into
+    the bootstrap, the Holm correction and the published tables; research code
+    that applies a different uncertainty calculation consumes the same object, so
+    it shares one owner of matching, support and weighting and its availability
+    can never depend on a sampled bootstrap draw.
     """
+
+    members: tuple[Mapping[str, Any], ...]
+    member_ids: tuple[str, ...]
+    instrument_ids: tuple[str, ...]
+    grid: CalendarGrid
+    results: list[dict[str, Any]]
+    influence: dict[int, dict[str, np.ndarray]]
+    strata: dict[int, dict[str, np.ndarray]]
+    retained: np.ndarray
+    nE: np.ndarray
+    nC: np.ndarray
+    a_sum: np.ndarray
+    b_sum: np.ndarray
+    ag_sum: np.ndarray
+    bg_sum: np.ndarray
+    overlap: np.ndarray
+    target_days: np.ndarray
+    control_days: np.ndarray
+    e_daily: np.ndarray
+    c_daily: np.ndarray
+    a_daily: np.ndarray
+    b_daily: np.ndarray
+    ag_daily: np.ndarray
+    bg_daily: np.ndarray
+    o_daily: np.ndarray
+    stratum_member: np.ndarray
+    stratum_instrument: np.ndarray
+    stratum_month: np.ndarray
+    lengths: np.ndarray
+
+
+def _resolved_members(
+    family: Sequence[Any], instruments: Sequence[str]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     members = _family_records(family)
     member_ids = [item["member_id"] for item in members]
     instrument_ids = list(dict.fromkeys(str(item) for item in instruments))
@@ -580,11 +606,24 @@ def evaluate_observations(
         raise PatternLabDataError("instruments: duplicate instrument IDs are rejected.")
     if not instrument_ids:
         raise PatternLabDataError("instruments: at least one instrument is required.")
-    if isinstance(resamples, bool) or not isinstance(resamples, int) or resamples < 1:
-        raise PatternLabDataError(f"resamples: expected a positive integer, got {resamples!r}.")
-    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= analysis_request.MAX_SEED:
-        raise PatternLabDataError(f"seed: expected an integer in [0, 2**32-1], got {seed!r}.")
+    return members, member_ids, instrument_ids
 
+
+def accumulate_observations(
+    records: Any,
+    *,
+    family: Sequence[Any],
+    instruments: Sequence[str],
+    study_start_ms: int,
+    study_end_ms: int,
+) -> AccumulatedEstimates:
+    """Accumulate aligned observation records into point estimates and support.
+
+    ``records`` is one aligned observation table or an iterable of per-instrument
+    tables, validated exactly as :func:`evaluate_observations` validates them.
+    Nothing is resampled and no inference is published here.
+    """
+    members, member_ids, instrument_ids = _resolved_members(family, instruments)
     grid = CalendarGrid(study_start_ms, study_end_ms)
     accumulator = _Accumulator(members=member_ids, instruments=instrument_ids, grid=grid)
     frames: Iterable[Any]
@@ -595,29 +634,6 @@ def evaluate_observations(
     for position, frame in enumerate(frames):
         accumulator.add(frame, where=f"observation records[{position}]")
 
-    return _evaluate_accumulated(
-        accumulator,
-        members=members,
-        member_ids=member_ids,
-        instrument_ids=instrument_ids,
-        grid=grid,
-        resamples=int(resamples),
-        seed=int(seed),
-        batch_size=int(batch_size),
-    )
-
-
-def _evaluate_accumulated(
-    accumulator: _Accumulator,
-    *,
-    members: Sequence[Mapping[str, Any]],
-    member_ids: Sequence[str],
-    instrument_ids: Sequence[str],
-    grid: CalendarGrid,
-    resamples: int,
-    seed: int,
-    batch_size: int,
-) -> dict[str, Any]:
     n_member = len(member_ids)
     n_instrument = len(instrument_ids)
     n_month = grid.month_count
@@ -654,12 +670,9 @@ def _evaluate_accumulated(
     )
     stratum_member = np.repeat(np.arange(n_member, dtype=np.int64), per_member)
 
-    lengths = block_lengths(grid.days)
-    k_draw = int(lengths.size)
-    rng = np.random.Generator(np.random.PCG64(seed))
-
     results: list[dict[str, Any]] = []
     influence: dict[int, dict[str, np.ndarray]] = {}
+    strata: dict[int, dict[str, np.ndarray]] = {}
     for index in range(n_member):
         member = members[index]
         block = slice(index * per_member, (index + 1) * per_member)
@@ -702,14 +715,108 @@ def _evaluate_accumulated(
         vectors = outcome.pop("_influence", None)
         if vectors is not None:
             influence[index] = vectors
+        retained_strata = outcome.pop("_strata", None)
+        if retained_strata is not None:
+            strata[index] = retained_strata
         results.append(outcome)
 
-    _run_bootstrap(
-        results, influence, rng=rng, days=grid.days, lengths=lengths,
-        resamples=resamples, batch_size=batch_size,
+    _apply_horizon_fingerprints(members, results)
+
+    return AccumulatedEstimates(
+        members=tuple(members),
+        member_ids=tuple(member_ids),
+        instrument_ids=tuple(instrument_ids),
+        grid=grid,
+        results=results,
+        influence=influence,
+        strata=strata,
+        retained=retained,
+        nE=nE,
+        nC=nC,
+        a_sum=a_sum,
+        b_sum=b_sum,
+        ag_sum=ag_sum,
+        bg_sum=bg_sum,
+        overlap=overlap,
+        target_days=target_days,
+        control_days=control_days,
+        e_daily=e_daily,
+        c_daily=c_daily,
+        a_daily=a_daily,
+        b_daily=b_daily,
+        ag_daily=ag_daily,
+        bg_daily=bg_daily,
+        o_daily=o_daily,
+        stratum_member=stratum_member,
+        stratum_instrument=stratum_instrument,
+        stratum_month=stratum_month,
+        lengths=block_lengths(grid.days),
     )
 
-    _apply_horizon_fingerprints(members, results)
+
+def evaluate_observations(
+    records: Any,
+    *,
+    family: Sequence[Any],
+    instruments: Sequence[str],
+    study_start_ms: int,
+    study_end_ms: int,
+    resamples: int,
+    seed: int,
+    batch_size: int = BOOTSTRAP_BATCH,
+) -> dict[str, Any]:
+    """Estimate every family member's matched comparison and its uncertainty.
+
+    ``records`` is one aligned observation table or an iterable of per-instrument
+    tables.  Each row is one eligible anchor of one resolved family member, with
+    its target/control membership, the comparison's common condition
+    availability, the net and gross returns and the return validity.
+
+    The returned mapping holds the numeric results and compact columnar tables;
+    it publishes nothing and verifies no source provenance.
+    """
+    if isinstance(resamples, bool) or not isinstance(resamples, int) or resamples < 1:
+        raise PatternLabDataError(f"resamples: expected a positive integer, got {resamples!r}.")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= analysis_request.MAX_SEED:
+        raise PatternLabDataError(f"seed: expected an integer in [0, 2**32-1], got {seed!r}.")
+
+    accumulated = accumulate_observations(
+        records,
+        family=family,
+        instruments=instruments,
+        study_start_ms=study_start_ms,
+        study_end_ms=study_end_ms,
+    )
+    return _evaluate_accumulated(
+        accumulated,
+        resamples=int(resamples),
+        seed=int(seed),
+        batch_size=int(batch_size),
+    )
+
+
+def _evaluate_accumulated(
+    accumulated: AccumulatedEstimates,
+    *,
+    resamples: int,
+    seed: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Resample the accumulated members, adjust the family and build the tables."""
+    members = accumulated.members
+    member_ids = accumulated.member_ids
+    instrument_ids = accumulated.instrument_ids
+    grid = accumulated.grid
+    results = accumulated.results
+    n_member = len(member_ids)
+    lengths = accumulated.lengths
+    k_draw = int(lengths.size)
+    rng = np.random.Generator(np.random.PCG64(seed))
+
+    _run_bootstrap(
+        results, accumulated.influence, rng=rng, days=grid.days, lengths=lengths,
+        resamples=resamples, batch_size=batch_size,
+    )
 
     internal = np.array(
         [1.0 if item["p_raw"] is None else float(item["p_raw"]) for item in results],
@@ -755,35 +862,35 @@ def _evaluate_accumulated(
             member_ids=member_ids,
             instrument_ids=instrument_ids,
             grid=grid,
-            retained=retained,
-            nE=nE,
-            nC=nC,
-            a_sum=a_sum,
-            b_sum=b_sum,
-            ag_sum=ag_sum,
-            bg_sum=bg_sum,
-            overlap=overlap,
-            target_days=target_days,
-            control_days=control_days,
-            stratum_member=stratum_member,
-            stratum_instrument=stratum_instrument,
-            stratum_month=stratum_month,
+            retained=accumulated.retained,
+            nE=accumulated.nE,
+            nC=accumulated.nC,
+            a_sum=accumulated.a_sum,
+            b_sum=accumulated.b_sum,
+            ag_sum=accumulated.ag_sum,
+            bg_sum=accumulated.bg_sum,
+            overlap=accumulated.overlap,
+            target_days=accumulated.target_days,
+            control_days=accumulated.control_days,
+            stratum_member=accumulated.stratum_member,
+            stratum_instrument=accumulated.stratum_instrument,
+            stratum_month=accumulated.stratum_month,
         ),
         "daily": _daily_table(
             member_ids=member_ids,
             instrument_ids=instrument_ids,
             grid=grid,
-            retained=retained,
-            e_daily=e_daily,
-            c_daily=c_daily,
-            a_daily=a_daily,
-            b_daily=b_daily,
-            ag_daily=ag_daily,
-            bg_daily=bg_daily,
-            o_daily=o_daily,
-            stratum_member=stratum_member,
-            stratum_instrument=stratum_instrument,
-            stratum_month=stratum_month,
+            retained=accumulated.retained,
+            e_daily=accumulated.e_daily,
+            c_daily=accumulated.c_daily,
+            a_daily=accumulated.a_daily,
+            b_daily=accumulated.b_daily,
+            ag_daily=accumulated.ag_daily,
+            bg_daily=accumulated.bg_daily,
+            o_daily=accumulated.o_daily,
+            stratum_member=accumulated.stratum_member,
+            stratum_instrument=accumulated.stratum_instrument,
+            stratum_month=accumulated.stratum_month,
         ),
     }
 
@@ -1027,6 +1134,17 @@ def _member_estimates(
     )
     if not reasons:
         outcome["_influence"] = {"uE": uE, "uC": uC, "uD": uD}
+        # The retained sufficient statistics of this member, in retained-stratum
+        # order: the one place matching, support and weighting are decided, so a
+        # different uncertainty calculation reuses them rather than reselecting.
+        outcome["_strata"] = {
+            "month_index": month_index[rows].copy(),
+            "instrument_index": instrument_index[rows].copy(),
+            "target_count": nE_r.copy(),
+            "control_count": nC_r.copy(),
+            "target_net_sum": a_r.copy(),
+            "control_net_sum": b_r.copy(),
+        }
     return outcome
 
 

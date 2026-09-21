@@ -2614,6 +2614,244 @@ contract's `generator_digest`, for every run including legacy ones; legacy
 equivalence is demonstrated by comparing the legacy generators' actual masks,
 returns, availability and results, never by digest equality.
 
+#### The experimental monthly-jackknife candidate
+
+`tools.pattern_lab.analysis.calibration_monthly` holds one **research-only**
+experimental candidate, `monthly_cluster_jackknife_v1`, and the driver that
+decides it against the unchanged acceptance contract above. It is reachable
+only from its own command. No analysis request, method default, sealed artifact
+schema or HTML rendering exposes it, the existing seven-day block bootstrap
+remains the implemented — and explicitly unvalidated — production method, and no
+outcome of this experiment adopts a method, accepts M3a or starts M3b.
+
+```bash
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root EXTERNAL_TEMP_DIR
+python -m tools.pattern_lab.analysis.calibration_monthly --output-root EXTERNAL_TEMP_DIR \
+    --summarize-only
+```
+
+The first command runs the frozen matrix; the second rebuilds `summary.json` and
+`summary.md` from the saved manifest and records alone, generating no data and
+running no inference. Exit 0 is a PASS of the synthetic contract; exit 2 covers
+both FAIL and INCOMPLETE, which the JSON names explicitly.
+
+**The method.** For each family member the candidate keeps the production
+retained instrument x signal-month strata, their target and control counts
+`e_s`, `c_s` and their net sums `a_s`, `b_s`, with `r_s = e_s/c_s`. It aggregates
+them to whole signal months,
+
+```text
+N_m = sum_{s in m} e_s
+Q_m = [sum a_s, sum r_s b_s, sum (a_s - r_s b_s)]
+N   = sum_m N_m            theta = sum_m Q_m / N
+```
+
+where `theta` is (signal, matched control, lift) and equals the production point
+estimate. With `G` informative months it deletes each month in turn,
+
+```text
+theta_(-m) = (sum_l Q_l - Q_m) / (N - N_m)
+V_J        = (G-1)/G * sum_m outer(theta_(-m) - mean, theta_(-m) - mean)
+CI_j       = theta_j +/- t(.975, G-1) * sqrt(V_J[j,j])
+p_lift     = 2 * t_survival(|theta_lift| / SE_lift, G-1)
+```
+
+and reports the **full-sample** `theta`, never the deletion average. Holm uses
+the candidate's own p-values over the entire unchanged declared family with the
+existing deterministic tie handling; unavailable members keep internal `p = 1`.
+No seed and no resample count governs this formula.
+
+`V_J` is positive semidefinite and **singular by construction**, because the lift
+column is the signal column minus the matched-control column. Only its diagonal
+is used: it is never inverted, Cholesky-factored or ridged, and its off-diagonal
+entries do not add an independent dimension. The `t` reference is an explicit
+approximation — months need not be independent in real data. The monthly
+cancellation removes the need to estimate a fitted within-stratum imbalance term
+at a block scale smaller than its own stratum; it does **not** remove
+control-mean uncertainty, which stays in the variation of `A_m`.
+
+**Support and validity.** The existing full-sample strata, span, active-day,
+block, retained-coverage and horizon gates are applied once, by the shared
+accumulation, and are never reapplied to a deleted-month sample. Partial
+endpoint months, unequal counts and outcomes crossing month boundaries are
+preserved, and each outcome belongs to its signal month; there is no equal-month
+reweighting, trimming, post-hoc concentration gate or selection of successful
+months. On top of them the candidate adds only mathematical validity rules: at
+least two informative months, a positive remaining target count after every
+deletion, finite inputs and results, and a nondegenerate contrast under the fixed
+float64 rule
+
+```text
+mass          = sum_s (|a_s| + |r_s b_s|) / N
+amplification = max_m N / (N - N_m)
+scale_lift    = max(|theta_lift|, mass * amplification)
+degenerate   <=>  SE_lift <= 128 * finfo(float64).eps * scale_lift
+```
+
+which uses pre-cancellation component mass and the deletion-denominator
+amplification rather than already-cancelled sums. An exact zero stays unavailable
+even when the threshold is zero. Refusals publish explicit reasons and nulls,
+never an epsilon-filled SE, a NaN or `p = 0`; a non-finite input is a correctness
+error and raises, rather than hiding in availability.
+
+**The shared pre-inference stage.** `estimator.accumulate_observations` is the
+one owner of accumulation, matching, support and the per-member point estimates.
+`evaluate_observations` keeps its exact signature, behaviour, table schemas and
+numerical results and now continues from that object into the bootstrap, Holm and
+the published tables; the candidate consumes the same object. Candidate
+availability is therefore decided **before** any resampling and can never depend
+on a sampled bootstrap degeneracy. Editing `estimator.py` changes
+`artifacts.ATTRIBUTED_MODULES` digests and the implementation provenance of
+future sealed artifacts. That is expected: `artifacts.semantic_identity`
+deliberately excludes the implementation digest, so analysis semantic identity is
+preserved, and numerical equivalence is demonstrated by comparing results on
+fixed synthetic sources rather than by preserving an obsolete hash.
+
+**Fixture 102.** `null_causal_ohlc_v1` is a coherent synthetic candle null that
+the candidate module owns, because it produces OHLCV and runs the real study job
+rather than outcome records. Four instruments on a 30-minute grid cover the same
+365-day research year as fixture 1 with seven preceding warmup days. Each bar
+draws a shared Rademacher sign `C` and per-instrument signs `E_i`, giving the
+simple return `r_i = 0.001 * (0.8*C + 0.6*E_i)`; the initial open is 100, the
+close is `open*(1+r)`, the next open is the previous close, and
+`high = max(open,close)*1.0002`, `low = min(open,close)*0.9998`. Quote volume is
+`exp(0.25*Z_i)` with `Z_i` standard normal and independent of the return
+innovations. The RNG order is pinned: PCG64 from `SeedSequence([20260920, 102,
+repetition_id, 0])` draws `C` for every chronological warmup and study bar first,
+then, in the frozen instrument order, each instrument's `E_i` signs followed by
+its `Z_i` normals.
+
+Because `|0.8| > |0.6|` and both draws are +/-1, a bar is green exactly when
+`C = +1`: the two-green component of the condition is **identical on all four
+instruments by construction**. The fixture therefore deliberately tests a fully
+common price signal with strong cross-sectional event clustering; the independent
+volume filter still gives distinct event masks and the return magnitudes still
+differ. Common signs do not invalidate the null. Rademacher innovations are
+bounded, which is what guarantees strictly positive price paths; Gaussian return
+innovations would lose that guarantee.
+
+The fixture runs the actual built-in two-green/rising-volume condition in
+occurrence mode, the existing nonsignal comparison, the next-open fixed-horizon
+model and the real price-ratio fee expansion, with
+`commission_pct_per_side = 0.05` pinned in both the model settings and the
+family metadata — `f = 0.0005` as a fraction. The legacy record families keep
+their zero commission. Entry is `open[i+1] = close[i]` and exit is `close[i+k]`,
+so the gross ratio has conditional mean one given the past and the expected fee
+is `2f`; the condition is measurable with respect to the past, so the target and
+control populations have the same zero expected net difference. This is a
+coherent population-null construction, not a claim that a finite
+random-denominator estimate, or an expectation conditional on the whole
+endogenous mask, is exactly zero: the exogenous-mask oracle of the record
+fixtures does not apply here.
+
+A small research-local in-memory table provider replaces only the verified table
+read, so `InstrumentReader`, the shared case expansion, the checked condition and
+emission alignment, the all-anchor case view and the membership mapping are the
+production ones. A bounded two-case disk replay writes the same evidence as
+Parquet, reads it back through the normal reader and requires identical results.
+
+**The frozen matrix.** Master seed 20260920, repetition IDs 20000-21999 only,
+eight required fixtures of 2,000 attempts each in the fixed order 2, 5, 1, 4, 3,
+12, 101, 102 — at most 16,000 main attempts, one candidate and no second formula.
+All family members are computed on every attempt. After the main matrix passes,
+the refusal fixtures 10 and 11 with their padded variants, the long-dependence
+fixtures 20 and 21 and the planted fixtures 30, 31 and 32 run at their original
+declared counts with fresh IDs from 20000, followed by the bounded replay and
+adapter checks. Every setting — the formula, both generator contracts and their
+digests, the numerical rules, the support contract, the family and primary
+definitions, the ordering, the seeds and the decision criteria — is written to
+`manifest.json` with its own digest **before** any outcome is inspected.
+
+The experiment has a three-hour wall-clock and 1 GiB process-RSS budget,
+measured rather than assumed, with a fixed five-attempt pilot per required
+fixture whose completed records are reused in the final matrix. Host available
+RAM and swap are read first; on a small host the ceiling is tightened to leave a
+system reserve, which never loosens the declared limit. A sampled RSS reading is
+a guard, not an OS-enforced allocation limit. Reaching the ceiling, inadequate
+headroom or a projected cost that cannot fit stops the run as **INCOMPLETE**
+rather than reducing attempts; a budget stop is not a statistical rejection.
+Statistical early stopping is allowed only where success is impossible: 140
+errors in any required rate cannot pass at the largest denominator 2,000, and 101
+unavailable primary attempts cannot meet the availability floor. There is no
+early acceptance.
+
+**Reading the result.** The candidate's interval and test are an exact inversion
+of one another, so on a zero-truth fixture raw rejection and nominal-95%
+noncoverage are the same event apart from boundary conventions; both columns are
+kept for compatibility, and the 24 displayed rate checks are not 24 independent
+confirmations. Constant-cost long and short lifts are exact sign mirrors with
+equal candidate p-values, and fixture 102's fixed proportional fee makes them
+near-exact mirrors with `lift_short = -(1+f)/(1-f) * lift_long` and an SE scaled
+by the same positive factor. Holm over tied pairs is conservative, so the
+family-wise rate is limited global-null evidence rather than proof of strong
+family-wise control. Legacy fixture 3 is a hard compatibility gate whose
+documented tiny population-null mismatch qualifies its number without waiving it.
+Refusal, long-dependence and planted fixtures are required disclosures whose
+rates are never added to the admitted-null envelope.
+
+The 252 active-day support gate implies at least nine occupied calendar months,
+so a `G = 2` case is mathematically valid but is not admitted inference, and that
+lower bound does not prove that every `G >= 9` population passes the other
+support gates. **The frozen matrix covers `G = 12` only.** A PASS therefore
+supplies no calibration evidence for other month counts or for all admitted
+support geometries, and broader production adoption remains a later decision.
+
+**The delivered decision: PASS on this synthetic contract.** The frozen matrix
+ran once, on repetition IDs 20000-21999, in 2.04 hours against the three-hour
+budget with a 352 MB peak RSS. All eight required fixtures completed their 2,000
+attempts and passed availability and all three rate checks, so the 24 required
+rate checks passed — the original 15 and the nine supplementary ones, kept
+separately visible and not pooled.
+
+| Fixture | Availability | Raw rejection (95% UB) | Noncoverage (95% UB) | Holm FWER (95% UB) | Mean SE / empirical SD |
+| --- | ---: | --- | --- | --- | ---: |
+| 002 `null_dependent_t5` | 100.00% | 5.70% (6.63%) | 5.70% (6.63%) | 2.05% (2.65%) | 0.954 |
+| 005 `null_admission_boundary_336` | 100.00% | 4.65% (5.50%) | 4.65% (5.50%) | 1.55% (2.09%) | 0.989 |
+| 001 `null_independent` | 100.00% | 5.25% (6.15%) | 5.25% (6.15%) | 2.40% (3.04%) | 0.992 |
+| 004 `null_inclusive_parent` | 99.95% | 5.25% (6.15%) | 5.25% (6.15%) | 1.90% (2.48%) | 0.962 |
+| 003 `null_conditional_confounded` | 100.00% | 5.00% (5.88%) | 5.00% (5.88%) | 1.75% (2.31%) | 0.992 |
+| 012 `null_dependent_gaussian_companion` | 100.00% | 4.15% (4.96%) | 4.15% (4.96%) | 0.90% (1.33%) | 0.990 |
+| 101 `null_confounded_signal_month_v2` | 100.00% | 4.60% (5.45%) | 4.60% (5.45%) | 1.95% (2.54%) | 0.974 |
+| 102 `null_causal_ohlc_v1` | 100.00% | 5.60% (6.52%) | 5.60% (6.52%) | 2.35% (2.99%) | 0.982 |
+
+Every fixture measured `G = 12` informative months, so **only twelve clusters are
+calibrated by this run**. The two rate columns coincide exactly on every fixture,
+as the interval/test duality requires, and each long/short pair produced
+identical marginal rates, as the mirror property requires; neither doubling is
+independent evidence. The longest 480-minute horizon of fixture 102 measured a
+5.95% marginal raw rejection rate, the highest of its eight members.
+
+The required disclosures behaved as declared and are **outside** the gate. All
+four refusal runs, including both zero-contribution-padded variants, published no
+p-value and no interval on any of their 200 attempts. The long-dependence
+fixtures at daily AR 0.9 measured 3.60% and 4.50% raw rejection at signal
+persistence 0.70 and 0.97, against the 8.3% and 11.1% the tracked long-dependence
+experiment measured for the seven-day bootstrap on the same two fixture
+definitions and the same rate. Those runs used different repetition IDs, so the
+pair is unpaired rather than a matched comparison. Either way this is a
+disclosure about these two fixtures, **not** a claim that the candidate controls
+error under long memory. The strong planted effects
+were detected in 100% of attempts and the modest one in 5.00%; those are wiring
+checks, not a power result. Both bounded checks agreed: the fixture-102 disk
+replay to `0.0` and the checked-joins replay to `3.0e-15`.
+
+**What this PASS does and does not mean.** It means the candidate met the
+unchanged declared synthetic screen that the seven-day block bootstrap failed
+11-of-15, on eight fixtures at twelve monthly clusters, and that on each
+fixture's own repetitions its mean standard error is 0.954-0.992 of the
+empirical spread of the primary lift. That last figure is **not** a paired
+comparison with the delivered bootstrap run: that run predates the
+`bootstrap_scale` field and published no direct standard-error ratio, only an
+interval-implied one — mean width / (2 x 1.96) — of about 0.99 on the iid-signal
+scenarios and about 0.90 on the two persistent-signal ones. Those are different
+statistics on different methods, so they indicate a direction and nothing
+sharper. The PASS is **not** adoption, not a validated market edge, not error
+control under dependence longer than these fixtures', and not calibration for
+any other month count or support geometry. Integrating the method is a separate,
+later decision; at this commit the production screen is still the bootstrap and
+**M3a's statistical acceptance gate remains open**.
+
 Alongside the acceptance scenarios the driver runs short-population refusal
 checks at 84 and 180 days — including the same records embedded in a 365-day grid with
 zero-contribution padding, which must stay unavailable — a **required
@@ -2758,6 +2996,14 @@ python -m tools.pattern_lab inspect --data-root <pack> --verify
 ```bash
 # The declared M3a calibration experiments, once, into an external root:
 python -m tools.pattern_lab.analysis.calibration --output-root "${TMPDIR:-/tmp}/pattern-lab-calibration"
+
+# The research-only monthly-jackknife candidate experiment, once, into its own
+# external root, and its offline summary rebuilt from that root alone:
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+python -m tools.pattern_lab.analysis.calibration_monthly \
+    --output-root "${TMPDIR:-/tmp}/pattern-lab-monthly"
+python -m tools.pattern_lab.analysis.calibration_monthly \
+    --output-root "${TMPDIR:-/tmp}/pattern-lab-monthly" --summarize-only
 ```
 
 The event-study cases live in `tests/pattern_lab/test_pattern_lab_study_events.py`,
@@ -2768,7 +3014,15 @@ independent row-level, finite-difference and index-based oracles),
 `_analysis_contracts.py` (the request, the resolved family and source
 admission), `_analysis_artifact.py` (publication, failure, the seal, relocation,
 regeneration and the CLI) and `_analysis_calibration.py` (the calibration
-machinery; the large declared experiments run once through the command above).
+machinery, its versioned protocol gate, its attempt ledger and the corrected
+fixture 101; the large declared experiments run once through the command above).
+`test_pattern_lab_analysis_monthly.py` owns the experimental candidate's focused
+checks: the point and monthly-score identities, direct deletion recomputation,
+the equal-count reduction and the interval/test inversion, every refusal, the
+fixture-102 candle law, its actual condition, emission, outcome and fee
+pipeline, the bounded disk-replay proof of its in-memory adapter, the causal
+prefix and suffix invariance of the built-in condition and the custom example,
+and the frozen matrix's own stopping arithmetic.
 `_study_contracts.py` owns the enforced boundary contracts: custom-model evidence
 admission and read-side revalidation, completion and partial-inspection
 integrity, every accepted request form, used-source attribution, resolved
@@ -2819,6 +3073,10 @@ Known limits of these milestones:
   daily signal-state chain measured about 7.5-8.3% rejection and noncoverage
   against a nominal 5%. A nominal Holm rejection is not a validated edge, and
   these p-values and intervals are anti-conservative under clustered signals.
+  The experimental `monthly_cluster_jackknife_v1` candidate passed the same
+  synthetic screen at twelve monthly clusters, but it is research-only and
+  unintegrated: it changes nothing about the production screen, and adopting it
+  is a separate decision that has not been taken.
 - **A seven-day block does not control error under dependence substantially
   longer than a week**, and the measurements above show it is already
   anti-conservative at the declared signal persistence. The tracked
