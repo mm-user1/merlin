@@ -2510,8 +2510,31 @@ established cause. **M3a's statistical acceptance is therefore open**; the
 method needs a reviewed revision before its inferential output can be treated
 as an accepted screen.
 
-Alongside them the driver runs short-population refusal checks at 84 and 180
-days — including the same records embedded in a 365-day grid with
+A bounded follow-up compared estimated variance with the true variance under a
+**known synthetic generator** on scenarios 1, 2, 3, 4, 5 and 12 at 400 repetitions
+each. Conditional on the realized masks, availability and retained strata, the matched estimate is a
+fixed linear combination of the generator's bar returns, so its exact sampling
+variance is computable on those fixtures. That is a **synthetic oracle**: it needs
+the data-generating process and is never available on market data. Against it, the
+exact calendar-block variance of the production influence vector averaged
+**0.97, 0.87, 0.97, 0.94, 0.86 and 0.87** of the true variance on scenarios 1, 2,
+3, 4, 5 and 12. These are **means of variance ratios**, not the standard-deviation
+ratios above; taking their square roots does not reproduce that earlier statistic.
+Using the generator's known means in the daily reference removes only part of
+each average deficit. On scenarios 2, 5 and 12, the fitted-score and
+block-calculation discrepancies are each about half of the deficit and are tied
+at 400 repetitions. These six fixtures differ in signal persistence, matching
+shape and innovation law at the same time, so they isolate no single cause.
+The count of named fitted mean terms (2 + retained strata) alone does not explain
+the differences and is **not** a degrees-of-freedom correction. It does not rule
+out an effect of estimating means from dependent observations or of their
+alignment with daily count patterns. These are descriptive diagnostics at
+that repetition count: they are not a universal undercoverage factor, not a
+calibrated inflation, not a correction, and they neither revise the delivered
+2000-repetition result nor accept M3a.
+
+Alongside the acceptance scenarios the driver runs short-population refusal
+checks at 84 and 180 days — including the same records embedded in a 365-day grid with
 zero-contribution padding, which must stay unavailable — a **required
 long-dependence limitation experiment** at daily AR 0.9 with two signal
 persistences, planted strong and modest effects, a default-`B` smoke, and a
