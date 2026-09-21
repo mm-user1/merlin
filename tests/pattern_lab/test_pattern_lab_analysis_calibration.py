@@ -8,13 +8,14 @@ an external task-owned root.  Nothing here certifies an error rate.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
 
 from tools.pattern_lab import PatternLabDataError
 from tools.pattern_lab.analysis import calibration as analysis_calibration
+from tools.pattern_lab.study.contracts import semantic_digest
 from tools.pattern_lab.analysis.calibration import (
     SCENARIOS,
     SCENARIOS_BY_NAME,
@@ -52,7 +53,7 @@ def test_the_declared_scenarios_cover_the_required_experiments():
     kinds = {}
     for scenario in SCENARIOS:
         kinds.setdefault(scenario.kind, []).append(scenario.name)
-    assert len(kinds["admitted_null"]) == 5
+    assert len(kinds["admitted_null"]) == 6
     assert len(kinds["refusal"]) == 2
     assert len(kinds["stress"]) == 2
     assert len(kinds["planted"]) == 2
@@ -69,6 +70,9 @@ def test_the_declared_scenarios_cover_the_required_experiments():
     assert SCENARIOS_BY_NAME["planted_negative_strong"].planted_effect == -0.005
     assert SCENARIOS_BY_NAME["planted_modest"].planted_effect == 0.00005
     assert SCENARIOS_BY_NAME["default_b_smoke"].resamples == 9999
+    corrected = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    assert corrected.scenario_id == 101 and corrected.signal == "confounded_signal_month"
+    assert corrected.admitted is True and corrected.repetitions == 2000
 
 
 def test_the_seed_derivation_is_reproducible_and_stream_separated():
@@ -182,6 +186,213 @@ def test_a_planted_effect_moves_only_the_target_observations():
 
 
 # --------------------------------------------------------------------------
+# fixture 101: the signal-month-aligned confounded null
+# --------------------------------------------------------------------------
+
+def _stratum_months(scenario):
+    """The production signal-month ordinal of every anchor, from the real grid."""
+    from tools.pattern_lab.analysis.estimator import CalendarGrid
+
+    bars = scenario.days * analysis_calibration.BARS_PER_DAY
+    anchors = bars - 1
+    step = analysis_calibration.TIMEFRAME_MINUTES * 60_000
+    signal = scenario.grid_start_ms + (np.arange(anchors, dtype=np.int64) + 1) * step
+    grid = CalendarGrid(scenario.study_start_ms, scenario.study_end_ms)
+    return grid, signal, grid.month_of_day[grid.day_offsets(signal)]
+
+
+def _assigned_probabilities(scenario, instrument_index, anchors):
+    """The event probability the generator assigns to every anchor."""
+    bars = scenario.days * analysis_calibration.BARS_PER_DAY
+    table = np.asarray(analysis_calibration.CONFOUNDED_PROBABILITIES)
+    if scenario.signal == "confounded_signal_month":
+        owner = analysis_calibration._signal_month_index(scenario.grid_start_ms, bars)[:anchors]
+    else:
+        owner = np.repeat(
+            analysis_calibration._month_index(scenario.grid_start_ms, scenario.days),
+            analysis_calibration.BARS_PER_DAY,
+        )[:anchors]
+    return table[(instrument_index + owner) % table.size]
+
+
+def test_a_month_end_anchor_belongs_to_the_next_signal_month():
+    scenario = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    bars = scenario.days * analysis_calibration.BARS_PER_DAY
+    driver = analysis_calibration._signal_month_index(scenario.grid_start_ms, bars)
+    bar_month = np.repeat(
+        analysis_calibration._month_index(scenario.grid_start_ms, scenario.days),
+        analysis_calibration.BARS_PER_DAY,
+    )
+    boundary = np.flatnonzero(driver[: bars - 1] != bar_month[: bars - 1])
+    # One 23:30 anchor per month boundary inside the 365-day grid.
+    assert boundary.size == 11
+    assert np.all(driver[boundary] == bar_month[boundary] + 1)
+    assert np.all(boundary % analysis_calibration.BARS_PER_DAY == analysis_calibration.BARS_PER_DAY - 1)
+    # The driver's ordinal is exactly the production grid's stratum month.
+    _grid, _signal, production = _stratum_months(scenario)
+    assert np.array_equal(driver[: production.size], production)
+
+
+def test_fixture_101_probabilities_are_constant_inside_every_actual_stratum():
+    corrected = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    legacy = SCENARIOS_BY_NAME["null_conditional_confounded"]
+    for scenario, constant in ((corrected, True), (legacy, False)):
+        _grid, _signal, months = _stratum_months(scenario)
+        mismatched = 0
+        for index in range(len(analysis_calibration.INSTRUMENTS)):
+            probabilities = _assigned_probabilities(scenario, index, months.size)
+            for month in np.unique(months):
+                distinct = np.unique(probabilities[months == month])
+                if distinct.size != 1:
+                    mismatched += 1
+        assert (mismatched == 0) is constant
+    # Exactly the 44 boundary anchors of the legacy fixture carry the wrong month.
+    _grid, _signal, months = _stratum_months(legacy)
+    wrong = sum(
+        int(
+            np.count_nonzero(
+                _assigned_probabilities(legacy, index, months.size)
+                != _assigned_probabilities(corrected, index, months.size)
+            )
+        )
+        for index in range(len(analysis_calibration.INSTRUMENTS))
+    )
+    assert wrong == 44
+
+
+def test_the_two_confounded_fixtures_keep_their_opposing_instrument_parity():
+    corrected = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    _grid, _signal, months = _stratum_months(corrected)
+    probabilities = [
+        _assigned_probabilities(corrected, index, months.size)
+        for index in range(len(analysis_calibration.INSTRUMENTS))
+    ]
+    # ``(index + month) % 2`` pairs the even and the odd instruments.
+    assert np.array_equal(probabilities[0], probabilities[2])
+    assert np.array_equal(probabilities[1], probabilities[3])
+    assert not np.array_equal(probabilities[0], probabilities[1])
+    assert np.all(probabilities[0] + probabilities[1] == pytest.approx(0.50))
+    # The deterministic return-mean schedule keeps its original bar-time
+    # ownership, so the return law is the legacy one.
+    legacy = SCENARIOS_BY_NAME["null_conditional_confounded"]
+    assert corrected.innovation == legacy.innovation
+    assert corrected.dependent == legacy.dependent
+    assert corrected.daily_ar == legacy.daily_ar
+    assert corrected.days == legacy.days and corrected.start_day == legacy.start_day
+    assert corrected.comparison == legacy.comparison
+    assert corrected.resamples == legacy.resamples
+
+
+def _population_lift(scenario, horizon_minutes):
+    """Exact stratum row-mixture target and control means, at one horizon.
+
+    Direct short window sums: a long cumulative prefix difference would cancel
+    against a running total of order 0.6 and hide a 1e-18 residual.
+    """
+    bars = scenario.days * analysis_calibration.BARS_PER_DAY
+    anchors = bars - 1
+    steps = horizon_minutes // analysis_calibration.TIMEFRAME_MINUTES
+    _grid, _signal, months = _stratum_months(scenario)
+    bar_month = np.repeat(
+        analysis_calibration._month_index(scenario.grid_start_ms, scenario.days),
+        analysis_calibration.BARS_PER_DAY,
+    )
+    index_of = np.arange(anchors)
+    valid = index_of + 1 + steps <= bars
+    worst = 0.0
+    numerator = 0.0
+    denominator = 0.0
+    for index in range(len(analysis_calibration.INSTRUMENTS)):
+        sign = 1.0 if index % 2 == 0 else -1.0
+        shift = (
+            sign
+            * analysis_calibration.CONFOUNDED_MONTH_SHIFT
+            * np.where(bar_month % 2 == 0, 1.0, -1.0)
+        )
+        windows = np.lib.stride_tricks.sliding_window_view(shift, steps).sum(axis=1)
+        mu = np.zeros(anchors, dtype=np.float64)
+        mu[: windows.size - 1] = windows[1:]
+        probabilities = _assigned_probabilities(scenario, index, anchors)
+        for month in np.unique(months):
+            take = valid & (months == month)
+            if not take.any():
+                continue
+            weight_e = probabilities[take].sum()
+            weight_c = (1.0 - probabilities[take]).sum()
+            lift = float(
+                (probabilities[take] * mu[take]).sum() / weight_e
+                - ((1.0 - probabilities[take]) * mu[take]).sum() / weight_c
+            )
+            worst = max(worst, abs(lift))
+            numerator += weight_e * lift
+            denominator += weight_e
+    return worst, numerator / denominator
+
+
+@pytest.mark.slow
+def test_the_corrected_fixture_has_a_zero_population_contrast_at_every_horizon():
+    """The deterministic row-mixture identity, not a claim about realized masks."""
+    corrected = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    legacy = SCENARIOS_BY_NAME["null_conditional_confounded"]
+    for horizon in analysis_calibration.HORIZON_MINUTES:
+        worst, weighted = _population_lift(corrected, horizon)
+        # The contributions are sums of at most 16 terms of 4e-4, so the
+        # floating-point floor of this identity is around 1e-17.
+        assert worst < 1e-17
+        assert abs(weighted) < 1e-17
+    # The legacy fixture keeps its documented, tiny, nonzero mismatch.
+    legacy_worst, legacy_weighted = _population_lift(legacy, 240)
+    assert legacy_worst == pytest.approx(4.1254148207e-08, rel=1e-9)
+    assert legacy_weighted == pytest.approx(1.4622196520e-08, rel=1e-9)
+    assert "not a waiver for a failed rate" in legacy.caveat
+    assert corrected.caveat == ""
+
+
+def test_the_corrected_fixture_censors_its_final_horizon_windows():
+    scenario = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    records = generate_records(scenario, 0)
+    members = [
+        item
+        for item in scenario_family(scenario)
+        if item.direction == "long" and item.horizon_minutes == 480
+    ]
+    frame = next(iter(record_frames(records, members)))
+    valid = frame["return_valid"].to_numpy()
+    signal = frame["signal_time_ms"].to_numpy()
+    steps = 480 // analysis_calibration.TIMEFRAME_MINUTES
+    tail = scenario.grid_end_ms - steps * analysis_calibration.TIMEFRAME_MINUTES * 60_000
+    # Every anchor whose 8-hour window would run past the generated grid is
+    # invalid, and nothing before that boundary is censored by the horizon.
+    assert not valid[signal > tail].any()
+    assert valid[signal <= tail].all()
+    assert np.isnan(frame["net_return"].to_numpy()[~valid]).all()
+
+
+def test_the_corrected_fixture_reaches_full_support_through_the_production_path():
+    scenario = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    row = analysis_calibration.run_repetition(scenario, 20000)
+    assert row["primary_available"] is True and row["primary_reasons"] == []
+    geometry = row["primary_geometry"]
+    assert geometry["day_grid_days"] == 365 and geometry["retained_months"] == 12
+    assert geometry["retained_strata"] == 48
+    assert row["family_available"] == row["family_size"] == 8
+
+
+def test_the_corrected_fixture_draws_an_independent_realization_of_its_own_id():
+    """Fixture 101 keys its seed on 101, so it is not a paired correction of 3."""
+    corrected = SCENARIOS_BY_NAME["null_confounded_signal_month_v2"]
+    legacy = SCENARIOS_BY_NAME["null_conditional_confounded"]
+    first = generate_records(corrected, 0)
+    second = generate_records(legacy, 0)
+    instrument = analysis_calibration.INSTRUMENTS[0]
+    assert not np.array_equal(first.returns[instrument], second.returns[instrument])
+    assert not np.array_equal(first.target_mask[instrument], second.target_mask[instrument])
+    assert np.array_equal(
+        first.returns[instrument], generate_records(corrected, 0).returns[instrument]
+    )
+
+
+# --------------------------------------------------------------------------
 # rate arithmetic and acceptance
 # --------------------------------------------------------------------------
 
@@ -205,7 +416,7 @@ def test_the_wilson_interval_is_reported_with_its_denominator():
     assert wilson_interval(0, 0) == {"lower": None, "upper": None, "level": 0.95}
 
 
-def test_acceptance_is_an_intersection_over_the_admitted_scenarios_only():
+def test_the_rate_scorer_is_an_intersection_over_the_admitted_records_it_is_given():
     def record(name, admitted, events):
         return {
             "name": name,
@@ -221,15 +432,20 @@ def test_acceptance_is_an_intersection_over_the_admitted_scenarios_only():
     passing = [record(f"s{index}", True, 100) for index in range(5)]
     scored = analysis_calibration.score_acceptance(passing + [record("stress", False, 900)])
     assert scored["checks_total"] == 15
-    assert scored["checks_passed"] == 15 and scored["accepted"] is True
+    assert scored["checks_passed"] == 15
+    assert scored["all_requested_checks_passed"] is True
+    assert scored["scope"] == "requested_subset"
     assert "not a joint 95% statement" in scored["meaning"]
+    assert "never release acceptance" in scored["meaning"]
+    # The release Boolean is not this helper's to publish.
+    assert "accepted" not in scored
 
     failing = passing[:-1] + [record("s4", True, 300)]
     scored = analysis_calibration.score_acceptance(failing)
-    assert scored["accepted"] is False and scored["checks_passed"] == 12
+    assert scored["all_requested_checks_passed"] is False and scored["checks_passed"] == 12
 
 
-def test_availability_below_the_floor_fails_acceptance():
+def test_availability_below_the_floor_fails_the_rate_scorer():
     record = {
         "name": "s1",
         "admitted": True,
@@ -241,7 +457,333 @@ def test_availability_below_the_floor_fails_acceptance():
         },
     }
     scored = analysis_calibration.score_acceptance([record])
-    assert scored["accepted"] is False
+    assert scored["all_requested_checks_passed"] is False
+
+
+# --------------------------------------------------------------------------
+# the versioned legacy-protocol gate
+# --------------------------------------------------------------------------
+
+def _entry_record(entry, *, events=100, repetitions=None, availability=1.0, refuses=None):
+    """One synthetic executed result for a planned legacy entry."""
+    scenario = SCENARIOS_BY_NAME[entry["name"].removesuffix("_padded_365")]
+    padded = entry["variant"] == analysis_calibration.PADDED_VARIANT
+    total = int(entry["repetitions"] if repetitions is None else repetitions)
+    available = round(availability * total)
+    refusing = scenario.kind == "refusal" if refuses is None else refuses
+    ids = list(range(total))
+    # A synthetic count can never exceed its own denominator.
+    primary_events = min(events, available)
+    family_events = min(events, total)
+    return {
+        "scenario_id": scenario.scenario_id,
+        "name": entry["name"],
+        "kind": scenario.kind,
+        "admitted": bool(scenario.admitted and not padded),
+        "caveat": scenario.caveat or None,
+        "config": asdict(scenario),
+        "ledger": analysis_calibration.attempt_ledger(
+            scenario,
+            padded_days=365 if padded else None,
+            requested=total,
+            attempted=ids,
+            completed=ids,
+        ),
+        "repetitions": total,
+        "resamples": scenario.resamples,
+        "primary_availability": availability,
+        "primary_availability_meets_floor": availability >= 0.95,
+        "rates": {
+            "primary_raw_rejection": analysis_calibration.rate_record(
+                "primary_raw_rejection", primary_events, available
+            ),
+            "primary_interval_noncoverage": analysis_calibration.rate_record(
+                "primary_interval_noncoverage", primary_events, available
+            ),
+            "family_wise_holm_rejection": analysis_calibration.rate_record(
+                "family_wise_holm_rejection", family_events, total
+            ),
+        },
+        "published_inference": {
+            "repetitions_with_p_value": 0 if refusing else available,
+            "repetitions_with_interval": 0 if refusing else available,
+        },
+    }
+
+
+def _complete_document(**overrides):
+    """A synthetic, complete and passing legacy-protocol run."""
+    plan = analysis_calibration.build_run_plan(analysis_calibration.LEGACY_PROTOCOL_SCENARIOS)
+    contract = analysis_calibration._contract_with_digest()
+    document = {
+        "schema_version": analysis_calibration.CALIBRATION_SCHEMA_VERSION,
+        "generator_contract": contract,
+        "run_plan": plan,
+        "results": [
+            _entry_record(entry) for entry in analysis_calibration.legacy_protocol_plan()
+        ],
+        "evidence_replay": {
+            "repetitions": analysis_calibration.LEGACY_REPLAY_REPETITIONS,
+            "agrees": True,
+            "mismatched": [],
+        },
+        "state_entry_replay": {"records_supplied": 1234},
+    }
+    document.update(overrides)
+    return document
+
+
+def test_a_complete_passing_synthetic_run_is_accepted_and_a_failing_one_is_not():
+    state = analysis_calibration.legacy_protocol_state(_complete_document())
+    assert state["protocol"] == analysis_calibration.LEGACY_PROTOCOL
+    assert state["complete_run"] is True
+    assert state["eligibility_reasons"] == []
+    assert state["diagnostic_checks_passed"] is True
+    assert state["accepted"] is True and state["accepted_reasons"] == []
+    assert state["diagnostic"]["checks_total"] == 15
+
+    document = _complete_document()
+    document["results"] = [
+        _entry_record(entry, events=300 if entry["name"] == "null_dependent_t5" else 100)
+        for entry in analysis_calibration.legacy_protocol_plan()
+    ]
+    failing = analysis_calibration.legacy_protocol_state(document)
+    assert failing["complete_run"] is True
+    assert failing["diagnostic_checks_passed"] is False
+    assert failing["accepted"] is False
+    assert any("null_dependent_t5" in reason for reason in failing["accepted_reasons"])
+
+
+def test_a_passing_subset_is_diagnostic_only_and_never_release_acceptance():
+    """The audit's counterexample in synthetic form: one passing fixture."""
+    plan = analysis_calibration.legacy_protocol_plan()
+    one = [_entry_record(plan[0])]
+    assert analysis_calibration.score_acceptance(one)["all_requested_checks_passed"] is True
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=one))
+    assert state["diagnostic_checks_passed"] is True
+    assert state["complete_run"] is False
+    assert state["accepted"] is False
+    assert any("is missing" in reason for reason in state["eligibility_reasons"])
+    assert any("is missing" in reason for reason in state["accepted_reasons"])
+
+
+def test_an_empty_run_is_neither_complete_nor_diagnostically_passing():
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=[]))
+    assert state["diagnostic_checks_passed"] is False
+    assert state["complete_run"] is False and state["accepted"] is False
+    assert "no admitted rate check was scored" in state["accepted_reasons"]
+
+
+def test_a_duplicated_or_substituted_fixture_cannot_be_a_complete_run():
+    plan = analysis_calibration.legacy_protocol_plan()
+    rows = [_entry_record(entry) for entry in plan]
+    duplicated = analysis_calibration.legacy_protocol_state(
+        _complete_document(results=rows + [_entry_record(plan[0])])
+    )
+    assert duplicated["complete_run"] is False
+    assert any("appears 2 times" in reason for reason in duplicated["eligibility_reasons"])
+
+    substituted = list(rows)
+    substituted[1] = _entry_record(plan[0])
+    substituted[1]["name"] = plan[1]["name"]
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=substituted))
+    assert state["complete_run"] is False
+    assert any("does not match the planned" in r for r in state["eligibility_reasons"])
+
+    extra = list(rows)
+    extra.append({**_entry_record(plan[0]), "name": "null_confounded_signal_month_v2"})
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=extra))
+    assert any("not part of this protocol" in r for r in state["eligibility_reasons"])
+
+
+def test_reduced_attempts_and_a_smoke_override_stay_diagnostic():
+    plan = analysis_calibration.legacy_protocol_plan()
+    rows = [_entry_record(entry, repetitions=50) for entry in plan]
+    document = _complete_document(
+        results=rows,
+        run_plan=analysis_calibration.build_run_plan(
+            analysis_calibration.LEGACY_PROTOCOL_SCENARIOS, repetitions=50
+        ),
+    )
+    state = analysis_calibration.legacy_protocol_state(document)
+    assert state["complete_run"] is False and state["accepted"] is False
+    assert any("smoke run" in reason for reason in state["eligibility_reasons"])
+    assert any("requested repetitions instead of" in r for r in state["eligibility_reasons"])
+
+
+def test_an_omitted_or_disagreeing_replay_blocks_acceptance():
+    for override, fragment in (
+        ({"evidence_replay": None}, "evidence replay is absent"),
+        (
+            {
+                "evidence_replay": {
+                    "repetitions": analysis_calibration.LEGACY_REPLAY_REPETITIONS,
+                    "agrees": False,
+                    "mismatched": ["x"],
+                }
+            },
+            "do not agree",
+        ),
+        (
+            {"evidence_replay": {"repetitions": 2, "agrees": True, "mismatched": []}},
+            "not 25",
+        ),
+        ({"state_entry_replay": None}, "state-entry replay is absent"),
+        (
+            {
+                "run_plan": analysis_calibration.build_run_plan(
+                    analysis_calibration.LEGACY_PROTOCOL_SCENARIOS, replay_repetitions=0
+                )
+            },
+            "replay ran 0 repetitions",
+        ),
+    ):
+        state = analysis_calibration.legacy_protocol_state(_complete_document(**override))
+        assert state["accepted"] is False
+        assert any(fragment in reason for reason in state["eligibility_reasons"]), fragment
+
+
+def test_a_required_refusal_that_published_inference_blocks_acceptance():
+    rows = [
+        _entry_record(
+            entry, refuses=entry["name"] != "short_population_84_days_padded_365"
+        )
+        for entry in analysis_calibration.legacy_protocol_plan()
+    ]
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=rows))
+    assert state["complete_run"] is False
+    assert any("deterministic refusal published" in r for r in state["eligibility_reasons"])
+
+
+def test_inconsistent_counters_and_configurations_block_acceptance():
+    plan = analysis_calibration.legacy_protocol_plan()
+
+    def mutate(index, change):
+        rows = [_entry_record(entry) for entry in plan]
+        rows[index] = {**rows[index], **change}
+        return analysis_calibration.legacy_protocol_state(_complete_document(results=rows))
+
+    missing_ledger = mutate(0, {"ledger": None})
+    assert any("no attempt ledger" in r for r in missing_ledger["eligibility_reasons"])
+
+    rows = [_entry_record(entry) for entry in plan]
+    rows[0]["ledger"] = analysis_calibration.attempt_ledger(
+        SCENARIOS_BY_NAME["null_independent"],
+        padded_days=None,
+        requested=2000,
+        attempted=list(range(1999)) + [5000],
+        completed=list(range(1999)) + [5000],
+    )
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=rows))
+    assert any("attempted repetition IDs" in r for r in state["eligibility_reasons"])
+
+    rows = [_entry_record(entry) for entry in plan]
+    rows[0]["ledger"] = analysis_calibration.attempt_ledger(
+        SCENARIOS_BY_NAME["null_independent"],
+        padded_days=None,
+        requested=2000,
+        attempted=list(range(2000)),
+        completed=list(range(1500)),
+    )
+    state = analysis_calibration.legacy_protocol_state(_complete_document(results=rows))
+    assert any("incomplete_attempts" in r for r in state["eligibility_reasons"])
+
+    bad_denominator = mutate(
+        0,
+        {
+            "rates": {
+                "primary_raw_rejection": analysis_calibration.rate_record("r", 10, 2000),
+                "primary_interval_noncoverage": analysis_calibration.rate_record("n", 10, 1900),
+                "family_wise_holm_rejection": analysis_calibration.rate_record("f", 10, 2000),
+            }
+        },
+    )
+    assert any("denominators disagree" in r for r in bad_denominator["eligibility_reasons"])
+
+    wrong_availability = mutate(0, {"primary_availability": 0.5})
+    assert any("contradicts the reported" in r for r in wrong_availability["eligibility_reasons"])
+
+    bad_family = mutate(
+        0,
+        {
+            "rates": {
+                "primary_raw_rejection": analysis_calibration.rate_record("r", 10, 2000),
+                "primary_interval_noncoverage": analysis_calibration.rate_record("n", 10, 2000),
+                "family_wise_holm_rejection": analysis_calibration.rate_record("f", 10, 1000),
+            }
+        },
+    )
+    assert any("is not every attempted" in r for r in bad_family["eligibility_reasons"])
+
+
+def test_a_schema_v1_document_or_a_tampered_contract_is_ineligible():
+    state = analysis_calibration.legacy_protocol_state(_complete_document(schema_version=1))
+    assert state["complete_run"] is False
+    assert any("complete-run contract" in r for r in state["eligibility_reasons"])
+
+    document = _complete_document()
+    document["generator_contract"] = {
+        **document["generator_contract"], "master_seed": 1234,
+    }
+    state = analysis_calibration.legacy_protocol_state(document)
+    assert any("does not match its own contract" in r for r in state["eligibility_reasons"])
+
+    document = _complete_document()
+    contract = dict(document["generator_contract"])
+    contract["master_seed"] = 1234
+    contract["generator_digest"] = semantic_digest(
+        {k: v for k, v in contract.items() if k != "generator_digest"}
+    )
+    document["generator_contract"] = contract
+    state = analysis_calibration.legacy_protocol_state(document)
+    assert any("differs from this driver's frozen settings" in r for r in state["eligibility_reasons"])
+
+
+def test_the_attempt_ledger_records_identities_not_only_counts():
+    ledger = analysis_calibration.attempt_ledger(
+        SCENARIOS_BY_NAME["null_independent"],
+        padded_days=None,
+        requested=4,
+        attempted=[0, 1, 2, 3],
+        completed=[0, 1, 2, 3],
+    )
+    assert ledger["status"] == "completed" and ledger["reasons"] == []
+    assert ledger["attempted"]["ranges"] == [[0, 3]]
+    assert ledger["variant"] == analysis_calibration.UNPADDED_VARIANT
+    assert ledger["config_digest"] == analysis_calibration.scenario_config_digest(
+        SCENARIOS_BY_NAME["null_independent"]
+    )
+    duplicated = analysis_calibration.attempt_ledger(
+        SCENARIOS_BY_NAME["null_independent"],
+        padded_days=365,
+        requested=4,
+        attempted=[0, 1, 2, 2],
+        completed=[0, 1, 2, 2],
+    )
+    assert duplicated["status"] == "incomplete"
+    assert "duplicate_attempt_id" in duplicated["reasons"]
+    assert duplicated["variant"] == analysis_calibration.PADDED_VARIANT
+    assert analysis_calibration.id_ranges([5, 0, 1, 2, 9, 10]) == [[0, 2], [5, 5], [9, 10]]
+
+
+def test_the_run_plan_lists_driver_generated_padded_refusal_variants():
+    plan = analysis_calibration.build_run_plan(["short_population_84_days", "null_independent"])
+    assert [item["name"] for item in plan["entries"]] == [
+        "short_population_84_days",
+        "short_population_84_days_padded_365",
+        "null_independent",
+    ]
+    assert plan["entries"][1]["driver_generated"] is True
+    assert plan["protocol"] == analysis_calibration.LEGACY_PROTOCOL
+    with pytest.raises(PatternLabDataError, match="unknown calibration scenario"):
+        analysis_calibration.build_run_plan(["nope"])
+
+
+def test_the_legacy_protocol_set_is_pinned_and_excludes_the_new_fixtures():
+    assert analysis_calibration.DEFAULT_SCENARIOS is analysis_calibration.LEGACY_PROTOCOL_SCENARIOS
+    assert "null_confounded_signal_month_v2" not in analysis_calibration.LEGACY_PROTOCOL_SCENARIOS
+    assert set(analysis_calibration.LEGACY_PROTOCOL_SCENARIOS) < set(SCENARIOS_BY_NAME)
+    assert len(analysis_calibration.LEGACY_PROTOCOL_SCENARIOS) == 14
 
 
 # --------------------------------------------------------------------------
@@ -367,13 +909,89 @@ def test_the_driver_saves_a_compact_evidence_artifact(tmp_path):
     assert saved["results"][0]["repetitions"] == 3
     assert set(saved["results"][0]["rates"]) == set(analysis_calibration.ACCEPTANCE_RATES)
     # The additive scale diagnostics survive serialization at schema version 1.
-    assert saved["schema_version"] == analysis_calibration.CALIBRATION_SCHEMA_VERSION == 1
+    assert saved["schema_version"] == analysis_calibration.CALIBRATION_SCHEMA_VERSION == 2
     scale = saved["results"][0]["bootstrap_scale"]
     assert scale["n"] == 3 and scale["mean_bootstrap_sd"] > 0.0
     assert scale["mean_bootstrap_sd_over_empirical_sd"] > 0.0
     assert "not a variance factor" in scale["population"]
     assert saved["generator_contract"]["generator_digest"]
     assert "certifies neither unsimulated generators" in saved["scope"]
+
+
+def _inject_driver(monkeypatch, *, events=100):
+    """Drive the real ``run_calibration`` with injected per-entry results."""
+    planned = {item["name"]: item for item in analysis_calibration.legacy_protocol_plan()}
+
+    def fake_run_scenario(scenario, *, repetitions=None, padded_days=None, progress=None):
+        name = f"{scenario.name}_padded_365" if padded_days else scenario.name
+        return _entry_record(planned[name], events=events, repetitions=repetitions)
+
+    monkeypatch.setattr(analysis_calibration, "run_scenario", fake_run_scenario)
+    monkeypatch.setattr(
+        analysis_calibration,
+        "run_evidence_replay",
+        lambda **kwargs: {
+            "repetitions": kwargs["repetitions"], "agrees": True, "mismatched": []
+        },
+    )
+    monkeypatch.setattr(
+        analysis_calibration, "_state_entry_replay", lambda root: {"records_supplied": 7}
+    )
+
+
+def test_the_driver_and_cli_publish_the_versioned_gate(tmp_path, monkeypatch, capsys):
+    _inject_driver(monkeypatch)
+    exit_code = analysis_calibration.main(["--output-root", str(tmp_path / "pass")])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["accepted"] is True and payload["complete_run"] is True
+    assert payload["diagnostic_checks_passed"] is True
+    assert payload["checks_total"] == 15 and payload["checks_passed"] == 15
+    assert payload["protocol"] == analysis_calibration.LEGACY_PROTOCOL
+    assert payload["eligibility_reasons"] == [] and payload["accepted_reasons"] == []
+    assert "deliberately does not distinguish" in payload["exit_code_note"]
+    saved = json.loads(
+        (tmp_path / "pass" / "calibration.json").read_text(encoding="utf-8")
+    )
+    assert saved["acceptance"]["accepted"] is True
+    assert saved["run_plan"]["protocol"] == analysis_calibration.LEGACY_PROTOCOL
+    assert saved["schema_version"] == 2
+
+
+def test_the_cli_returns_two_for_a_completed_failing_run(tmp_path, monkeypatch, capsys):
+    _inject_driver(monkeypatch, events=300)
+    exit_code = analysis_calibration.main(["--output-root", str(tmp_path / "fail")])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["complete_run"] is True
+    assert payload["diagnostic_checks_passed"] is False
+    assert payload["accepted"] is False and payload["accepted_reasons"]
+
+
+def test_the_cli_returns_two_for_a_completed_diagnostic_subset(tmp_path, monkeypatch, capsys):
+    _inject_driver(monkeypatch)
+    exit_code = analysis_calibration.main(
+        ["--output-root", str(tmp_path / "subset"), "--scenarios", "null_independent"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["diagnostic_checks_passed"] is True
+    assert payload["complete_run"] is False and payload["accepted"] is False
+    assert any("is missing" in reason for reason in payload["eligibility_reasons"])
+
+
+def test_a_smoke_repetition_override_cannot_return_success(tmp_path, monkeypatch, capsys):
+    # Zero errors in 40 attempts is inside the envelope, so this smoke run is
+    # rejected for being a smoke run, not for its rates.
+    _inject_driver(monkeypatch, events=0)
+    exit_code = analysis_calibration.main(
+        ["--output-root", str(tmp_path / "smoke"), "--repetitions", "40"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["diagnostic_checks_passed"] is True
+    assert payload["complete_run"] is False
+    assert any("smoke run" in reason for reason in payload["eligibility_reasons"])
 
 
 def test_an_unknown_scenario_name_is_an_actionable_error(tmp_path):

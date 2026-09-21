@@ -160,7 +160,12 @@ fixtures — it is not a certification of exact 5% control, and the required
 long-dependence experiment sits outside the admitted-null envelope by design.
 **The delivered run met 11 of its 15 acceptance checks**, so M3a's statistical
 acceptance is open; rerun this command after any change to the estimator, the
-support gates or the resampling method.
+support gates or the resampling method. That saved document is also *ineligible*
+under the versioned `legacy_bootstrap_v1` gate, because schema-v1 records carry
+no attempt ledger and it embedded no replay; ineligibility is separate from, and
+does not excuse, its 11-of-15 rate result. Exit 0 means complete acceptance of
+that named protocol; exit 2 covers both a completed diagnostic or subset run and
+a completed failing one, so callers read the explicit JSON state.
 
 ```bash
 python -m tools.pattern_lab.analysis.calibration \

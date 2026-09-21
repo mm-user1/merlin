@@ -2491,6 +2491,55 @@ individual bounds and are not jointly 95%. At least 95% primary inferential
 availability is required, and every refusal reason is reported, because refusal
 cannot manufacture a passing rate.
 
+#### Rate checks, run completeness and the release gate
+
+Passing rate checks are not acceptance. `score_acceptance` scores exactly the
+admitted records it is handed and publishes
+`all_requested_checks_passed` with `scope="requested_subset"`: one passing
+fixture, or the same fixture supplied twice, legitimately satisfies it. The
+release decision belongs to `legacy_protocol_state`, the versioned gate of the
+named **`legacy_bootstrap_v1`** protocol, which answers three separate questions
+and never collapses them:
+
+| Field | Meaning |
+| --- | --- |
+| `diagnostic_checks_passed` | Every rate and availability check of the records actually present passed |
+| `complete_run` | This document is a complete, eligible run of the named protocol |
+| `accepted` | A complete run whose checks passed, with `accepted_reasons` otherwise |
+
+Eligibility is bound to the **driver**, never to result-supplied names, counts or
+`admitted` flags. `LEGACY_PROTOCOL_SCENARIOS` pins the protocol's fourteen
+fixtures in their original order and is also the CLI default, so a fixture added
+to the registry later changes neither. `build_run_plan` resolves those names into
+the exact entries the run executes, listing the padded 365-day refusal variants
+the driver generates itself. Each executed entry carries an **attempt ledger**
+with its fixture ID, padded or unpadded variant, configuration digest, declared
+and requested repetition counts, resamples, and the attempted and completed
+repetition IDs as compressed ranges. The gate requires every planned entry
+exactly once at its declared configuration and contiguous ID block, self-
+consistent counters and denominators, actual refusal from the refusal fixtures,
+and the required evidence and state-entry replays with their declared count and
+agreement. Stress and planted fixtures are required disclosures whose rates sit
+outside the admitted-null ceiling by design; they are not extra error checks and
+the planted results are not a power gate.
+
+Any subset, any `--repetitions` smoke override, an omitted or disagreeing replay
+and any unfinished run are **diagnostic-only** and can never return `accepted`.
+Exit status 0 means complete acceptance of this named protocol and nothing more;
+exit 2 is every other completed run and **deliberately does not distinguish** a
+diagnostic run from a statistical failure — read `complete_run`,
+`diagnostic_checks_passed` and the two reason lists in the JSON.
+
+`CALIBRATION_SCHEMA_VERSION` is **2**, because the release-facing Boolean changed
+meaning and a complete run now carries a run plan and attempt ledgers. Saved
+schema-v1 documents stay readable historical records: they carry no ledger, so
+they are ineligible under this contract, they are never rewritten, and they gain
+no retrospective verified status. The delivered T05 document is ineligible on
+that ground **and**, independently, fails its own rate checks 11 of 15. Its
+`evidence_replay` and `state_entry_replay` fields are null, so that release run
+never embedded the replay; separately retained replay evidence is not proof that
+no replay was ever performed and is not injected into the saved document.
+
 **The delivered run passed 11 of those 15 checks.** Availability was 100% on
 every admitted scenario and all five Holm family-wise rates passed (2.55-2.85%).
 The independent scenario (5.30%) and the conditional-confounding scenario
@@ -2533,6 +2582,38 @@ that repetition count: they are not a universal undercoverage factor, not a
 calibrated inflation, not a correction, and they neither revise the delivered
 2000-repetition result nor accept M3a.
 
+#### Versioned fixtures: the confounded null
+
+Scenario 3, `null_conditional_confounded`, assigns its event probability from the
+**anchor's own bar month**, while matching owns the **signal-close** month. The
+23:30 anchor of a month's last day signals at 00:00 in the next month, so 44
+anchors per repetition carry the previous month's probability and the fixture's
+population null is not exactly zero. At the 240m primary horizon the exact
+row-mixture contrast is at most `4.1254148207e-08` per stratum and
+`1.4622196520e-08` event-weighted, against a per-repetition lift standard
+deviation of order `1e-4`. The fixture, its draws and its original evidence are
+retained unchanged; its `caveat` field carries this limitation with every record
+that reports it. **The caveat qualifies the interpretation of a rate; it is never
+a waiver for a failed rate.**
+
+Fixture **101**, `null_confounded_signal_month_v2`, is the corrected version. It
+keeps scenario 3's return law, comparison, calendar, support, family and
+generator parameters and assigns the target-event probability by the anchor's
+signal-close UTC month, so the probability is constant inside every actual
+matching stratum and the deterministic row-mixture target and control population
+means agree to roundoff (at most `3.5e-18` at the 480m horizon). The
+deterministic return-mean schedule keeps its original **bar-time** ownership, and
+production UTC ownership is unchanged. Its seed is keyed on fixture ID 101, so it
+is an independent realization of that law rather than a paired correction of
+scenario 3's draws, and rate comparisons between the two are unpaired.
+
+Fixture 101 is **not** part of `LEGACY_PROTOCOL_SCENARIOS`: adding it left the
+legacy command's run, its gate and its numerical outputs untouched. It does
+change the scenario list embedded in `generator_contract`, and therefore that
+contract's `generator_digest`, for every run including legacy ones; legacy
+equivalence is demonstrated by comparing the legacy generators' actual masks,
+returns, availability and results, never by digest equality.
+
 Alongside the acceptance scenarios the driver runs short-population refusal
 checks at 84 and 180 days — including the same records embedded in a 365-day grid with
 zero-contribution padding, which must stay unavailable — a **required
@@ -2555,10 +2636,12 @@ exactly the same available samples, and the block reports its own count and
 scope because the existing `effect.*` fields keep their own wider population of
 every repetition with a non-null lift. An undefined ratio is published as null
 with its count. These are standard-deviation diagnostics, never variance
-factors, and `CALIBRATION_SCHEMA_VERSION` stays at `1` because the fields are
-additive and no existing field changed meaning. Read these diagnostic fields,
+factors. They were introduced additively at `CALIBRATION_SCHEMA_VERSION` `1`,
+which changed no existing field's meaning; the version moved to `2` later, for
+the acceptance semantics above. Read these diagnostic fields,
 including `bootstrap_scale`, as optional: records saved before their introduction
-do not contain them.
+do not contain them, and the same applies to `ledger` and `caveat` in schema-v1
+documents.
 
 The direct bootstrap-SD ratio differs from the interval-implied SE ratio above.
 Both depend on the sampled repetitions and their empirical SD; shorter runs have

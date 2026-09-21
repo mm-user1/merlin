@@ -41,9 +41,20 @@ from .estimator import RECORD_COLUMNS, evaluate_observations
 from .family import FamilyMember
 from .request import ALPHA
 
-# Stays at 1: the saved scale diagnostics are additive fields beside the
-# existing summary and rate fields, and no existing field changed its meaning.
-CALIBRATION_SCHEMA_VERSION = 1
+# Version 2 changes the *meaning* of the release-facing result: a completed run
+# now carries a driver-owned attempt ledger and an explicit protocol gate, and
+# the rate scorer's Boolean is scoped to the requested subset rather than to
+# release acceptance.  Saved schema-v1 documents remain readable historical
+# records; they carry no ledger, so they are ineligible under the complete-run
+# contract below and are never rewritten or granted retrospective status.
+CALIBRATION_SCHEMA_VERSION = 2
+
+# The named validation contract of the existing bootstrap command.  A pass of
+# this protocol is a pass of *this* protocol only: it is not acceptance of the
+# inference method on market data, and it is not a contract for another method.
+LEGACY_PROTOCOL = "legacy_bootstrap_v1"
+LEGACY_GATE_VERSION = 1
+LEGACY_REPLAY_REPETITIONS = 25
 
 MASTER_SEED = 20260920
 DATA_STREAM = 0
@@ -122,6 +133,10 @@ class Scenario:
     evaluation_days: int | None = None
     evaluation_start_day: str | None = None
     note: str = ""
+    # A known limitation of this fixture's own null, carried with every record
+    # that reports it.  It qualifies the interpretation of a rate; it is never a
+    # waiver for a failed rate.
+    caveat: str = ""
 
     @property
     def grid_start_ms(self) -> int:
@@ -192,6 +207,15 @@ SCENARIOS: tuple[Scenario, ...] = (
             "probabilities 0.10/0.40 that are constant inside a stratum. The conditional null holds "
             "inside every true UTC-month stratum, including boundary-crossing outcomes, while naive "
             "unmatched pooling is confounded."
+        ),
+        caveat=(
+            "Event probabilities are assigned by the anchor's own bar month, while matching owns "
+            "the signal-close month, so the 44 anchors that open at 23:30 on a month's last day "
+            "carry the previous month's probability. The resulting deterministic population "
+            "contrast is tiny — 4.1254148207e-08 at most per stratum and 1.4622196520e-08 "
+            "event-weighted at the 240m primary horizon — but it is not exactly zero. Fixture 101 "
+            "is the signal-month-aligned correction; this fixture is retained unchanged as a "
+            "compatibility check and its caveat is not a waiver for a failed rate."
         ),
     ),
     Scenario(
@@ -389,10 +413,54 @@ SCENARIOS: tuple[Scenario, ...] = (
             "B=1999."
         ),
     ),
+    Scenario(
+        scenario_id=101,
+        name="null_confounded_signal_month_v2",
+        kind="admitted_null",
+        start_day="2025-07-01",
+        days=365,
+        dependent=True,
+        innovation="gaussian",
+        signal="confounded_signal_month",
+        comparison="baseline",
+        repetitions=2000,
+        resamples=1999,
+        admitted=True,
+        note=(
+            "Scenario 3's return law, comparison, calendar, support, family and generator "
+            "parameters, with the target-event probability assigned by the anchor's signal-close "
+            "UTC month instead of its own bar month. The deterministic return-mean schedule keeps "
+            "its original bar-time ownership, so probabilities are constant inside every actual "
+            "matching stratum and the row-mixture target and control population means agree at "
+            "roundoff. Its seed uses fixture ID 101, so it is an independent realization of "
+            "scenario 3's law rather than a paired correction of the same draws."
+        ),
+    ),
 )
 
 SCENARIOS_BY_NAME = {item.name: item for item in SCENARIOS}
 SCENARIOS_BY_ID = {item.scenario_id: item for item in SCENARIOS}
+
+# The fixtures the legacy bootstrap protocol runs, pinned explicitly in their
+# original order rather than derived from :data:`SCENARIOS`.  A later fixture
+# added to the registry — 101 is the first — must not silently change what this
+# command runs or what its release gate requires.
+LEGACY_PROTOCOL_SCENARIOS: tuple[str, ...] = (
+    "null_independent",
+    "null_dependent_t5",
+    "null_conditional_confounded",
+    "null_inclusive_parent",
+    "null_admission_boundary_336",
+    "null_dependent_gaussian_companion",
+    "short_population_84_days",
+    "short_population_180_days",
+    "stress_long_dependence_ar09_p070",
+    "stress_long_dependence_ar09_p097",
+    "planted_positive_strong",
+    "planted_negative_strong",
+    "planted_modest",
+    "default_b_smoke",
+)
 
 
 # --------------------------------------------------------------------------
@@ -509,6 +577,22 @@ def _month_index(start_ms: int, days: int) -> np.ndarray:
     return (dates - dates[0]).astype("int64")
 
 
+def _signal_month_index(start_ms: int, bars: int) -> np.ndarray:
+    """The UTC calendar month ordinal of every anchor's **signal close**.
+
+    Anchor ``j`` opens at ``start_ms + j * step`` and signals at its close, one
+    step later, which is the instant matching owns.  The 23:30 anchor of a
+    month's last day therefore belongs to the next month's stratum.  Ordinals
+    are relative to the first bar's own month, so a grid that starts mid-month
+    keeps ordinal zero for that partial month.
+    """
+    step = TIMEFRAME_MINUTES * 60_000
+    signal_ms = start_ms + (np.arange(bars, dtype=np.int64) + 1) * step
+    months = signal_ms.astype("datetime64[ms]").astype("datetime64[M]")
+    first = np.datetime64(start_ms, "ms").astype("datetime64[M]")
+    return (months - first).astype("int64")
+
+
 @dataclass(frozen=True)
 class SyntheticRecords:
     """One repetition's frozen synthetic outcomes and masks."""
@@ -527,11 +611,21 @@ def generate_records(scenario: Scenario, repetition: int) -> SyntheticRecords:
     The return innovations are drawn first and the signal process afterwards, so
     the signal states are statistically independent of the entire
     return-innovation stream.
+
+    ``confounded`` assigns its event probability from the anchor's own bar month
+    and ``confounded_signal_month`` from the anchor's signal-close month, which
+    is the month the production matching strata by.  Both share one deterministic
+    return-mean schedule that stays owned by bar time.
     """
     rng = data_generator(scenario.scenario_id, repetition)
     days = scenario.days
     bars = days * BARS_PER_DAY
     month_of_day = _month_index(scenario.grid_start_ms, days)
+    signal_month_of_bar = (
+        _signal_month_index(scenario.grid_start_ms, bars)
+        if scenario.signal == "confounded_signal_month"
+        else None
+    )
 
     common = _ar1_daily(rng, days, scenario.daily_ar) if scenario.dependent else np.zeros(days)
     returns: dict[str, np.ndarray] = {}
@@ -542,7 +636,7 @@ def generate_records(scenario: Scenario, repetition: int) -> SyntheticRecords:
         level = COMMON_LOADING * common + INDIVIDUAL_LOADING * individual
         noise = _innovations(rng, (days, BARS_PER_DAY), scenario.innovation) * BAR_INNOVATION_SCALE
         series = level[:, np.newaxis] + noise
-        if scenario.signal == "confounded":
+        if scenario.signal in ("confounded", "confounded_signal_month"):
             sign = 1.0 if INSTRUMENTS.index(instrument) % 2 == 0 else -1.0
             shift = sign * CONFOUNDED_MONTH_SHIFT * np.where(month_of_day % 2 == 0, 1.0, -1.0)
             series = series + shift[:, np.newaxis]
@@ -565,6 +659,18 @@ def generate_records(scenario: Scenario, repetition: int) -> SyntheticRecords:
                 dtype=np.float64,
             )
             mask = (rng.random((days, BARS_PER_DAY)) < probabilities[:, np.newaxis]).reshape(bars)
+        elif scenario.signal == "confounded_signal_month":
+            # Fixture 101: the same law as ``confounded``, with the probability
+            # assigned by the anchor's signal-close month, which is the month the
+            # production matching actually strata by.  The deterministic return
+            # mean above keeps its original bar-time ownership, so probabilities
+            # are constant inside every real stratum without changing the return
+            # process this fixture inherits from scenario 3.
+            index = INSTRUMENTS.index(instrument)
+            probabilities = np.asarray(CONFOUNDED_PROBABILITIES, dtype=np.float64)[
+                (index + signal_month_of_bar) % len(CONFOUNDED_PROBABILITIES)
+            ]
+            mask = rng.random(bars) < probabilities
         else:
             states = _markov_states(rng, days, scenario.signal_p11)
             rates = np.where(states, SIGNAL_TARGET_IN_STATE_1, SIGNAL_TARGET_IN_STATE_0)
@@ -1129,6 +1235,91 @@ def rate_record(name: str, successes: int, trials: int) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# the driver-owned attempt ledger
+# --------------------------------------------------------------------------
+
+UNPADDED_VARIANT = "unpadded"
+PADDED_VARIANT = "padded_365"
+
+
+def id_ranges(values: Sequence[int]) -> list[list[int]]:
+    """Compress sorted-unique repetition IDs into inclusive ``[first, last]`` runs.
+
+    The ledger records identities, not only counts, so a substituted or repeated
+    attempt is visible; contiguous runs keep that record small.
+    """
+    ordered = sorted({int(item) for item in values})
+    runs: list[list[int]] = []
+    for item in ordered:
+        if runs and item == runs[-1][1] + 1:
+            runs[-1][1] = item
+        else:
+            runs.append([item, item])
+    return runs
+
+
+def _id_record(values: Sequence[int]) -> dict[str, Any]:
+    ordered = [int(item) for item in values]
+    unique = sorted(set(ordered))
+    return {
+        "count": len(ordered),
+        "unique_count": len(unique),
+        "first": unique[0] if unique else None,
+        "last": unique[-1] if unique else None,
+        "ranges": id_ranges(unique),
+    }
+
+
+def scenario_config_digest(scenario: Scenario) -> str:
+    """The digest of one fixture's whole frozen configuration."""
+    return contracts.semantic_digest(asdict(scenario))
+
+
+def attempt_ledger(
+    scenario: Scenario,
+    *,
+    padded_days: int | None,
+    requested: int,
+    attempted: Sequence[int],
+    completed: Sequence[int],
+) -> dict[str, Any]:
+    """One executed entry's identity, attempts and status.
+
+    ``run_scenario``'s aggregates cannot prove completeness: matching counts or a
+    matching name do not establish that the declared repetition IDs were the ones
+    actually run, at the declared configuration.  This ledger is owned by the
+    driver and is what the protocol gate binds to.
+    """
+    reasons: list[str] = []
+    attempted_record = _id_record(attempted)
+    completed_record = _id_record(completed)
+    if attempted_record["count"] != attempted_record["unique_count"]:
+        reasons.append("duplicate_attempt_id")
+    if completed_record["count"] != completed_record["unique_count"]:
+        reasons.append("duplicate_completed_id")
+    if set(completed) - set(attempted):
+        reasons.append("completed_id_was_never_attempted")
+    if attempted_record["count"] != int(requested):
+        reasons.append("attempted_count_differs_from_requested")
+    if completed_record["count"] != attempted_record["count"]:
+        reasons.append("incomplete_attempts")
+    return {
+        "fixture_id": int(scenario.scenario_id),
+        "fixture_name": scenario.name,
+        "variant": PADDED_VARIANT if padded_days else UNPADDED_VARIANT,
+        "padded_days": int(padded_days) if padded_days else None,
+        "requested_repetitions": int(requested),
+        "declared_repetitions": int(scenario.repetitions),
+        "resamples": int(scenario.resamples),
+        "config_digest": scenario_config_digest(scenario),
+        "attempted": attempted_record,
+        "completed": completed_record,
+        "status": "completed" if not reasons else "incomplete",
+        "reasons": reasons,
+    }
+
+
+# --------------------------------------------------------------------------
 # one scenario
 # --------------------------------------------------------------------------
 
@@ -1139,11 +1330,13 @@ def run_scenario(
     padded_days: int | None = None,
     progress=None,
 ) -> dict[str, Any]:
-    """Run one scenario's repetitions and score its rates."""
+    """Run one scenario's repetitions, score its rates and record its ledger."""
     total = int(repetitions if repetitions is not None else scenario.repetitions)
     started = time.monotonic()
     rows: list[dict[str, Any]] = []
+    attempted: list[int] = []
     for repetition in range(total):
+        attempted.append(repetition)
         rows.append(run_repetition(scenario, repetition, padded_days=padded_days))
         if progress is not None and (repetition + 1) % 50 == 0:
             progress(
@@ -1217,7 +1410,15 @@ def run_scenario(
         "name": scenario.name + ("_padded_365" if padded_days else ""),
         "kind": scenario.kind,
         "admitted": bool(scenario.admitted and padded_days is None),
+        "caveat": scenario.caveat or None,
         "config": asdict(scenario),
+        "ledger": attempt_ledger(
+            scenario,
+            padded_days=padded_days,
+            requested=total,
+            attempted=attempted,
+            completed=[int(item["repetition"]) for item in rows],
+        ),
         "evaluation_days": padded_days or (scenario.evaluation_days or scenario.days),
         "repetitions": total,
         "resamples": scenario.resamples,
@@ -1316,7 +1517,15 @@ ACCEPTANCE_RATES = (
 
 
 def score_acceptance(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Score the declared intersection requirement over the admitted scenarios."""
+    """Score the rate checks of whatever admitted records it is given.
+
+    This is a reusable **subset** calculation, not a release gate: it reports
+    whether every check of the records supplied passed, and it cannot know which
+    fixtures a named validation contract requires.  Supplying one passing
+    fixture, or the same fixture twice, legitimately returns
+    ``all_requested_checks_passed`` — which is why the release decision belongs
+    to :func:`legacy_protocol_state` and never to this Boolean.
+    """
     checks: list[dict[str, Any]] = []
     for record in results:
         if not record["admitted"]:
@@ -1346,13 +1555,14 @@ def score_acceptance(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if record["admitted"]
     ]
     return {
+        "scope": "requested_subset",
         "ceiling": ERROR_ENVELOPE,
         "availability_floor": MIN_PRIMARY_AVAILABILITY,
         "checks": checks,
         "checks_total": len(checks),
         "checks_passed": sum(1 for item in checks if item["passed"]),
         "availability_checks": availability,
-        "accepted": bool(
+        "all_requested_checks_passed": bool(
             checks
             and all(item["passed"] for item in checks)
             and all(item["passed"] for item in availability)
@@ -1361,7 +1571,259 @@ def score_acceptance(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "Each bound is a separate one-sided 95% exact binomial upper bound and the requirement "
             "is their intersection. The collection is not a joint 95% statement, the 8% ceiling is "
             "not a test alpha or a 92% interval, and passing does not imply the true error rate "
-            "equals 5%."
+            "equals 5%. These checks cover exactly the admitted records supplied: a subset that "
+            "passes is a diagnostic observation, never release acceptance."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------
+# the versioned release gate of the legacy bootstrap protocol
+# --------------------------------------------------------------------------
+
+def legacy_protocol_plan() -> tuple[dict[str, Any], ...]:
+    """The exact entries a complete legacy-protocol run must contain.
+
+    Refusal fixtures are run twice by the driver: once as declared and once with
+    the same records embedded in a padded 365-day grid.  The padded entry is
+    generated here, not requested by a caller, so the gate expects it.
+    """
+    planned: list[dict[str, Any]] = []
+    for name in LEGACY_PROTOCOL_SCENARIOS:
+        scenario = SCENARIOS_BY_NAME[name]
+        planned.append(
+            {
+                "name": scenario.name,
+                "fixture_id": scenario.scenario_id,
+                "variant": UNPADDED_VARIANT,
+                "repetitions": scenario.repetitions,
+                "resamples": scenario.resamples,
+                "config_digest": scenario_config_digest(scenario),
+                "kind": scenario.kind,
+                "driver_generated": False,
+            }
+        )
+        if scenario.kind == "refusal":
+            planned.append(
+                {
+                    "name": f"{scenario.name}_padded_365",
+                    "fixture_id": scenario.scenario_id,
+                    "variant": PADDED_VARIANT,
+                    "repetitions": scenario.repetitions,
+                    "resamples": scenario.resamples,
+                    "config_digest": scenario_config_digest(scenario),
+                    "kind": scenario.kind,
+                    "driver_generated": True,
+                }
+            )
+    return tuple(planned)
+
+
+def _contract_without_implementation(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """The semantic part of a generator contract, without physical digests."""
+    return {
+        key: value
+        for key, value in contract.items()
+        if key not in ("implementation", "generator_digest")
+    }
+
+
+def _eligibility_reasons(document: Mapping[str, Any]) -> list[str]:
+    """Why this document is, or is not, a complete legacy-protocol run."""
+    reasons: list[str] = []
+    if document.get("schema_version") != CALIBRATION_SCHEMA_VERSION:
+        reasons.append(
+            f"schema_version {document.get('schema_version')!r} is not the versioned "
+            f"complete-run contract {CALIBRATION_SCHEMA_VERSION}"
+        )
+    plan = document.get("run_plan")
+    if not isinstance(plan, Mapping):
+        reasons.append("the document carries no driver-owned run plan")
+    else:
+        if plan.get("protocol") != LEGACY_PROTOCOL:
+            reasons.append(
+                f"the run plan declares protocol {plan.get('protocol')!r}, not {LEGACY_PROTOCOL!r}"
+            )
+        if plan.get("repetition_override") is not None:
+            reasons.append(
+                f"a repetition override of {plan['repetition_override']!r} makes this a smoke run"
+            )
+        if plan.get("replay_repetitions") != LEGACY_REPLAY_REPETITIONS:
+            reasons.append(
+                f"the replay ran {plan.get('replay_repetitions')!r} repetitions, not the declared "
+                f"{LEGACY_REPLAY_REPETITIONS}"
+            )
+
+    contract = document.get("generator_contract")
+    if not isinstance(contract, Mapping):
+        reasons.append("the document carries no generator contract")
+    else:
+        recorded = contract.get("generator_digest")
+        recomputed = contracts.semantic_digest(
+            {key: value for key, value in contract.items() if key != "generator_digest"}
+        )
+        if recorded != recomputed:
+            reasons.append("the recorded generator digest does not match its own contract")
+        if _contract_without_implementation(contract) != _contract_without_implementation(
+            generator_contract()
+        ):
+            reasons.append(
+                "the recorded generator contract differs from this driver's frozen settings"
+            )
+
+    expected = legacy_protocol_plan()
+    by_name: dict[str, list[Mapping[str, Any]]] = {}
+    for record in document.get("results", ()):
+        if not isinstance(record, Mapping):
+            reasons.append("a result row is not an object")
+            continue
+        by_name.setdefault(str(record.get("name")), []).append(record)
+    for entry in expected:
+        found = by_name.pop(entry["name"], [])
+        if not found:
+            reasons.append(f"required entry {entry['name']!r} is missing")
+            continue
+        if len(found) > 1:
+            reasons.append(f"required entry {entry['name']!r} appears {len(found)} times")
+            continue
+        reasons.extend(_entry_reasons(found[0], entry))
+    for name in sorted(by_name):
+        reasons.append(f"unexpected entry {name!r} is not part of this protocol")
+
+    replay = document.get("evidence_replay")
+    if not isinstance(replay, Mapping):
+        reasons.append("the required evidence replay is absent")
+    else:
+        if replay.get("repetitions") != LEGACY_REPLAY_REPETITIONS:
+            reasons.append(
+                f"the evidence replay ran {replay.get('repetitions')!r} repetitions, not "
+                f"{LEGACY_REPLAY_REPETITIONS}"
+            )
+        if not replay.get("agrees"):
+            reasons.append("the production joins and the numerical boundary do not agree")
+    state_entry = document.get("state_entry_replay")
+    if not isinstance(state_entry, Mapping):
+        reasons.append("the required state-entry replay is absent")
+    elif not state_entry.get("records_supplied"):
+        reasons.append("the state-entry replay supplied no records")
+    return reasons
+
+
+def _entry_reasons(record: Mapping[str, Any], entry: Mapping[str, Any]) -> list[str]:
+    """Bind one executed result to the driver-owned plan entry it claims to be."""
+    name = entry["name"]
+    reasons: list[str] = []
+    ledger = record.get("ledger")
+    if not isinstance(ledger, Mapping):
+        reasons.append(f"{name}: no attempt ledger; counts alone do not prove completeness")
+        return reasons
+    if ledger.get("status") != "completed":
+        detail = ", ".join(ledger.get("reasons") or ["unspecified"])
+        reasons.append(f"{name}: the ledger status is {ledger.get('status')!r} ({detail})")
+    for key in ("fixture_id", "variant", "config_digest", "resamples"):
+        if ledger.get(key) != entry.get(key, ledger.get(key)) and key in entry:
+            reasons.append(
+                f"{name}: ledger {key} {ledger.get(key)!r} does not match the planned "
+                f"{entry[key]!r}"
+            )
+    if ledger.get("requested_repetitions") != entry["repetitions"]:
+        reasons.append(
+            f"{name}: {ledger.get('requested_repetitions')!r} requested repetitions instead of "
+            f"the declared {entry['repetitions']}"
+        )
+    attempted = ledger.get("attempted") or {}
+    if attempted.get("ranges") != [[0, entry["repetitions"] - 1]]:
+        reasons.append(
+            f"{name}: the attempted repetition IDs are {attempted.get('ranges')!r}, not the "
+            f"declared contiguous block [[0, {entry['repetitions'] - 1}]]"
+        )
+    if (ledger.get("completed") or {}).get("ranges") != attempted.get("ranges"):
+        reasons.append(f"{name}: the completed repetition IDs differ from the attempted ones")
+
+    repetitions = record.get("repetitions")
+    if repetitions != entry["repetitions"]:
+        reasons.append(f"{name}: the record reports {repetitions!r} repetitions")
+    availability = record.get("primary_availability")
+    rates = record.get("rates")
+    if not isinstance(rates, Mapping) or set(rates) != set(ACCEPTANCE_RATES):
+        reasons.append(f"{name}: the record does not publish the three declared rates")
+        return reasons
+    family = rates["family_wise_holm_rejection"]
+    if family["denominator"] != repetitions:
+        reasons.append(
+            f"{name}: the family-wise denominator {family['denominator']!r} is not every attempted "
+            f"repetition"
+        )
+    available = rates["primary_raw_rejection"]["denominator"]
+    if rates["primary_interval_noncoverage"]["denominator"] != available:
+        reasons.append(f"{name}: the two available-primary denominators disagree")
+    if (
+        isinstance(repetitions, int)
+        and repetitions
+        and availability is not None
+        and available != round(float(availability) * repetitions)
+    ):
+        reasons.append(
+            f"{name}: the available-primary denominator {available!r} contradicts the reported "
+            f"availability {availability!r}"
+        )
+    for key, rate in rates.items():
+        if rate["events"] > rate["denominator"]:
+            reasons.append(f"{name}: {key} counts more events than its denominator")
+
+    if entry["kind"] == "refusal":
+        published = record.get("published_inference") or {}
+        if published.get("repetitions_with_p_value") or published.get("repetitions_with_interval"):
+            reasons.append(f"{name}: a required deterministic refusal published inference")
+    return reasons
+
+
+def legacy_protocol_state(document: Mapping[str, Any]) -> dict[str, Any]:
+    """The release decision of the legacy bootstrap calibration command.
+
+    Three questions are answered separately and never collapsed: whether the
+    requested rate checks passed, whether the run is a *complete* run of this
+    named protocol, and whether that complete run is accepted.  A subset, a smoke
+    repetition override, an omitted required replay or an unfinished run is
+    diagnostic-only and can never return ``accepted``.
+    """
+    diagnostic = score_acceptance(document.get("results", ()))
+    reasons = _eligibility_reasons(document)
+    complete = not reasons
+    accepted_reasons: list[str] = list(reasons)
+    if not diagnostic["all_requested_checks_passed"]:
+        failed = [item for item in diagnostic["checks"] if not item["passed"]]
+        accepted_reasons.extend(
+            f"{item['scenario']}: {item['rate']} upper bound "
+            f"{item['one_sided_95_upper_bound']} exceeds {item['ceiling']}"
+            for item in failed
+        )
+        accepted_reasons.extend(
+            f"{item['scenario']}: primary availability {item['availability']} is below "
+            f"{item['floor']}"
+            for item in diagnostic["availability_checks"]
+            if not item["passed"]
+        )
+        if not failed and not diagnostic["checks"]:
+            accepted_reasons.append("no admitted rate check was scored")
+    return {
+        "gate_version": LEGACY_GATE_VERSION,
+        "protocol": LEGACY_PROTOCOL,
+        "required_entries": [item["name"] for item in legacy_protocol_plan()],
+        "diagnostic": diagnostic,
+        "diagnostic_checks_passed": bool(diagnostic["all_requested_checks_passed"]),
+        "complete_run": complete,
+        "eligibility_reasons": reasons,
+        "accepted": bool(complete and diagnostic["all_requested_checks_passed"]),
+        "accepted_reasons": accepted_reasons,
+        "meaning": (
+            "A pass of this gate is a pass of the named legacy_bootstrap_v1 protocol on its "
+            "declared synthetic fixtures, and nothing else. Completeness is bound to the "
+            "driver-owned fixture, generator and attempt ledger, not to result-supplied names, "
+            "counts or admitted flags. Stress and planted fixtures are required disclosures whose "
+            "rates are deliberately outside the admitted-null ceiling, and legacy scenario 3 "
+            "carries a documented tiny population-null mismatch that qualifies its number without "
+            "waiving its check."
         ),
     }
 
@@ -1403,6 +1865,16 @@ def generator_contract() -> dict[str, Any]:
         "constant_cost_per_observation": CONSTANT_COST_PER_OBSERVATION,
         "confounded_month_shift": CONFOUNDED_MONTH_SHIFT,
         "confounded_probabilities": list(CONFOUNDED_PROBABILITIES),
+        "confounded_probability_month_ownership": {
+            "null_conditional_confounded": (
+                "the anchor's own bar month, which is the original fixture and differs from the "
+                "matching stratum at the 44 month-boundary anchors"
+            ),
+            "null_confounded_signal_month_v2": (
+                "the anchor's signal-close month, which is the month production matching strata "
+                "by; the deterministic return-mean schedule keeps bar-time ownership in both"
+            ),
+        },
         "thinning_probability": THINNING_PROBABILITY,
         "missing_interval_days": [list(item) for item in MISSING_INTERVAL_DAYS],
         "short_history_instrument": SHORT_HISTORY_INSTRUMENT,
@@ -1428,23 +1900,24 @@ def _contract_with_digest() -> dict[str, Any]:
     return contract
 
 
-DEFAULT_SCENARIOS = tuple(item.name for item in SCENARIOS)
+# The CLI default and the legacy gate both use the pinned protocol tuple, never
+# a listing of the growing registry.
+DEFAULT_SCENARIOS = LEGACY_PROTOCOL_SCENARIOS
 
 
-def run_calibration(
+def build_run_plan(
+    scenarios: Sequence[str],
     *,
-    output_root: Any,
-    scenarios: Sequence[str] = DEFAULT_SCENARIOS,
     repetitions: int | None = None,
-    replay_repetitions: int = 25,
-    progress=None,
+    replay_repetitions: int = LEGACY_REPLAY_REPETITIONS,
 ) -> dict[str, Any]:
-    """Run the requested scenarios and save the compact evidence artifact."""
-    root = Path(output_root).expanduser()
-    root.mkdir(parents=True, exist_ok=True)
-    contract = _contract_with_digest()
-    started = time.monotonic()
-    results: list[dict[str, Any]] = []
+    """Resolve the requested names into the exact entries this run will execute.
+
+    Driver-generated padded refusal variants are listed here explicitly: they are
+    not duplicate caller requests, and a gate that reads the executed results
+    must expect them.
+    """
+    entries: list[dict[str, Any]] = []
     for name in scenarios:
         scenario = SCENARIOS_BY_NAME.get(name)
         if scenario is None:
@@ -1452,17 +1925,55 @@ def run_calibration(
                 f"unknown calibration scenario {name!r}; declared scenarios are "
                 f"{sorted(SCENARIOS_BY_NAME)}."
             )
-        if progress is not None:
-            progress(f"scenario {scenario.name} starting")
-        results.append(run_scenario(scenario, repetitions=repetitions, progress=progress))
+        entries.append({"name": scenario.name, "padded_days": None, "driver_generated": False})
         if scenario.kind == "refusal":
-            # The same records embedded in a 365-day grid with zero-contribution
-            # padding must still refuse inference.
-            results.append(
-                run_scenario(
-                    scenario, repetitions=repetitions, padded_days=365, progress=progress
-                )
+            entries.append(
+                {
+                    "name": f"{scenario.name}_padded_365",
+                    "padded_days": 365,
+                    "driver_generated": True,
+                }
             )
+    return {
+        "protocol": LEGACY_PROTOCOL,
+        "requested_scenarios": [str(item) for item in scenarios],
+        "entries": entries,
+        "repetition_override": None if repetitions is None else int(repetitions),
+        "replay_repetitions": int(replay_repetitions),
+    }
+
+
+def run_calibration(
+    *,
+    output_root: Any,
+    scenarios: Sequence[str] = DEFAULT_SCENARIOS,
+    repetitions: int | None = None,
+    replay_repetitions: int = LEGACY_REPLAY_REPETITIONS,
+    progress=None,
+) -> dict[str, Any]:
+    """Run the planned entries and save the compact evidence artifact."""
+    root = Path(output_root).expanduser()
+    plan = build_run_plan(
+        scenarios, repetitions=repetitions, replay_repetitions=replay_repetitions
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    contract = _contract_with_digest()
+    started = time.monotonic()
+    results: list[dict[str, Any]] = []
+    for entry in plan["entries"]:
+        scenario = SCENARIOS_BY_NAME[
+            entry["name"][: -len("_padded_365")] if entry["padded_days"] else entry["name"]
+        ]
+        if progress is not None:
+            progress(f"scenario {entry['name']} starting")
+        results.append(
+            run_scenario(
+                scenario,
+                repetitions=repetitions,
+                padded_days=entry["padded_days"],
+                progress=progress,
+            )
+        )
     replay: dict[str, Any] | None = None
     state_entry_replay: dict[str, Any] | None = None
     if replay_repetitions:
@@ -1476,16 +1987,17 @@ def run_calibration(
         "schema_version": CALIBRATION_SCHEMA_VERSION,
         "generated_utc": artifacts.now_utc(),
         "generator_contract": contract,
+        "run_plan": plan,
         "results": results,
         "evidence_replay": replay,
         "state_entry_replay": state_entry_replay,
-        "acceptance": score_acceptance(results),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "scope": (
             "This measures and bounds the finite-sample approximation on the declared synthetic "
             "fixtures. It certifies neither unsimulated generators nor actual market error rates."
         ),
     }
+    document["acceptance"] = legacy_protocol_state(document)
     path = root / "calibration.json"
     path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return document
@@ -1503,14 +2015,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True, metavar="DIR")
     parser.add_argument(
         "--scenarios", nargs="*", default=list(DEFAULT_SCENARIOS), metavar="NAME",
-        help="Scenario names to run; the default is every declared scenario.",
+        help=(
+            "Scenario names to run; the default is the pinned legacy_bootstrap_v1 protocol set. "
+            "Any other selection is diagnostic-only."
+        ),
     )
     parser.add_argument(
         "--repetitions", type=int, default=None, metavar="N",
         help="Override every scenario's frozen repetition count (for a smoke run only).",
     )
     parser.add_argument(
-        "--replay-repetitions", type=int, default=25, metavar="N",
+        "--replay-repetitions", type=int, default=LEGACY_REPLAY_REPETITIONS, metavar="N",
         help=(
             "Repetitions routed through the production checked joins as evidence-shaped frames "
             "(default 25); 0 skips the replay."
@@ -1533,17 +2048,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         progress=progress,
     )
     acceptance = document["acceptance"]
+    diagnostic = acceptance["diagnostic"]
     replay = document.get("evidence_replay")
     print(
         json.dumps(
             {
                 "status": "completed",
                 "output_root": str(Path(args.output_root).expanduser()),
+                "protocol": acceptance["protocol"],
                 "scenarios": [item["name"] for item in document["results"]],
-                "checks_passed": acceptance["checks_passed"],
-                "checks_total": acceptance["checks_total"],
+                "checks_passed": diagnostic["checks_passed"],
+                "checks_total": diagnostic["checks_total"],
+                "diagnostic_checks_passed": acceptance["diagnostic_checks_passed"],
+                "complete_run": acceptance["complete_run"],
+                "eligibility_reasons": acceptance["eligibility_reasons"],
                 "accepted": acceptance["accepted"],
+                "accepted_reasons": acceptance["accepted_reasons"],
                 "evidence_replay_agrees": None if replay is None else replay["agrees"],
+                "exit_code_note": (
+                    "Exit 0 means complete acceptance of this named protocol. Exit 2 is every "
+                    "other completed run and deliberately does not distinguish a diagnostic or "
+                    "subset run from a statistical failure: read complete_run, "
+                    "diagnostic_checks_passed and the reason lists above."
+                ),
             },
             indent=2,
         )
