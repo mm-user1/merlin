@@ -304,3 +304,165 @@ def test_checksum_listed_missing_record_is_incomplete(archive):
     result = monthly.summarize(archive)
     assert result['decision']=='INCOMPLETE'
     assert result['integrity_problems']==[]
+
+
+def test_plan_entry_summary_names_and_full_failure_labels(archive):
+    main, refusal = monthly.MAIN_MATRIX[0], monthly.SUPPLEMENTARY_MATRIX[0]
+    missing, partial = monthly.SUPPLEMENTARY_MATRIX[-2:]
+    _save_rows(archive, main, [{**_row(main, reject=True), "id":20000+i} for i in range(main.attempts)])
+    rows = _rows(archive, refusal)
+    rows[0] = _row(refusal)
+    _save_rows(archive, refusal, rows)
+    (archive / "records" / f"{missing.label}.json.gz").unlink()
+    _save_rows(archive, partial, _rows(archive, partial)[:-1])
+    result = monthly.summarize(archive)
+    assert result["decision"] == "FAIL"
+    assert result["required_plan_entries"] == [f.label for f in monthly.MAIN_MATRIX + monthly.SUPPLEMENTARY_MATRIX]
+    assert result["required_main_fixtures"] == [f.label for f in monthly.MAIN_MATRIX]
+    assert result["missing_plan_entries"] == [missing.label]
+    assert result["incomplete_plan_entries"] == [partial.label]
+    assert result["failing_plan_entries"] == [main.label, refusal.label]
+    assert not any(k in result for k in ("required_fixtures", "missing_required_fixtures",
+                                       "incomplete_required_fixtures", "failing_required_fixtures"))
+    assert sum(r["attempts"] for r in result["results"]) == 19400 - missing.attempts - 1
+    rendered = monthly.render_summary(result)
+    assert f"failing_plan_entries: {main.label}, {refusal.label}" in rendered
+
+
+@pytest.mark.parametrize("case", ["proved_failure", "resource_only", "invalid", "override", "impossibility"])
+def test_coordinator_budget_stop_preserves_only_admitted_failure(case, tmp_path, monkeypatch):
+    root = tmp_path / "run"
+    fixture = monthly.MAIN_MATRIX[0]
+    def stop(phase):
+        return monthly.BudgetStop({"kind":"wall_clock", "phase":phase, "message":"injected later budget stop"})
+    def sample(self, phase, **kwargs):
+        if phase == "before_replays":
+            raise stop(phase)
+        return {"peak_rss_bytes":100}
+    def produce(selected, *, attempts, **kwargs):
+        if selected != fixture:
+            raise stop("later_fixture")
+        count = 140 if case == "impossibility" else attempts
+        rows = [{**_row(fixture, reject=case != "resource_only"), "id":20000+i} for i in range(count)]
+        if case == "invalid":
+            rows[0]["member_p_raw"][0] = .5  # contradicts the rejection vector
+        proof = monthly.impossibility(fixture, rows) if case == "impossibility" else None
+        return rows, proof
+    monkeypatch.setattr(monthly.Budget, "sample", sample)
+    monkeypatch.setattr(monthly, "_run_pilot", lambda *a, **k: ({"projected_total_seconds":0}, {}))
+    monkeypatch.setattr(monthly, "run_fixture", produce)
+    monkeypatch.setattr(monthly, "run_candidate_repetition", lambda *a: pytest.fail("unexpected generation"))
+    run = monthly.run_experiment(output_root=root, attempts=2 if case == "override" else None)
+    assert run["status"] == "incomplete"
+    result = monthly.summarize(root)
+    assert result["decision"] == ("FAIL" if case in ("proved_failure", "impossibility") else "INCOMPLETE")
+    assert bool(result["integrity_problems"]) == (case == "invalid")
+    assert result["missing_plan_entries"]
+    if case == "impossibility":
+        assert result["failing_plan_entries"] == []  # proof remains in stops/reasons
+        assert "cannot pass" in " ".join(result["decision_reasons"])
+
+
+def test_refusal_violation_survives_later_budget_stop(archive):
+    fixture = monthly.SUPPLEMENTARY_MATRIX[0]
+    _save_rows(archive, fixture, [_row(fixture)])
+    run = json.loads((archive / "run.json").read_text())
+    run.update(status="incomplete", incomplete_reason="later budget stop", replays=None,
+               stops=[{"kind":"wall_clock", "message":"later budget stop"}])
+    _write(archive / "run.json", run)
+    result = monthly.summarize(archive)
+    assert result["decision"] == "FAIL"
+    assert result["failing_plan_entries"] == [fixture.label]
+
+
+def _change_live_scenario(monkeypatch, **changes):
+    original = cal.SCENARIOS_BY_NAME["null_dependent_t5"]
+    changed = replace(original, **changes)
+    monkeypatch.setattr(cal, "SCENARIOS", tuple(changed if s.name == original.name else s for s in cal.SCENARIOS))
+    monkeypatch.setitem(cal.SCENARIOS_BY_NAME, original.name, changed)
+
+
+@pytest.mark.parametrize("mutation", ["parameter", "lookup_only", "global", "family", "candle"])
+def test_changed_live_semantics_cannot_generate_plan1(mutation, monkeypatch, tmp_path):
+    if mutation == "parameter":
+        _change_live_scenario(monkeypatch, daily_ar=.123)
+    elif mutation == "lookup_only":
+        s = cal.SCENARIOS_BY_NAME["null_dependent_t5"]
+        monkeypatch.setitem(cal.SCENARIOS_BY_NAME, s.name, replace(s, daily_ar=.123))
+    elif mutation == "global":
+        monkeypatch.setattr(cal, "COMMON_LOADING", .123)
+    elif mutation == "family":
+        original = cal.scenario_family
+        monkeypatch.setattr(cal, "scenario_family", lambda s: original(s)[:-1])
+    else:
+        original = monthly.candle_generator_contract
+        monkeypatch.setattr(monthly, "candle_generator_contract", lambda: {**original(), "return_scale":.123})
+    monkeypatch.setattr(monthly, "run_candidate_repetition", lambda *a: pytest.fail("unexpected generation"))
+    monkeypatch.setattr(monthly, "_run_pilot", lambda *a, **k: pytest.fail("unexpected pilot"))
+    root = tmp_path / "run"
+    with pytest.raises(monthly.PatternLabDataError, match="plan 1"):
+        monthly.run_experiment(output_root=root, attempts=1)
+    assert not root.exists()
+
+
+def test_rehashed_required_semantic_mutation_is_rejected(archive):
+    manifest = json.loads((archive / "manifest.json").read_text())
+    contract = manifest["generators"]["record_contract"]
+    next(s for s in contract["scenarios"] if s["name"] == "null_dependent_t5")["daily_ar"] = .123
+    contract["generator_digest"] = semantic_digest({k:v for k,v in contract.items() if k != "generator_digest"})
+    _rehash(archive, manifest)
+    result = monthly.summarize(archive)
+    assert result["decision"] == "INCOMPLETE"
+    assert any("null_dependent_t5" in problem for problem in result["integrity_problems"])
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("change", ["parameter_and_family", "global", "prose_and_extra"])
+def test_saved_plan_is_independent_of_live_semantics(archive, monkeypatch, change, version):
+    if version == 1:
+        manifest = json.loads((archive / "manifest.json").read_text())
+        manifest["schema_version"] = 1
+        for key in ("plan_version", "decision_policy_version", "research_implementation"):
+            manifest.pop(key)
+        _rehash(archive, manifest)
+        run = json.loads((archive / "run.json").read_text())
+        run["schema_version"] = 1
+        _write(archive / "run.json", run)
+    if change == "parameter_and_family":
+        _change_live_scenario(monkeypatch, daily_ar=.123, comparison="parent_child", planted_effect=99.)
+        monkeypatch.setattr(cal, "scenario_family", lambda *a: pytest.fail("offline live family lookup"))
+        monkeypatch.setattr(monthly, "candle_family", lambda *a: pytest.fail("offline live candle family"))
+    elif change == "global":
+        monkeypatch.setattr(cal, "COMMON_LOADING", .123)
+        monkeypatch.setattr(cal, "HORIZON_MINUTES", (60,))
+    else:
+        _change_live_scenario(monkeypatch, note="new explanatory prose")
+        extra = replace(cal.SCENARIOS[0], scenario_id=999, name="future_fixture")
+        monkeypatch.setattr(cal, "SCENARIOS", (*cal.SCENARIOS, extra))
+    result = monthly.summarize(archive)
+    assert result["decision"] == "PASS", result["decision_reasons"]
+    assert len(result["required_plan_entries"]) == 17
+    assert sum(r["attempts"] for r in result["results"]) == 19400
+    assert result["results"][0]["true_lift"] == 0.
+
+
+def test_prose_and_unrelated_registry_growth_keep_fresh_plan_eligible(monkeypatch):
+    _change_live_scenario(monkeypatch, note="clarified prose", caveat="clarified caveat")
+    extra = replace(cal.SCENARIOS[0], scenario_id=999, name="future_fixture")
+    monkeypatch.setattr(cal, "SCENARIOS", (*cal.SCENARIOS, extra))
+    manifest = monthly.candidate_manifest()
+    monthly._require_plan1_generation(manifest, list(monthly.MAIN_MATRIX))
+    assert admission.manifest_problems(manifest, monthly.RESEARCH_MODULES) == []
+
+
+@pytest.mark.parametrize("payload", [b'\x1f\x8b\x08\x00' + b'\x00'*6 + b'\x07' + b'\x00'*8,
+                                  gzip.compress(b'{"rows":[]}')[:-4], b'not gzip'])
+def test_corrupt_compressed_record_through_offline_cli(archive, payload, capsys):
+    fixture = monthly.MAIN_MATRIX[0]
+    path = archive / "records" / f"{fixture.label}.json.gz"
+    path.write_bytes(payload)
+    assert monthly.main(["--output-root", str(archive), "--summarize-only"]) == 2
+    result = json.loads((archive / "summary.json").read_text())
+    assert result["decision"] == "INCOMPLETE"
+    assert any("invalid compressed record" in p and str(path) in p for p in result["integrity_problems"])
+    assert '"decision": "INCOMPLETE"' in capsys.readouterr().out

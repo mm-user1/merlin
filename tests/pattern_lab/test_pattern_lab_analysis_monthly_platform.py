@@ -104,3 +104,39 @@ def test_requested_projection_and_pilot_reuse(attempts, monkeypatch):
     if attempts is not None:
         monthly.run_fixture(fixture, attempts=count, budget=budget, reuse=reuse[fixture.label])
         assert calls == list(range(20000, 20000 + count))
+
+
+@pytest.mark.parametrize("selection,attempts,accepted", [
+    ("refusal", 200, True), ("refusal", 201, False),
+    ("mixed", 200, True), ("mixed", 201, False),
+    ("main", 201, True), ("main", 2000, True), ("main", 2001, False),
+    ("mixed", None, True),
+])
+def test_selected_attempt_limits_precede_output_and_work(selection, attempts, accepted, monkeypatch, tmp_path):
+    main, refusal = monthly.MAIN_MATRIX[0], monthly.SUPPLEMENTARY_MATRIX[0]
+    selected = {"main": [main], "refusal": [refusal], "mixed": [main, refusal]}[selection]
+    calls = []
+    def pilot(*args, **kwargs):
+        calls.append("pilot")
+        return {"projected_total_seconds": 0}, {}
+    def produce(fixture, *, attempts, **kwargs):
+        calls.append((fixture.label, attempts))
+        return [], None  # exercise integer admission without generating repetitions
+    monkeypatch.setattr(monthly, "_run_pilot", pilot)
+    monkeypatch.setattr(monthly, "run_fixture", produce)
+    monkeypatch.setattr(monthly, "run_candidate_repetition", lambda *a: pytest.fail("unexpected generation"))
+    root = tmp_path / "run"
+    if accepted:
+        result = monthly.run_experiment(output_root=root, fixtures=selected, attempts=attempts, include_replays=False)
+        assert result["status"] == "completed"
+        assert [c for c in calls if isinstance(c, tuple)] == [
+            (f.label, f.attempts if attempts is None else attempts) for f in selected]
+    else:
+        monkeypatch.setattr(monthly, "candidate_manifest", lambda: pytest.fail("late input rejection"))
+        with pytest.raises(PatternLabDataError, match=f"attempts {attempts}") as error:
+            monthly.run_experiment(output_root=root, fixtures=selected, attempts=attempts)
+        for fixture in selected:
+            if attempts > fixture.attempts:
+                assert f"{fixture.label} (limit {fixture.attempts})" in str(error.value)
+        assert calls == []
+        assert not root.exists()

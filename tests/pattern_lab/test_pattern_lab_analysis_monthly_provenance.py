@@ -61,3 +61,33 @@ def test_cleanup_failure_names_owned_path_and_does_not_hide_it(tmp_path,monkeypa
     assert owned.exists()
     with pytest.raises(monthly.PatternLabDataError,match="unsafe"):
         monthly._remove_owned_replay(tmp_path,tmp_path)
+
+
+@pytest.mark.parametrize("failure", ["absent", "origin", "directory", "missing_file", "unreadable", "resolution"])
+def test_missing_research_source_has_module_diagnostic(failure, monkeypatch, tmp_path, capsys):
+    name = monthly.RESEARCH_MODULES[0]
+    source = tmp_path / "source.py"
+    source.write_text("# source", encoding="utf-8")
+    original_resolve = importlib.util.find_spec
+    def resolve(module):
+        if module != name:
+            return original_resolve(module)
+        if failure == "resolution":
+            raise ModuleNotFoundError("injected resolution failure")
+        return None if failure == "absent" else SimpleNamespace(origin={
+            "origin": None, "directory": str(tmp_path), "missing_file": str(tmp_path / "absent.py"),
+        }.get(failure, str(source)))
+    monkeypatch.setattr(importlib.util, "find_spec", resolve)
+    if failure == "unreadable":
+        original_read = Path.read_bytes
+        def denied(path):
+            if path == source:
+                raise PermissionError("injected unreadable source")
+            return original_read(path)
+        monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises(monthly.PatternLabDataError, match=name):
+        monthly.research_digests()
+    root = tmp_path / "run"
+    assert monthly.main(["--output-root", str(root), "--attempts", "1"]) == 2
+    assert name in capsys.readouterr().err
+    assert not root.exists()

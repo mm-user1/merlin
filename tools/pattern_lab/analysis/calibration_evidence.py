@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import zlib
 
 import numpy as np
 
@@ -19,6 +20,156 @@ PLAN_VERSION = 1
 DECISION_POLICY_VERSION = 2
 REPLAY_IDS = [20000, 20001]
 SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+
+
+# Immutable plan-1 semantic fingerprints captured from accepted d47dfa4 and
+# checked against the retained format-1 manifest. Values exclude attribution
+# and explanatory prose. This is evidence interpretation, not old generator code.
+_PLAN1_FIELDS = (('family', ('record_primary', 'candle_primary_member_id', 'alpha', 'confidence_level')),
+ ('seeds', ('master_seed', 'statistical_range', 'pilot_ids')),
+ ('decision',
+  ('error_envelope', 'min_primary_availability', 'rates', 'impossible_errors', 'impossible_unavailable')),
+ ('budget',
+  ('wall_clock_seconds',
+   'rss_ceiling_bytes',
+   'headroom_required_bytes',
+   'headroom_reserve_bytes',
+   'pilot_attempts')),
+ ('validity',
+  ('min_informative_months',
+   'positive_deletion_denominator',
+   'finite_inputs_and_results',
+   'nondegenerate_contrast')),
+ ('matrix_entry',
+  ('order',
+   'fixture_id',
+   'name',
+   'kind',
+   'attempts',
+   'source',
+   'scenario_name',
+   'padded_days',
+   'required')),
+ ('record_contract',
+  ('schema_version',
+   'master_seed',
+   'timeframe_minutes',
+   'bars_per_day',
+   'instruments',
+   'horizons_minutes',
+   'directions',
+   'primary_member',
+   'common_loading',
+   'individual_loading',
+   'daily_ar_coefficient',
+   'daily_level_scale',
+   'bar_innovation_scale',
+   'student_t_df',
+   'signal_p11',
+   'signal_p10',
+   'signal_stationary_probability',
+   'bar_target_probability_state_1',
+   'bar_target_probability_state_0',
+   'independent_signal_probability',
+   'constant_cost_per_observation',
+   'confounded_month_shift',
+   'confounded_probabilities',
+   'thinning_probability',
+   'missing_interval_days',
+   'short_history_instrument',
+   'short_history_start_day')),
+ ('candle_contract',
+  ('fixture_id',
+   'fixture_name',
+   'timeframe_minutes',
+   'instruments',
+   'study_start_utc_day',
+   'study_days',
+   'warmup_days',
+   'common_loading',
+   'individual_loading',
+   'return_scale',
+   'initial_open',
+   'high_factor',
+   'low_factor',
+   'volume_log_scale',
+   'condition',
+   'occurrence',
+   'comparison',
+   'commission_pct_per_side',
+   'commission_fraction_per_side',
+   'horizons_minutes',
+   'directions',
+   'primary')))
+_PLAN1_DIGESTS = (('method', '594a0ac659bd2ffdd09a04021209b59379ca9bd407078c8e0cfd0df4424a083e'),
+ ('scope', 'a6395af04b1a37964d27c0b0ecd14aad721ef885a7092762a0a4a3df7442b667'),
+ ('family', '273863a18be9b593519e6af881eee37abd988dab01d914e821d8608bcdec3272'),
+ ('seeds', 'a5b084aa65e1b6f693a8041a53a862b4c8aca292ea40bb9fb18b192d3b6bc4fb'),
+ ('decision', 'c2d884e114b52c92dcd2fbf187c2eada5deea499da0b286c1c08b6be3fbdb638'),
+ ('budget', 'fe2d67213b02bc15b74a7a776314cf4cd2077d614be18bd65b540a3fb06dfc8c'),
+ ('validity', '2d6370be1c15422fea756f98c86e07d1cc7fdc67c284182f87544a06fd6e8bfd'),
+ ('main', '0d8c03de61db4b83f8ea659f06f55b34c857948b221b265483e6607273548ebe'),
+ ('supplementary', '35b01b86beaa5e8b17526fa7fa9d54167baa9a0e23a38d33d2eabad713f42acb'),
+ ('record_contract', '5185cba0cb0f1bf24f6f9869838e4e484e8d91afa4778a73180baa45e9ecf695'),
+ ('candle_contract', '3b84b497077bd286ebb4614b2fa79eba5ec89fd57480a7e4270f36f663d2992d'))
+_PLAN1_SCENARIOS = (('null_independent', '5c07b95f2c64ff07d86ce06305d47bb907aeb7608c5755c9d4bb7bd766328849', 0.0),
+ ('null_dependent_t5', '0299a12c12dfc6dd16af8e68542e7b03a5d483f4a209502c4ccd0cf5b039154c', 0.0),
+ ('null_conditional_confounded', 'bb0ec750ea7453faf04871de69c51274c712e56ee430ba45627f452cd3d6ce25', 0.0),
+ ('null_inclusive_parent', '9db7f0d0de2c9a08ddd506f57e46be13304704bd38e25b81d5bb03e8645361ab', 0.0),
+ ('null_admission_boundary_336', '26f37488cbfd7be5306c8ce13726082dbaf6042102f90f18ee9504b70fc9f72c', 0.0),
+ ('null_dependent_gaussian_companion',
+  '8a78eefe52cd1c865ad1a3fcb2eed256636d12b4f6722da5d7222e99a0dfba98',
+  0.0),
+ ('short_population_84_days', '5cf77bc2a5d3d7516160fbfaa4ac5c88f7b43e420410a932ff31b7532ba56d5f', 0.0),
+ ('short_population_180_days', '77d69dc43ef99d2dd01a7e9103d12bdb022ff23c32613c0549b211a430c9bbd3', 0.0),
+ ('stress_long_dependence_ar09_p070',
+  '0024c23586d3b6067504c85e3c4de328a398915c489111f2bd953cd0dbb40758',
+  0.0),
+ ('stress_long_dependence_ar09_p097',
+  'cfd3bc6273190056f4722de9d0aca6c96eb889225c8a92069ffab3d10ac8d532',
+  0.0),
+ ('planted_positive_strong', '43e6007f58fb76303239ce5a55c6cdd0e9904cff7033eca234d0e8bff69ebc23', 0.005),
+ ('planted_negative_strong', '52d984946955a1059b99ca74c4c0885c7df73955eb233437d618b38b526aeffd', -0.005),
+ ('planted_modest', 'e3de59e72296df1f5d95328f60893a59c273505c681416fddd2d980df583f522', 5e-05),
+ ('null_confounded_signal_month_v2',
+  '3744a1edcf2985e0e2f60df352db85c13d7edea70d91114ddf86ef92be557e10',
+  0.0))
+_PLAN1_FAMILIES = (('baseline',
+  ('baseline__signal|synthetic|tf30m|tf30m.h60m.long',
+   'baseline__signal|synthetic|tf30m|tf30m.h60m.short',
+   'baseline__signal|synthetic|tf30m|tf30m.h120m.long',
+   'baseline__signal|synthetic|tf30m|tf30m.h120m.short',
+   'baseline__signal|synthetic|tf30m|tf30m.h240m.long',
+   'baseline__signal|synthetic|tf30m|tf30m.h240m.short',
+   'baseline__signal|synthetic|tf30m|tf30m.h480m.long',
+   'baseline__signal|synthetic|tf30m|tf30m.h480m.short'),
+  'baseline__signal|synthetic|tf30m|tf30m.h240m.long'),
+ ('parent_child',
+  ('baseline__child|synthetic|tf30m|tf30m.h60m.long',
+   'baseline__child|synthetic|tf30m|tf30m.h60m.short',
+   'baseline__child|synthetic|tf30m|tf30m.h120m.long',
+   'baseline__child|synthetic|tf30m|tf30m.h120m.short',
+   'baseline__child|synthetic|tf30m|tf30m.h240m.long',
+   'baseline__child|synthetic|tf30m|tf30m.h240m.short',
+   'baseline__child|synthetic|tf30m|tf30m.h480m.long',
+   'baseline__child|synthetic|tf30m|tf30m.h480m.short',
+   'baseline__parent|synthetic|tf30m|tf30m.h60m.long',
+   'baseline__parent|synthetic|tf30m|tf30m.h60m.short',
+   'baseline__parent|synthetic|tf30m|tf30m.h120m.long',
+   'baseline__parent|synthetic|tf30m|tf30m.h120m.short',
+   'baseline__parent|synthetic|tf30m|tf30m.h240m.long',
+   'baseline__parent|synthetic|tf30m|tf30m.h240m.short',
+   'baseline__parent|synthetic|tf30m|tf30m.h480m.long',
+   'baseline__parent|synthetic|tf30m|tf30m.h480m.short',
+   'child_versus_parent|synthetic|tf30m|tf30m.h60m.long',
+   'child_versus_parent|synthetic|tf30m|tf30m.h60m.short',
+   'child_versus_parent|synthetic|tf30m|tf30m.h120m.long',
+   'child_versus_parent|synthetic|tf30m|tf30m.h120m.short',
+   'child_versus_parent|synthetic|tf30m|tf30m.h240m.long',
+   'child_versus_parent|synthetic|tf30m|tf30m.h240m.short',
+   'child_versus_parent|synthetic|tf30m|tf30m.h480m.long',
+   'child_versus_parent|synthetic|tf30m|tf30m.h480m.short'),
+  'child_versus_parent|synthetic|tf30m|tf30m.h240m.long'))
 
 
 def load_json(raw):
@@ -48,7 +199,25 @@ def same(left, right):
     return semantic_digest(left) == semantic_digest(right)
 
 
-def manifest_problems(saved, expected, scenario_names, research_modules):
+def plan_truth(scenario_name):
+    if scenario_name is None:  # causal candle null
+        return 0.0
+    return next(truth for name, _, truth in _PLAN1_SCENARIOS if name == scenario_name)
+
+
+def plan_family(scenario_name):
+    kind = "parent_child" if scenario_name == "null_inclusive_parent" else "baseline"
+    _, members, primary = next(item for item in _PLAN1_FAMILIES if item[0] == kind)
+    return list(members), primary
+
+
+def scenario_matches_plan(scenario):
+    wanted = dict((name, digest) for name, digest, _ in _PLAN1_SCENARIOS)
+    config = {k: v for k, v in scenario.items() if k not in ("note", "caveat")}
+    return semantic_digest(config) == wanted.get(scenario.get("name"))
+
+
+def manifest_problems(saved, research_modules):
     problems = []
     version = saved.get("schema_version")
     if type(version) is not int or version not in (1, EVIDENCE_SCHEMA_VERSION):
@@ -57,58 +226,42 @@ def manifest_problems(saved, expected, scenario_names, research_modules):
         problems.append("unknown or missing plan_version")
     if saved.get("manifest_digest") != semantic_digest({k: v for k, v in saved.items() if k != "manifest_digest"}):
         problems.append("the saved manifest digest does not match its own content")
+    expected = dict(_PLAN1_DIGESTS)
+    fields = dict(_PLAN1_FIELDS)
     for key in ("method", "scope"):
-        if saved.get(key) != expected[key]:
+        if semantic_digest(saved.get(key)) != expected[key]:
             problems.append(f"manifest {key} differs from plan 1")
     # Only semantic fields: neither producer hashes nor mutable explanatory prose.
-    fields = {
-        "family": ("record_primary", "candle_primary_member_id", "alpha", "confidence_level"),
-        "seeds": ("master_seed", "statistical_range", "pilot_ids"),
-        "decision": ("error_envelope", "min_primary_availability", "rates", "impossible_errors", "impossible_unavailable"),
-        "budget": ("wall_clock_seconds", "rss_ceiling_bytes", "headroom_required_bytes", "headroom_reserve_bytes", "pilot_attempts"),
-    }
-    for section, keys in fields.items():
+    for section in ("family", "seeds", "decision", "budget"):
+        keys = fields[section]
         actual = saved.get(section, {})
-        if not isinstance(actual, dict) or not same({key: actual.get(key) for key in keys},
-                                                    {key: expected[section][key] for key in keys}):
+        if not isinstance(actual, dict) or semantic_digest({key: actual.get(key) for key in keys}) != expected[section]:
             problems.append(f"manifest {section} settings differ from plan 1")
     validity = saved.get("formula", {}).get("validity", {})
-    keys = ("min_informative_months", "positive_deletion_denominator", "finite_inputs_and_results", "nondegenerate_contrast")
-    if not same({k: validity.get(k) for k in keys}, {k: expected["formula"]["validity"][k] for k in keys}):
+    if semantic_digest({k: validity.get(k) for k in fields["validity"]}) != expected["validity"]:
         problems.append("manifest mathematical validity settings differ from plan 1")
     matrix = saved.get("matrix", {})
     for group in ("main", "supplementary"):
         entries = matrix.get(group)
-        reference = expected["matrix"][group]
-        keys = ("order", "fixture_id", "name", "kind", "attempts", "source", "scenario_name", "padded_days", "required")
-        if not isinstance(entries, list) or not same(
-            [{k: item.get(k) for k in keys} for item in entries],
-            [{k: item[k] for k in keys} for item in reference],
-        ):
+        keys = fields["matrix_entry"]
+        if not isinstance(entries, list) or semantic_digest(
+            [{k: item.get(k) for k in keys} for item in entries]
+        ) != expected[group]:
             problems.append(f"manifest {group} matrix differs from frozen plan 1")
     if not same(matrix.get("max_main_attempts"), 16000):
         problems.append("manifest max_main_attempts differs from plan 1")
     generators = saved.get("generators", {})
     for kind in ("record_contract", "candle_contract"):
         actual = generators.get(kind, {})
-        reference = expected["generators"][kind]
-        # Numerical settings and explicit identities are the semantic contract.
-        excluded = {"implementation", "generator_digest", "scenarios", "seed_rule", "draw_order",
-                    "ar_initialization", "signal_initialization", "months", "outcome_model",
-                    "confounded_probability_month_ownership", "bounded_law_disclosure",
-                    "common_signal_disclosure", "null_argument", "price_law", "return_law", "volume_law"}
-        keys = [key for key in reference if key not in excluded]
-        if not same({k: actual.get(k) for k in keys}, {k: reference[k] for k in keys}):
+        keys = fields[kind]
+        if semantic_digest({k: actual.get(k) for k in keys}) != expected[kind]:
             problems.append(f"manifest {kind} settings differ from plan 1")
         if kind == "record_contract":
             if actual.get("generator_digest") != semantic_digest({k: v for k, v in actual.items() if k != "generator_digest"}):
                 problems.append("record generator digest does not match its own contract")
-            for name in scenario_names:
+            for name, _, _ in _PLAN1_SCENARIOS:
                 found = [s for s in actual.get("scenarios", []) if s.get("name") == name]
-                wanted = [s for s in reference["scenarios"] if s["name"] == name]
-                def config(items):
-                    return [{k: v for k, v in item.items() if k not in ("note", "caveat")} for item in items]
-                if len(found) != 1 or not same(config(found), config(wanted)):
+                if len(found) != 1 or not scenario_matches_plan(found[0]):
                     problems.append(f"record generator required fixture {name} missing, duplicated or changed")
     if version == EVIDENCE_SCHEMA_VERSION:
         if not same(saved.get("decision_policy_version"), DECISION_POLICY_VERSION):
@@ -132,7 +285,10 @@ def record_bytes(root, label):
     if plain.is_file():
         return plain.read_bytes()
     if packed.is_file():
-        return gzip.decompress(packed.read_bytes())
+        try:
+            return gzip.decompress(packed.read_bytes())
+        except (gzip.BadGzipFile, EOFError, zlib.error) as error:
+            raise ValueError(f"{label}: invalid compressed record {packed}: {error}") from error
     return None
 
 

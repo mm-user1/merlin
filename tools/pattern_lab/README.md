@@ -2658,6 +2658,11 @@ Use a **new external output directory** for a small diagnostic run:
 
 The positive integer override projects only requested work and pilots at most
 `min(5, attempts)` draws per selected main fixture, reusing each completed ID.
+It requests that exact count for **each selected entry**. Before creating output
+or doing any work, the driver rejects counts above any selected entry's frozen
+limit and names the limiting labels/counts. For example, refusal entries allow
+200 attempts, while a main-only selection allows 2,000; unselected entries do
+not limit a diagnostic request. No count is silently capped.
 The full experiment still uses five pilot attempts, its original IDs and counts.
 A diagnostic subset, attempt override or skipped supplementary/replay work cannot
 earn PASS even when the requested work completes. Replay cleanup failures name
@@ -2670,11 +2675,19 @@ attempts: eight main nulls in order 2, 5, 1, 4, 3, 12, 101, 102 at 2,000 each;
 planted 30/31/32 at 200 each. IDs are contiguous from 20000 within each entry,
 master seed 20260920. An unrelated registered fixture does not extend this plan.
 An intentional change to experiment membership/settings needs a later plan version.
+The evidence helper owns immutable plan-1 semantic fingerprints, derived from the
+accepted baseline and checked against the historical manifest. They pin required
+scenario parameters, global generator/family settings and the existing admission
+settings, excluding source hashes and explanatory prose. Fresh generation checks
+both its manifest and actual scenario lookup/families against this reference before
+creating output. Offline scoring uses the pinned reference, family identities and
+fixture truths, independently of the current registry. An unrelated fixture or
+prose edit neither extends the plan nor invalidates historical evidence.
 
 Evidence format **2**, plan version **1**, decision policy **2** and mathematical
 method `monthly_cluster_jackknife_v1` are separate identities. The driver and
 offline CLI share one admission/decision path: the manifest's own digest is checked
-alongside driver-owned semantic settings, never against today's source hashes or
+alongside frozen plan-1 semantic settings, never against today's source hashes or
 explanatory prose. Run method, format, plan, manifest reference, terminal state and
 declared work must agree. Counts are rebuilt from admitted records, including
 integer IDs, ordered family identities, primary selection, finite/null values,
@@ -2691,8 +2704,21 @@ Format 2 additionally records/checks both ordered member lists, their counts and
 the expected family. Missing or contradictory evidence is INCOMPLETE; contradictions
 are listed separately as `integrity_problems`. A completed valid main failure,
 actual refusal failure or record-proven impossibility stop can establish FAIL
-before later fixtures finish. A stop message alone proves nothing. There is no
+before later fixtures finish, even if a later resource stop leaves the run or
+replays incomplete. Integrity contradictions still take precedence; a resource
+stop without admitted failure proof is INCOMPLETE. An attempt override remains
+diagnostic INCOMPLETE. A stop message alone proves nothing. There is no
 early acceptance and no new stress or planted rate ceiling.
+
+Derived summaries use full fixture labels consistently: `required_plan_entries`
+lists all 17 entries in frozen order and `required_main_fixtures` lists the eight
+main rate-gated fixtures. `missing_plan_entries` and `incomplete_plan_entries`
+identify absent and admitted-but-unfinished work. `failing_plan_entries` contains
+completed main failures and proved refusal violations without duplicates. Early
+impossibility proofs remain in `stops` and decision reasons. The CLI names its
+main result list `required_main_fixtures_scored`. These derived names replace
+the former ambiguous `required_fixtures` names without changing evidence format,
+plan identity, decision policy or statistical thresholds.
 
 `records.sha256` is optional. When supplied, every consumed record must have one
 unique known safe label in `<64-hex SHA-256><two spaces><label>.json` format, hashing
@@ -2701,6 +2727,8 @@ incomplete evidence; malformed/mismatching supplied checksums mean an integrity
 problem. An absent checksum file is disclosed as `not supplied`, not a PASS blocker.
 Having both plain and gzip files for the same entry is always ambiguous and
 rejected. Equal hashes across distinct padded/unpadded refusal entries are valid.
+Invalid DEFLATE, bad gzip and truncated compressed records become labelled
+integrity diagnostics (INCOMPLETE, CLI exit 2) at the reader boundary.
 
 **Historical provenance.** Delivered format-1 manifests without a plan field map
 explicitly to plan 1 and undergo the same semantic/record checks. Their missing
@@ -2712,6 +2740,8 @@ Summaries retain the input file/archive and original manifest identities, produc
 attribution, current verifier hashes, environment and policy version separately.
 Current verifier hashes need not match producer hashes. Any recovered commit
 attribution must be labelled retrospective; it cannot prove a pre-run freeze.
+Missing, non-file or unreadable required research sources produce an explicit
+module-specific error; required hashes are never silently omitted.
 Before re-scoring an archive, copy it to external scratch and save its original
 summaries separately: `--summarize-only` replaces that copy's top-level summaries.
 

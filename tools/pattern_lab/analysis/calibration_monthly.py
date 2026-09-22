@@ -94,8 +94,16 @@ RESEARCH_MODULES = (
 
 def research_digests() -> dict[str, str]:
     """Explicit research dependencies, separate from production artifact attribution."""
-    return {name: hashlib.sha256(Path(importlib.util.find_spec(name).origin).read_bytes()).hexdigest()
-            for name in RESEARCH_MODULES}
+    digests = {}
+    for name in RESEARCH_MODULES:
+        try:
+            spec = importlib.util.find_spec(name)
+            if spec is None or not spec.origin or not Path(spec.origin).is_file():
+                raise PatternLabDataError(f"research source {name}: missing or non-file module origin")
+            digests[name] = hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
+        except (OSError, ImportError, ValueError) as error:
+            raise PatternLabDataError(f"research source {name}: {error}") from error
+    return digests
 
 # Mathematical validity requirements of the candidate, beyond the unchanged
 # production support gates.  They are not a new support threshold.
@@ -841,9 +849,7 @@ class CandidateFixture:
 
     @property
     def truth(self) -> float:
-        if self.scenario_name is None:
-            return 0.0
-        return float(cal.SCENARIOS_BY_NAME[self.scenario_name].planted_effect)
+        return admission.plan_truth(self.scenario_name)
 
 
 def _main_matrix() -> tuple[CandidateFixture, ...]:
@@ -1845,10 +1851,18 @@ def run_experiment(
     """
     root = Path(output_root).expanduser()
     _validate_attempts(attempts)
+    planned = list(fixtures if fixtures is not None else MAIN_MATRIX)
+    if fixtures is None and include_supplementary:
+        planned += list(SUPPLEMENTARY_MATRIX)
+    limiting = [item for item in planned if attempts is not None and attempts > item.attempts]
+    if limiting:
+        limits = ", ".join(f"{item.label} (limit {item.attempts})" for item in limiting)
+        raise PatternLabDataError(f"attempts {attempts} exceeds selected plan-1 entry limits: {limits}")
+    manifest = candidate_manifest()
+    _require_plan1_generation(manifest, planned)
     if root.exists():
         raise PatternLabDataError(f"{root}: output root must be a new directory")
     (root / "records").mkdir(parents=True)
-    manifest = candidate_manifest()
     environment = environment_document()
     _write_json(root / "manifest.json", manifest)
     _write_json(root / "environment.json", environment)
@@ -1866,9 +1880,6 @@ def run_experiment(
         )
     budget = Budget(started=time.monotonic(), rss_ceiling_bytes=ceiling)
 
-    planned = list(fixtures if fixtures is not None else MAIN_MATRIX)
-    if fixtures is None and include_supplementary:
-        planned = planned + list(SUPPLEMENTARY_MATRIX)
     results: list[dict[str, Any]] = []
     stops: list[dict[str, Any]] = []
     status = "completed"
@@ -2092,10 +2103,29 @@ def read_records(root: Path, label: str) -> dict[str, Any] | None:
 
 
 def _fixture_family(fixture):
-    if fixture.source == "candles":
-        return [item.member_id for item in candle_family()], candle_primary_member_id()
-    scenario = cal.SCENARIOS_BY_NAME[fixture.scenario_name]
-    return [item.member_id for item in cal.scenario_family(scenario)], cal.primary_member_id(scenario)
+    return admission.plan_family(fixture.scenario_name)
+
+
+def _require_plan1_generation(manifest, selected):
+    """Check both the recorded contract and the actual lookup/families before work."""
+    problems = admission.manifest_problems(manifest, RESEARCH_MODULES)
+    declared = {f.label: f for f in MAIN_MATRIX + SUPPLEMENTARY_MATRIX}
+    for fixture in selected:
+        if fixture.label not in declared or fixture != declared[fixture.label]:
+            problems.append(f"selected entry {fixture.label} differs from plan 1")
+    for fixture in declared.values():
+        if fixture.source == "candles":
+            actual = [m.member_id for m in candle_family()], candle_primary_member_id()
+        else:
+            scenario = cal.SCENARIOS_BY_NAME.get(fixture.scenario_name)
+            if scenario is None or not admission.scenario_matches_plan(asdict(scenario)):
+                problems.append(f"generator lookup {fixture.scenario_name} differs from plan 1")
+                continue
+            actual = [m.member_id for m in cal.scenario_family(scenario)], cal.primary_member_id(scenario)
+        if actual != _fixture_family(fixture):
+            problems.append(f"generator family {fixture.label} differs from plan 1")
+    if problems:
+        raise PatternLabDataError("fresh generation cannot use plan 1: " + "; ".join(problems))
 
 
 def summarize(output_root: Any) -> dict[str, Any]:
@@ -2126,8 +2156,7 @@ def summarize(output_root: Any) -> dict[str, Any]:
         except (OSError, ValueError, TypeError) as error:
             problems.append(f"{filename}: {error}")
     try:
-        names = list(dict.fromkeys(f.scenario_name for f in fixtures if f.scenario_name))
-        problems.extend(admission.manifest_problems(manifest, candidate_manifest(), names, RESEARCH_MODULES))
+        problems.extend(admission.manifest_problems(manifest, RESEARCH_MODULES))
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         problems.append(f"malformed manifest: {error}")
     run_missing, run_errors = admission.run_problems(run, manifest, labels)
@@ -2151,7 +2180,7 @@ def summarize(output_root: Any) -> dict[str, Any]:
             raw = admission.record_bytes(root, fixture.label)
             if raw is None:
                 missing.append(fixture.label)
-                incomplete.append(f"required fixture {fixture.label} produced no records")
+                incomplete.append(f"required plan entry {fixture.label} produced no records")
                 continue
             digest = hashlib.sha256(raw).hexdigest()
             input_hashes[f"records/{fixture.label}.json (uncompressed)"] = digest
@@ -2174,13 +2203,12 @@ def summarize(output_root: Any) -> dict[str, Any]:
             scored = score_fixture(fixture, rows)
             results.append(scored)
             if not scored["complete"]:
-                incomplete.append(f"required fixture {fixture.label} did not complete its declared attempts")
+                incomplete.append(f"required plan entry {fixture.label} did not complete its declared attempts")
         except (OSError, EOFError, KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
             problems.append(f"{fixture.label}: {error}")
     replay_families = {
-        "candle_disk_replay": [item.member_id for item in candle_family()],
-        "candidate_evidence_replay": [item.member_id for item in cal.scenario_family(
-            cal.SCENARIOS_BY_NAME["null_dependent_t5"]) if item.comparison_id == "baseline__signal"],
+        "candle_disk_replay": admission.plan_family(None)[0],
+        "candidate_evidence_replay": admission.plan_family("null_dependent_t5")[0],
     }
     replay_missing, replay_errors = admission.replay_problems(
         (run or {}).get("replays"), replay_families, new_format=new_format)
@@ -2205,7 +2233,7 @@ def summarize(output_root: Any) -> dict[str, Any]:
             problems.append("unknown stop record")
         elif (run or {}).get("status") == "completed":
             problems.append("completed run contradicts a budget stop")
-    failing = [item["name"] for item in results if item["required"] and item["complete"]
+    failing = [_result_label(item) for item in results if item["required"] and item["complete"]
                and item["rate_checks_passed"] is not True]
     refusal_failures = [f.label for f in fixtures if f.kind == "refusal" and
                         any(any(r["member_available"]) for r in rows_by_label.get(f.label, []))]
@@ -2230,10 +2258,11 @@ def summarize(output_root: Any) -> dict[str, Any]:
         "decision_reasons": reasons,
         "integrity_problems": problems,
         "incomplete_evidence": list(dict.fromkeys(incomplete)),
-        "required_fixtures": [item.label for item in fixtures if item.required],
-        "missing_required_fixtures": missing,
-        "incomplete_required_fixtures": [item["name"] for item in results if not item["complete"]],
-        "failing_required_fixtures": failing + refusal_failures,
+        "required_plan_entries": labels,
+        "required_main_fixtures": [item.label for item in fixtures if item.required],
+        "missing_plan_entries": missing,
+        "incomplete_plan_entries": [_result_label(item) for item in results if not item["complete"]],
+        "failing_plan_entries": list(dict.fromkeys(failing + refusal_failures)),
         "results": results,
         "replays": (run or {}).get("replays"),
         "stops": stops,
@@ -2263,11 +2292,15 @@ def summarize(output_root: Any) -> dict[str, Any]:
     return summary
 
 
+def _result_label(result):
+    return f"{result['fixture_id']:03d}_{result['name']}"
+
+
 def _decide(*, problems, incomplete, failing, refusal_failures, proven_stops, run_document):
     """Only coherent saved evidence can establish statistical failure."""
     if problems:
         return "INCOMPLETE", [f"evidence integrity: {item}" for item in problems] + list(dict.fromkeys(incomplete))
-    if run_document and run_document.get("status") == "completed" and run_document.get("attempts_override") is None:
+    if run_document and run_document.get("attempts_override") is None:
         reasons = [f"required fixture {name} completed its declared attempts and failed its rate or availability gate"
                    for name in failing]
         reasons += [f"required refusal fixture {name} published inference" for name in refusal_failures]
@@ -2304,10 +2337,13 @@ def render_summary(summary: Mapping[str, Any]) -> str:
         "",
     ]
     lines.extend(f"- {reason}" for reason in summary["decision_reasons"])
+    for key in ("required_plan_entries", "required_main_fixtures", "missing_plan_entries",
+                "incomplete_plan_entries", "failing_plan_entries"):
+        lines.extend(["", f"{key}: {', '.join(summary[key]) or 'none'}."])
     lines.extend(
         [
             "",
-            "## Required matrix",
+            "## Main rate-gated fixtures",
             "",
             "| # | Fixture | Attempts | Availability | Raw rejection (UB) | Noncoverage (UB) "
             "| Holm FWER (UB) | Passed |",
@@ -2490,8 +2526,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "output_root": str(root),
                 "decision": summary["decision"],
                 "decision_reasons": summary["decision_reasons"],
-                "required_fixtures_scored": [
-                    item["name"] for item in summary["results"] if item["required"]
+                "required_main_fixtures_scored": [
+                    _result_label(item) for item in summary["results"] if item["required"]
                 ],
                 "integration": (
                     "Research only: no production request, artifact or report exposes this "
