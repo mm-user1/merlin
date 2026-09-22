@@ -55,6 +55,9 @@ INFERENCE_SCOPE = "approximate_development_screen"
 MIN_RESAMPLES = 1999
 MAX_RESAMPLES = 99999
 MAX_SEED = 2**32 - 1
+SAVED_V1_MIN_RESAMPLES = 1999
+SAVED_V1_MAX_RESAMPLES = 99999
+SAVED_V1_MAX_SEED = 2**32 - 1
 
 # Deterministic reason order; every applicable reason is reported.
 REASON_NO_SUPPORT = "no_matched_support"
@@ -281,6 +284,9 @@ def _normalize_pairwise(raw: Any) -> tuple[PairwiseComparison, ...]:
 
 def normalize_analysis_request(document: Any, *, source: str) -> AnalysisRequest:
     """Validate an analysis request document and return its normalized form."""
+    if not (SAVED_V1_MIN_RESAMPLES <= MIN_RESAMPLES <= MAX_RESAMPLES <= SAVED_V1_MAX_RESAMPLES
+            and 0 <= MAX_SEED <= SAVED_V1_MAX_SEED):
+        raise PatternLabDataError("v1 launch domains exceed the saved format; an explicit format decision is required.")
     values = contracts.require_mapping(document, source)
     version = _require_version(values.get("schema_version"), f"{source}.schema_version")
     keys = REQUEST_KEYS if version == 1 else tuple(k for k in REQUEST_KEYS if k not in ("seed", "resamples"))
@@ -335,15 +341,36 @@ def validate_saved_request(document: Any, *, source: str) -> int:
     _normalize_pairwise(values["pairwise"])
     if version == 1:
         _require_bounded_int(
-            values["resamples"], f"{source}.resamples", minimum=1999, maximum=99999
+            values["resamples"], f"{source}.resamples",
+            minimum=SAVED_V1_MIN_RESAMPLES, maximum=SAVED_V1_MAX_RESAMPLES
         )
-        _require_bounded_int(values["seed"], f"{source}.seed", minimum=0, maximum=2**32 - 1)
+        _require_bounded_int(values["seed"], f"{source}.seed", minimum=0, maximum=SAVED_V1_MAX_SEED)
     method = contracts.require_mapping(values["method"], f"{source}.method")
     expected_id = METHOD_ID if version == 1 else V2_METHOD_ID
     if method.get("method") != expected_id:
         raise PatternLabDataError(
             f"{source}.method: method ID contradicts request version {version}."
         )
+    for key in ("matching", "inference_scope", *(("grouping", "reference") if version == 2 else ())):
+        require_text(method.get(key), f"{source}.method.{key}")
+    for key in ("alpha", "confidence_level"):
+        value = contracts.require_number(method.get(key), f"{source}.method.{key}")
+        if not 0 < value < 1:
+            raise PatternLabDataError(f"{source}.method.{key}: probability must be in (0, 1).")
+    support = contracts.require_mapping(method.get("support"), f"{source}.method.support")
+    for key in (
+        "min_stratum_target", "min_stratum_control", "min_stratum_target_days",
+        "min_stratum_control_days", "min_day_grid", "min_supported_span_days",
+        "min_joint_active_days", "min_supported_blocks", "min_supported_block_active_days",
+        "max_inference_horizon_minutes",
+    ):
+        require_int(support.get(key), f"{source}.method.support.{key}", minimum=1)
+    share = contracts.require_number(support.get("min_retained_target_share"),
+                                     f"{source}.method.support.min_retained_target_share")
+    if not 0 <= share <= 1:
+        raise PatternLabDataError(f"{source}.method.support.min_retained_target_share: expected [0, 1].")
+    if version == 1:
+        require_int(method.get("block_length_days"), f"{source}.method.block_length_days", minimum=1)
     return version
 
 

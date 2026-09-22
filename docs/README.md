@@ -51,7 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
-| [Pattern Lab data foundation, collector, event studies and matched comparisons](../tools/pattern_lab/README.md) | Research-only Parquet pack schema, manifest, roster, exchange collector, update/recovery and exclusion contract, NPZ import, fixed-interval reads and input identity, the event-study request, extension, evidence, identity, worker-pool and report contracts, and the M3a analysis request, estimator, support gates, declared family, sealed artifact and calibration |
+| [Pattern Lab data foundation, collector, event studies and matched comparisons](../tools/pattern_lab/README.md) | Research-only pack, collector, study, evidence, identity, extensions and workers; M3a analysis, support gates and calibration; M3b explicit context, frozen candidates, split admission, child-bound validation receipts and offline reports |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 ## Baseline evidence

@@ -202,9 +202,13 @@ without the study or its pack. The tracked example uses v2 monthly jackknife;
 explicit v1 keeps its failed bootstrap calibration (11/15 checks, about 7.5-8.3%
 error on persistent-signal fixtures). Monthly inference passed the synthetic
 G=12 screen against an 8% upper-bound envelope; it does not certify nominal 5%
-control or arbitrary dependence across months. **M3a integration is ready for
-tech-lead review; acceptance remains pending.** M3b context/frozen validation and
-the M4 sequential bracket probe are not implemented. Neither an M2 descriptive
+control or arbitrary dependence across months. **M3a is accepted at `9fe7816`
+for this approximate development-screen scope.** M3b context/frozen validation is
+implemented pending tech-lead review: study v2 declares explicit context aliases,
+`freeze-candidate` binds a completed development generation and monthly family,
+and `validate-candidate` executes its exact later interval into a new parent root.
+See the [M3b contract](pattern_lab/README.md#explicit-context-and-frozen-validation-m3b).
+The M4 sequential bracket probe is not implemented. Neither an M2 descriptive
 result nor an M3a nominal Holm rejection is a validated edge. Merlin and Strategy Lab do not
 import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See the
 [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,

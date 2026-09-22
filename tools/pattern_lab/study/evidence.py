@@ -24,6 +24,10 @@ from .. import manifest as pack_manifest
 from . import contracts
 
 RUN_SCHEMA_VERSION = 1
+CURRENT_RUN_SCHEMA_VERSION = 2
+SUPPORTED_RUN_SCHEMA_VERSIONS = (1, 2)
+CONTEXT_ADMISSION_FILE = "spec/context.json"
+CONTEXT_FILE = "context.json"
 BUNDLE_SCHEMA_VERSION = 1
 
 SPEC_DIR = "spec"
@@ -193,21 +197,21 @@ def require_run_directory(run_root: Path) -> Path:
 # identity
 # --------------------------------------------------------------------------
 
-def specification_identity(request_document: Mapping[str, Any], family: Mapping[str, Any]) -> str:
+def specification_identity(request_document: Mapping[str, Any], family: Mapping[str, Any], *, run_version: int = 1) -> str:
     """Semantic identity of the normalized request, protocol and planned family."""
     return contracts.semantic_digest(
-        {"specification": request_document, "family": family, "version": RUN_SCHEMA_VERSION}
+        {"specification": request_document, "family": family, "version": run_version}
     )
 
 
-def implementation_identity(source: Mapping[str, Any]) -> str:
+def implementation_identity(source: Mapping[str, Any], *, run_version: int = 1) -> str:
     """Identity of the consumed source digests and numerical library versions."""
     return contracts.semantic_digest(
         {
             "core_source": source["core_source"],
             "extensions": source["extensions"],
             "library_versions": source["library_versions"],
-            "version": RUN_SCHEMA_VERSION,
+            "version": run_version,
         }
     )
 
@@ -218,6 +222,8 @@ def data_input_identity(
     semantic_specification: Mapping[str, Any],
     universe: Sequence[Mapping[str, Any]],
     protocol: Mapping[str, Any],
+    run_version: int = 1,
+    context: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the final data-input identity of a completed run.
 
@@ -242,7 +248,8 @@ def data_input_identity(
                 for item in universe
             ],
             "protocol": protocol,
-            "version": RUN_SCHEMA_VERSION,
+            "version": run_version,
+            **({"context": dict(context or {})} if run_version == 2 else {}),
         }
     )
 
@@ -395,12 +402,13 @@ def completion_path(run_root: Path) -> Path:
     return Path(run_root) / COMPLETION_FILE
 
 
-def immutable_files(run_root: Path) -> list[str]:
+def immutable_files(run_root: Path, *, run_version: int = 1) -> list[str]:
     """Every immutable evidence file, relative to the run root and sorted."""
     root = Path(run_root)
     names: list[str] = []
     for relative in (REQUEST_FILE, PROTOCOL_FILE, FAMILY_FILE, SOURCE_FILE, PROVENANCE_FILE,
-                     STATUS_FILE, METRICS_FILE):
+                     STATUS_FILE, METRICS_FILE,
+                     *((CONTEXT_ADMISSION_FILE, CONTEXT_FILE) if run_version == 2 else ())):
         if (root / relative).is_file():
             names.append(relative)
     for directory in (SNAPSHOT_DIR, ADMITTED_DIR):
@@ -420,16 +428,16 @@ def immutable_files(run_root: Path) -> list[str]:
     return sorted(names)
 
 
-def write_completion(run_root: Path, *, summary: Mapping[str, Any]) -> dict[str, Any]:
+def write_completion(run_root: Path, *, summary: Mapping[str, Any], run_version: int = 1) -> dict[str, Any]:
     """Hash the immutable evidence and terminal status, then write the record last.
 
     The record never hashes itself and never hashes the regenerable derived
     outputs.
     """
     root = Path(run_root)
-    digests = {name: file_digest(root / name) for name in immutable_files(root)}
+    digests = {name: file_digest(root / name) for name in immutable_files(root, run_version=run_version)}
     record = {
-        "schema_version": RUN_SCHEMA_VERSION,
+        "schema_version": run_version,
         "terminal_status": TERMINAL_COMPLETED,
         "evidence_sha256": digests,
         "evidence_set_sha256": contracts.semantic_digest(digests),
@@ -484,10 +492,10 @@ def verify_completion(run_root: Path) -> dict[str, Any]:
     record = dict(document)
     version = record.get("schema_version")
     # A boolean compares equal to an integer, so it is rejected explicitly.
-    if isinstance(version, bool) or not isinstance(version, int) or version != RUN_SCHEMA_VERSION:
+    if type(version) is not int or version not in SUPPORTED_RUN_SCHEMA_VERSIONS:
         raise _corrupt(
             f"{path}: completion schema_version {version!r} is not the supported integer "
-            f"{RUN_SCHEMA_VERSION}; this record cannot be verified."
+            f"{SUPPORTED_RUN_SCHEMA_VERSIONS}; this record cannot be verified."
         )
     if record.get("terminal_status") != TERMINAL_COMPLETED:
         raise _corrupt(
@@ -500,7 +508,9 @@ def verify_completion(run_root: Path) -> dict[str, Any]:
     ):
         raise _corrupt(f"{path}: the completion record has no usable evidence_sha256 mapping.")
     recorded = dict(digests)
-    present = set(immutable_files(root))
+    present = set(immutable_files(root, run_version=version))
+    if version == 2 and not {CONTEXT_ADMISSION_FILE, CONTEXT_FILE} <= present:
+        raise _corrupt(f"{root}: v2 context metadata is missing.")
     missing = sorted(set(recorded) - present)
     unexpected = sorted(present - set(recorded))
     if missing:

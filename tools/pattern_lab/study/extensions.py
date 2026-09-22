@@ -22,6 +22,7 @@ import platform
 import subprocess
 import sys
 import sysconfig
+from types import ModuleType
 from typing import Any, Sequence
 
 from .. import PatternLabDataError
@@ -30,10 +31,12 @@ from .. import PatternLabDataError
 # crawler over the repository or the environment.
 CORE_MODULES = (
     "tools.pattern_lab.data",
+    "tools.pattern_lab.candidate",
     "tools.pattern_lab.manifest",
     "tools.pattern_lab.pack_lock",
     "tools.pattern_lab.update_transaction",
     "tools.pattern_lab.study.contracts",
+    "tools.pattern_lab.study.context",
     "tools.pattern_lab.study.builtins",
     "tools.pattern_lab.study.spec",
     "tools.pattern_lab.study.validation",
@@ -79,6 +82,32 @@ class LoadedExtension:
 # digests they were imported from.  A second study reuses them only when the
 # files still hash to the same values.
 _LOADED: dict[str, LoadedExtension] = {}
+
+
+def _verify_local_imports(module, declaration) -> None:
+    """Local imported Python helpers must be explicitly declared and hashed.
+
+    This checks imported namespaces, not arbitrary future Python behavior.
+    Trusted code must still declare files it opens or dynamically loads later.
+    """
+    root = Path(declaration.source_root).resolve()
+    allowed = {(root / name).resolve() for name, _ in _declared_files(declaration)}
+    seen = set()
+    def visit(current):
+        if id(current) in seen:
+            return
+        seen.add(id(current))
+        for value in vars(current).values():
+            imported = value if isinstance(value, ModuleType) else sys.modules.get(getattr(value, "__module__", ""))
+            origin = getattr(imported, "__file__", None)
+            if origin is None:
+                continue
+            path = Path(origin).resolve()
+            if root in path.parents:
+                if path not in allowed:
+                    raise PatternLabDataError(f"extension {declaration.module}: undeclared local helper {path.name}; declare it in helpers.")
+                visit(imported)
+    visit(module)
 
 
 def _declared_files(declaration) -> list[tuple[str, Path]]:
@@ -163,6 +192,7 @@ def load_extensions(declarations: Sequence[Any]) -> tuple[LoadedExtension, ...]:
             if inserted and root in sys.path:
                 sys.path.remove(root)
         register = getattr(module, "register", None)
+        _verify_local_imports(module, declaration)
         if not callable(register):
             sys.modules.pop(declaration.module, None)
             raise PatternLabDataError(

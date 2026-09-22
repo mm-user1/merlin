@@ -34,6 +34,30 @@ from . import spec as study_spec
 from .spec import StudyRequest
 
 
+def validate_saved_execution(document: Mapping[str, Any]) -> None:
+    """Check saved purpose and period without a registry or external files."""
+    version = document.get("schema_version")
+    if type(version) is not int or version not in study_spec.SUPPORTED_REQUEST_VERSIONS:
+        raise PatternLabDataError("study schema_version: unsupported version.")
+    execution = document.get("execution") if version == 2 else {"kind": "development"}
+    if version == 2:
+        from .context import normalize_aliases
+        normalize_aliases(document.get("context"))
+    if execution == {"kind": "development"}:
+        from ..manifest import to_epoch_ms
+        protocol = study_spec.normalize_protocol(document["protocol"], source="saved protocol")
+        study = document["study"]
+        start, end, warmup = [to_epoch_ms(study[key], key) for key in
+                              ("start_utc", "end_utc", "warmup_start_utc")]
+        if not warmup <= start < end:
+            raise PatternLabDataError("saved study: invalid interval order.")
+        study_spec.validate_against_protocol(protocol, study_start_ms=start,
+                                            study_end_ms=end, warmup_start_ms=warmup)
+    else:
+        from ..candidate import validate_execution
+        validate_execution(document)
+
+
 def external_document(request: StudyRequest) -> dict[str, Any]:
     """Render a normalized request in the external request schema.
 
@@ -47,6 +71,8 @@ def external_document(request: StudyRequest) -> dict[str, Any]:
         instruments = {"ids": list(request.instrument_selection or ())}
     return {
         "schema_version": request.schema_version,
+        **({"context": copy.deepcopy(dict(request.context)),
+            "execution": copy.deepcopy(dict(request.execution))} if request.schema_version == 2 else {}),
         "study_name": request.study_name,
         "notes": request.notes,
         "protocol": copy.deepcopy(study_spec.protocol_document(request.protocol)),

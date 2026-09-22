@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "analysis_name": "Context filters versus matched nonsignal and inclusive parent",
+  "notes": "Associational comparison; the inclusive parent is not an isolated causal counterfactual.",
+  "model_instances": ["fixed_horizon"],
+  "pairwise": [
+    {"id": "btc_increment", "target_variant": "btc_positive", "control_variant": "parent"},
+    {"id": "panel_increment", "target_variant": "panel_majority", "control_variant": "parent"}
+  ]
+}

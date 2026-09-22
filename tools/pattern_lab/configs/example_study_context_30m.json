@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "study_name": "Two green candles with explicit BTC and panel context",
+  "notes": "Development example; explicit roster members, strict fractional thresholds, no implicit leave-one-out.",
+  "protocol": "protocol_development_v1.json",
+  "study": {"start_utc": "2025-07-01T00:00:00Z", "end_utc": "2026-07-01T00:00:00Z", "warmup_start_utc": "2025-06-01T00:00:00Z"},
+  "instruments": {"ids": ["OKX_ETH-USDT-SWAP", "OKX_SOL-USDT-SWAP"]},
+  "context": {
+    "btc": {"ids": ["OKX_BTC-USDT-SWAP"]},
+    "market": {"ids": ["OKX_ETH-USDT-SWAP", "OKX_SOL-USDT-SWAP"]}
+  },
+  "execution": {"kind": "development"},
+  "timeframes_minutes": [30],
+  "hypotheses": [
+    {"id": "parent", "hypothesis": "two_green_rising_quote_volume", "parameters": {}, "occurrence": "every_qualifying_bar"},
+    {"id": "btc_positive", "hypothesis": "two_green_volume_btc", "parameters": {"alias": "btc", "threshold": 0.0}, "occurrence": "every_qualifying_bar"},
+    {"id": "panel_majority", "hypothesis": "two_green_volume_panel", "parameters": {"alias": "market", "threshold": 0.5}, "occurrence": "every_qualifying_bar"}
+  ],
+  "models": [{"id": "fixed_horizon", "model": "fixed_horizon_path", "settings": {
+    "directions": ["long", "short"], "commission_pct_per_side": 0.05,
+    "by_timeframe": {"30": {"horizons_minutes": [60, 120, 240, 480], "primary_horizon_minutes": 240}}
+  }}],
+  "metrics": [],
+  "extensions": []
+}

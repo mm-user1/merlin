@@ -202,7 +202,9 @@ def planned_family(request: StudyRequest, entries: Sequence[Mapping[str, Any]]) 
         for entry in entries
     ]
     return {
-        "schema_version": evidence.RUN_SCHEMA_VERSION,
+        "schema_version": request.schema_version,
+        **({"context": dict(request.context), "execution": dict(request.execution)}
+           if request.schema_version == 2 else {}),
         "instruments": instruments,
         "timeframes_minutes": list(request.timeframes),
         "variants": [variant.as_json() for variant in request.variants],
@@ -234,6 +236,8 @@ class _RunState:
     # The instrument currently being read, prepared, computed or published.
     current: str | None = None
     phase: str = "execute"
+    run_version: int = 1
+    context_outputs: Mapping[str, Any] = field(default_factory=dict)
 
     def counts(self) -> dict[str, int]:
         tally = {
@@ -257,7 +261,7 @@ class _RunState:
     def document(self, *, terminal: str, started: str, finished: str,
                  failure: Mapping[str, Any] | None) -> dict[str, Any]:
         return {
-            "schema_version": evidence.RUN_SCHEMA_VERSION,
+            "schema_version": self.run_version,
             "terminal_status": terminal,
             "counts": self.counts(),
             "instruments": [
@@ -470,7 +474,8 @@ def _admit(
         del base
 
     state.phase = "execute"
-    return prepared
+    from .context import align
+    return align(prepared, request, state.context_outputs) if request.schema_version == 2 else prepared
 
 
 def _job_payload(
@@ -681,6 +686,11 @@ def run_study(
     requested_workers = normalize_workers(workers)
 
     normalized = study_validation.validated_request(request)
+    candidate = None
+    if normalized.execution["kind"] == "validation":
+        from ..candidate import validate_execution, verify_current_generation
+        candidate = validate_execution(normalized.semantic_document())
+        verify_current_generation(candidate)
 
     loaded = study_extensions.load_extensions(normalized.extensions)
     study_extensions.verify_extensions(loaded, where="study preflight")
@@ -710,8 +720,14 @@ def run_study(
                 "studied.",
                 error_code="admission_failed",
             )
+        from . import context as study_context
         entries = resolve_selection(report, normalized)
-        failures = metadata_admission_failures(entries, normalized)
+        context_entries = study_context.resolve_entries(report, normalized)
+        if candidate is not None:
+            from ..candidate import verify_admitted_contracts
+            verify_admitted_contracts(candidate, normalized, entries, context_entries)
+        union = {entry["instrument_id"]: entry for entry in entries + context_entries}
+        failures = metadata_admission_failures(list(union.values()), normalized)
         if failures:
             raise PatternLabDataError(
                 "metadata admission failed for the requested study:\n  - " + "\n  - ".join(failures),
@@ -730,20 +746,21 @@ def run_study(
         request_document = normalized.request_document()
         semantic = normalized.semantic_document()
         identities = {
-            "specification_sha256": evidence.specification_identity(semantic, family),
-            "implementation_sha256": evidence.implementation_identity(source_identity),
+            "specification_sha256": evidence.specification_identity(semantic, family, run_version=normalized.schema_version),
+            "implementation_sha256": evidence.implementation_identity(source_identity, run_version=normalized.schema_version),
             "data_input_sha256": None,
         }
 
         effective_workers = min(requested_workers, len(entries))
         run_root = evidence.create_run_directory(output_root, data_root=pack_root)
         state = _RunState(
+            run_version=normalized.schema_version,
             order=[entry["instrument_id"] for entry in entries],
             states={entry["instrument_id"]: evidence.STATE_NOT_STARTED for entry in entries},
         )
         manifest_file = pack_manifest.manifest_path(Path(pack_root))
         provenance = {
-            "schema_version": evidence.RUN_SCHEMA_VERSION,
+            "schema_version": normalized.schema_version,
             "data_root": str(Path(pack_root).resolve()),
             "output_root": str(run_root),
             "workers": requested_workers,
@@ -770,21 +787,34 @@ def run_study(
             "timings": {"started_utc": started, "finished_utc": None, "elapsed_seconds": None},
         }
 
-        evidence.write_json(run_root / evidence.REQUEST_FILE, request_document)
-        evidence.write_json(
-            run_root / evidence.PROTOCOL_FILE, study_spec.protocol_document(normalized.protocol)
-        )
-        evidence.write_json(run_root / evidence.FAMILY_FILE, family)
-        source_identity["snapshots"] = _write_snapshots(run_root, loaded)
-        evidence.write_json(run_root / evidence.SOURCE_FILE, source_identity)
-        evidence.write_json(run_root / evidence.PROVENANCE_FILE, provenance)
-        evidence.write_status(
-            run_root,
-            state.document(terminal="running", started=started, finished="", failure=None),
-        )
-
         checks = _SourceChecks(loaded=loaded, used=used, declared=declared_digests)
+        context_identity = {}
         try:
+            state.phase = "freeze"
+            evidence.write_json(run_root / evidence.REQUEST_FILE, request_document)
+            evidence.write_json(
+                run_root / evidence.PROTOCOL_FILE, study_spec.protocol_document(normalized.protocol)
+            )
+            evidence.write_json(run_root / evidence.FAMILY_FILE, family)
+            source_identity["snapshots"] = _write_snapshots(run_root, loaded)
+            evidence.write_json(run_root / evidence.SOURCE_FILE, source_identity)
+            evidence.write_json(run_root / evidence.PROVENANCE_FILE, provenance)
+            evidence.write_status(
+                run_root,
+                state.document(terminal="running", started=started, finished="", failure=None),
+            )
+
+            if normalized.schema_version == 2:
+                admitted_context = study_context.admission(
+                    normalized, context_entries, state.order
+                )
+                evidence.write_json(run_root / evidence.CONTEXT_ADMISSION_FILE, admitted_context)
+                state.phase = "context"
+                checks.verify("context preparation start")
+                state.context_outputs, context_facts = study_context.prepare(session, context_entries, normalized)
+                checks.verify("context preparation result")
+                evidence.write_json(run_root / evidence.CONTEXT_FILE, context_facts)
+                context_identity = {"admission": admitted_context, "outputs": context_facts}
             if requested_workers == 1:
                 _execute_direct(run_root, session, entries, normalized, family, state, checks)
             else:
@@ -840,6 +870,8 @@ def run_study(
         semantic_specification=semantic,
         universe=family["instruments"],
         protocol=study_spec.protocol_document(normalized.protocol),
+        run_version=normalized.schema_version,
+        context=context_identity,
     )
     provenance["identities"] = identities
     evidence.write_json(run_root / evidence.PROVENANCE_FILE, provenance)
@@ -908,7 +940,7 @@ def _publish_run(
     html = study_report.render_report(summary)
     evidence.replace_derived(run_root, summary=summary, html=html)
     return evidence.write_completion(
-        run_root,
+        run_root, run_version=request.schema_version,
         summary={
             "run_root": str(run_root),
             "identities": dict(identities),

@@ -92,7 +92,7 @@ importing them, using their actual qualified name (`server._helpers`). Keep the
 package marker empty. Do not import conftest or add test-to-test imports.
 
 `tests/pattern_lab` covers the Pattern Lab data foundation, collector, event
-studies and M3a matched comparisons with runtime-generated synthetic packs only;
+studies, M3a matched comparisons and M3b context/frozen validation with runtime-generated synthetic packs only;
 it reads no market data and commits no binary fixtures. The `test_pattern_lab_study_*.py` modules build
 hand-calculated bars, write their trusted extension modules into the launcher's
 external temporary root, and drive the real coordinator, so admission ordering,
@@ -104,6 +104,21 @@ integrity, every accepted public request form, used-source attribution, resolved
 dependency warmup, failure attribution and bounded evidence reuse. It counts
 decoded evidence tables to keep the summary read count independent of the group
 count, rather than asserting a wall-clock threshold.
+`test_pattern_lab_context.py` covers dense-grid arithmetic, missingness, causal
+prefixes, explicit aliases, scope/cycle rejection, the custom context extension,
+read-only transport, shared reads, identity and worker parity, and context-phase
+failure/interrupt status. `test_pattern_lab_candidate.py` covers frozen source
+generation, v1 lifting, splits, code policy, CLI status, receipts, short-period
+descriptions and relocated offline reporting. Its point-estimate oracle computes
+the target-count weighted means independently from checked saved accumulations.
+The compatibility suite also reseals malformed saved method metadata and checks
+the separate historical-v1 numeric domains against current launch policy.
+Run these focused modules while changing the contracts, then the whole
+`tools/run_tests.py -- tests/pattern_lab` suite once after final changes. Windows
+process inspection requires usable `tasklist`; a sandbox access denial is a
+verification failure requiring an authorized rerun, not evidence of cleanup.
+WinError 1314 remains a named unverified symlink boundary where privileges are
+unavailable; do not silently skip it or change Windows policy.
 `test_pattern_lab_study_workers.py` starts real `spawn` children through the
 production coordinator and owns worker parity, effective capacity, out-of-order
 completion, the retention bound, child isolation, the thread policy, declared

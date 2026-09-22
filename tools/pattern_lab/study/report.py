@@ -253,9 +253,20 @@ def render_report(summary: Mapping[str, Any]) -> str:
 
     counts = summary["counts"]
     disclosures = "".join(f"<li>{escape(item)}</li>" for item in summary["disclosures"])
+    context_html = ""
+    if summary.get("context"):
+        context_html = '<div class="card"><h2>Explicit market context</h2>' + _definition([
+            ("Aliases and canonical members", str(summary["context"])),
+            ("Roles and self-inclusion", str(summary["context_admission"])),
+            ("Coverage and memory", str(summary["context_diagnostics"])),
+            ("Thresholds (fractions)", str([(v["hypothesis_id"], v["parameters"]) for v in summary["variants"]])),
+            ("Availability", "Same-timeframe bar-close inputs; every declared panel member must be valid. Unknown context is excluded from controls. Strict thresholds: equality is false. Doji is not green."),
+            ("Interpretation", "Filtered versus inclusive parent is incremental association, not a causal contribution or buy-and-hold outperformance."),
+        ]) + '</div>'
     body = f"""<h1>Pattern Lab event study: {escape(str(summary['study_name']))}</h1>
 <p class="small">Generated {escape(generated)} · run <code>{escape(str(summary['run_root']))}</code></p>
 <div class="banner">{escape(BANNER)}</div>
+{context_html}
 <div class="card">
 <h2>Study question and frozen settings</h2>
 {_definition([

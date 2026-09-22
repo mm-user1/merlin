@@ -236,9 +236,11 @@ Holm error 0.9-2.4%, assessed with exact one-sided 95% upper bounds against 8%
 and a 95% availability floor. These correlated checks do not certify nominal
 5% control or arbitrary dependence across months. Other mathematically supported
 month counts remain available with an explicit calibration-scope disclosure.
-**M3a integration is ready for tech-lead review; acceptance remains pending.**
-M3b external-series/panel context with frozen validation and M4 bracket execution
-are not implemented. A nominal rejection is an approximate development-screen
+**M3a is accepted at `9fe7816` for the documented approximate development-screen scope.**
+M3b adds explicit external-series/panel context and frozen-candidate validation,
+pending tech-lead review. It reuses monthly v2 without lowering support gates;
+short validation can remain descriptive. M4 bracket execution is not implemented.
+A nominal rejection is an approximate development-screen
 result, not a validated edge or production acceptance.
 
 The complete schema, roster, adapter, exclusion, recovery, study, evidence,

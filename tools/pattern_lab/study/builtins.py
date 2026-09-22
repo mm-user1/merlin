@@ -433,6 +433,8 @@ def expand_fixed_horizon_case(primitives: pd.DataFrame, case: ModelCase) -> pd.D
 
 def register_builtins() -> None:
     """Register the built-in hypothesis and model exactly once."""
+    from .context import register_builtins as register_context
+    register_context()
     if TWO_GREEN_HYPOTHESIS_ID not in contracts.registered("hypothesis"):
         contracts.register_hypothesis(TWO_GREEN_DESCRIPTOR, builtin=True)
     if TWO_GREEN_PLAIN_HYPOTHESIS_ID not in contracts.registered("hypothesis"):

@@ -8,7 +8,8 @@ pool without a second numerical implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -36,6 +37,7 @@ class TimeframeInput:
     base_gap_count: int
     omitted_group_count: int
     segment_count: int
+    context_features: Mapping[str, FeatureValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -69,12 +71,14 @@ def build_series(instrument_id: str, prepared: TimeframeInput) -> BarSeries:
     """Wrap one prepared timeframe as the aligned series the contracts use."""
     step_ms = prepared.timeframe_minutes * 60_000
     stamps = np.ascontiguousarray(prepared.timestamps_ms, dtype=np.int64)
+    slots = stamps // step_ms
+    slots.flags.writeable = False
     return BarSeries(
         instrument_id=instrument_id,
         timeframe_minutes=prepared.timeframe_minutes,
         step_ms=step_ms,
         timestamps_ms=stamps,
-        slots=stamps // step_ms,
+        slots=slots,
         values=np.ascontiguousarray(prepared.values, dtype=np.float64),
         research_start_index=int(prepared.research_start_index),
     )
@@ -103,7 +107,10 @@ def _feature_value(
     cache: dict[str, FeatureValue],
     pending: tuple[str, ...] = (),
 ) -> FeatureValue:
-    key = f"{series.instrument_id}|{series.timeframe_minutes}|{request.key}"
+    descriptor = contracts.feature(request.feature_id)
+    parameters = descriptor.validate_parameters(dict(request.parameters))
+    normalized = FeatureRequest(request.feature_id, parameters)
+    key = f"{series.instrument_id}|{series.timeframe_minutes}|{normalized.key}"
     cached = cache.get(key)
     if cached is not None:
         return cached
@@ -111,19 +118,23 @@ def _feature_value(
         raise PatternLabDataError(
             f"feature {request.feature_id!r}: circular dependency through {list(pending)}."
         )
-    descriptor = contracts.feature(request.feature_id)
+    if descriptor.scope == "context":
+        raise PatternLabDataError(
+            f"feature {request.feature_id!r}: missing prepared context entry; internal consistency error."
+        )
     contracts.require_scope(descriptor.scope, f"feature {request.feature_id}.scope")
-    parameters = descriptor.validate_parameters(dict(request.parameters))
     dependencies: dict[str, FeatureValue] = {}
     for dependency in descriptor.dependencies(parameters):
         dependencies[dependency.key] = _feature_value(
             series, dependency, cache, pending + (request.feature_id,)
         )
     result = contracts.check_feature_result(
-        descriptor.evaluate(series, parameters, dependencies),
+        descriptor.evaluate(series, MappingProxyType(parameters), MappingProxyType(dependencies)),
         series,
         f"feature {request.feature_id}",
     )
+    result.values.flags.writeable = False
+    result.valid.flags.writeable = False
     cache[key] = result
     return result
 
@@ -367,6 +378,9 @@ def protect_inputs(payload: InstrumentJobInput) -> None:
     shared bars it was given.
     """
     for prepared in payload.timeframes:
+        for feature in prepared.context_features.values():
+            feature.values.flags.writeable = False
+            feature.valid.flags.writeable = False
         for array in (prepared.timestamps_ms, prepared.values):
             if isinstance(array, np.ndarray) and array.flags.writeable:
                 array.flags.writeable = False
@@ -391,7 +405,10 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
         anchors = eligible_anchors(
             series, study_start_ms=payload.study_start_ms, study_end_ms=payload.study_end_ms
         )
-        feature_cache: dict[str, FeatureValue] = {}
+        feature_cache: dict[str, FeatureValue] = {
+            f"{series.instrument_id}|{series.timeframe_minutes}|{key}": value
+            for key, value in prepared.context_features.items()
+        }
 
         by_condition: dict[str, list[Mapping[str, Any]]] = {}
         for variant in payload.variants:
@@ -405,7 +422,7 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
             for dependency in descriptor.dependencies(parameters):
                 dependencies[dependency.key] = _feature_value(series, dependency, feature_cache)
             condition = contracts.check_condition_result(
-                descriptor.evaluate(series, parameters, dependencies),
+                descriptor.evaluate(series, MappingProxyType(parameters), MappingProxyType(dependencies)),
                 series,
                 f"hypothesis {variants[0]['hypothesis_id']}",
             )

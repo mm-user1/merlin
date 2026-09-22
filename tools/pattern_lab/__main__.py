@@ -47,7 +47,7 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # structured JSON status; the older data commands keep their existing behavior
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report")
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate")
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
             "recover an interrupted operation, import the historical NPZ pack, inspect a pack, read a "
             "fixed UTC interval, run a descriptive event study, analyze a completed study with "
             "matched comparisons and calibrated inference (M3a), and regenerate either report. "
-            "M3b context/frozen validation and M4 bracket execution are not implemented here."
+            "M3b adds explicit context, freeze-candidate and validate-candidate. M4 bracket execution is not implemented."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
@@ -257,6 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reporter.add_argument("--run-root", type=Path, required=True, metavar="RUN")
+    freezer = commands.add_parser("freeze-candidate", help="Freeze a completed development candidate")
+    for flag in ("study-root", "analysis-root", "output"):
+        freezer.add_argument("--" + flag, type=Path, required=True)
+    for flag in ("start", "end", "warmup-start"):
+        freezer.add_argument("--" + flag, required=True)
+    validator = commands.add_parser("validate-candidate", help="Evaluate a frozen candidate on its declared interval")
+    for flag in ("candidate", "data-root", "output-root"):
+        validator.add_argument("--" + flag, type=Path, required=True)
+    validator.add_argument("--workers", type=int, default=1)
     return parser
 
 
@@ -287,6 +296,17 @@ def _collector_status(result) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "freeze-candidate":
+        from .candidate import freeze_candidate
+        result = freeze_candidate(study_root=args.study_root, analysis_root=args.analysis_root,
+                                  start=args.start, end=args.end, warmup_start=args.warmup_start, output=args.output)
+        _emit({"status":"completed", "candidate_id":result["candidate_id"], "output":str(args.output)})
+        return EXIT_OK
+    if args.command == "validate-candidate":
+        from .candidate import run_validation
+        _emit(run_validation(candidate=args.candidate, data_root=args.data_root,
+                             output_root=args.output_root, workers=args.workers))
+        return EXIT_OK
     # Every data command needs the pinned reader; report the dependency once, up front.
     pack_data.require_pyarrow()
     progress = pack_collect.stderr_progress

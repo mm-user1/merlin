@@ -347,6 +347,21 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     states, counts = _reconcile(root, status)
     provenance = dict(evidence.read_json(root / evidence.PROVENANCE_FILE))
     family = dict(evidence.read_json(root / evidence.FAMILY_FILE))
+    request = dict(evidence.read_json(root / evidence.REQUEST_FILE))
+    if type(request.get("schema_version")) is not int or request["schema_version"] not in evidence.SUPPORTED_RUN_SCHEMA_VERSIONS:
+        raise PatternLabDataError("request: unsupported saved study version.")
+    if request.get("schema_version") == 2:
+        from .validation import validate_saved_execution
+        validate_saved_execution(request)
+        if request["protocol"] != evidence.read_json(root / evidence.PROTOCOL_FILE):
+            raise PatternLabDataError("request protocol contradicts separately frozen protocol.")
+        for name, document in (("status", status), ("family", family), ("provenance", provenance)):
+            if document.get("schema_version") != 2:
+                raise PatternLabDataError(f"{name}: run version contradicts request version 2.")
+        if completion is not None and completion.get("schema_version") != 2:
+            raise PatternLabDataError("completion: run version contradicts request version 2.")
+        if any(family.get(key) != request.get(key) for key in ("context", "execution")):
+            raise PatternLabDataError("family: context/execution contradicts saved request.")
     if completion is not None:
         _verify_completion_agreement(
             root, completion, status=status, counts=counts, provenance=provenance, family=family
@@ -373,7 +388,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         )
     return StudyResults(
         run_root=root,
-        request=dict(evidence.read_json(root / evidence.REQUEST_FILE)),
+        request=request,
         protocol=dict(evidence.read_json(root / evidence.PROTOCOL_FILE)),
         family=family,
         source=dict(evidence.read_json(root / evidence.SOURCE_FILE)),
@@ -636,7 +651,12 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
         )
 
     return {
-        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "schema_version": results.request["schema_version"],
+        **({"context": dict(results.request["context"]),
+            "context_admission": evidence.read_json(results.run_root / evidence.CONTEXT_ADMISSION_FILE),
+            "context_diagnostics": evidence.read_json(results.run_root / evidence.CONTEXT_FILE),
+            "execution": dict(results.request["execution"])}
+           if results.request["schema_version"] == 2 and (results.run_root / evidence.CONTEXT_FILE).is_file() else {}),
         "evidence_view_version": EVIDENCE_VIEW_VERSION,
         "run_root": str(results.run_root),
         "study_name": results.request["study_name"],

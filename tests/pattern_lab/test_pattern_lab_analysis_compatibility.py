@@ -122,6 +122,32 @@ def _reseal(root):
 
 
 @pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("key,value", [
+    ("matching", None), ("alpha", True), ("alpha", 1.0),
+    ("confidence_level", 0), ("inference_scope", []), ("support", None),
+])
+def test_saved_method_minimal_shape(sealed_versions, tmp_path, version, key, value):
+    root = _copy(sealed_versions, version, tmp_path)
+    for name in (artifacts.REQUEST_FILE, artifacts.FAMILY_FILE, artifacts.SUMMARY_FILE):
+        document = _read(root, name)
+        document["method"][key] = value
+        _write(root, name, document)
+    _reseal(root)
+    before = (root/artifacts.REPORT_FILE).read_bytes()
+    with pytest.raises(PatternLabDataError, match="method"):
+        analysis.regenerate_report(root)
+    assert (root/artifacts.REPORT_FILE).read_bytes() == before
+
+
+def test_launch_widening_requires_format_decision(monkeypatch):
+    document = request.load_analysis_request(analysis_request_document()).request_document()
+    monkeypatch.setattr(request, "MAX_RESAMPLES", request.SAVED_V1_MAX_RESAMPLES+1)
+    assert request.validate_saved_request(document, source="historical") == 1
+    with pytest.raises(PatternLabDataError, match="format decision"):
+        request.load_analysis_request(analysis_request_document())
+
+
+@pytest.mark.parametrize("version", [1, 2])
 def test_consistent_saved_disclosure_need_not_equal_current_metadata(
     sealed_versions, tmp_path, version, monkeypatch
 ):

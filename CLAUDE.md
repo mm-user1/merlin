@@ -70,9 +70,10 @@ baselines, or mutate external systems unless explicitly authorized.
   explicit v1 preserves the seven-day bootstrap and its failed calibration
   (11/15 checks, about 7.5-8.3% error on persistent-signal fixtures). The monthly
   method passed the declared synthetic screen at G=12, against an 8% upper-bound
-  envelope, not certified nominal 5% control. Integration is ready for tech-lead
-  review; **M3a acceptance remains pending**. M3b context/frozen validation and
-  M4 bracket execution are not implemented. These are approximate development
+  envelope, not certified nominal 5% control. **M3a is accepted at `9fe7816`
+  for the documented approximate-screen scope.** M3b explicit context and frozen
+  candidate validation are implemented pending tech-lead review. M4 bracket
+  execution is not implemented. These are approximate development
   screens; arbitrary dependence across months is not covered.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.

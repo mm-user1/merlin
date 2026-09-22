@@ -55,7 +55,7 @@ class AdmittedSource:
         completion = dict(self.results.completion or {})
         identities = dict(self.results.provenance["identities"])
         return {
-            "schema_version": 1,
+            "schema_version": self.results.request["schema_version"],
             "run_root": str(self.run_root),
             "study_name": self.results.request["study_name"],
             "study": dict(self.results.request["study"]),
@@ -71,6 +71,9 @@ class AdmittedSource:
                 "evidence_view_version": int(self.results.source["evidence_view_version"]),
             },
             "semantic_inputs": self.semantic_inputs(),
+            **({"context_admission": evidence.read_json(self.run_root/evidence.CONTEXT_ADMISSION_FILE),
+                "context_diagnostics": evidence.read_json(self.run_root/evidence.CONTEXT_FILE)}
+               if self.results.request["schema_version"] == 2 else {}),
             "counts": dict(self.results.counts),
             "instruments": list(self.instruments),
             "timeframes_minutes": list(self.timeframes),
@@ -84,6 +87,9 @@ class AdmittedSource:
         """The source facts that enter this analysis's own semantic identity."""
         identities = dict(self.results.provenance["identities"])
         return {
+            **({"context": self.results.request["context"],
+                "execution": self.results.request["execution"]}
+               if self.results.request["schema_version"] == 2 else {}),
             "specification_sha256": identities.get("specification_sha256"),
             "data_input_sha256": identities.get("data_input_sha256"),
             "evidence_view_version": int(self.results.source["evidence_view_version"]),
@@ -185,9 +191,8 @@ def admit_source(
     start_ms = to_epoch_ms(study["start_utc"], f"{where}.study.start_utc")
     end_ms = to_epoch_ms(study["end_utc"], f"{where}.study.end_utc")
     warmup_ms = to_epoch_ms(study["warmup_start_utc"], f"{where}.study.warmup_start_utc")
-    study_spec.validate_against_protocol(
-        protocol, study_start_ms=start_ms, study_end_ms=end_ms, warmup_start_ms=warmup_ms
-    )
+    from ..study.validation import validate_saved_execution
+    validate_saved_execution({**results.request, "protocol": study_spec.protocol_document(results.protocol)})
 
     instruments = tuple(results.completed_instruments)
     planned = [item["instrument_id"] for item in family["instruments"]]

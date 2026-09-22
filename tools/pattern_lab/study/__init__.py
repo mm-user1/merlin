@@ -43,7 +43,7 @@ from .contracts import (
     registered,
     registrations,
 )
-from .evidence import RUN_SCHEMA_VERSION
+from .evidence import RUN_SCHEMA_VERSION, CURRENT_RUN_SCHEMA_VERSION, SUPPORTED_RUN_SCHEMA_VERSIONS
 from .extensions import ExtensionContext
 from .job import InstrumentJobInput, InstrumentJobResult, TimeframeInput, run_instrument_job
 from .report import render_report
@@ -53,6 +53,8 @@ from .spec import (
     OCCURRENCE_POLICIES,
     PROTOCOL_SCHEMA_VERSION,
     REQUEST_SCHEMA_VERSION,
+    CURRENT_REQUEST_SCHEMA_VERSION,
+    SUPPORTED_REQUEST_VERSIONS,
     StudyRequest,
     load_request,
     normalize_protocol,
@@ -84,6 +86,10 @@ __all__ = [
     "PROTOCOL_SCHEMA_VERSION",
     "REQUEST_SCHEMA_VERSION",
     "RUN_SCHEMA_VERSION",
+    "CURRENT_RUN_SCHEMA_VERSION",
+    "SUPPORTED_RUN_SCHEMA_VERSIONS",
+    "CURRENT_REQUEST_SCHEMA_VERSION",
+    "SUPPORTED_REQUEST_VERSIONS",
     "StudyRequest",
     "StudyResults",
     "TWO_GREEN_HYPOTHESIS_ID",

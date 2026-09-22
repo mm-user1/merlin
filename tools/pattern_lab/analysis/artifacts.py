@@ -81,7 +81,10 @@ COMPLETION_IDENTITY_KEYS = (
 # The modules whose source actually decides an analysis result, including the
 # shared observation expansion and the statistic code it reuses.
 ATTRIBUTED_MODULES = (
+    "tools.pattern_lab.candidate",
+    "tools.pattern_lab.study.validation",
     "tools.pattern_lab.study.contracts",
+    "tools.pattern_lab.study.context",
     "tools.pattern_lab.study.builtins",
     "tools.pattern_lab.study.observations",
     "tools.pattern_lab.study.evidence",
@@ -457,6 +460,9 @@ class AnalysisResults:
                     "method": self.summary["method"]["method"],
                     "informative_months": monthly.get("informative_months"),
                     "degrees_of_freedom": monthly.get("degrees_of_freedom"),
+                    **({"validation": self.summary["validation"],
+                        "candidate_id": self.summary["validation"]["candidate_id"]}
+                       if "validation" in self.summary else {}),
                     "standard_error_lift": monthly.get("standard_error", {}).get("lift"),
                     "month_count_in_calibration": monthly.get("month_count_in_calibration"),
                     "effect_sign": member["effect_sign"],
@@ -573,6 +579,31 @@ def verify_agreement(
     if request_version != version:
         raise _corrupt(f"{path}: request/artifact version mapping is inconsistent")
     expected_method = request_document["method"]
+    if type(source.get("schema_version")) is not int or source["schema_version"] not in (1, 2):
+        raise _corrupt("source binding: unsupported version")
+    if source.get("schema_version") == 2:
+        execution = source["semantic_inputs"].get("execution")
+        if not isinstance(execution, dict):
+            raise _corrupt("source binding v2 requires execution metadata")
+        if execution.get("kind") == "validation":
+            from ..candidate import load_candidate, validation_metadata
+            candidate = load_candidate(execution.get("candidate"))
+            semantic = candidate["recipe"]["study_semantic"]
+            if (source["study"] != candidate["split"]["evaluation"] or source["protocol"] != semantic["protocol"]
+                    or source["semantic_inputs"]["context"] != semantic["context"]
+                    or source["instruments"] != semantic["instruments"]["ids"]
+                    or source["timeframes_minutes"] != semantic["timeframes_minutes"]
+                    or family != candidate["recipe"]["analysis_family"]
+                    or summary.get("validation") != validation_metadata(candidate)):
+                raise _corrupt("source binding: inconsistent candidate, purpose, family or split")
+        elif execution != {"kind":"development"}:
+            raise _corrupt("source binding: invalid execution purpose")
+        else:
+            from ..study.validation import validate_saved_execution
+            validate_saved_execution({"schema_version":2, "execution":execution,
+                "context":source["semantic_inputs"]["context"], "study":source["study"], "protocol":source["protocol"]})
+        if source["semantic_inputs"]["study"] != source["study"] or source["semantic_inputs"]["protocol"] != source["protocol"]:
+            raise _corrupt("source binding: semantic projection contradicts protocol/period")
     for name, document in (("family", family), ("summary", summary)):
         if contracts.semantic_digest(document.get("method")) != contracts.semantic_digest(expected_method):
             raise _corrupt(f"{path}: {name} method contradicts the saved request method")
@@ -665,7 +696,13 @@ def summary_document(
     artifact_version: int,
 ) -> dict[str, Any]:
     """The immutable result document the report renders and agents read."""
+    execution = source_binding["semantic_inputs"].get("execution", {"kind":"development"})
+    validation_info = None
+    if execution["kind"] == "validation":
+        from ..candidate import validation_metadata
+        validation_info = validation_metadata(execution["candidate"])
     return {
+        **({"validation": validation_info} if validation_info is not None else {}),
         "schema_version": artifact_version,
         "artifact": ARTIFACT_KIND,
         "analysis_name": request.analysis_name,
@@ -691,6 +728,7 @@ def summary_document(
         "instruments": estimates["instruments"],
         "comparisons": list(family["comparisons"]),
         "source": dict(source_binding),
+        **({"source_variants": list(family["source_variants"])} if source_binding["schema_version"] == 2 else {}),
         "diagnostics": dict(diagnostics),
         "members": list(estimates["members"]),
         "units": (

@@ -8,7 +8,7 @@ provenance only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -31,6 +31,8 @@ from .contracts import ModelCase
 study_builtins.register_builtins()
 
 REQUEST_SCHEMA_VERSION = 1
+CURRENT_REQUEST_SCHEMA_VERSION = 2
+SUPPORTED_REQUEST_VERSIONS = (1, 2)
 PROTOCOL_SCHEMA_VERSION = 1
 
 OCCURRENCE_POLICIES = ("every_qualifying_bar", "state_entry")
@@ -288,11 +290,15 @@ class StudyRequest:
     models: tuple[ModelInstance, ...]
     metrics: tuple[MetricDeclaration, ...]
     extensions: tuple[ExtensionDeclaration, ...]
+    context: Mapping[str, Any] = field(default_factory=dict)
+    execution: Mapping[str, Any] = field(default_factory=lambda: {"kind": "development"})
 
     def semantic_document(self) -> dict[str, Any]:
         """The canonical semantic payload; free-form notes stay outside it."""
         return {
             "schema_version": self.schema_version,
+            **({"context": dict(self.context), "execution": dict(self.execution)}
+               if self.schema_version == 2 else {}),
             "study": {
                 "start_utc": format_epoch_ms(self.study_start_ms),
                 "end_utc": format_epoch_ms(self.study_end_ms),
@@ -586,13 +592,21 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
     extension paths resolve against it, never against the process's cwd.
     """
     values = contracts.require_mapping(document, source)
-    contracts.closed_keys(values, REQUEST_KEYS, source)
     version = require_int(values.get("schema_version"), f"{source}.schema_version")
-    if version != REQUEST_SCHEMA_VERSION:
+    if version not in SUPPORTED_REQUEST_VERSIONS:
         raise PatternLabDataError(
             f"{source}.schema_version: unsupported request version {version}; this build reads "
-            f"{REQUEST_SCHEMA_VERSION}."
+            f"{SUPPORTED_REQUEST_VERSIONS}."
         )
+    contracts.closed_keys(values, (*REQUEST_KEYS, *(("context", "execution") if version == 2 else ())), source)
+    from . import context as study_context
+    context = study_context.normalize_aliases(values.get("context")) if version == 2 else {}
+    execution = contracts.require_mapping(values.get("execution"), "execution") if version == 2 else {"kind": "development"}
+    if execution != {"kind": "development"}:
+        # Candidate-bound validation is checked by the shared split policy below.
+        contracts.closed_keys(execution, ("kind", "candidate"), "execution")
+        if execution.get("kind") != "validation" or not isinstance(execution.get("candidate"), dict):
+            raise PatternLabDataError("execution: validation requires a verified embedded candidate snapshot.")
     study_name = require_text(values.get("study_name"), f"{source}.study_name")
     notes = values.get("notes")
     if notes is not None and not isinstance(notes, str):
@@ -631,9 +645,10 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
         require_aligned(start_ms, step_ms, f"{source}.study.start_utc")
         require_aligned(end_ms, step_ms, f"{source}.study.end_utc")
 
-    validate_against_protocol(
-        protocol, study_start_ms=start_ms, study_end_ms=end_ms, warmup_start_ms=warmup_ms
-    )
+    if execution["kind"] == "development":
+        validate_against_protocol(
+            protocol, study_start_ms=start_ms, study_end_ms=end_ms, warmup_start_ms=warmup_ms
+        )
 
     extensions = _normalize_extensions(values.get("extensions"), base=base)
     # Trusted modules are hashed, imported and registered before any descriptor
@@ -646,6 +661,8 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
 
     request = StudyRequest(
         schema_version=version,
+        context=context,
+        execution=execution,
         study_name=study_name,
         notes=notes,
         protocol=protocol,
@@ -661,6 +678,10 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
         metrics=metrics,
         extensions=extensions,
     )
+    study_context.dependencies(request)
+    if execution["kind"] == "validation":
+        from ..candidate import validate_execution
+        validate_execution(request.semantic_document())
     check_warmup_sufficiency(request)
     return request
 

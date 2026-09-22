@@ -413,7 +413,28 @@ def render_report(summary: Mapping[str, Any]) -> str:
         "rejection at this family size."
     ))
 
+    validation_html = ""
+    if "validation" in summary:
+        info = summary["validation"]
+        validation_html = '<div class="banner"><h2>Frozen candidate validation</h2>' + _definition([
+            ("Candidate", info["candidate_id"]), ("Mode", info["mode"]),
+            ("Discovery interval and warmup", str(info["discovery"])),
+            ("Evaluation interval and warmup", str(info["evaluation"])),
+            ("Fixed complete family", str(info["fixed_family_size"])),
+            ("Prior use and limits", " ".join(info["prior_use"])),
+        ]) + '</div>'
+    context_html = ""
+    if source.get("context_admission", {}).get("aliases"):
+        context_html = '<div class="card"><h2>Declared context</h2>' + _definition([
+            ("Members, roles, self-inclusion and missingness policy", str(source["context_admission"])),
+            ("Thresholds (fractions)", str([(v["hypothesis_id"], v["parameters"])
+                                           for v in summary.get("source_variants", [])])),
+            ("Usable context coverage", str(source["context_diagnostics"])),
+            ("Comparison", "Unknown context is excluded. Child versus inclusive parent measures association, not the causal contribution of a filter."),
+        ]) + '</div>'
     body = f"""<h1>Pattern Lab matched comparisons: {escape(str(summary['analysis_name']))}</h1>
+{validation_html}
+{context_html}
 <p class="small">Generated {escape(generated)} · analysis of study
 <code>{escape(str(source['run_root']))}</code></p>
 <div class="banner">{escape(banner)}</div>

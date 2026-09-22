@@ -109,12 +109,12 @@ def require_unique(values: Sequence[str], field_name: str) -> list[str]:
     return seen
 
 
-def require_scope(value: Any, field_name: str) -> str:
+def require_scope(value: Any, field_name: str, *, context_feature: bool = False) -> str:
     text = require_text(value, field_name)
-    if text not in SUPPORTED_SCOPES:
+    if text not in (*SUPPORTED_SCOPES, *(("context",) if context_feature else ())):
         raise PatternLabDataError(
             f"{field_name}: scope {text!r} is not supported; this milestone executes only "
-            f"{list(SUPPORTED_SCOPES)} jobs. Panel and external-series scope is M3 work."
+            f"{list(SUPPORTED_SCOPES)} jobs; only feature descriptors may declare context scope."
         )
     return text
 
@@ -278,6 +278,8 @@ class FeatureDescriptor:
     scope: str = INSTRUMENT_SCOPE
     description: str = ""
     initialization: str = ""
+    context_aliases: Callable[[Mapping[str, Any]], tuple[str, ...]] = lambda parameters: ()
+    context_source_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -415,7 +417,11 @@ def _register(kind: str, identifier: str, descriptor: Any, *, builtin: bool,
 
 def register_feature(descriptor: FeatureDescriptor, *, builtin: bool = False,
                      source_digest: str | None = None, source_path: str | None = None) -> Registration:
-    require_scope(descriptor.scope, f"feature {descriptor.feature_id}.scope")
+    require_scope(descriptor.scope, f"feature {descriptor.feature_id}.scope", context_feature=True)
+    if not callable(descriptor.context_aliases):
+        raise PatternLabDataError(f"feature {descriptor.feature_id}: context_aliases must be callable.")
+    if descriptor.context_source_count is not None:
+        require_int(descriptor.context_source_count, f"feature {descriptor.feature_id}.context_source_count", minimum=1)
     return _register("feature", descriptor.feature_id, descriptor, builtin=builtin,
                      source_digest=source_digest, source_path=source_path)
 
@@ -504,7 +510,9 @@ def resolve_feature_closure(
                 "any market data is read."
             )
         descriptor = feature(request.feature_id)
-        require_scope(descriptor.scope, f"{where} feature {request.feature_id}.scope")
+        require_scope(descriptor.scope, f"{where} feature {request.feature_id}.scope", context_feature=True)
+        if chain and feature(chain[-1]).scope == "context" and descriptor.scope != "context":
+            raise PatternLabDataError(f"{where}: context feature cannot depend on instrument feature {request.feature_id!r}.")
         parameters = descriptor.validate_parameters(
             require_mapping(request.parameters, f"{where} feature {request.feature_id}.parameters")
         )
