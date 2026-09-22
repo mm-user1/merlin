@@ -4,14 +4,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from .. import PatternLabDataError
 from .request import (
-    V2_METHOD_ID as CANDIDATE_METHOD_ID, ALPHA,
+    V2_METHOD_ID as CANDIDATE_METHOD_ID, ALPHA, CONFIDENCE_LEVEL,
+    MIN_INFORMATIVE_MONTHS, DEGENERACY_MULTIPLIER,
     REASON_NO_SUPPORT, REASON_SPAN, REASON_ACTIVE_DAYS, REASON_BLOCKS,
     REASON_COVERAGE, REASON_HORIZON, REASON_DEGENERATE,
 )
 
-# Mathematical validity requirements of the candidate, beyond the unchanged
-# production support gates.  They are not a new support threshold.
-MIN_INFORMATIVE_MONTHS = 2
 REASON_MONTHS = "insufficient_informative_months"
 REASON_DELETION = "exhausted_deletion_denominator"
 
@@ -26,10 +24,6 @@ CANDIDATE_REASON_ORDER = (
     REASON_DELETION,
     REASON_DEGENERATE,
 )
-
-DEGENERACY_MULTIPLIER = 128
-CONFIDENCE_LEVEL = 0.95
-
 
 # --------------------------------------------------------------------------
 # the pure numerical candidate

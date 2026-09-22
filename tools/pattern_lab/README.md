@@ -60,8 +60,11 @@ data is another.
 
 ## Dependency setup
 
-The package requires the pinned root dependency `pyarrow==22.0.0`. Install it into
-the configured project interpreter; Pattern Lab never installs anything itself:
+Use the configured Merlin environment with the project dependencies from root
+`requirements.txt`. Pattern Lab requires `pyarrow==22.0.0`; ordinary v2 monthly
+analysis also requires the already pinned `scipy==1.16.3`. Pattern Lab never
+installs dependencies itself. The commands below are only the extra PyArrow step
+for an otherwise installed Merlin environment, not a standalone environment setup:
 
 ```bash
 python -m pip install --only-binary=:all: --no-deps --no-cache-dir pyarrow==22.0.0
@@ -1944,6 +1947,8 @@ Strict JSON with mandatory integer `schema_version`: **2** for new monthly
 analyses, **1** for explicit legacy bootstrap compatibility. Accepted as a file path or as a mapping
 through one normalization path. There is no trusted normalized-object bypass: an
 already normalized request is rendered back into this schema and revalidated.
+These are new-execution checks. Reading a sealed artifact instead validates its
+recorded version's saved request format, as described below.
 
 ```json
 {
@@ -2370,8 +2375,21 @@ status, summary and provenance must agree on exactly integer 1 or 2. Artifact
 version participates explicitly in semantic and implementation identities; v1
 retains its original digest payload. Readers use saved attributed hashes, not
 the current checkout, so genuine historical and relocated artifacts remain
-readable. Request/family/summary method settings must agree with the version
-even when altered files have been rehashed. Contradictions fail before rendering.
+readable. Historical request validation is separate from today's launch policy:
+it checks required fields, closed version-specific keys, types, IDs and pairs,
+and v1's original integer domains (`1999..99999` resamples, `0..2**32-1` seed).
+It does not apply subsequently tightened launch limits or rebuild saved method
+metadata from current defaults. New execution still uses strict normalization.
+
+The saved request/family/summary method objects must agree with each other, and
+their ID must match `1 -> calendar_score_cbb_v1` or
+`2 -> monthly_cluster_jackknife_v1`. A descriptive addition in another generation
+does not invalidate internally consistent old metadata. Method metadata remains
+part of the saved semantic identity. Both publication and reading use the same
+artifact-agreement checks, including all four version stamps, hashes, identities,
+counts and family order. Rehashed contradictions fail before derived HTML is
+replaced. Historical validation neither reopens the source nor runs inference,
+and successful rendering never rewrites immutable evidence.
 
 V2 omits seed, resamples and Monte Carlo resolution, calendar bootstrap fields,
 member `bootstrap`, `p_upper`, `p_lower`, top-level `degeneracy` and `k_draw`.
@@ -2456,6 +2474,10 @@ warning and bootstrap settings. V2 shows monthly G/df/standard errors and
 balance, the measured synthetic scope and non-12 disclosure, without seed/B or
 bootstrap claims. An unavailable member retains its known geometry and reasons;
 no missing standard error or p-value is fabricated.
+The 2.20-SE half-width at G=12 (df=11) is explicitly labelled a calibration
+reference example only, not the current run's geometry or a power-based MDE.
+Actual G/df and availability remain visible for each member, including zero or
+unknown retained months.
 
 `derived/report.html` is a standalone light-theme page with no CDN, no network
 dependency and no required JavaScript package: escaped HTML tables only. It

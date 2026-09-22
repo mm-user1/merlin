@@ -29,6 +29,10 @@ BLOCK_LENGTH_DAYS = 7
 ALPHA = 0.05
 CONFIDENCE_LEVEL = 0.95
 
+# Mathematical validity beyond the unchanged full-sample support gates.
+MIN_INFORMATIVE_MONTHS = 2
+DEGENERACY_MULTIPLIER = 128
+
 # Support rules of version 1.  They depend on availability and counts, never on
 # return values, and they are explicit safeguards rather than assertions that the
 # retained observations are independent.
@@ -111,17 +115,25 @@ def method_settings(schema_version: int = 1) -> dict[str, Any]:
     }
     if schema_version == 2:
         settings.pop("block_length_days")
-        settings.update(method=V2_METHOD_ID, grouping="UTC signal month, all instruments jointly",
-                        reference="Student t with G-1 degrees of freedom",
-                        confidence_level=CONFIDENCE_LEVEL,
-                        mathematical_validity={"min_informative_months": 2,
-                            "positive_deletion_denominator": True, "finite_inputs_and_results": True,
-                            "degeneracy_multiplier": 128},
-                        calibration={"tested_informative_month_counts": [12], "main_null_fixtures": 8,
-                            "attempts_per_fixture": 2000, "primary_raw_rejection_range": [0.0415, 0.057],
-                            "holm_fwer_range": [0.009, 0.024], "one_sided_95_upper_bound_envelope": 0.08,
-                            "minimum_primary_availability": 0.95,
-                            "scope": "Synthetic screen only; matching G does not validate market inference."})
+        settings.update(
+            method=V2_METHOD_ID,
+            grouping="UTC signal month, all instruments jointly",
+            reference="Student t with G-1 degrees of freedom",
+            confidence_level=CONFIDENCE_LEVEL,
+            mathematical_validity={
+                "min_informative_months": MIN_INFORMATIVE_MONTHS,
+                "positive_deletion_denominator": True,
+                "finite_inputs_and_results": True,
+                "degeneracy_multiplier": DEGENERACY_MULTIPLIER,
+            },
+            calibration={
+                "tested_informative_month_counts": [12], "main_null_fixtures": 8,
+                "attempts_per_fixture": 2000, "primary_raw_rejection_range": [0.0415, 0.057],
+                "holm_fwer_range": [0.009, 0.024], "one_sided_95_upper_bound_envelope": 0.08,
+                "minimum_primary_availability": 0.95,
+                "scope": "Synthetic screen only; matching G does not validate market inference.",
+            },
+        )
     return settings
 
 
@@ -295,6 +307,44 @@ def normalize_analysis_request(document: Any, *, source: str) -> AnalysisRequest
         seed=seed,
         notes=notes,
     )
+
+
+def validate_saved_request(document: Any, *, source: str) -> int:
+    """Validate a saved format, without current launch policy or reconstructed defaults.
+
+    Saved v1 integer domains are part of its original format. Execution limits
+    may tighten independently; neither they nor current method disclosures govern
+    historical readability. The reused helpers validate only field shapes.
+    """
+    values = contracts.require_mapping(document, source)
+    version = _require_version(values.get("schema_version"), f"{source}.schema_version")
+    keys = ("schema_version", "analysis_name", "model_instances", "pairwise", "notes", "method")
+    if version == 1:
+        keys += ("resamples", "seed")
+    contracts.closed_keys(values, keys, source)
+    for key in keys:
+        if key not in values:
+            raise PatternLabDataError(f"{source}.{key}: an explicit saved value is required.")
+    require_text(values["analysis_name"], f"{source}.analysis_name")
+    if values["notes"] is not None and not isinstance(values["notes"], str):
+        raise PatternLabDataError(f"{source}.notes: expected a string or null.")
+    for key in ("model_instances", "pairwise"):
+        if not isinstance(values[key], list):
+            raise PatternLabDataError(f"{source}.{key}: expected a saved JSON list.")
+    _normalize_model_instances(values["model_instances"])
+    _normalize_pairwise(values["pairwise"])
+    if version == 1:
+        _require_bounded_int(
+            values["resamples"], f"{source}.resamples", minimum=1999, maximum=99999
+        )
+        _require_bounded_int(values["seed"], f"{source}.seed", minimum=0, maximum=2**32 - 1)
+    method = contracts.require_mapping(values["method"], f"{source}.method")
+    expected_id = METHOD_ID if version == 1 else V2_METHOD_ID
+    if method.get("method") != expected_id:
+        raise PatternLabDataError(
+            f"{source}.method: method ID contradicts request version {version}."
+        )
+    return version
 
 
 def load_analysis_request(request: Any) -> AnalysisRequest:

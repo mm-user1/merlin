@@ -402,8 +402,10 @@ def render_report(summary: Mapping[str, Any]) -> str:
     disclosures = "".join(f"<li>{escape(item)}</li>" for item in summary["disclosures"])
 
     resolution_note = (
-        "At G=12, df=11: interval half-width is about 2.20 SE (full width 4.40 SE), not a power-based "
-        "minimum detectable effect." if monthly else (
+        "Calibration reference example only: at G=12 (df=11), a nominal 95% interval "
+        "has half-width about 2.20 SE (full width 4.40 SE). Actual G and df are listed "
+        "for each member below. This is not a power-based minimum detectable effect."
+        if monthly else (
         "The minimum two-sided resolution 2/(B+1) exceeds alpha/m, so no first Holm rejection is "
         "possible at this family size; B is not increased silently."
         if summary["p_resolution_blocks_first_rejection"]

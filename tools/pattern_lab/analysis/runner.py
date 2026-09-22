@@ -24,18 +24,14 @@ from .estimator import evaluate_observations, evaluate_monthly_observations
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
-DISCLOSURES = (
+EXPLORATORY_DISCLOSURES = (
     "Exploratory development analysis. The family is frozen for this execution; that is not "
     "historical preregistration, and a rerun is still exploratory.",
     "Inference is an approximate development screen, not certification of exact 5% family-wise "
     "error, 95% coverage or an independently validated edge.",
-    "The delivered calibration did NOT meet its declared empirical error envelope. On the tracked "
-    "fixtures with persistent daily signal states, rejection and nominal-95% noncoverage reached "
-    "approximately 7.5-8.3% against nominal 5%. The cause is still under investigation; these "
-    "inferential outputs remain unvalidated and were anti-conservative on those fixtures.",
-    "The calendar block bootstrap assumes weak dependence, adequate moments and support and a "
-    "reasonably stable centered influence process. A seven-day block does not control error under "
-    "dependence substantially longer than a week; see the tracked long-dependence experiment.",
+)
+
+OBSERVATION_DISCLOSURES = (
     "Observations overlap in time and across comparisons: these are conditional measurements, not "
     "an executable equity curve or realized profit.",
     "Matching is conditional on instrument and UTC calendar month only. It does not remove every "
@@ -43,13 +39,30 @@ DISCLOSURES = (
     "Occurrence variants that share one condition also share its known-false control population; "
     "those comparisons are not independent tests.",
     "Commission is included; funding and slippage are excluded by explicit decision.",
-    "Neither event counts, ticker breadth nor bootstrap draws imply independent observations.",
+)
+
+NONREJECTION_DISCLOSURE = (
     "A non-rejection means insufficient evidence for that test, not proof that the effect is "
-    "absent. Holm covers only this declared family, not an unrecorded adaptive search.",
+    "absent. Holm covers only this declared family, not an unrecorded adaptive search."
+)
+
+# Preserve the public legacy tuple's text and order.
+DISCLOSURES = (
+    *EXPLORATORY_DISCLOSURES,
+    "The delivered calibration did NOT meet its declared empirical error envelope. On the tracked "
+    "fixtures with persistent daily signal states, rejection and nominal-95% noncoverage reached "
+    "approximately 7.5-8.3% against nominal 5%. The cause is still under investigation; these "
+    "inferential outputs remain unvalidated and were anti-conservative on those fixtures.",
+    "The calendar block bootstrap assumes weak dependence, adequate moments and support and a "
+    "reasonably stable centered influence process. A seven-day block does not control error under "
+    "dependence substantially longer than a week; see the tracked long-dependence experiment.",
+    *OBSERVATION_DISCLOSURES,
+    "Neither event counts, ticker breadth nor bootstrap draws imply independent observations.",
+    NONREJECTION_DISCLOSURE,
 )
 
 MONTHLY_DISCLOSURES = (
-    DISCLOSURES[0], DISCLOSURES[1],
+    *EXPLORATORY_DISCLOSURES,
     "Monthly jackknife passed eight required synthetic null fixtures at G=12, 2,000 attempts each. "
     "Observed primary raw rejection was 4.15-5.70%; Holm global-null rejection was 0.90-2.40%. "
     "Acceptance required an exact one-sided 95% error-rate upper bound at most 8%, separately "
@@ -59,8 +72,9 @@ MONTHLY_DISCLOSURES = (
     "Only G=12 was covered by retained calibration. Another known G remains mathematically admissible "
     "but was not covered; equality of G alone is not validation. Balance is diagnostic, not effective df.",
     "Raw rejection/noncoverage and mirrored long/short checks are correlated, not 24 independent confirmations.",
-    *DISCLOSURES[4:8],
-    "Neither event counts nor ticker breadth imply independent observations.", DISCLOSURES[9],
+    *OBSERVATION_DISCLOSURES,
+    "Neither event counts nor ticker breadth imply independent observations.",
+    NONREJECTION_DISCLOSURE,
 )
 
 
@@ -230,9 +244,15 @@ def run_analysis(
             started=started,
             finished=finished,
         )
-        artifacts._verify_agreement(
-            root, completion={"analysis_schema_version": artifact_version, "counts": counts, "identities": identities},
-            request_document=request_document, family=family_document, source=source_binding, summary=summary,
+        artifacts.verify_agreement(
+            root,
+            completion={
+                "analysis_schema_version": artifact_version,
+                "counts": counts,
+                "identities": identities,
+            },
+            request_document=request_document, family=family_document,
+            source=source_binding, summary=summary,
             provenance=evidence.read_json(root / artifacts.PROVENANCE_FILE),
             status=evidence.read_json(root / artifacts.STATUS_FILE),
         )

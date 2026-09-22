@@ -212,8 +212,11 @@ event study, which turns a versioned study request and protocol into immutable
 per-instrument evidence, a machine-readable summary and one offline HTML report,
 with a bounded spawn pool for its per-instrument jobs; and **M3a matched
 comparisons with calibrated inference**, which analyses a completed study
-offline into its own sealed artifact. It requires `pyarrow==22.0.0` and reaches
-the network only inside an explicit collect, update or recover operation.
+offline into its own sealed artifact. It uses the existing Merlin project
+dependencies, including `pyarrow==22.0.0` and, for ordinary v2 monthly inference,
+`scipy==1.16.3`, as pinned in root `requirements.txt`. These are not a standalone
+two-package installation. It reaches the network only inside an explicit
+collect, update or recover operation.
 
 `workers` accepts any positive integer: `workers=1` runs each instrument job
 directly and a larger count runs the same job under an explicit spawn pool

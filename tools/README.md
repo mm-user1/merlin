@@ -134,8 +134,10 @@ for its per-instrument jobs) and matched comparisons with calibrated inference
 matched control populations, event-weighted estimates, monthly jackknife in
 request v2 or the legacy joint calendar block bootstrap in explicit v1, one
 declared Holm family and a standalone offline report). It
-requires `pyarrow==22.0.0` from the root `requirements.txt` and never installs
-dependencies itself.
+requires the existing Merlin project dependencies, including `pyarrow==22.0.0`
+and, for ordinary v2 monthly analysis, `scipy==1.16.3`, all pinned in root
+`requirements.txt`. Those two packages alone are not a standalone environment;
+Pattern Lab never installs dependencies itself.
 
 ```bash
 python -m tools.pattern_lab --help

@@ -1615,11 +1615,6 @@ def _evaluate_monthly_candidate(accumulated: AccumulatedEstimates) -> dict[str, 
                 target_net_sum=strata["target_net_sum"],
                 control_net_sum=strata["control_net_sum"],
             )
-            if inherited:
-                candidate = _unavailable_candidate(
-                    inherited + candidate["reasons"], groups=candidate["informative_months"],
-                    balance=candidate["balance"], degeneracy=candidate["degeneracy"],
-                )
         point = {name: result[name] for name in ("signal", "control", "lift")}
         identity = None
         if candidate["theta"]["lift"] is not None and point["lift"] is not None:

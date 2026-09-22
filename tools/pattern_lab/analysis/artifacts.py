@@ -525,7 +525,7 @@ def load_analysis(analysis_root: Any) -> AnalysisResults:
     summary = dict(evidence.read_json(root / SUMMARY_FILE))
     provenance = dict(evidence.read_json(root / PROVENANCE_FILE))
     status = dict(evidence.read_json(root / STATUS_FILE))
-    _verify_agreement(
+    verify_agreement(
         root,
         completion=completion,
         request_document=request_document,
@@ -547,7 +547,7 @@ def load_analysis(analysis_root: Any) -> AnalysisResults:
     )
 
 
-def _verify_agreement(
+def verify_agreement(
     root: Path,
     *,
     completion: Mapping[str, Any],
@@ -565,16 +565,17 @@ def _verify_agreement(
         if type(document.get("schema_version")) is not int or document["schema_version"] != version:
             raise _corrupt(f"{path}: {name} artifact version contradicts completion")
     try:
-        normalized = analysis_request.load_analysis_request({
-            k: v for k, v in request_document.items() if k != "method"})
+        request_version = analysis_request.validate_saved_request(
+            request_document, source="saved analysis request"
+        )
     except PatternLabDataError as error:
         raise _corrupt(f"{path}: invalid saved request: {error}") from error
-    if normalized.schema_version != version:
+    if request_version != version:
         raise _corrupt(f"{path}: request/artifact version mapping is inconsistent")
-    expected_method = analysis_request.method_settings(normalized.schema_version)
-    for name, document in (("request", request_document), ("family", family), ("summary", summary)):
+    expected_method = request_document["method"]
+    for name, document in (("family", family), ("summary", summary)):
         if contracts.semantic_digest(document.get("method")) != contracts.semantic_digest(expected_method):
-            raise _corrupt(f"{path}: {name} method contradicts the recorded request version")
+            raise _corrupt(f"{path}: {name} method contradicts the saved request method")
     if status.get("terminal_status") != TERMINAL_COMPLETED:
         raise _corrupt(
             f"{path}: the seal claims a completed analysis, but the recorded terminal status is "
