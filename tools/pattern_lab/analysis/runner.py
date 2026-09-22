@@ -20,7 +20,7 @@ from ..study import extensions as study_extensions
 from . import artifacts, family as analysis_family, report as analysis_report
 from . import request as analysis_request
 from . import source as analysis_source
-from .estimator import evaluate_observations
+from .estimator import evaluate_observations, evaluate_monthly_observations
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -48,6 +48,21 @@ DISCLOSURES = (
     "absent. Holm covers only this declared family, not an unrecorded adaptive search.",
 )
 
+MONTHLY_DISCLOSURES = (
+    DISCLOSURES[0], DISCLOSURES[1],
+    "Monthly jackknife passed eight required synthetic null fixtures at G=12, 2,000 attempts each. "
+    "Observed primary raw rejection was 4.15-5.70%; Holm global-null rejection was 0.90-2.40%. "
+    "Acceptance required an exact one-sided 95% error-rate upper bound at most 8%, separately "
+    "from 95% primary availability. PASS does not certify nominal 5% market error.",
+    "Calendar months need not be independent. Tested persistent signal occurrence does not establish "
+    "error control under arbitrary multi-month dependence of returns or correlated monthly contrasts.",
+    "Only G=12 was covered by retained calibration. Another known G remains mathematically admissible "
+    "but was not covered; equality of G alone is not validation. Balance is diagnostic, not effective df.",
+    "Raw rejection/noncoverage and mirrored long/short checks are correlated, not 24 independent confirmations.",
+    *DISCLOSURES[4:8],
+    "Neither event counts nor ticker breadth imply independent observations.", DISCLOSURES[9],
+)
+
 
 def _failure_document(exc: BaseException, *, phase: str) -> dict[str, Any]:
     return {
@@ -69,6 +84,7 @@ def run_analysis(
     clock = time.monotonic()
 
     normalized = analysis_request.load_analysis_request(request)
+    artifact_version = {1: 1, 2: 2}[normalized.schema_version]
     source = analysis_source.admit_source(
         run_root, model_instances=normalized.model_instances, where="analysis admission"
     )
@@ -85,6 +101,7 @@ def run_analysis(
         timeframes=source.timeframes,
     )
     family_document = analysis_family.family_document(
+        request_version=normalized.schema_version,
         comparisons=comparisons,
         members=members,
         model_instances=sorted(normalized.model_instances),
@@ -118,19 +135,20 @@ def run_analysis(
         evidence.write_json(root / artifacts.FAMILY_FILE, family_document)
         artifacts.write_status(
             root, terminal=artifacts.TERMINAL_RUNNING, counts=counts, started=started,
-            finished=None,
+            finished=None, artifact_version=artifact_version,
         )
 
         phase = "aggregate"
         records = analysis_source.RecordSource(source, members)
-        estimates = evaluate_observations(
+        evaluate = evaluate_observations if normalized.schema_version == 1 else evaluate_monthly_observations
+        settings = {"resamples": normalized.resamples, "seed": normalized.seed} if normalized.schema_version == 1 else {}
+        estimates = evaluate(
             records.frames(),
             family=members,
             instruments=source.instruments,
             study_start_ms=source.study_start_ms,
             study_end_ms=source.study_end_ms,
-            resamples=normalized.resamples,
-            seed=normalized.seed,
+            **settings,
         )
         phase = "verify_source"
         analysis_source.reverify_source(source, where="analysis publication")
@@ -156,13 +174,14 @@ def run_analysis(
             source_binding=source_binding,
             estimates=estimates,
             diagnostics=diagnostics,
-            disclosures=DISCLOSURES,
+            disclosures=DISCLOSURES if normalized.schema_version == 1 else MONTHLY_DISCLOSURES,
+            artifact_version=artifact_version,
         )
         artifacts.write_table(root / artifacts.STRATA_FILE, estimates["strata"])
         artifacts.write_table(root / artifacts.DAILY_FILE, estimates["daily"])
         evidence.write_json(root / artifacts.SUMMARY_FILE, summary)
 
-        implementation = artifacts.implementation_identity()
+        implementation = artifacts.implementation_identity(artifact_version)
         semantic_request = {
             key: value
             for key, value in request_document.items()
@@ -170,6 +189,7 @@ def run_analysis(
         }
         identities = {
             "analysis_semantic_sha256": artifacts.semantic_identity(
+                artifact_version=artifact_version,
                 request_document=semantic_request,
                 family=family_document,
                 source=source_binding["semantic_inputs"],
@@ -184,7 +204,7 @@ def run_analysis(
         evidence.write_json(
             root / artifacts.PROVENANCE_FILE,
             {
-                "schema_version": artifacts.ANALYSIS_SCHEMA_VERSION,
+                "schema_version": artifact_version,
                 "artifact": artifacts.ARTIFACT_KIND,
                 "analysis_root": str(root),
                 "source_run_root": str(source.run_root),
@@ -204,25 +224,32 @@ def run_analysis(
         )
         artifacts.write_status(
             root,
+            artifact_version=artifact_version,
             terminal=artifacts.TERMINAL_COMPLETED,
             counts=counts,
             started=started,
             finished=finished,
         )
+        artifacts._verify_agreement(
+            root, completion={"analysis_schema_version": artifact_version, "counts": counts, "identities": identities},
+            request_document=request_document, family=family_document, source=source_binding, summary=summary,
+            provenance=evidence.read_json(root / artifacts.PROVENANCE_FILE),
+            status=evidence.read_json(root / artifacts.STATUS_FILE),
+        )
         artifacts.replace_report(root, analysis_report.render_report(summary))
-        record = artifacts.write_completion(root, counts=counts, identities=identities)
+        record = artifacts.write_completion(root, counts=counts, identities=identities, artifact_version=artifact_version)
     except KeyboardInterrupt as exc:
-        _record_failure(root, counts, started, clock, artifacts.TERMINAL_INTERRUPTED, exc, phase)
+        _record_failure(root, counts, started, clock, artifacts.TERMINAL_INTERRUPTED, exc, phase, artifact_version)
         raise
     except Exception as exc:
-        _record_failure(root, counts, started, clock, artifacts.TERMINAL_FAILED, exc, phase)
+        _record_failure(root, counts, started, clock, artifacts.TERMINAL_FAILED, exc, phase, artifact_version)
         raise PatternLabStudyError(
             f"analysis failed during {phase}: {exc}",
             error_code=getattr(exc, "error_code", "analysis_failed"),
             context={"operation": "analyze", "phase": phase, "analysis_root": str(root)},
         ) from exc
     except BaseException as exc:  # pragma: no cover - control flow, never masked
-        _record_failure(root, counts, started, clock, artifacts.TERMINAL_FAILED, exc, phase)
+        _record_failure(root, counts, started, clock, artifacts.TERMINAL_FAILED, exc, phase, artifact_version)
         raise
 
     return {
@@ -249,7 +276,7 @@ def _sealed(root) -> bool:
     return True
 
 
-def _record_failure(root, counts, started, clock, terminal, exc, phase) -> None:
+def _record_failure(root, counts, started, clock, terminal, exc, phase, artifact_version) -> None:
     """Record an honest terminal state; a status failure never masks the cause.
 
     Once the completion record has been atomically published the analysis is
@@ -260,6 +287,7 @@ def _record_failure(root, counts, started, clock, terminal, exc, phase) -> None:
     try:
         artifacts.write_status(
             root,
+            artifact_version=artifact_version,
             terminal=terminal,
             counts=counts,
             started=started,

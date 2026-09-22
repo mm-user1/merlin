@@ -466,3 +466,62 @@ def test_corrupt_compressed_record_through_offline_cli(archive, payload, capsys)
     assert result["decision"] == "INCOMPLETE"
     assert any("invalid compressed record" in p and str(path) in p for p in result["integrity_problems"])
     assert '"decision": "INCOMPLETE"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("change", ["envelope", "floor", "rate_set", "demote", "attempts", "impossibility", "unknown", "max_main"])
+def test_consumed_verifier_drift_is_integrity_before_scoring(archive, monkeypatch, capsys, change):
+    if change == "envelope":
+        monkeypatch.setattr(cal, "ERROR_ENVELOPE", .055)
+    elif change == "floor":
+        monkeypatch.setattr(cal, "MIN_PRIMARY_AVAILABILITY", .99)
+    elif change == "rate_set":
+        monkeypatch.setattr(cal, "ACCEPTANCE_RATES", cal.ACCEPTANCE_RATES[:-1])
+    elif change == "impossibility":
+        monkeypatch.setattr(monthly, "IMPOSSIBLE_ERRORS", 139)
+    elif change == "max_main":
+        monkeypatch.setattr(monthly, "MAX_MAIN_ATTEMPTS", 1)
+    else:
+        fixture = monthly.MAIN_MATRIX[0]
+        fields = {"demote":{"required":False}, "attempts":{"attempts":1999},
+                  "unknown":{"scenario_name":"unsupported", "name":"unsupported"}}[change]
+        monkeypatch.setattr(monthly, "MAIN_MATRIX", (replace(fixture, **fields), *monthly.MAIN_MATRIX[1:]))
+    def forbidden(*a, **k):
+        pytest.fail("altered verifier reached scoring or stop proof")
+    monkeypatch.setattr(monthly, "score_fixture", forbidden)
+    monkeypatch.setattr(monthly, "impossibility", forbidden)
+    monkeypatch.setattr(monthly, "candidate_manifest", forbidden)
+    assert monthly.main(["--output-root", str(archive), "--summarize-only"]) == 2
+    result = json.loads((archive / "summary.json").read_text())
+    assert result["decision"] == "INCOMPLETE" and result["results"] == []
+    assert any("verifier" in p for p in result["integrity_problems"])
+    assert '"decision": "INCOMPLETE"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("function", [admission.plan_truth, admission.plan_family])
+def test_unknown_frozen_scenario_is_explicit(function):
+    with pytest.raises(ValueError, match="unsupported.*not_registered"):
+        function("not_registered")
+    assert function(None) is not None
+
+
+def test_unknown_scenario_at_record_boundary_is_structured(archive, monkeypatch):
+    monkeypatch.setattr(monthly, "_fixture_family", lambda f: admission.plan_family("not_registered"))
+    assert monthly.main(["--output-root", str(archive), "--summarize-only"]) == 2
+    result=json.loads((archive/"summary.json").read_text())
+    assert result["decision"] == "INCOMPLETE"
+    assert all("not_registered" in p for p in result["integrity_problems"])
+
+
+@pytest.mark.parametrize("revision", [1, 2])
+def test_research_source_revision_preserves_old_scope_without_weakening_new(archive, revision):
+    manifest=json.loads((archive/"manifest.json").read_text())
+    if revision==1:
+        manifest.pop("research_attribution_revision")
+    manifest["research_implementation"].pop(admission.SHARED_MONTHLY_MODULE)
+    _rehash(archive,manifest)
+    result=monthly.summarize(archive)
+    assert result["decision"] == ("PASS" if revision==1 else "INCOMPLETE")
+    if revision==1:
+        assert any("five-source scope" in s for s in result["verification"]["provenance_limitations"])
+    else:
+        assert any("research source hashes" in s for s in result["integrity_problems"])

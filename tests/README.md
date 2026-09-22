@@ -152,8 +152,12 @@ including the frozen generator contract and the exact-binomial acceptance
 arithmetic). They build studies and analyses under the launcher's external
 temporary root and never read market data.
 
-`test_pattern_lab_analysis_monthly.py` covers the separate research-only
-`monthly_cluster_jackknife_v1` numerical candidate and its bounded real pipeline
+`test_pattern_lab_analysis_v2.py` covers ordinary v2 requests, real sealed
+artifacts and relocation, version/method agreement after rehashing, G=13 scope,
+method evaluation order and isolation from research imports. Its available and
+refused cases use runtime-generated synthetic studies.
+`test_pattern_lab_analysis_monthly.py` covers the shared
+`monthly_cluster_jackknife_v1` numerical kernel and bounded research pipeline
 replays. Companion `_monthly_platform.py`, `_monthly_replay.py`,
 `_monthly_admission.py` and `_monthly_provenance.py` cover native memory readings
 and injected failures, requested-work projection and pilot reuse, complete replay
@@ -161,6 +165,9 @@ families, plan-1 evidence admission and source attribution. Constructed compact
 records test PASS/FAIL/INCOMPLETE without running a Monte Carlo matrix. The tests
 include historical format 1 and new format 2, optional decoded-byte checksums,
 ambiguous plain/gzip rejection and mandatory disclosure/refusal behavior.
+Consumed verifier settings are checked before scoring or stop proofs; old
+five-source research attribution remains readable while revision 2 requires
+the shared monthly module.
 Native Windows readings are exercised on Windows; injected Linux results on that
 host do not certify native Linux `getrusage` or `/proc` calls. Run the platform
 module on each host, and keep the full Pattern Lab suite's worker/platform cases.
@@ -189,9 +196,11 @@ an external task-owned root. Their purpose is to measure and bound the
 finite-sample error of the approximate inference screen on declared synthetic
 fixtures — it is not a certification of exact 5% control, and the required
 long-dependence experiment sits outside the admitted-null envelope by design.
-**The delivered run met 11 of its 15 acceptance checks**, so M3a's statistical
-acceptance is open; rerun this command after any change to the estimator, the
-support gates or the resampling method. That saved document is also *ineligible*
+**The legacy bootstrap delivery met 11 of its 15 acceptance checks**. Monthly
+jackknife passed its declared G=12 synthetic screen, and ordinary v2 integration
+awaits M3a tech-lead acceptance. Changes to the formula, support gates or frozen
+experiment require an explicit new calibration decision, not an automatic full
+experiment during ordinary verification. That saved document is also *ineligible*
 under the versioned `legacy_bootstrap_v1` gate, because schema-v1 records carry
 no attempt ledger and it embedded no replay; ineligibility is separate from, and
 does not excuse, its 11-of-15 rate result. Exit 0 means complete acceptance of

@@ -218,11 +218,12 @@ def family_document(
     model_instances: Sequence[str],
     timeframes: Sequence[int],
     variants: Sequence[Mapping[str, Any]],
+    request_version: int = 1,
 ) -> dict[str, Any]:
     """The frozen family document written before any outcome aggregation."""
     return {
         "schema_version": 1,
-        "method": method_settings(),
+        "method": method_settings(request_version),
         "model_instances": list(model_instances),
         "timeframes_minutes": [int(item) for item in timeframes],
         "source_variants": [dict(item) for item in variants],

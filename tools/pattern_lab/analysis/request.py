@@ -2,9 +2,8 @@
 
 One strict normalization path serves the CLI and agent scripts: a JSON file path
 and a mapping reach the same validators, and there is no trusted
-normalized-object bypass.  Schema version 1 fixes the inference method, the
-matching, the block length, the nominal levels and the support rules.  A future
-method change needs an explicit version, not a silent default change.
+normalized-object bypass. Version 1 preserves the calendar block bootstrap;
+version 2 selects monthly jackknife with the same matching and support rules.
 """
 
 from __future__ import annotations
@@ -18,6 +17,9 @@ from ..manifest import read_json_file, require_int, require_text
 from ..study import contracts
 
 ANALYSIS_REQUEST_SCHEMA_VERSION = 1
+SUPPORTED_REQUEST_VERSIONS = (1, 2)
+CURRENT_REQUEST_SCHEMA_VERSION = 2
+V2_METHOD_ID = "monthly_cluster_jackknife_v1"
 
 # Version 1 fixes the method; these are resolved values recorded in the frozen
 # family and identity, not optional request switches.
@@ -50,6 +52,24 @@ MIN_RESAMPLES = 1999
 MAX_RESAMPLES = 99999
 MAX_SEED = 2**32 - 1
 
+# Deterministic reason order; every applicable reason is reported.
+REASON_NO_SUPPORT = "no_matched_support"
+REASON_SPAN = "insufficient_span"
+REASON_ACTIVE_DAYS = "insufficient_active_days"
+REASON_BLOCKS = "insufficient_supported_blocks"
+REASON_COVERAGE = "insufficient_retained_coverage"
+REASON_HORIZON = "unsupported_inference_horizon"
+REASON_DEGENERATE = "degenerate_contrast"
+REASON_ORDER = (
+    REASON_NO_SUPPORT,
+    REASON_SPAN,
+    REASON_ACTIVE_DAYS,
+    REASON_BLOCKS,
+    REASON_COVERAGE,
+    REASON_HORIZON,
+    REASON_DEGENERATE,
+)
+
 # Generated nonsignal-baseline comparison IDs reserve this prefix.
 BASELINE_PREFIX = "baseline__"
 
@@ -65,9 +85,10 @@ REQUEST_KEYS = (
 PAIRWISE_KEYS = ("id", "target_variant", "control_variant")
 
 
-def method_settings() -> dict[str, Any]:
-    """The resolved method constants recorded in the frozen family and identity."""
-    return {
+def method_settings(schema_version: int = 1) -> dict[str, Any]:
+    """Resolved constants; the no-argument form retains the legacy v1 contract."""
+    _require_version(schema_version, "schema_version")
+    settings = {
         "method": METHOD_ID,
         "matching": MATCHING_ID,
         "block_length_days": BLOCK_LENGTH_DAYS,
@@ -88,6 +109,27 @@ def method_settings() -> dict[str, Any]:
             "max_inference_horizon_minutes": MAX_INFERENCE_HORIZON_MINUTES,
         },
     }
+    if schema_version == 2:
+        settings.pop("block_length_days")
+        settings.update(method=V2_METHOD_ID, grouping="UTC signal month, all instruments jointly",
+                        reference="Student t with G-1 degrees of freedom",
+                        confidence_level=CONFIDENCE_LEVEL,
+                        mathematical_validity={"min_informative_months": 2,
+                            "positive_deletion_denominator": True, "finite_inputs_and_results": True,
+                            "degeneracy_multiplier": 128},
+                        calibration={"tested_informative_month_counts": [12], "main_null_fixtures": 8,
+                            "attempts_per_fixture": 2000, "primary_raw_rejection_range": [0.0415, 0.057],
+                            "holm_fwer_range": [0.009, 0.024], "one_sided_95_upper_bound_envelope": 0.08,
+                            "minimum_primary_availability": 0.95,
+                            "scope": "Synthetic screen only; matching G does not validate market inference."})
+    return settings
+
+
+def _require_version(value, where):
+    version = require_int(value, where)
+    if version not in SUPPORTED_REQUEST_VERSIONS:
+        raise PatternLabDataError(f"{where}: unsupported analysis request version {version}; reads 1 and 2.")
+    return version
 
 
 @dataclass(frozen=True)
@@ -114,20 +156,17 @@ class AnalysisRequest:
     analysis_name: str
     model_instances: tuple[str, ...]
     pairwise: tuple[PairwiseComparison, ...]
-    resamples: int
-    seed: int
+    resamples: int | None
+    seed: int | None
     notes: str | None
 
     def semantic_document(self) -> dict[str, Any]:
         """The canonical semantic payload; the free-form name and notes stay out."""
-        return {
-            "schema_version": self.schema_version,
-            "model_instances": list(self.model_instances),
-            "pairwise": [item.as_json() for item in self.pairwise],
-            "resamples": self.resamples,
-            "seed": self.seed,
-            "method": method_settings(),
-        }
+        document = self.external_document()
+        document.pop("analysis_name")
+        document.pop("notes")
+        document["method"] = method_settings(self.schema_version)
+        return document
 
     def request_document(self) -> dict[str, Any]:
         document = self.semantic_document()
@@ -137,7 +176,10 @@ class AnalysisRequest:
 
     def external_document(self) -> dict[str, Any]:
         """Render this request back into the external request schema."""
-        return {
+        _require_version(self.schema_version, "normalized analysis request.schema_version")
+        if self.schema_version == 2 and (self.seed is not None or self.resamples is not None):
+            raise PatternLabDataError("normalized analysis request: v2 does not support seed or resamples")
+        document = {
             "schema_version": self.schema_version,
             "analysis_name": self.analysis_name,
             "model_instances": list(self.model_instances),
@@ -146,6 +188,10 @@ class AnalysisRequest:
             "seed": self.seed,
             "notes": self.notes,
         }
+        if self.schema_version == 2:
+            document.pop("resamples")
+            document.pop("seed")
+        return document
 
 
 def _require_bounded_int(value: Any, field_name: str, *, minimum: int, maximum: int) -> int:
@@ -224,26 +270,22 @@ def _normalize_pairwise(raw: Any) -> tuple[PairwiseComparison, ...]:
 def normalize_analysis_request(document: Any, *, source: str) -> AnalysisRequest:
     """Validate an analysis request document and return its normalized form."""
     values = contracts.require_mapping(document, source)
-    contracts.closed_keys(values, REQUEST_KEYS, source)
-    version = require_int(values.get("schema_version"), f"{source}.schema_version")
-    if version != ANALYSIS_REQUEST_SCHEMA_VERSION:
-        raise PatternLabDataError(
-            f"{source}.schema_version: unsupported analysis request version {version}; this build "
-            f"reads {ANALYSIS_REQUEST_SCHEMA_VERSION}."
-        )
+    version = _require_version(values.get("schema_version"), f"{source}.schema_version")
+    keys = REQUEST_KEYS if version == 1 else tuple(k for k in REQUEST_KEYS if k not in ("seed", "resamples"))
+    contracts.closed_keys(values, keys, source)
     analysis_name = require_text(values.get("analysis_name"), f"{source}.analysis_name")
     notes = values.get("notes")
     if notes is not None and not isinstance(notes, str):
         raise PatternLabDataError(f"{source}.notes: expected a string or null.")
-    for key in ("model_instances", "resamples", "seed"):
+    for key in (("model_instances", "resamples", "seed") if version == 1 else ("model_instances",)):
         if key not in values:
             raise PatternLabDataError(f"{source}.{key}: an explicit value is required.")
     model_instances = _normalize_model_instances(values["model_instances"])
     pairwise = _normalize_pairwise(values.get("pairwise"))
-    resamples = _require_bounded_int(
+    resamples = None if version == 2 else _require_bounded_int(
         values["resamples"], f"{source}.resamples", minimum=MIN_RESAMPLES, maximum=MAX_RESAMPLES
     )
-    seed = _require_bounded_int(values["seed"], f"{source}.seed", minimum=0, maximum=MAX_SEED)
+    seed = None if version == 2 else _require_bounded_int(values["seed"], f"{source}.seed", minimum=0, maximum=MAX_SEED)
     return AnalysisRequest(
         schema_version=version,
         analysis_name=analysis_name,

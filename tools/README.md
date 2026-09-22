@@ -131,8 +131,9 @@ feature/hypothesis/model/metric contracts, fixed-horizon and path outcomes,
 immutable evidence, a regenerable offline HTML report and a bounded spawn pool
 for its per-instrument jobs) and matched comparisons with calibrated inference
 (M3a: offline analysis of a completed study into its own sealed artifact, with
-matched control populations, event-weighted estimates, one joint calendar block
-bootstrap, one declared Holm family and a standalone offline report). It
+matched control populations, event-weighted estimates, monthly jackknife in
+request v2 or the legacy joint calendar block bootstrap in explicit v1, one
+declared Holm family and a standalone offline report). It
 requires `pyarrow==22.0.0` from the root `requirements.txt` and never installs
 dependencies itself.
 
@@ -181,8 +182,9 @@ scoring needs no generator or memory API, preserves producer versus verifier
 attribution, and labels historical source/replay limitations. Copy archives and
 save their original summaries before re-scoring; the command replaces top-level
 summaries. The [candidate guide](pattern_lab/README.md#the-experimental-monthly-jackknife-candidate)
-owns the format, optional checksum and platform contracts. This candidate is not
-exposed through `analyze`, sealed artifacts or HTML; M3a acceptance remains open.
+owns the format, optional checksum and platform contracts. The numerical method
+is integrated into ordinary v2 analysis; this research driver remains separate.
+M3a acceptance awaits tech-lead review.
 
 `study` accepts any positive `--workers`, default `1`; above `1` the same
 instrument job runs in an explicit spawn pool bounded by the selected instrument
@@ -194,13 +196,14 @@ interrupt of `study`, `report`, `analyze` or `analysis-report`.
 sealed analysis artifact into a new output root; it takes no worker count, and a
 completed artifact exits `0` even when every comparison lacks inferential
 support. `analysis-report` re-renders a sealed analysis from that artifact alone,
-without the study or its pack. **M3a is implemented but its statistical
-acceptance gate is open** — the delivered calibration met 11 of 15 checks and
-measured about 7.5-8.3% error against a nominal 5% on fixtures with persistent
-daily signal states. M3b context/frozen validation and the M4 sequential bracket
-probe are not implemented. An M2 study result is descriptive evidence and an M3a
-nominal Holm rejection is an unvalidated, anti-conservative screening hint —
-neither is a validated edge. Merlin and Strategy Lab do not
+without the study or its pack. The tracked example uses v2 monthly jackknife;
+explicit v1 keeps its failed bootstrap calibration (11/15 checks, about 7.5-8.3%
+error on persistent-signal fixtures). Monthly inference passed the synthetic
+G=12 screen against an 8% upper-bound envelope; it does not certify nominal 5%
+control or arbitrary dependence across months. **M3a integration is ready for
+tech-lead review; acceptance remains pending.** M3b context/frozen validation and
+the M4 sequential bracket probe are not implemented. Neither an M2 descriptive
+result nor an M3a nominal Holm rejection is a validated edge. Merlin and Strategy Lab do not
 import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See the
 [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,
 adapters, identity encoding, exclusion/recovery contract, the event-study

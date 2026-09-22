@@ -20,6 +20,9 @@ PLAN_VERSION = 1
 DECISION_POLICY_VERSION = 2
 REPLAY_IDS = [20000, 20001]
 SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+RESEARCH_ATTRIBUTION_REVISION = 2
+SHARED_MONTHLY_MODULE = "tools.pattern_lab.analysis.monthly"
+_PLAN1_MAX_MAIN_ATTEMPTS = 16000
 
 
 # Immutable plan-1 semantic fingerprints captured from accepted d47dfa4 and
@@ -202,10 +205,14 @@ def same(left, right):
 def plan_truth(scenario_name):
     if scenario_name is None:  # causal candle null
         return 0.0
-    return next(truth for name, _, truth in _PLAN1_SCENARIOS if name == scenario_name)
+    for name, _, truth in _PLAN1_SCENARIOS:
+        if name == scenario_name:
+            return truth
+    raise ValueError(f"unsupported plan-1 scenario {scenario_name!r}")
 
 
 def plan_family(scenario_name):
+    plan_truth(scenario_name)  # reject unknown names; None explicitly means candle null
     kind = "parent_child" if scenario_name == "null_inclusive_parent" else "baseline"
     _, members, primary = next(item for item in _PLAN1_FAMILIES if item[0] == kind)
     return list(members), primary
@@ -215,6 +222,20 @@ def scenario_matches_plan(scenario):
     wanted = dict((name, digest) for name, digest, _ in _PLAN1_SCENARIOS)
     config = {k: v for k, v in scenario.items() if k not in ("note", "caveat")}
     return semantic_digest(config) == wanted.get(scenario.get("name"))
+
+
+def verifier_problems(*, decision, main, supplementary, max_main_attempts):
+    """Check consumed acceptance settings without consulting live generators."""
+    expected, fields = dict(_PLAN1_DIGESTS), dict(_PLAN1_FIELDS)
+    problems = []
+    if semantic_digest(decision) != expected["decision"]:
+        problems.append("verifier acceptance settings differ from frozen plan 1")
+    for name, entries in (("main", main), ("supplementary", supplementary)):
+        if semantic_digest([{k: row[k] for k in fields["matrix_entry"]} for row in entries]) != expected[name]:
+            problems.append(f"verifier {name} matrix differs from frozen plan 1")
+    if not same(max_main_attempts, _PLAN1_MAX_MAIN_ATTEMPTS):
+        problems.append("verifier max_main_attempts differs from frozen plan 1")
+    return problems
 
 
 def manifest_problems(saved, research_modules):
@@ -248,7 +269,7 @@ def manifest_problems(saved, research_modules):
             [{k: item.get(k) for k in keys} for item in entries]
         ) != expected[group]:
             problems.append(f"manifest {group} matrix differs from frozen plan 1")
-    if not same(matrix.get("max_main_attempts"), 16000):
+    if not same(matrix.get("max_main_attempts"), _PLAN1_MAX_MAIN_ATTEMPTS):
         problems.append("manifest max_main_attempts differs from plan 1")
     generators = saved.get("generators", {})
     for kind in ("record_contract", "candle_contract"):
@@ -267,9 +288,13 @@ def manifest_problems(saved, research_modules):
         if not same(saved.get("decision_policy_version"), DECISION_POLICY_VERSION):
             problems.append("new manifest decision_policy_version is missing or unknown")
         attribution = saved.get("research_implementation", {})
+        revision = saved.get("research_attribution_revision", 1)
+        if type(revision) is not int or revision not in (1, RESEARCH_ATTRIBUTION_REVISION):
+            problems.append("unknown research attribution revision")
+        required_modules = [name for name in research_modules if revision != 1 or name != SHARED_MONTHLY_MODULE]
         if not isinstance(attribution, dict) or any(
             not isinstance(attribution.get(name), str) or not SHA256.fullmatch(attribution[name])
-            for name in research_modules
+            for name in required_modules
         ):
             problems.append("new manifest lacks required research source hashes")
     return problems

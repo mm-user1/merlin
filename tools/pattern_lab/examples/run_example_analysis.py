@@ -1,7 +1,7 @@
 """Run a study, then analyze it, then read the saved analysis tables.
 
 This is the agent-facing M3a path the CLI also uses: one completed event study,
-one offline analysis of it, and the documented access to the saved comparison,
+one v2 monthly-jackknife analysis of it, and documented access to the saved comparison,
 stratum and daily tables.  Nothing here executes a hypothesis module, a saved
 Python snapshot or a metric plugin.
 

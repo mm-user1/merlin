@@ -66,12 +66,14 @@ baselines, or mutate external systems unless explicitly authorized.
   Event studies accept any positive `workers`: `workers=1` runs the jobs
   directly and a larger count uses an explicit spawn pool whose canonical
   evidence and identities match. Offline M3a analysis is a coordinator-side
-  calculation with no worker option. **M3a is implemented but its statistical
-  acceptance gate is open: the delivered calibration met 11 of 15 checks, and
-  the two admitted scenarios with persistent daily signal states measured about
-  7.5-8.3% error against a nominal 5%.** M3b context and frozen validation, and
-  M4 bracket execution, are not implemented. Treat M3a p-values, intervals and
-  Holm rejections as unvalidated and anti-conservative under clustered signals.
+  calculation with no worker option. New request v2 uses monthly jackknife;
+  explicit v1 preserves the seven-day bootstrap and its failed calibration
+  (11/15 checks, about 7.5-8.3% error on persistent-signal fixtures). The monthly
+  method passed the declared synthetic screen at G=12, against an 8% upper-bound
+  envelope, not certified nominal 5% control. Integration is ready for tech-lead
+  review; **M3a acceptance remains pending**. M3b context/frozen validation and
+  M4 bracket execution are not implemented. These are approximate development
+  screens; arbitrary dependence across months is not covered.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.
 

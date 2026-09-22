@@ -62,7 +62,7 @@ def test_the_frozen_method_settings_are_part_of_the_semantic_request():
 @pytest.mark.parametrize(
     "overrides, message",
     [
-        ({"schema_version": 2}, "unsupported analysis request version"),
+        ({"schema_version": 3}, "unsupported analysis request version"),
         ({"schema_version": True}, "expected an integer"),
         ({"analysis_name": "   "}, "nonblank string"),
         ({"model_instances": []}, "nonempty list"),
@@ -556,7 +556,8 @@ def test_the_tracked_analysis_request_normalizes():
     assert [item.comparison_id for item in normalized.pairwise] == ["volume_filter"]
     assert normalized.pairwise[0].target_variant == "two_green_volume"
     assert normalized.pairwise[0].control_variant == "two_green_plain"
-    assert normalized.resamples == 9999
+    assert normalized.schema_version == 2
+    assert normalized.resamples is None and normalized.seed is None
 
 
 def test_the_tracked_pair_study_declares_both_variants_and_keeps_the_original():

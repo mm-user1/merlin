@@ -27,6 +27,8 @@ statistically validated edge.
 
 from .artifacts import (
     ANALYSIS_SCHEMA_VERSION,
+    SUPPORTED_ANALYSIS_SCHEMA_VERSIONS,
+    CURRENT_ANALYSIS_SCHEMA_VERSION,
     AnalysisResults,
     load_analysis,
 )
@@ -35,6 +37,7 @@ from .estimator import (
     RECORD_COLUMNS,
     CalendarGrid,
     evaluate_observations,
+    evaluate_monthly_observations,
 )
 from .family import Comparison, FamilyMember, resolve_family
 from .report import render_report
@@ -43,6 +46,9 @@ from .request import (
     BLOCK_LENGTH_DAYS,
     INFERENCE_SCOPE,
     METHOD_ID,
+    V2_METHOD_ID,
+    SUPPORTED_REQUEST_VERSIONS,
+    CURRENT_REQUEST_SCHEMA_VERSION,
     AnalysisRequest,
     load_analysis_request,
     method_settings,
@@ -52,6 +58,8 @@ from .runner import DISCLOSURES, regenerate_report, run_analysis
 from .source import AdmittedSource, RecordSource, admit_source
 
 __all__ = [
+    "V2_METHOD_ID", "SUPPORTED_REQUEST_VERSIONS", "SUPPORTED_ANALYSIS_SCHEMA_VERSIONS",
+    "CURRENT_REQUEST_SCHEMA_VERSION", "CURRENT_ANALYSIS_SCHEMA_VERSION", "evaluate_monthly_observations",
     "ANALYSIS_REQUEST_SCHEMA_VERSION",
     "ANALYSIS_SCHEMA_VERSION",
     "BLOCK_LENGTH_DAYS",

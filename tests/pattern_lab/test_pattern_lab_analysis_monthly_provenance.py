@@ -12,7 +12,7 @@ from tools.pattern_lab.analysis import artifacts
 def _direct_research_dependencies():
     """Bounded static check of these research modules, not a repository import graph."""
     dependencies = set()
-    for filename in ("calibration_monthly.py", "calibration.py", "calibration_evidence.py", "calibration_memory.py"):
+    for filename in ("calibration_monthly.py", "calibration.py", "calibration_evidence.py", "calibration_memory.py", "monthly.py"):
         tree = ast.parse(Path(monthly.__file__).with_name(filename).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or not node.level:
@@ -33,7 +33,7 @@ def test_research_attribution_covers_actual_direct_local_imports():
     assert dependencies <= known, dependencies - known
     assert "tools.pattern_lab.analysis.calibration_evidence" in dependencies - (known - {
         "tools.pattern_lab.analysis.calibration_evidence"})
-    assert not set(monthly.RESEARCH_MODULES) & set(artifacts.ATTRIBUTED_MODULES)
+    assert set(monthly.RESEARCH_MODULES) & set(artifacts.ATTRIBUTED_MODULES) == {"tools.pattern_lab.analysis.monthly"}
 
 
 def test_helper_change_changes_research_identity(tmp_path, monkeypatch):

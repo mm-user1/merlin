@@ -153,7 +153,7 @@ def _estimate_rows(members: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-def _inference_rows(members: Sequence[Mapping[str, Any]]) -> str:
+def _inference_rows(members: Sequence[Mapping[str, Any]], *, monthly: bool = False) -> str:
     rows = []
     for member in members:
         interval = member["intervals"]["lift"]
@@ -177,7 +177,8 @@ def _inference_rows(members: Sequence[Mapping[str, Any]]) -> str:
             "Holm-adjusted p", "Nominal Holm rejection", "Sign", "Unavailable reasons",
         ],
         caption=(
-            "Pointwise nominal 95% basic intervals on the lift, with the raw and Holm-adjusted "
+            ("Pointwise nominal 95% Student-t intervals on the lift, with the raw and Holm-adjusted " if monthly else
+             "Pointwise nominal 95% basic intervals on the lift, with the raw and Holm-adjusted ") +
             "two-sided lift p-values. These are not simultaneous Holm-adjusted intervals."
         ),
     )
@@ -223,7 +224,7 @@ def _support_rows(members: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-def _geometry_rows(members: Sequence[Mapping[str, Any]]) -> str:
+def _geometry_rows(members: Sequence[Mapping[str, Any]], *, monthly: bool = False) -> str:
     rows = []
     for member in members:
         geometry = member["geometry"]
@@ -232,7 +233,7 @@ def _geometry_rows(members: Sequence[Mapping[str, Any]]) -> str:
                 member["member_id"],
                 _integer(geometry["day_grid_days"]),
                 _integer(geometry["block_length_days"]),
-                _integer(geometry["k_draw"]),
+                *([] if monthly else [_integer(geometry["k_draw"])]),
                 _integer(geometry["supported_span_days"]),
                 _integer(geometry["joint_active_days"]),
                 _integer(geometry["supported_blocks"]),
@@ -242,15 +243,37 @@ def _geometry_rows(members: Sequence[Mapping[str, Any]]) -> str:
     return _rows(
         rows,
         header=[
-            "Member", "Day grid T", "Block L", "K_draw", "Supported span (days)",
+            "Member", "Day grid T", "Support bin days" if monthly else "Block L",
+            *([] if monthly else ["K_draw"]), "Supported span (days)",
             "Joint active days", "Supported blocks", "Same population across horizons",
         ],
         caption=(
+            ("Calendar support geometry. Seven-day bins are support diagnostics, not resampled "
+             "blocks or independent observations." if monthly else
             "Calendar and block geometry. K_draw is the number of bootstrap block draws per "
             "replicate, not the amount of supported data, and these are coverage diagnostics, not "
-            "independent-sample-size estimates."
+            "independent-sample-size estimates.")
         ),
     )
+
+
+def _monthly_rows(members: Sequence[Mapping[str, Any]]) -> str:
+    rows = []
+    for member in members:
+        info = member["monthly_inference"]
+        balance = info["balance"] or {}
+        rows.append([
+            member["member_id"], _integer(info["informative_months"]),
+            _integer(info["degrees_of_freedom"]),
+            *[_number(info["standard_error"][key]) for key in ("signal", "control", "lift")],
+            _number(balance.get("max_monthly_share")), _number(balance.get("inverse_sum_squared_shares")),
+            "G=12 count only" if info["month_count_in_calibration"] is True else
+            "Month count not covered by calibration" if info["month_count_in_calibration"] is False else "Unknown G",
+        ])
+    return _rows(rows, header=["Member", "G", "df", "Signal SE", "Control SE", "Lift SE",
+                             "Max month share", "Inverse squared shares", "Calibration month count"],
+                 caption="Monthly uncertainty in fractional-return units. Balance is not effective df. "
+                         "Matching G=12 alone is not validation; other known counts were not covered by retained calibration.")
 
 
 def _bootstrap_rows(members: Sequence[Mapping[str, Any]]) -> str:
@@ -363,21 +386,35 @@ def render_report(summary: Mapping[str, Any]) -> str:
     source = summary["source"]
     calendar = summary["calendar"]
     method = summary["method"]
+    from .request import METHOD_ID, V2_METHOD_ID
+    from .. import PatternLabDataError
+    if method["method"] not in (METHOD_ID, V2_METHOD_ID):
+        raise PatternLabDataError(f"unsupported analysis report method {method['method']!r}")
+    monthly = method["method"] == V2_METHOD_ID
+    banner = ("Monthly jackknife: approximate development screen. The declared synthetic screen passed "
+              "at G=12; this does not certify market error control, nominal 5% error or a profitable strategy.") if monthly else BANNER
+    approximation = ("Full-sample matched estimates with whole signal-month deletion across all instruments, "
+                     "Student-t reference with G-1 df and pointwise 95% intervals. Holm covers only this frozen "
+                     "family; it cannot repair invalid individual p-values.") if monthly else APPROXIMATION
+    dependence = ("Calendar months need not be independent. Tested persistent signal occurrence does not establish "
+                  "error control under arbitrary multi-month dependence of returns or correlated monthly contrasts.") if monthly else LONG_DEPENDENCE
     diagnostics = summary["diagnostics"]
     disclosures = "".join(f"<li>{escape(item)}</li>" for item in summary["disclosures"])
 
     resolution_note = (
+        "At G=12, df=11: interval half-width is about 2.20 SE (full width 4.40 SE), not a power-based "
+        "minimum detectable effect." if monthly else (
         "The minimum two-sided resolution 2/(B+1) exceeds alpha/m, so no first Holm rejection is "
         "possible at this family size; B is not increased silently."
         if summary["p_resolution_blocks_first_rejection"]
         else "The minimum two-sided resolution 2/(B+1) does not by itself prevent a first Holm "
         "rejection at this family size."
-    )
+    ))
 
     body = f"""<h1>Pattern Lab matched comparisons: {escape(str(summary['analysis_name']))}</h1>
 <p class="small">Generated {escape(generated)} · analysis of study
 <code>{escape(str(source['run_root']))}</code></p>
-<div class="banner">{escape(BANNER)}</div>
+<div class="banner">{escape(banner)}</div>
 <div class="card">
 <h2>Source study, family and frozen method</h2>
 {_definition([
@@ -396,14 +433,15 @@ def render_report(summary: Mapping[str, Any]) -> str:
         f"{key}m={value}" for key, value in sorted(diagnostics["eligible_anchors_by_timeframe"].items()))),
     ("Inference method", method["method"]),
     ("Matching", method["matching"]),
-    ("Block length (days)", method["block_length_days"]),
+    *([("Grouping", method["grouping"]), ("Reference", method["reference"])] if monthly else
+      [("Block length (days)", method["block_length_days"])]),
     ("Two-sided alpha", method["alpha"]),
     ("Pointwise confidence level", method["confidence_level"]),
     ("Inference scope", summary["inference_scope"]),
-    ("Bootstrap resamples B", summary["resamples"]),
-    ("Bootstrap seed", summary["seed"]),
+    *([] if monthly else [("Bootstrap resamples B", summary["resamples"]),
+                         ("Bootstrap seed", summary["seed"])]),
     ("Family size m", summary["family_size"]),
-    ("Minimum two-sided p resolution", summary["p_resolution"]),
+    *([] if monthly else [("Minimum two-sided p resolution", summary["p_resolution"])]),
     ("Calendar day grid", f"{calendar['day_grid_days']} days, "
         f"{calendar['first_day_utc']} to {calendar['last_day_utc']}"),
     ("Calendar rule", calendar["rule"]),
@@ -420,11 +458,11 @@ returns are never summed into profit and no equity or profitability claim follow
 </div>
 <div class="card">
 <h2>Inference</h2>
-<div class="qualify">{escape(APPROXIMATION)}</div>
-<div class="qualify">{escape(LONG_DEPENDENCE)}</div>
+<div class="qualify">{escape(approximation)}</div>
+<div class="qualify">{escape(dependence)}</div>
 <p class="small">{escape(resolution_note)}</p>
-{_inference_rows(members)}
-{_bootstrap_rows(members)}
+{_inference_rows(members, monthly=monthly)}
+{_monthly_rows(members) if monthly else _bootstrap_rows(members)}
 <p class="small">A negative difference is not a positive edge, and a non-rejection is insufficient
 evidence rather than proof of absence. Net profitability is not inferred from the lift p-value, and
 no gross-return, excursion or subgroup p-value is reported.</p>
@@ -432,7 +470,7 @@ no gross-return, excursion or subgroup p-value is reported.</p>
 <div class="card">
 <h2>Support, exclusions and overlap</h2>
 {_support_rows(members)}
-{_geometry_rows(members)}
+{_geometry_rows(members, monthly=monthly)}
 {_ticker_details(members)}
 <p class="small">The full stratum table, including zero-event and excluded strata with their
 reason codes, is saved in <code>strata.parquet</code>; the daily counts and sums that reproduce the
@@ -442,7 +480,7 @@ estimator are in <code>daily.parquet</code>.</p>
 <h2>Declared primary cases</h2>
 <p class="small">Order follows the canonical family, not best return or smallest p. The declared
 primary horizon is emphasized without hiding the other horizons or directions.</p>
-{_inference_rows(primary) if primary else '<p class="small">No case is declared primary.</p>'}
+{_inference_rows(primary, monthly=monthly) if primary else '<p class="small">No case is declared primary.</p>'}
 </div>
 <div class="card">
 <h2>Disclosures and limitations</h2>

@@ -29,6 +29,8 @@ from ..study.builtins import EVIDENCE_VIEW_VERSION
 from . import request as analysis_request
 
 ANALYSIS_SCHEMA_VERSION = 1
+SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = (1, 2)
+CURRENT_ANALYSIS_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "pattern_lab_analysis"
 
 REQUEST_FILE = "request.json"
@@ -88,6 +90,7 @@ ATTRIBUTED_MODULES = (
     "tools.pattern_lab.analysis.request",
     "tools.pattern_lab.analysis.family",
     "tools.pattern_lab.analysis.estimator",
+    "tools.pattern_lab.analysis.monthly",
     "tools.pattern_lab.analysis.source",
     "tools.pattern_lab.analysis.artifacts",
     "tools.pattern_lab.analysis.report",
@@ -115,7 +118,7 @@ def module_digests() -> dict[str, str]:
     return digests
 
 
-def implementation_identity() -> dict[str, Any]:
+def implementation_identity(artifact_version: int) -> dict[str, Any]:
     """The analysis implementation attribution and its own digest."""
     attribution = {
         "modules": module_digests(),
@@ -133,14 +136,15 @@ def implementation_identity() -> dict[str, Any]:
             {
                 "modules": attribution["modules"],
                 "evidence_view_version": EVIDENCE_VIEW_VERSION,
-                "version": ANALYSIS_SCHEMA_VERSION,
+                "version": artifact_version,
             }
         ),
     }
 
 
 def semantic_identity(
-    *, request_document: Mapping[str, Any], family: Mapping[str, Any], source: Mapping[str, Any]
+    *, request_document: Mapping[str, Any], family: Mapping[str, Any], source: Mapping[str, Any],
+    artifact_version: int,
 ) -> str:
     """The analysis identity over the canonical request, family, method and source.
 
@@ -152,7 +156,7 @@ def semantic_identity(
             "request": request_document,
             "family": family,
             "source": source,
-            "version": ANALYSIS_SCHEMA_VERSION,
+            "version": artifact_version,
         }
     )
 
@@ -246,6 +250,7 @@ def write_table(path: Path, columns: Mapping[str, Any]) -> None:
 def write_status(
     root: Path,
     *,
+    artifact_version: int,
     terminal: str,
     counts: Mapping[str, int],
     started: str,
@@ -253,7 +258,7 @@ def write_status(
     failure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     document = {
-        "schema_version": ANALYSIS_SCHEMA_VERSION,
+        "schema_version": artifact_version,
         "artifact": ARTIFACT_KIND,
         "terminal_status": terminal,
         "counts": {key: int(counts.get(key, 0)) for key in COMPLETION_COUNT_KEYS},
@@ -266,7 +271,7 @@ def write_status(
 
 
 def write_completion(
-    root: Path, *, counts: Mapping[str, int], identities: Mapping[str, Any]
+    root: Path, *, counts: Mapping[str, int], identities: Mapping[str, Any], artifact_version: int,
 ) -> dict[str, Any]:
     """Hash every immutable artifact and publish the completion record last."""
     base = Path(root)
@@ -277,7 +282,7 @@ def write_completion(
         )
     digests = {name: evidence.file_digest(base / name) for name in IMMUTABLE_FILES}
     record = {
-        "analysis_schema_version": ANALYSIS_SCHEMA_VERSION,
+        "analysis_schema_version": artifact_version,
         "artifact": ARTIFACT_KIND,
         "terminal_status": TERMINAL_COMPLETED,
         "evidence_sha256": digests,
@@ -334,10 +339,10 @@ def verify_completion(root: Path) -> dict[str, Any]:
         raise _corrupt(f"{path}: the analysis completion record is not a JSON object.")
     record = dict(document)
     version = record.get("analysis_schema_version")
-    if isinstance(version, bool) or not isinstance(version, int) or version != ANALYSIS_SCHEMA_VERSION:
+    if type(version) is not int or version not in SUPPORTED_ANALYSIS_SCHEMA_VERSIONS:
         raise _corrupt(
             f"{path}: analysis_schema_version {version!r} is not the supported integer "
-            f"{ANALYSIS_SCHEMA_VERSION}."
+            f"versions {SUPPORTED_ANALYSIS_SCHEMA_VERSIONS}."
         )
     if record.get("artifact") != ARTIFACT_KIND:
         raise _corrupt(
@@ -358,7 +363,7 @@ def verify_completion(root: Path) -> dict[str, Any]:
     if set(recorded) != set(IMMUTABLE_FILES):
         raise _corrupt(
             f"{path}: the hashed artifact set {sorted(recorded)} does not describe the supported "
-            f"schema-v1 immutable artifacts {sorted(IMMUTABLE_FILES)}."
+            f"immutable artifacts {sorted(IMMUTABLE_FILES)}."
         )
     for name, expected in sorted(recorded.items()):
         target = base / name
@@ -445,9 +450,18 @@ class AnalysisResults:
         rows = []
         for member in self.members:
             intervals = member["intervals"]
+            monthly = member.get("monthly_inference", {})
             rows.append(
                 {
                     "member_id": member["member_id"],
+                    "method": self.summary["method"]["method"],
+                    "informative_months": monthly.get("informative_months"),
+                    "degrees_of_freedom": monthly.get("degrees_of_freedom"),
+                    "standard_error_lift": monthly.get("standard_error", {}).get("lift"),
+                    "month_count_in_calibration": monthly.get("month_count_in_calibration"),
+                    "effect_sign": member["effect_sign"],
+                    "nominal_reject_raw": (None if not member["inference_available"] else
+                                           bool(member["p_raw"] <= self.summary["method"]["alpha"])),
                     "comparison_id": member["comparison_id"],
                     "kind": member["kind"],
                     "model_instance_id": member["model_instance_id"],
@@ -519,6 +533,7 @@ def load_analysis(analysis_root: Any) -> AnalysisResults:
         source=source,
         summary=summary,
         status=status,
+        provenance=provenance,
     )
     return AnalysisResults(
         analysis_root=root,
@@ -541,9 +556,25 @@ def _verify_agreement(
     source: Mapping[str, Any],
     summary: Mapping[str, Any],
     status: Mapping[str, Any],
+    provenance: Mapping[str, Any],
 ) -> None:
     """Cross-check counts, identities and result/family membership by value."""
     path = root / COMPLETION_FILE
+    version = completion["analysis_schema_version"]
+    for name, document in (("summary", summary), ("status", status), ("provenance", provenance)):
+        if type(document.get("schema_version")) is not int or document["schema_version"] != version:
+            raise _corrupt(f"{path}: {name} artifact version contradicts completion")
+    try:
+        normalized = analysis_request.load_analysis_request({
+            k: v for k, v in request_document.items() if k != "method"})
+    except PatternLabDataError as error:
+        raise _corrupt(f"{path}: invalid saved request: {error}") from error
+    if normalized.schema_version != version:
+        raise _corrupt(f"{path}: request/artifact version mapping is inconsistent")
+    expected_method = analysis_request.method_settings(normalized.schema_version)
+    for name, document in (("request", request_document), ("family", family), ("summary", summary)):
+        if contracts.semantic_digest(document.get("method")) != contracts.semantic_digest(expected_method):
+            raise _corrupt(f"{path}: {name} method contradicts the recorded request version")
     if status.get("terminal_status") != TERMINAL_COMPLETED:
         raise _corrupt(
             f"{path}: the seal claims a completed analysis, but the recorded terminal status is "
@@ -591,6 +622,7 @@ def _verify_agreement(
             "analysis."
         )
     expected_semantic = semantic_identity(
+        artifact_version=version,
         request_document=_semantic_request_document(request_document),
         family=family,
         source=source["semantic_inputs"],
@@ -600,6 +632,16 @@ def _verify_agreement(
             f"{path}: the sealed analysis semantic identity contradicts the request, family and "
             "source binding it claims to summarize."
         )
+    implementation = provenance.get("implementation", {})
+    expected_implementation = contracts.semantic_digest({
+        "modules": implementation.get("modules"),
+        "evidence_view_version": implementation.get("evidence_view_version"),
+        "version": version,
+    })
+    if identities.get("analysis_implementation_sha256") != expected_implementation:
+        raise _corrupt(f"{path}: implementation identity contradicts recorded attribution/version")
+    if provenance.get("identities") != identities:
+        raise _corrupt(f"{path}: provenance identities contradict completion")
 
 
 def _semantic_request_document(request_document: Mapping[str, Any]) -> dict[str, Any]:
@@ -619,10 +661,11 @@ def summary_document(
     estimates: Mapping[str, Any],
     diagnostics: Mapping[str, Any],
     disclosures: Sequence[str],
+    artifact_version: int,
 ) -> dict[str, Any]:
     """The immutable result document the report renders and agents read."""
     return {
-        "schema_version": ANALYSIS_SCHEMA_VERSION,
+        "schema_version": artifact_version,
         "artifact": ARTIFACT_KIND,
         "analysis_name": request.analysis_name,
         "notes": request.notes,
@@ -631,20 +674,19 @@ def summary_document(
         "nominal_levels": {
             "alpha": analysis_request.ALPHA,
             "confidence_level": analysis_request.CONFIDENCE_LEVEL,
-            "note": (
+            "note": ("Monthly jackknife passed the declared synthetic screen at G=12; nominal levels "
+                     "remain approximate and do not certify market error control." if artifact_version == 2 else (
                 "Every test is nominally 5% and every interval nominally 95%. The delivered "
                 "calibration did not meet the declared empirical error envelope: measured "
                 "rejection and noncoverage reached about 7.5-8.3% on fixtures with persistent "
                 "daily signal states, so these levels are nominal and anti-conservative rather "
                 "than verified."
-            ),
+            )),
         },
         "calendar": estimates["calendar"],
-        "resamples": estimates["resamples"],
-        "seed": estimates["seed"],
+        **({key: estimates[key] for key in ("resamples", "seed", "p_resolution",
+            "p_resolution_blocks_first_rejection")} if artifact_version == 1 else {}),
         "family_size": estimates["family_size"],
-        "p_resolution": estimates["p_resolution"],
-        "p_resolution_blocks_first_rejection": estimates["p_resolution_blocks_first_rejection"],
         "instruments": estimates["instruments"],
         "comparisons": list(family["comparisons"]),
         "source": dict(source_binding),

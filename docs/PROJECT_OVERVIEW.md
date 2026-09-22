@@ -222,23 +222,21 @@ publication and canonical evidence identical to the direct run. Event studies
 themselves remain descriptive, with no p-value, confidence interval, matched
 control or edge verdict.
 
-M3a adds matched control populations, event-weighted point estimates, one joint
-calendar block bootstrap and one declared Holm family over a completed study's
-saved evidence. It reads that study strictly, never modifies it, and is a
-coordinator-side calculation with no worker option. **M3a is implemented but its
-statistical acceptance gate is open**: the delivered calibration met 11 of its 15
-declared checks, and the two admitted scenarios combining AR(1) daily factors
-with a persistent daily signal-state chain measured about 7.5-8.3% rejection and
-nominal-95% noncoverage against a nominal 5%. The cause is still under
-investigation; those inferential outputs remain unvalidated and were
-anti-conservative on those fixtures. M3b
-external-series/panel context with frozen validation, and M4 bracket execution
-with sizing, leverage and expiry, are not implemented. M3a inference is an
-explicitly approximate development screen; it certifies no error rate, it is
-anti-conservative under clustered signals, and a seven-day block does not
-control error under substantially longer dependence. Shipped code is neither an
-operationally prepared market pack nor a validated research result, and a
-nominal Holm rejection is not a validated edge.
+M3a adds matched control populations, event-weighted point estimates and one
+declared Holm family over a completed study's saved evidence. Request v2 uses
+the shared monthly jackknife; explicit v1 retains the seven-day bootstrap. It
+reads the study strictly, never modifies it, and takes no worker option. The v1
+calibration met 11/15 checks and measured about 7.5-8.3% error on persistent
+daily-signal fixtures. Monthly inference passed the declared synthetic screen
+at G=12: eight nulls with 2,000 attempts each, raw error 4.15-5.70% and family
+Holm error 0.9-2.4%, assessed with exact one-sided 95% upper bounds against 8%
+and a 95% availability floor. These correlated checks do not certify nominal
+5% control or arbitrary dependence across months. Other mathematically supported
+month counts remain available with an explicit calibration-scope disclosure.
+**M3a integration is ready for tech-lead review; acceptance remains pending.**
+M3b external-series/panel context with frozen validation and M4 bracket execution
+are not implemented. A nominal rejection is an approximate development-screen
+result, not a validated edge or production acceptance.
 
 The complete schema, roster, adapter, exclusion, recovery, study, evidence,
 worker-pool, analysis, estimator, support-gate, artifact and command contracts

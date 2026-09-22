@@ -24,7 +24,8 @@ Pattern Lab is local, research-only tooling. These milestones are implemented:
   [Workers and the bounded spawn pool](#workers-and-the-bounded-spawn-pool).
 - **M3a, matched comparisons and calibrated inference**: offline analysis of a
   **completed** study — matched control populations, event-weighted point
-  estimates, one joint calendar block bootstrap and one declared Holm family,
+  estimates, monthly jackknife in request v2 (legacy block bootstrap in explicit
+  v1) and one declared Holm family,
   sealed into its own artifact with a standalone offline report. See
   [Matched comparisons and calibrated inference](#matched-comparisons-and-calibrated-inference).
 
@@ -35,15 +36,13 @@ stays descriptive: it reports no p-value, confidence interval, significance
 badge, matched control or edge verdict, and those live only in an M3a analysis
 artifact.
 
-**M3a inference is an approximate development screen, and its delivered
-calibration DID NOT MEET the declared empirical error envelope.** On the tracked
-fixtures with persistent daily signal states, rejection and nominal-95%
-noncoverage reached approximately **7.5-8.3%** against nominal 5%. The cause is
-still under investigation; these inferential outputs remain unvalidated and were
-anti-conservative on those fixtures. The implementation is delivered and
-verified; its statistical acceptance gate is **open pending tech-lead review**.
-Until that is resolved, treat every M3a p-value, interval and Holm rejection as
-an unvalidated, anti-conservative screening hint — never as evidence of an edge. See
+**M3a inference is an approximate development screen; milestone acceptance
+remains pending tech-lead review.** The integrated monthly method passed the
+declared synthetic screen at G=12 against an 8% upper-bound envelope, without
+certifying nominal 5% control or arbitrary dependence across months. Explicit
+v1 retains its failed bootstrap calibration: rejection and nominal-95%
+noncoverage reached approximately **7.5-8.3%** on persistent-signal fixtures.
+Neither method certifies a validated edge or production acceptance. See
 [Calibration](#calibration).
 
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
@@ -1941,13 +1940,14 @@ evidence; `analysis-report` only renders the sealed analysis summary.
 
 ### The analysis request
 
-Strict JSON at `schema_version=1`, accepted as a file path or as a mapping
+Strict JSON with mandatory integer `schema_version`: **2** for new monthly
+analyses, **1** for explicit legacy bootstrap compatibility. Accepted as a file path or as a mapping
 through one normalization path. There is no trusted normalized-object bypass: an
 already normalized request is rendered back into this schema and revalidated.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "analysis_name": "Two green candles: matched comparisons",
   "model_instances": ["fixed_horizon"],
   "pairwise": [
@@ -1957,35 +1957,43 @@ already normalized request is rendered back into this schema and revalidated.
       "control_variant": "two_green_plain"
     }
   ],
-  "resamples": 9999,
-  "seed": 20260920,
   "notes": null
 }
 ```
 
 | Key | Contract |
 | --- | --- |
-| `schema_version` | Exactly `1`; a boolean is not an integer |
+| `schema_version` | Exactly integer `1` or `2`; checked before version-specific keys |
 | `analysis_name` | Nonblank label, outside semantic identity |
 | `model_instances` | Nonempty, unique model-instance IDs of the source study |
 | `pairwise` | Optional explicit comparisons; defaults to an empty list |
-| `resamples` | Integer `B` in `[1999, 99999]` |
-| `seed` | Integer in `[0, 2**32-1]` |
+| `resamples` | v1 only: integer `B` in `[1999, 99999]`; unsupported in v2 |
+| `seed` | v1 only: integer in `[0, 2**32-1]`; unsupported in v2 |
 | `notes` | Free-form text or null, outside semantic identity |
 
 Unknown keys, duplicate JSON keys, duplicate IDs, duplicate semantic pairs,
 self-comparisons, non-finite values and unknown references are all rejected, and
 every error names its field. Pairwise IDs may not use the reserved
-`baseline__` prefix. Cost scales linearly in `resamples` and family size;
+`baseline__` prefix. For v1, cost scales linearly in `resamples` and family size;
 batching bounds intermediate RAM, not total computational work.
 
 Version 1 **fixes** the method: `calendar_score_cbb_v1`, matching
 `instrument_utc_month_v1`, block length **7 days**, two-sided alpha **0.05**,
 pointwise confidence level **0.95** and the support rules below. These resolved
 values are recorded in the frozen family and in the analysis identity even
-though they are not request switches. A future method change needs an explicit
-version, not a silent default change; there is no menu of inference or matching
-methods.
+though they are not request switches. Version 2 fixes
+`monthly_cluster_jackknife_v1` with the same matching, family and nominal levels.
+It has no seed, resample count or block-length switch: these keys are rejected,
+including null values. Unknown versions and Boolean versions are rejected;
+normalized objects are revalidated, including contradictory v2 bootstrap fields.
+
+**Explicit legacy recipe:** read the tracked v2 example as a mapping, set
+`schema_version=1`, add `resamples=9999` and `seed=20260920`, and pass it to
+`analysis.run_analysis`. Existing v1 JSON remains valid without migration.
+`ANALYSIS_REQUEST_SCHEMA_VERSION`, `ANALYSIS_SCHEMA_VERSION` and `METHOD_ID`
+remain legacy aliases. Use `CURRENT_REQUEST_SCHEMA_VERSION=2`,
+`CURRENT_ANALYSIS_SCHEMA_VERSION=2`, `SUPPORTED_REQUEST_VERSIONS=(1, 2)`,
+`SUPPORTED_ANALYSIS_SCHEMA_VERSIONS=(1, 2)` and `V2_METHOD_ID` for current contracts.
 
 ### Admission
 
@@ -2145,7 +2153,40 @@ to agree. There is no automatic common-support retrimming. Occurrence variants
 that share one condition also share its known-false control population; those
 comparisons are named and are not independent tests.
 
-### One statistical method, with an explicit approximation
+### Versioned statistical methods, with an explicit approximation
+
+**Version 2 (new workflow).** The shared `analysis/monthly.py` kernel deletes one
+whole retained signal UTC month at a time, jointly across instruments. For each
+deletion it recomputes the same event-weighted signal, matched control and lift
+from retained stratum counts and sums. If `theta[-g]` is the deletion vector and
+`theta_bar` its mean, covariance is `(G-1)/G * sum((theta[-g]-theta_bar)
+(theta[-g]-theta_bar)^T)`. Standard errors are its diagonal square roots. The
+reported point is the full-sample estimate, not the deletion mean. Pointwise
+95% intervals use Student t with `df=G-1`; the two-sided lift p-value uses the
+same t reference. Joint deletion retains signal/control covariance.
+
+The existing full-sample support gates apply once. Mathematical validity adds
+G>=2, positive deletion denominators, finite arithmetic and a nondegenerate
+contrast. Deleted samples are not subjected to a new year-length gate. There
+is no G=12-only availability rule. G=13 and other supported counts may produce
+inference, but the declared calibration covers G=12 only. Unknown geometry is
+null; known non-12 geometry is explicitly outside that calibration.
+
+The measured G=12 synthetic screen had eight nulls with 2,000 attempts each:
+raw error 4.15-5.70%, family Holm error 0.9-2.4%. Its gate used exact one-sided
+95% upper bounds against an **8%** envelope and at least **95%** primary
+availability. Tests and interval noncoverage are correlated checks, not
+independent confirmations. Passing this screen does not certify nominal 5%
+control, arbitrary dependence across months, a validated edge or production
+acceptance. At df=11 a 95% interval half-width is approximately 2.20*SE; this is
+not a minimum detectable effect or a power calculation.
+
+`estimator.py` owns both method assemblies, Holm and compact evidence tables;
+research calls a thin adapter to this same implementation. Evaluating either
+method leaves accumulated results and numerical arrays unchanged.
+
+**Version 1 (legacy compatibility).** The following bootstrap description and
+its historical failure measurements apply only to explicit v1 requests.
 
 The estimand is the supported, event-weighted **mean net-return difference**
 above. It is not causation, an equity curve, a random-direction strategy or
@@ -2261,7 +2302,7 @@ requires all of:
 | Supported blocks | `supported_blocks >= 48` |
 | Retained coverage | `>= 80%` of valid target observations on common condition and outcome availability retained after stratum support exclusions |
 | Horizon ceiling | case horizon `<= 8 hours` |
-| Bootstrap variation | finite and nondegenerate for the tested contrast |
+| Method validity | v1: finite, nondegenerate bootstrap contrast; v2: monthly validity above |
 
 A **joint active day** has at least one retained E and one retained C
 observation in the pooled population. `supported_span_days` is the inclusive
@@ -2323,6 +2364,28 @@ this declared family, never an agent's unrecorded adaptive search across earlier
 runs.
 
 ### The sealed analysis artifact
+
+Request v1 produces artifact v1; request v2 produces artifact v2. Completion,
+status, summary and provenance must agree on exactly integer 1 or 2. Artifact
+version participates explicitly in semantic and implementation identities; v1
+retains its original digest payload. Readers use saved attributed hashes, not
+the current checkout, so genuine historical and relocated artifacts remain
+readable. Request/family/summary method settings must agree with the version
+even when altered files have been rehashed. Contradictions fail before rendering.
+
+V2 omits seed, resamples and Monte Carlo resolution, calendar bootstrap fields,
+member `bootstrap`, `p_upper`, `p_lower`, top-level `degeneracy` and `k_draw`.
+Common point estimates, intervals, support, p-values and Holm fields remain.
+Each member adds `monthly_inference`: method, three standard errors, informative
+months, degrees of freedom, balance, degeneracy, t statistic/critical value,
+covariance note and `month_count_in_calibration` (true for known G=12, false for
+other known counts, null when unknown). Point/interval/p-values have one owner
+in the common fields. Shared monthly source is attributed by ordinary artifacts.
+
+`saved.comparisons()` adds method, informative months, degrees of freedom,
+`standard_error_lift`, `month_count_in_calibration`, `effect_sign` and
+`nominal_reject_raw`. Legacy monthly columns are null; its raw rejection is
+derived from saved p/alpha if absent. Loading and rendering perform no inference.
 
 The analysis writes into its own output root and never mutates an input study
 file, including that study's derived report.
@@ -2387,6 +2450,12 @@ bytes alone. An unsealed, truncated or inconsistent artifact is rejected before
 any derived file is altered. There is no partial-inference bypass.
 
 ### The offline analysis report
+
+The renderer dispatches from the saved method. V1 retains its failed-calibration
+warning and bootstrap settings. V2 shows monthly G/df/standard errors and
+balance, the measured synthetic scope and non-12 disclosure, without seed/B or
+bootstrap claims. An unavailable member retains its known geometry and reasons;
+no missing standard error or p-value is fabricated.
 
 `derived/report.html` is a standalone light-theme page with no CDN, no network
 dependency and no required JavaScript package: escaped HTML tables only. It
@@ -2619,13 +2688,42 @@ returns, availability and results, never by digest equality.
 
 #### The experimental monthly-jackknife candidate
 
-`tools.pattern_lab.analysis.calibration_monthly` holds one **research-only**
-experimental candidate, `monthly_cluster_jackknife_v1`, and the driver that
-decides it against the unchanged acceptance contract above. It is reachable
-only from its own command. No analysis request, method default, sealed artifact
-schema or HTML rendering exposes it, the existing seven-day block bootstrap
-remains the implemented — and explicitly unvalidated — production method, and no
-outcome of this experiment adopts a method, accepts M3a or starts M3b.
+`tools.pattern_lab.analysis.calibration_monthly` is the **research-only driver**
+for `monthly_cluster_jackknife_v1`. The numerical method is now integrated in
+ordinary request/artifact v2 through a shared kernel; ordinary analysis never
+imports the driver or its resource/environment policy. Explicit v1 preserves the
+seven-day bootstrap. Historical experiment results below remain unchanged.
+No research PASS accepts M3a or starts M3b.
+
+Research source attribution revision 2 includes `analysis.monthly` in addition
+to the original five research modules. Older format-2 evidence without this
+revision retains its five-source scope and a disclosure; it does not silently
+acquire the new source guarantee. New revision-2 evidence missing the shared
+module is ineligible.
+
+Offline acceptance guards the actual consumed envelope/availability floor from
+`calibration`, rate set, ordered matrices (including attempts, kind and required
+flags), impossibility thresholds and maximum main attempts before any scoring
+or stopping proof. These must match frozen plan-1 fingerprints. Generator
+source drift remains a historical-attribution limitation, independently of
+verifier drift. Unknown frozen scenario names raise an explicit data error.
+
+**Reconstructing the pinned reference.** The tracked constants in
+`analysis/calibration_evidence.py` were derived from accepted commit `d47dfa4`
+and checked against the delivered format-1 manifest; accepted integration
+baseline `437e13620e1ac5e9f38b72a085448b88b36a29aa` retains them. To verify without
+ignored scripts or evidence, export that Git tree to an external temporary
+directory with `git archive`, import its `calibration_monthly` in a fresh Python
+process and obtain `candidate_manifest()` (no generation). Project the named
+sections using `_PLAN1_FIELDS`, and hash with `study.contracts.semantic_digest`:
+the whole `method`/`scope`, projected family/seeds/decision/budget/validity,
+ordered projected main/supplementary arrays, record/candle contracts; compare
+with `_PLAN1_DIGESTS`. Scenario projections omit only `note` and `caveat`, and
+must match `_PLAN1_SCENARIOS`; family member IDs/primary match `_PLAN1_FAMILIES`.
+The separate maximum-main pin is 16,000 (eight main fixtures * 2,000); compare
+the manifest's `matrix.max_main_attempts` with `_PLAN1_MAX_MAIN_ATTEMPTS`.
+Do not regenerate these acceptance pins from mutable current settings merely
+to make a drift failure pass.
 
 ```bash
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
@@ -2958,9 +3056,9 @@ scenarios and about 0.90 on the two persistent-signal ones. Those are different
 statistics on different methods, so they indicate a direction and nothing
 sharper. The PASS is **not** adoption, not a validated market edge, not error
 control under dependence longer than these fixtures', and not calibration for
-any other month count or support geometry. Integrating the method is a separate,
-later decision; at this commit the production screen is still the bootstrap and
-**M3a's statistical acceptance gate remains open**.
+any other month count or support geometry. The owner subsequently authorized
+ordinary v2 integration of this method. **M3a acceptance remains pending
+tech-lead review**; the research PASS itself is not milestone acceptance.
 
 Alongside the acceptance scenarios the driver runs short-population refusal
 checks at 84 and 180 days — including the same records embedded in a 365-day grid with
@@ -3126,7 +3224,12 @@ admission), `_analysis_artifact.py` (publication, failure, the seal, relocation,
 regeneration and the CLI) and `_analysis_calibration.py` (the calibration
 machinery, its versioned protocol gate, its attempt ledger and the corrected
 fixture 101; the large declared experiments run once through the command above).
-`test_pattern_lab_analysis_monthly.py` owns the experimental candidate's focused
+`test_pattern_lab_analysis_v2.py` owns ordinary v2 request/artifact/report
+integration, order independence, supported G=13 and research-import isolation.
+The monthly admission tests exercise consumed-verifier drift and versioned
+research attribution. Run these alongside all existing analysis modules and
+`test_pattern_lab_cli.py`; no new Monte Carlo experiment is needed.
+`test_pattern_lab_analysis_monthly.py` owns the shared method's focused
 checks: the point and monthly-score identities, direct deletion recomputation,
 the equal-count reduction and the interval/test inversion, every refusal, the
 fixture-102 candle law, its actual condition, emission, outcome and fee
@@ -3178,15 +3281,13 @@ advertised but did not check; block B adds the bounded spawn pool and the
 
 Known limits of these milestones:
 
-- **M3a inference is unvalidated: its acceptance gate failed.** The delivered
-  calibration met 11 of 15 checks; the two admitted scenarios with a persistent
-  daily signal-state chain measured about 7.5-8.3% rejection and noncoverage
-  against a nominal 5%. A nominal Holm rejection is not a validated edge, and
-  these p-values and intervals are anti-conservative under clustered signals.
-  The experimental `monthly_cluster_jackknife_v1` candidate passed the same
-  synthetic screen at twelve monthly clusters, but it is research-only and
-  unintegrated: it changes nothing about the production screen, and adopting it
-  is a separate decision that has not been taken.
+- **M3a integration is ready for tech-lead review; acceptance remains pending.**
+  New v2 analyses use monthly jackknife, which passed the declared synthetic
+  screen at twelve monthly clusters against an 8% upper-bound envelope, not
+  certified nominal 5% control. Arbitrary dependence across months is uncovered.
+  Explicit v1 keeps the legacy failure: 11/15 checks, about 7.5-8.3% rejection
+  and noncoverage on persistent-signal fixtures. A nominal Holm rejection from
+  either method is not a validated edge. M3b/M4 remain unimplemented.
 - **A seven-day block does not control error under dependence substantially
   longer than a week**, and the measurements above show it is already
   anti-conservative at the declared signal persistence. The tracked

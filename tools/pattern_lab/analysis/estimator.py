@@ -17,6 +17,7 @@ memory or regime change.  Holm cannot repair an invalid individual p-value.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -27,6 +28,9 @@ import pandas as pd
 from .. import PatternLabDataError
 from ..study import contracts
 from . import request as analysis_request
+from .monthly import monthly_jackknife, _unavailable_candidate
+from .request import V2_METHOD_ID as CANDIDATE_METHOD_ID, CONFIDENCE_LEVEL
+CANDIDATE_SCHEMA_VERSION = 1
 from .request import (
     ALPHA,
     BLOCK_LENGTH_DAYS,
@@ -63,22 +67,8 @@ RECORD_COLUMNS = (
     "return_valid",
 )
 
-# Deterministic reason order; every applicable reason is reported.
-REASON_NO_SUPPORT = "no_matched_support"
-REASON_SPAN = "insufficient_span"
-REASON_ACTIVE_DAYS = "insufficient_active_days"
-REASON_BLOCKS = "insufficient_supported_blocks"
-REASON_COVERAGE = "insufficient_retained_coverage"
-REASON_HORIZON = "unsupported_inference_horizon"
-REASON_DEGENERATE = "degenerate_contrast"
-REASON_ORDER = (
-    REASON_NO_SUPPORT,
-    REASON_SPAN,
-    REASON_ACTIVE_DAYS,
-    REASON_BLOCKS,
-    REASON_COVERAGE,
-    REASON_HORIZON,
-    REASON_DEGENERATE,
+from .request import (
+    REASON_NO_SUPPORT, REASON_SPAN, REASON_ACTIVE_DAYS, REASON_BLOCKS, REASON_COVERAGE, REASON_HORIZON, REASON_DEGENERATE, REASON_ORDER
 )
 
 STRATUM_REASON_TARGET_COUNT = "target_count_below_minimum"
@@ -807,7 +797,7 @@ def _evaluate_accumulated(
     member_ids = accumulated.member_ids
     instrument_ids = accumulated.instrument_ids
     grid = accumulated.grid
-    results = accumulated.results
+    results = deepcopy(accumulated.results)
     n_member = len(member_ids)
     lengths = accumulated.lengths
     k_draw = int(lengths.size)
@@ -839,7 +829,7 @@ def _evaluate_accumulated(
     resolution = 2.0 / (resamples + 1)
     return {
         "schema_version": ESTIMATOR_SCHEMA_VERSION,
-        "method": analysis_request.method_settings(),
+        "method": analysis_request.method_settings(1),
         "inference_scope": INFERENCE_SCOPE,
         "calendar": {
             **grid.as_json(),
@@ -857,41 +847,53 @@ def _evaluate_accumulated(
         "p_resolution_blocks_first_rejection": bool(resolution > ALPHA / n_member),
         "instruments": list(instrument_ids),
         "members": results,
-        "strata": _stratum_table(
-            members=members,
-            member_ids=member_ids,
-            instrument_ids=instrument_ids,
-            grid=grid,
-            retained=accumulated.retained,
-            nE=accumulated.nE,
-            nC=accumulated.nC,
-            a_sum=accumulated.a_sum,
-            b_sum=accumulated.b_sum,
-            ag_sum=accumulated.ag_sum,
-            bg_sum=accumulated.bg_sum,
-            overlap=accumulated.overlap,
-            target_days=accumulated.target_days,
-            control_days=accumulated.control_days,
-            stratum_member=accumulated.stratum_member,
-            stratum_instrument=accumulated.stratum_instrument,
-            stratum_month=accumulated.stratum_month,
-        ),
-        "daily": _daily_table(
-            member_ids=member_ids,
-            instrument_ids=instrument_ids,
-            grid=grid,
-            retained=accumulated.retained,
-            e_daily=accumulated.e_daily,
-            c_daily=accumulated.c_daily,
-            a_daily=accumulated.a_daily,
-            b_daily=accumulated.b_daily,
-            ag_daily=accumulated.ag_daily,
-            bg_daily=accumulated.bg_daily,
-            o_daily=accumulated.o_daily,
-            stratum_member=accumulated.stratum_member,
-            stratum_instrument=accumulated.stratum_instrument,
-            stratum_month=accumulated.stratum_month,
-        ),
+        **_accumulated_tables(accumulated),
+    }
+
+
+def evaluate_monthly_observations(
+    records: Any, *, family: Sequence[Any], instruments: Sequence[str],
+    study_start_ms: int, study_end_ms: int,
+) -> dict[str, Any]:
+    """Version-2 inference over the same checked matched accumulation."""
+    return _evaluate_monthly_accumulated(accumulate_observations(
+        records, family=family, instruments=instruments,
+        study_start_ms=study_start_ms, study_end_ms=study_end_ms,
+    ))
+
+
+def _evaluate_monthly_accumulated(accumulated: AccumulatedEstimates) -> dict[str, Any]:
+    candidates = _evaluate_monthly_candidate(accumulated)
+    results = deepcopy(accumulated.results)
+    for result, evaluated in zip(results, candidates["members"]):
+        candidate = evaluated["candidate"]
+        for key in ("bootstrap", "p_upper", "p_lower", "degeneracy"):
+            result.pop(key, None)
+        result["geometry"].pop("k_draw", None)
+        for key in ("inference_available", "unavailable_reasons", "p_raw", "p_holm",
+                    "p_holm_internal", "nominal_reject_holm", "nominal_reject_raw"):
+            result[key] = deepcopy(evaluated[key])
+        result["intervals"] = deepcopy(candidate["intervals"])
+        result["effect_sign"] = ("positive" if result["lift"] > 0 else
+                                 "negative" if result["lift"] < 0 else "zero") if result["inference_available"] else None
+        diagnostic = {key: deepcopy(candidate[key]) for key in (
+            "method", "standard_error", "informative_months", "degrees_of_freedom", "balance",
+            "degeneracy", "t_statistic", "t_critical", "covariance_note")}
+        # Full-sample support refusals still retain known month geometry. No SE/t
+        # calculation is invented for a member the support rules refused.
+        if diagnostic["informative_months"] is None:
+            known = result["geometry"].get("retained_months")
+            if known is not None:
+                diagnostic["informative_months"] = known
+                diagnostic["degrees_of_freedom"] = max(known - 1, 0)
+        groups = diagnostic["informative_months"]
+        diagnostic["month_count_in_calibration"] = None if groups is None else groups == 12
+        result["monthly_inference"] = diagnostic
+    return {
+        "schema_version": 2, "method": analysis_request.method_settings(2),
+        "inference_scope": INFERENCE_SCOPE, "calendar": accumulated.grid.as_json(),
+        "family_size": len(results), "instruments": list(accumulated.instrument_ids),
+        "members": results, **_accumulated_tables(accumulated),
     }
 
 
@@ -1547,4 +1549,129 @@ def _daily_table(
         "control_net_sum": b_daily[rows][keep],
         "target_gross_sum": ag_daily[rows][keep],
         "control_gross_sum": bg_daily[rows][keep],
+    }
+
+
+def _accumulated_tables(accumulated):
+    """Shared compact evidence assembly; the numerical arrays stay read-only."""
+    return {
+        "strata": _stratum_table(
+            members=accumulated.members,
+            member_ids=accumulated.member_ids,
+            instrument_ids=accumulated.instrument_ids,
+            grid=accumulated.grid,
+            retained=accumulated.retained,
+            nE=accumulated.nE,
+            nC=accumulated.nC,
+            a_sum=accumulated.a_sum,
+            b_sum=accumulated.b_sum,
+            ag_sum=accumulated.ag_sum,
+            bg_sum=accumulated.bg_sum,
+            overlap=accumulated.overlap,
+            target_days=accumulated.target_days,
+            control_days=accumulated.control_days,
+            stratum_member=accumulated.stratum_member,
+            stratum_instrument=accumulated.stratum_instrument,
+            stratum_month=accumulated.stratum_month,
+        ),
+        "daily": _daily_table(
+            member_ids=accumulated.member_ids,
+            instrument_ids=accumulated.instrument_ids,
+            grid=accumulated.grid,
+            retained=accumulated.retained,
+            e_daily=accumulated.e_daily,
+            c_daily=accumulated.c_daily,
+            a_daily=accumulated.a_daily,
+            b_daily=accumulated.b_daily,
+            ag_daily=accumulated.ag_daily,
+            bg_daily=accumulated.bg_daily,
+            o_daily=accumulated.o_daily,
+            stratum_member=accumulated.stratum_member,
+            stratum_instrument=accumulated.stratum_instrument,
+            stratum_month=accumulated.stratum_month,
+        ),
+    }
+
+def _evaluate_monthly_candidate(accumulated: AccumulatedEstimates) -> dict[str, Any]:
+    """Apply the candidate to every member of one accumulated family.
+
+    The unchanged full-sample support, span, active-day, block, coverage and
+    horizon gates have already been applied once, by the production accumulation.
+    A member they refused stays refused; the candidate adds only its own
+    mathematical validity rules and never reapplies a year-length admission gate
+    to a deleted-month sample.
+    """
+    members: list[dict[str, Any]] = []
+    for index, result in enumerate(accumulated.results):
+        inherited = list(result["unavailable_reasons"])
+        strata = accumulated.strata.get(index)
+        if strata is None:
+            candidate = _unavailable_candidate(inherited or [REASON_NO_SUPPORT])
+        else:
+            candidate = monthly_jackknife(
+                month_index=strata["month_index"],
+                target_count=strata["target_count"],
+                control_count=strata["control_count"],
+                target_net_sum=strata["target_net_sum"],
+                control_net_sum=strata["control_net_sum"],
+            )
+            if inherited:
+                candidate = _unavailable_candidate(
+                    inherited + candidate["reasons"], groups=candidate["informative_months"],
+                    balance=candidate["balance"], degeneracy=candidate["degeneracy"],
+                )
+        point = {name: result[name] for name in ("signal", "control", "lift")}
+        identity = None
+        if candidate["theta"]["lift"] is not None and point["lift"] is not None:
+            identity = max(
+                abs(float(candidate["theta"][name]) - float(point[name]))
+                for name in ("signal", "control", "lift")
+            )
+        members.append(
+            {
+                "member_id": result["member_id"],
+                "primary": bool(result["primary"]),
+                "horizon_minutes": int(result["horizon_minutes"]),
+                "direction": result["direction"],
+                # The reported point estimate is the original full-sample one.
+                "signal": point["signal"],
+                "control": point["control"],
+                "lift": point["lift"],
+                "point_identity_max_abs_difference": identity,
+                "inherited_reasons": inherited,
+                "candidate": candidate,
+                "inference_available": bool(candidate["available"]),
+                "unavailable_reasons": candidate["reasons"],
+                "p_raw": candidate["p_lift"],
+            }
+        )
+
+    internal = np.array(
+        [1.0 if item["p_raw"] is None else float(item["p_raw"]) for item in members],
+        dtype=np.float64,
+    )
+    adjusted = _holm(internal, [item["member_id"] for item in members])
+    for index, item in enumerate(members):
+        item["p_holm_internal"] = float(adjusted[index])
+        if item["inference_available"]:
+            item["p_holm"] = float(adjusted[index])
+            item["nominal_reject_holm"] = bool(adjusted[index] <= ALPHA)
+            item["nominal_reject_raw"] = bool(item["p_raw"] <= ALPHA)
+        else:
+            item["p_holm"] = None
+            item["nominal_reject_holm"] = None
+            item["nominal_reject_raw"] = None
+    return {
+        "schema_version": CANDIDATE_SCHEMA_VERSION,
+        "method": CANDIDATE_METHOD_ID,
+        "scope": "experimental_research_candidate",
+        "alpha": ALPHA,
+        "confidence_level": CONFIDENCE_LEVEL,
+        "family_size": len(members),
+        "members": members,
+        "note": (
+            "Holm uses the candidate's own p-values over the entire unchanged declared family, "
+            "with p=1 kept internally for unavailable members. No original bootstrap p-value "
+            "enters this family-wise result, and no seed or resample count governs this method."
+        ),
     }
