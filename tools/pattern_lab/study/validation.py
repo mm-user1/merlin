@@ -34,23 +34,26 @@ from . import spec as study_spec
 from .spec import StudyRequest
 
 
-def validate_saved_execution(document: Mapping[str, Any]) -> None:
+def validate_saved_execution(document: Mapping[str, Any], *, source="saved study") -> None:
     """Check saved purpose and period without a registry or external files."""
     version = document.get("schema_version")
     if type(version) is not int or version not in study_spec.SUPPORTED_REQUEST_VERSIONS:
         raise PatternLabDataError("study schema_version: unsupported version.")
     execution = document.get("execution") if version == 2 else {"kind": "development"}
+    execution = contracts.require_mapping(execution, source + ".execution")
+    if execution.get("kind") not in ("development", "validation"):
+        raise PatternLabDataError(f"{source}.execution.kind: unsupported {execution.get('kind')!r}; supported: development, validation.")
     if version == 2:
         from .context import normalize_aliases
         normalize_aliases(document.get("context"))
+    from ..manifest import to_epoch_ms
+    study = contracts.require_mapping(document.get("study"), source + ".study")
+    start, end, warmup = [to_epoch_ms(study.get(key), source + ".study." + key) for key in
+                         ("start_utc", "end_utc", "warmup_start_utc")]
+    if not warmup <= start < end:
+        raise PatternLabDataError(f"{source}.study: invalid interval order.")
     if execution == {"kind": "development"}:
-        from ..manifest import to_epoch_ms
-        protocol = study_spec.normalize_protocol(document["protocol"], source="saved protocol")
-        study = document["study"]
-        start, end, warmup = [to_epoch_ms(study[key], key) for key in
-                              ("start_utc", "end_utc", "warmup_start_utc")]
-        if not warmup <= start < end:
-            raise PatternLabDataError("saved study: invalid interval order.")
+        protocol = study_spec.normalize_protocol(document.get("protocol"), source=source + ".protocol")
         study_spec.validate_against_protocol(protocol, study_start_ms=start,
                                             study_end_ms=end, warmup_start_ms=warmup)
     else:

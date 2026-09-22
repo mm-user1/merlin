@@ -16,6 +16,13 @@ POLICY = "dense_utc_close_same_timeframe_all_declared_members_no_fill_v1"
 
 @dataclass(frozen=True)
 class ContextSeries:
+    """Dense epoch slots; availability is owned by ``valid``.
+
+    ``bars.contiguous_with_previous()`` tests slot adjacency, not missing data.
+    Rolling features must require validity over their full declared lookback
+    and re-warm after every invalid slot.
+    """
+
     bars: BarSeries
     valid: np.ndarray
 

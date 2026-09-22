@@ -14,11 +14,15 @@ proved by shape checks.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import builtins
 import hashlib
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import platform
+import re
 import subprocess
 import sys
 import sysconfig
@@ -82,32 +86,206 @@ class LoadedExtension:
 # digests they were imported from.  A second study reuses them only when the
 # files still hash to the same values.
 _LOADED: dict[str, LoadedExtension] = {}
+# Runtime object, resolved source path and verified executed bytes. Records are
+# committed only after the owning extension successfully registers.
+_VERIFIED_MODULES: dict[str, tuple[ModuleType, Path, str]] = {}
+_VERIFIED_IMPORTS: dict[str, tuple[ModuleType, ...]] = {}
 
 
-def _verify_local_imports(module, declaration) -> None:
-    """Local imported Python helpers must be explicitly declared and hashed.
+def _relative_source_path(value, where):
+    if not isinstance(value, str) or not value:
+        raise PatternLabDataError(f"{where}: expected a relative source path.")
+    path = PurePosixPath(value.replace("\\", "/"))
+    if path.is_absolute() or PureWindowsPath(value).drive or ".." in path.parts or not path.parts:
+        raise PatternLabDataError(f"{where}: invalid relative source path {value!r}.")
+    return path.as_posix()
 
-    This checks imported namespaces, not arbitrary future Python behavior.
-    Trusted code must still declare files it opens or dynamically loads later.
+
+def source_records(records, declarations, *, where):
+    """Validate and project saved/loaded attribution without physical roots.
+
+    Check uniqueness before constructing maps, including declared coverage.
+    This is also the offline frozen-candidate comparison boundary.
     """
-    root = Path(declaration.source_root).resolve()
-    allowed = {(root / name).resolve() for name, _ in _declared_files(declaration)}
-    seen = set()
-    def visit(current):
-        if id(current) in seen:
+    from . import contracts
+    expected = {}
+    if not isinstance(declarations, (list, tuple)) or not isinstance(records, (list, tuple)):
+        raise PatternLabDataError(f"{where}: extensions and declarations must be lists.")
+    for declaration in declarations:
+        declaration = contracts.require_mapping(declaration, where)
+        name = contracts.require_identifier(declaration.get("module"), where + ".module")
+        helpers = declaration.get("helpers")
+        if name in expected or not isinstance(helpers, list):
+            raise PatternLabDataError(f"{where}: duplicate module {name!r} or invalid helpers.")
+        paths = [name + ".py", *helpers]
+        checked = set()
+        for path in paths:
+            path = _relative_source_path(path, where)
+            if path in checked:
+                raise PatternLabDataError(f"{where}: duplicate source path {name}/{path}.")
+            checked.add(path)
+        expected[name] = checked
+    result = {}
+    for record in records:
+        record = contracts.require_mapping(record, where)
+        name = contracts.require_identifier(record.get("module"), where + ".module")
+        if name in result or name not in expected or not isinstance(record.get("files"), list):
+            raise PatternLabDataError(f"{where}: duplicate/unexpected module {name!r} or missing files.")
+        files = {}
+        for item in record["files"]:
+            item = contracts.require_mapping(item, where + ".files")
+            path, digest = item.get("path"), item.get("sha256")
+            path = _relative_source_path(path, where)
+            if path not in expected[name] or path in files:
+                raise PatternLabDataError(f"{where}: duplicate/unexpected helper {name}/{path}.")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise PatternLabDataError(f"{where}: invalid SHA-256 for {name}/{path}.")
+            files[path] = digest
+        if set(files) != expected[name]:
+            raise PatternLabDataError(f"{where}: missing declared source/helper coverage for {name}.")
+        result[name] = files
+    if set(result) != set(expected):
+        raise PatternLabDataError(f"{where}: missing declared extension coverage.")
+    return result
+
+
+def compare_source_records(actual, required, declarations, *, where):
+    expected = source_records(required, declarations, where=where + " frozen sources")
+    observed = source_records(actual, declarations, where=where + " actual sources")
+    for name, files in expected.items():
+        for path, digest in files.items():
+            if observed[name][path] != digest:
+                raise PatternLabDataError(
+                    f"{where}: extension source {name}/{path}: expected {digest}, "
+                    f"actual {observed[name][path]}; frozen generation mismatch.",
+                    error_code="source_changed",
+                )
+
+
+def _load_verified_extension(record):
+    """Observe ordinary imports only during trusted loading/registration.
+
+    The temporary finder delegates resolution to PathFinder and changes only
+    local source code loading, compiling verified .py bytes without a pyc cache.
+    The import observer also sees already-cached scalar/namespace imports.
+    Arbitrary later dynamic loading remains the trusted author's responsibility.
+    """
+    from . import contracts
+    root = Path(record.source_root).resolve()
+    allowed = {(root / path).resolve(): digest for path, digest in record.files}
+    pending = {}
+    imported_dependencies = {}
+    modules_before = set(sys.modules)
+    registry_before = {kind: dict(items) for kind, items in contracts._REGISTRY.items()}
+    original_import = builtins.__import__
+    original_path = list(sys.path)
+
+    def declared(path):
+        if path not in allowed:
+            raise PatternLabDataError(
+                f"extension {record.module}: undeclared local helper {path.relative_to(root)}; declare it in helpers.")
+
+    def check_module(module, seen=None):
+        seen = set() if seen is None else seen
+        if id(module) in seen:
             return
-        seen.add(id(current))
-        for value in vars(current).values():
-            imported = value if isinstance(value, ModuleType) else sys.modules.get(getattr(value, "__module__", ""))
-            origin = getattr(imported, "__file__", None)
-            if origin is None:
-                continue
-            path = Path(origin).resolve()
-            if root in path.parents:
-                if path not in allowed:
-                    raise PatternLabDataError(f"extension {declaration.module}: undeclared local helper {path.name}; declare it in helpers.")
-                visit(imported)
-    visit(module)
+        seen.add(id(module))
+        origin = getattr(module, "__file__", None)
+        if origin is None:
+            return
+        path = Path(origin).resolve()
+        if root not in path.parents:
+            local = root.joinpath(*module.__name__.split("."))
+            for chosen in (local.with_suffix(".py"), local/"__init__.py"):
+                if chosen.is_file():
+                    raise PatternLabDataError(
+                        f"extension {record.module}: helper {module.__name__} is cached from {path}, "
+                        f"not chosen source {chosen}. Start a fresh interpreter.", error_code="unverified_module")
+            return
+        declared(path)
+        known = pending.get(module.__name__) or _VERIFIED_MODULES.get(module.__name__)
+        if known != (module, path, allowed[path]):
+            raise PatternLabDataError(
+                f"extension {record.module}: helper {module.__name__} at {path} has an unknown "
+                "or changed runtime source generation. Start a fresh interpreter and run again.",
+                error_code="unverified_module")
+        for dependency in _VERIFIED_IMPORTS.get(module.__name__, ()):
+            check_module(dependency, seen)
+
+    class VerifiedLoader(importlib.machinery.SourceFileLoader):
+        def get_code(self, fullname):
+            path = Path(self.path).resolve()
+            declared(path)
+            payload = path.read_bytes()
+            actual = hashlib.sha256(payload).hexdigest()
+            if actual != allowed[path]:
+                raise PatternLabDataError(
+                    f"extension {record.module}: {path.name}: expected {allowed[path]}, actual {actual}.",
+                    error_code="source_changed")
+            pending[fullname] = (sys.modules[fullname], path, actual)
+            return compile(payload, str(path), "exec", dont_inherit=True)
+
+    class LocalSourceFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            found = importlib.machinery.PathFinder.find_spec(fullname, path)
+            if found is not None and found.origin:
+                origin = Path(found.origin).resolve()
+                if root in origin.parents:
+                    declared(origin)
+                    found.loader = VerifiedLoader(fullname, str(origin))
+                    return found
+            return None
+
+    def observed_import(name, globals=None, locals=None, fromlist=(), level=0):
+        imported = original_import(name, globals, locals, fromlist, level)
+        full = (importlib.util.resolve_name("." * level + name, globals.get("__package__"))
+                if level else name)
+        names = [".".join(full.split(".")[:i]) for i in range(1, len(full.split(".")) + 1)]
+        names.extend(full + "." + item for item in (fromlist or ()) if item != "*")
+        for imported_name in names:
+            module = sys.modules.get(imported_name)
+            if module is not None:
+                check_module(module)
+                origin = getattr(module, "__file__", None)
+                owner = (globals or {}).get("__name__")
+                if owner in pending and origin and root in Path(origin).resolve().parents:
+                    imported_dependencies.setdefault(owner, {})[imported_name] = module
+        return imported
+
+    finder = LocalSourceFinder()
+    try:
+        sys.path.insert(0, str(root))
+        sys.meta_path.insert(0, finder)
+        builtins.__import__ = observed_import
+        loader = VerifiedLoader(record.module, record.module_path)
+        specification = importlib.util.spec_from_file_location(record.module, record.module_path, loader=loader)
+        module = importlib.util.module_from_spec(specification)
+        sys.modules[record.module] = module
+        loader.exec_module(module)
+        register = getattr(module, "register", None)
+        if not callable(register):
+            raise PatternLabDataError(f"extension {record.module!r}: the module must expose a callable register(context).")
+        context = ExtensionContext(record.module, record.module_path, dict(record.files)[record.module + ".py"])
+        register(context)
+        verify_extensions((record,), where="extension after import and registration")
+        contracts.require_verified_registrations({record.module_path: dict(record.files)[record.module + ".py"]})
+        for name in pending:
+            check_module(sys.modules[name])
+    except BaseException:
+        for kind, items in contracts._REGISTRY.items():
+            for name in set(items) - set(registry_before[kind]):
+                del items[name]
+        for name in set(sys.modules) - modules_before:
+            origin = getattr(sys.modules[name], "__file__", None)
+            if name == record.module or (origin and root in Path(origin).resolve().parents):
+                sys.modules.pop(name, None)
+        raise
+    finally:
+        builtins.__import__ = original_import
+        sys.meta_path.remove(finder)
+        sys.path[:] = original_path
+    _VERIFIED_MODULES.update(pending)
+    _VERIFIED_IMPORTS.update({name: tuple(imported_dependencies.get(name, {}).values()) for name in pending})
 
 
 def _declared_files(declaration) -> list[tuple[str, Path]]:
@@ -157,7 +335,9 @@ def load_extensions(declarations: Sequence[Any]) -> tuple[LoadedExtension, ...]:
         )
         previous = _LOADED.get(declaration.module)
         if previous is not None:
-            if previous.files != digests or previous.source_root != root:
+            runtime = _VERIFIED_MODULES.get(declaration.module)
+            if (previous.files != digests or previous.source_root != root
+                    or runtime is None or sys.modules.get(declaration.module) is not runtime[0]):
                 raise PatternLabDataError(
                     f"extension {declaration.module!r}: its declared source changed after it was "
                     "imported into this interpreter, so the registrations it created cannot be "
@@ -173,40 +353,7 @@ def load_extensions(declarations: Sequence[Any]) -> tuple[LoadedExtension, ...]:
                 "interpreter and run again.",
                 error_code="unverified_module",
             )
-        specification = importlib.util.spec_from_file_location(declaration.module, module_path)
-        if specification is None or specification.loader is None:
-            raise PatternLabDataError(
-                f"extension {declaration.module!r}: {module_path} is not an importable Python module."
-            )
-        module = importlib.util.module_from_spec(specification)
-        sys.modules[declaration.module] = module
-        inserted = root not in sys.path
-        if inserted:
-            sys.path.insert(0, root)
-        try:
-            specification.loader.exec_module(module)
-        except BaseException:
-            sys.modules.pop(declaration.module, None)
-            raise
-        finally:
-            if inserted and root in sys.path:
-                sys.path.remove(root)
-        register = getattr(module, "register", None)
-        _verify_local_imports(module, declaration)
-        if not callable(register):
-            sys.modules.pop(declaration.module, None)
-            raise PatternLabDataError(
-                f"extension {declaration.module!r}: the module must expose a callable "
-                "register(context) that registers its descriptors explicitly."
-            )
-        context = ExtensionContext(
-            module=declaration.module, source_path=module_path, source_digest=dict(digests)[f"{declaration.module}.py"]
-        )
-        try:
-            register(context)
-        except BaseException:
-            sys.modules.pop(declaration.module, None)
-            raise
+        _load_verified_extension(record)
         _LOADED[declaration.module] = record
         loaded.append(record)
 

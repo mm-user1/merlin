@@ -602,6 +602,8 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
     from . import context as study_context
     context = study_context.normalize_aliases(values.get("context")) if version == 2 else {}
     execution = contracts.require_mapping(values.get("execution"), "execution") if version == 2 else {"kind": "development"}
+    if execution.get("kind") not in ("development", "validation"):
+        raise PatternLabDataError(f"execution.kind: unsupported {execution.get('kind')!r}; supported: development, validation.")
     if execution != {"kind": "development"}:
         # Candidate-bound validation is checked by the shared split policy below.
         contracts.closed_keys(execution, ("kind", "candidate"), "execution")

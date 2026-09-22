@@ -56,6 +56,21 @@ def test_arithmetic_gaps_prefix_and_doji():
     np.testing.assert_array_equal(context.panel_green(g, {"alias":"panel"}, {}).values[:-1], panel.values[:-1])
 
 
+def test_dense_three_bar_lookback_rewarms_after_missing_slot():
+    series = grid([10., 11., 12., np.nan, 14., 15., 16., 17.],
+                  [9., 10., 11., np.nan, 13., 14., 15., 16.], [1, 1, 1, 0, 1, 1, 1, 1])
+    # Dense slots remain adjacent across the missing observation.
+    assert series.bars.contiguous_with_previous()[3:5].all()
+    values = np.full(8, np.nan)
+    valid = np.zeros(8, dtype=bool)
+    for i in range(2, 8):  # required_prior_bars=2, including all three observations
+        valid[i] = series.valid[i-2:i+1].all()
+        if valid[i]:
+            values[i] = series.bars.close[i] / series.bars.close[i-2] - 1
+    np.testing.assert_array_equal(valid, [0, 0, 1, 0, 0, 0, 1, 1])
+    np.testing.assert_allclose(values[valid], [.2, 16/14-1, 17/15-1])
+
+
 def test_context_run_identity_and_single_preparation(tmp_path, monkeypatch):
     doc = context_fixture(tmp_path / "pack")
     calls = []
@@ -167,8 +182,6 @@ def test_scope_cycle_and_undeclared_helper(tmp_path, monkeypatch):
     doc = context_fixture(tmp_path/"pack")
     (tmp_path/"ctx_unlisted_helper.py").write_text("VALUE = 1\n")
     (tmp_path/"ctx_bad_extension.py").write_text("from ctx_unlisted_helper import VALUE\ndef register(context): pass\n")
-    # Import a module object too, so attribution cannot disappear with a scalar.
-    (tmp_path/"ctx_bad_extension.py").write_text("import ctx_unlisted_helper\ndef register(context): pass\n")
     doc["extensions"] = [{"module":"ctx_bad_extension", "source_root":str(tmp_path), "helpers":[]}]
     with pytest.raises(PatternLabDataError, match="undeclared local helper"):
         validation.validated_request(doc)

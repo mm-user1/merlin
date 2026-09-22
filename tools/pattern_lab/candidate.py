@@ -219,16 +219,11 @@ def load_candidate(candidate: Any) -> dict[str, Any]:
             _digest(value, key)
         if not isinstance(code["extensions"], list):
             raise PatternLabDataError("candidate extensions: expected a list.")
-        expected_extensions = {e["module"]: {e["module"]+".py", *e["helpers"]} for e in semantic["extensions"]}
-        if {e["module"] for e in code["extensions"]} != set(expected_extensions):
-            raise PatternLabDataError("candidate extension membership drift.")
+        extensions.source_records(code["extensions"], semantic["extensions"], where="candidate")
         for extension in code["extensions"]:
             _object(extension, ("module", "files"), "candidate extension")
-            if {item["path"] for item in extension["files"]} != expected_extensions[extension["module"]]:
-                raise PatternLabDataError("candidate helper membership drift.")
             for item in extension["files"]:
                 _object(item, ("path", "sha256"), "candidate helper")
-                _digest(item["sha256"], "candidate helper digest")
         discovery = _object(document["discovery"], ("binding", "study_completion_sha256", "analysis_completion_sha256",
                             "analysis_identities", "source_study_version"), "candidate.discovery")
         _digest(discovery["study_completion_sha256"], "discovery study completion")
@@ -313,18 +308,25 @@ def validate_execution(document):
     return candidate
 
 
-def verify_current_generation(candidate):
+def verify_current_generation(candidate, *, actual_extensions=None):
     """Required source bytes only: report/transport/provenance drift is permitted."""
     for name, digest in candidate["required_code"]["core"].items():
         module = importlib.util.find_spec(name)
         if module is None or not module.origin or extensions.file_digest(Path(module.origin)) != digest:
             raise PatternLabDataError(f"candidate required generation changed: {name}; produce a fresh development generation.")
-    roots = {item["module"]: Path(item["source_root"]) for item in candidate["recipe"]["study"]["extensions"]}
-    for item in candidate["required_code"]["extensions"]:
-        for file in item["files"]:
-            path = roots[item["module"]]/file["path"]
-            if not path.is_file() or extensions.file_digest(path) != file["sha256"]:
-                raise PatternLabDataError(f"candidate required extension generation changed: {item['module']}/{file['path']}.")
+    if actual_extensions is None:
+        actual_extensions = []
+        for item in candidate["recipe"]["study"]["extensions"]:
+            declaration = spec.ExtensionDeclaration(**item)
+            actual_extensions.append({"module": item["module"], "files": [
+                {"path": name, "sha256": digest} for name, digest in extensions._resolve_digests(declaration)]})
+    verify_extension_generation(candidate, actual_extensions)
+
+
+def verify_extension_generation(candidate, actual):
+    """Compare actual execution or saved attribution, using records only."""
+    extensions.compare_source_records(actual, candidate["required_code"]["extensions"],
+        candidate["recipe"]["study_semantic"]["extensions"], where="candidate validation")
 
 
 def verify_admitted_contracts(candidate, request, entries, context_entries):
@@ -344,6 +346,58 @@ def validation_metadata(candidate):
             "discovery": candidate["recipe"]["study_semantic"]["study"],
             **candidate["split"], "prior_use": candidate["prior_use"],
             "fixed_family_size": candidate["recipe"]["analysis_family"]["family_size"]}
+
+
+def _verified_validation_children(root, frozen):
+    """One saved-record check shared by receipt publication and offline reads."""
+    from .analysis.source import admit_source
+    source = admit_source(root/"study", model_instances=frozen["recipe"]["analysis_request"]["model_instances"])
+    analyzed = artifacts.load_analysis(root/"analysis")
+    if source.results.request.get("execution") != {"kind": "validation", "candidate": frozen}:
+        raise PatternLabDataError("validation child candidate contradicts the parent snapshot.")
+    binding = source.binding_document()
+    for key in ("semantic", "physical", "semantic_inputs"):
+        if binding[key] != analyzed.source[key]:
+            raise PatternLabDataError(f"validation child source binding mismatch: {key}.")
+    if (analyzed.request != frozen["recipe"]["analysis_request"]
+            or analyzed.family != frozen["recipe"]["analysis_family"]):
+        raise PatternLabDataError("validation child analysis contradicts the frozen request/family.")
+    return {name: {"completion_sha256": manifest.file_sha256(root/name/"completion.json"),
+                   "evidence_set_sha256": seal["evidence_set_sha256"]}
+            for name, seal in (("study", source.results.completion), ("analysis", analyzed.completion))}
+
+
+def load_validation(output_root):
+    """Return the verified final receipt; status alone never means complete.
+
+    Reads saved metadata and file digests only. Relocation needs neither source
+    code, original paths, a market pack, table decoding nor inference.
+    """
+    root = Path(output_root).expanduser().resolve()
+    if not (root/"receipt.json").is_file():
+        raise PatternLabDataError(f"{root}: validation is incomplete: missing final receipt.json.",
+                                  error_code="incomplete_run")
+    try:
+        frozen = load_candidate(root/"candidate.json")
+        metadata = validation_metadata(frozen)
+        receipt = _object(evidence.read_json(root/"receipt.json"),
+            ("schema_version", "status", *metadata, "children", "completed_utc"), "validation receipt")
+        if type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1:
+            raise PatternLabDataError("validation receipt: unsupported schema_version; supported: 1.")
+        if receipt["status"] != "completed" or any(receipt[key] != value for key, value in metadata.items()):
+            raise PatternLabDataError("validation receipt: status/candidate/period/family metadata disagreement.")
+        manifest.require_int(receipt["fixed_family_size"], "validation receipt.fixed_family_size", minimum=1)
+        manifest.to_epoch_ms(receipt["completed_utc"], "validation receipt.completed_utc")
+        children = _object(receipt["children"], ("study", "analysis"), "validation receipt.children")
+        for name, child in children.items():
+            child = _object(child, ("completion_sha256", "evidence_set_sha256"), "validation receipt." + name)
+            for key, value in child.items():
+                _digest(value, "validation receipt." + name + "." + key)
+        if children != _verified_validation_children(root, frozen):
+            raise PatternLabDataError("validation receipt: child completion/evidence-set digest mismatch.")
+        return dict(receipt)
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise PatternLabDataError(f"{root}: malformed validation receipt/evidence: {error}") from error
 
 
 def run_validation(*, candidate, data_root, output_root, workers=1):
@@ -401,27 +455,25 @@ def run_validation(*, candidate, data_root, output_root, workers=1):
         analyzed_request = {key:value for key,value in frozen["recipe"]["analysis_request"].items() if key != "method"}
         analysis_runner.run_analysis(request=analyzed_request, run_root=root/"study", output_root=root/"analysis")
         phase = "receipt"
-        from .analysis.source import admit_source
-        final_source = admit_source(root/"study", model_instances=frozen["recipe"]["analysis_request"]["model_instances"])
-        final_analysis = artifacts.load_analysis(root/"analysis")
-        study_seal = final_source.results.completion
-        analysis_seal = final_analysis.completion
-        if final_source.results.request["execution"]["candidate"] != frozen:
-            raise PatternLabDataError("validation child candidate contradicts the parent snapshot.")
-        for key in ("semantic", "physical", "semantic_inputs"):
-            if final_source.binding_document()[key] != final_analysis.source[key]:
-                raise PatternLabDataError(f"validation child source binding mismatch: {key}.")
+        children = _verified_validation_children(root, frozen)
         verify_current_generation(frozen)
         if load_candidate(root/"candidate.json") != frozen:
             raise PatternLabDataError("validation candidate snapshot changed during execution.")
         receipt = {"schema_version":1, "status":"completed", **validation_metadata(frozen),
-            "children": {name:{"completion_sha256":manifest.file_sha256(root/name/"completion.json"),
-                                "evidence_set_sha256":seal["evidence_set_sha256"]}
-                         for name,seal in (("study",study_seal),("analysis",analysis_seal))},
+            "children": children,
             "completed_utc":artifacts.now_utc()}
         status("completed")
         evidence.write_json(root/"receipt.json", receipt)
+        receipt = load_validation(root)
     except BaseException as error:
+        try:
+            committed = load_validation(root)
+        except BaseException:
+            committed = None
+        if committed is not None:
+            if not isinstance(error, Exception):
+                raise  # Preserve completed evidence while propagating control flow.
+            return {**committed, "output_root":str(root), "report":str(root/"analysis"/artifacts.REPORT_FILE)}
         try:
             status("interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error)
         except BaseException:

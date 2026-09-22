@@ -1159,3 +1159,39 @@ def analysis_request_document(**overrides) -> dict[str, Any]:
     }
     document.update(overrides)
     return document
+def frozen_extension_generation(root, *, module="frozen_probe_extension"):
+    """Small synthetic discovery with an ordinary declared scalar helper."""
+    from tools.pattern_lab import analysis, candidate, study
+    source_root = root / "sources"
+    source_root.mkdir(parents=True)
+    helper = module + "_helper"
+    (source_root / (helper + ".py")).write_text("VALUE = False\n", encoding="utf-8")
+    (source_root / (module + ".py")).write_text(
+        f"from {helper} import VALUE\nimport numpy as np\n"
+        "from tools.pattern_lab.study import contracts\n"
+        "def evaluate(series, parameters, features):\n"
+        "    return contracts.ConditionValue(np.full(series.row_count, VALUE, dtype=bool), np.ones(series.row_count, dtype=bool))\n"
+        "def register(context):\n"
+        f"    context.register_hypothesis(contracts.HypothesisDescriptor('{module}', '1', evaluate))\n",
+        encoding="utf-8")
+    tf = 60
+    start, end = study_group_ms(24 * 8, tf), study_group_ms(24 * 11, tf)
+    stamps, values = timeframe_bars(tf, analysis_bar_specs(24 * 11, 11))
+    publish(root / "pack", [instrument_source(stamps, values, symbol="AAA", contract="AAA-USDT-SWAP")])
+    protocol = study_protocol(first_ms=study_group_ms(0, tf), coverage_end_ms=end)
+    protocol["development"] = {"start_utc": utc(study_group_ms(0, tf)), "end_utc": utc(start)}
+    protocol["reserved"] = {"start_utc": utc(start), "end_utc": utc(end)}
+    request = study_request(protocol=protocol, start_ms=study_group_ms(4, tf), end_ms=start,
+        warmup_ms=study_group_ms(0, tf), timeframes=[tf],
+        hypotheses=[{"id": "frozen", "hypothesis": module, "parameters": {}, "occurrence": "every_qualifying_bar"}],
+        models=[fixed_horizon_model(tf, [60, 120, 240, 480], primary=240)],
+        extensions=[{"module": module, "source_root": str(source_root), "helpers": [helper + ".py"]}])
+    request.update(schema_version=2, context={}, execution={"kind": "development"})
+    study.run_study(request=request, data_root=root / "pack", output_root=root / "study")
+    analysis_document = analysis_request_document(schema_version=2, pairwise=[])
+    analysis_document.pop("resamples")
+    analysis_document.pop("seed")
+    analysis.run_analysis(request=analysis_document, run_root=root / "study", output_root=root / "analysis")
+    frozen = candidate.freeze_candidate(study_root=root / "study", analysis_root=root / "analysis",
+        start=utc(start), end=utc(end), warmup_start=utc(start - 2 * tf * 60000), output=root / "candidate.json")
+    return frozen

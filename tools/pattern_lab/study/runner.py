@@ -690,10 +690,11 @@ def run_study(
     if normalized.execution["kind"] == "validation":
         from ..candidate import validate_execution, verify_current_generation
         candidate = validate_execution(normalized.semantic_document())
-        verify_current_generation(candidate)
 
     loaded = study_extensions.load_extensions(normalized.extensions)
     study_extensions.verify_extensions(loaded, where="study preflight")
+    if candidate is not None:
+        verify_current_generation(candidate, actual_extensions=[record.as_json() for record in loaded])
     used = study_validation.require_used_sources(normalized, loaded, where="study preflight")
     declared_digests = study_validation.declared_digests(loaded)
     source_identity = {

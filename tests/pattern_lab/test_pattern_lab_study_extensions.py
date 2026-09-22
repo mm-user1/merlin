@@ -456,10 +456,11 @@ def test_a_declared_helper_is_hashed_and_a_mid_run_mutation_is_detected(tmp_path
 def test_an_edited_module_cannot_be_reused_in_the_same_interpreter(tmp_path):
     pack = build_pack(tmp_path / "pack")
     root = tmp_path / "ext"
-    write_module(root, "ext_reimport", SIMPLE_METRIC, helpers={"helper_math.py": HELPER_MATH})
+    body = SIMPLE_METRIC.replace("helper_math", "helper_reimport").replace("ext_share_metric", "ext_share_reimport")
+    write_module(root, "ext_reimport", body, helpers={"helper_reimport.py": HELPER_MATH})
     document = request_for(
-        metrics=[{"id": "share", "metric": "ext_share_metric"}],
-        extensions=[declaration(root, "ext_reimport", ["helper_math.py"])],
+        metrics=[{"id": "share", "metric": "ext_share_reimport"}],
+        extensions=[declaration(root, "ext_reimport", ["helper_reimport.py"])],
     )
     pack_study.run_study(request=document, data_root=pack, output_root=tmp_path / "run")
 
@@ -475,17 +476,18 @@ def test_an_edited_module_cannot_be_reused_in_the_same_interpreter(tmp_path):
 def test_a_snapshot_is_inert_provenance_and_is_never_imported(tmp_path):
     pack = build_pack(tmp_path / "pack")
     root = tmp_path / "ext"
-    write_module(root, "ext_snapshot", SIMPLE_METRIC, helpers={"helper_math.py": HELPER_MATH})
+    body = SIMPLE_METRIC.replace("helper_math", "helper_snapshot").replace("ext_share_metric", "ext_share_snapshot")
+    write_module(root, "ext_snapshot", body, helpers={"helper_snapshot.py": HELPER_MATH})
     document = request_for(
-        metrics=[{"id": "share", "metric": "ext_share_metric"}],
-        extensions=[declaration(root, "ext_snapshot", ["helper_math.py"])],
+        metrics=[{"id": "share", "metric": "ext_share_snapshot"}],
+        extensions=[declaration(root, "ext_snapshot", ["helper_snapshot.py"])],
     )
     result = pack_study.run_study(
         request=document, data_root=pack, output_root=tmp_path / "run"
     )
     run_root = Path(result["run_root"])
     snapshots = sorted(path.name for path in (run_root / "spec" / "snapshots").iterdir())
-    assert snapshots == ["ext_snapshot__ext_snapshot.py", "ext_snapshot__helper_math.py"]
+    assert snapshots == ["ext_snapshot__ext_snapshot.py", "ext_snapshot__helper_snapshot.py"]
     assert not any(name.startswith("ext_snapshot__") for name in sys.modules)
 
     # Regeneration reuses the recorded metric values without importing anything.
@@ -495,7 +497,7 @@ def test_a_snapshot_is_inert_provenance_and_is_never_imported(tmp_path):
     pack_study.regenerate_report(run_root)
     assert set(sys.modules) - before == set()
     summary = json.loads((run_root / "derived" / "summary.json").read_text())
-    assert summary["metrics"]["values"][0]["metric_id"] == "ext_share_metric"
+    assert summary["metrics"]["values"][0]["metric_id"] == "ext_share_snapshot"
 
 
 def test_a_missing_declared_module_or_helper_is_named(tmp_path):

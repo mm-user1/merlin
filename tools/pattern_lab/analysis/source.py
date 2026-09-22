@@ -182,17 +182,13 @@ def admit_source(
     for instance_id in model_instances:
         _check_model_instance(instances[instance_id], timeframes)
 
-    # The saved study bounds are rechecked against the study's own saved
-    # development protocol; T05 introduces no reserved-period bypass.
-    protocol = study_spec.normalize_protocol(
-        study_spec.protocol_document(results.protocol), source=f"{where} source protocol"
-    )
+    # Saved bounds follow the saved development or bound-validation policy.
+    from ..study.validation import validate_saved_execution
+    validate_saved_execution({**results.request, "protocol": study_spec.protocol_document(results.protocol)},
+                             source=f"{where} source")
     study = results.request["study"]
     start_ms = to_epoch_ms(study["start_utc"], f"{where}.study.start_utc")
     end_ms = to_epoch_ms(study["end_utc"], f"{where}.study.end_utc")
-    warmup_ms = to_epoch_ms(study["warmup_start_utc"], f"{where}.study.warmup_start_utc")
-    from ..study.validation import validate_saved_execution
-    validate_saved_execution({**results.request, "protocol": study_spec.protocol_document(results.protocol)})
 
     instruments = tuple(results.completed_instruments)
     planned = [item["instrument_id"] for item in family["instruments"]]

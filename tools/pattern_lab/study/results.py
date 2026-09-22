@@ -28,6 +28,14 @@ from .builtins import EVIDENCE_VIEW_VERSION
 from .contracts import ModelCase, OutcomeSpec
 
 SUMMARY_SCHEMA_VERSION = 1
+CURRENT_SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_VERSION_BY_STUDY = {1: 1, 2: 2}
+
+
+def summary_schema_version(study_version):
+    if type(study_version) is not int or study_version not in SUMMARY_VERSION_BY_STUDY:
+        raise PatternLabDataError(f"summary: unsupported study version {study_version!r}; supported: 1, 2.")
+    return SUMMARY_VERSION_BY_STUDY[study_version]
 
 QUANTILES = (0.10, 0.25, 0.75, 0.90)
 QUANTILE_LABELS = ("p10", "p25", "p75", "p90")
@@ -348,11 +356,15 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     provenance = dict(evidence.read_json(root / evidence.PROVENANCE_FILE))
     family = dict(evidence.read_json(root / evidence.FAMILY_FILE))
     request = dict(evidence.read_json(root / evidence.REQUEST_FILE))
+    source = dict(evidence.read_json(root / evidence.SOURCE_FILE))
     if type(request.get("schema_version")) is not int or request["schema_version"] not in evidence.SUPPORTED_RUN_SCHEMA_VERSIONS:
         raise PatternLabDataError("request: unsupported saved study version.")
     if request.get("schema_version") == 2:
         from .validation import validate_saved_execution
-        validate_saved_execution(request)
+        validate_saved_execution(request, source=str(root / evidence.REQUEST_FILE))
+        if request["execution"]["kind"] == "validation":
+            from ..candidate import verify_extension_generation
+            verify_extension_generation(request["execution"]["candidate"], source.get("extensions"))
         if request["protocol"] != evidence.read_json(root / evidence.PROTOCOL_FILE):
             raise PatternLabDataError("request protocol contradicts separately frozen protocol.")
         for name, document in (("status", status), ("family", family), ("provenance", provenance)):
@@ -391,7 +403,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         request=request,
         protocol=dict(evidence.read_json(root / evidence.PROTOCOL_FILE)),
         family=family,
-        source=dict(evidence.read_json(root / evidence.SOURCE_FILE)),
+        source=source,
         provenance=provenance,
         status=status,
         completion=completion,
@@ -517,6 +529,7 @@ def _attach_metrics(results: StudyResults, groups: Sequence[Mapping[str, Any]]) 
 
 def summarize_results(results: StudyResults) -> dict[str, Any]:
     """Summarize saved observations by resolved model case, one instrument at a time."""
+    summary_version = summary_schema_version(results.request.get("schema_version"))
     family = results.family
     accumulators: dict[tuple[str, str, int, str], _GroupAccumulator] = {}
     instances = {item["model_instance_id"]: item for item in family["models"]}
@@ -651,7 +664,7 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
         )
 
     return {
-        "schema_version": results.request["schema_version"],
+        "schema_version": summary_version,
         **({"context": dict(results.request["context"]),
             "context_admission": evidence.read_json(results.run_root / evidence.CONTEXT_ADMISSION_FILE),
             "context_diagnostics": evidence.read_json(results.run_root / evidence.CONTEXT_FILE),

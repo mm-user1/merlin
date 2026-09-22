@@ -111,6 +111,15 @@ failure/interrupt status. `test_pattern_lab_candidate.py` covers frozen source
 generation, v1 lifting, splits, code policy, CLI status, receipts, short-period
 descriptions and relocated offline reporting. Its point-estimate oracle computes
 the target-count weighted means independently from checked saved accumulations.
+`test_pattern_lab_extension_generation.py` covers fresh/cached namespace and scalar
+helper imports, transitive declarations, unknown/stale runtime generations,
+verified reuse, stale bytecode avoidance and owned cleanup on failure/interrupt.
+`test_pattern_lab_frozen_integrity.py` checks actual outer-root generation admission
+for mapping/file/normalized requests, module/helper drift, source relocation with
+direct/spawn parity, strict saved attribution, authoritative parent receipts,
+publication faults on both sides of the atomic write, and relocated offline
+verification without numerical decoding. The context tests also demonstrate
+multi-bar dense validity and the exact recovery boundary after a missing slot.
 The compatibility suite also reseals malformed saved method metadata and checks
 the separate historical-v1 numeric domains against current launch policy.
 Run these focused modules while changing the contracts, then the whole

@@ -1,215 +1,5 @@
 # Pattern Lab data foundation, event studies and matched comparisons
 
-## Explicit context and frozen validation (M3b)
-
-M3b is implemented pending tech-lead review. M3a remains accepted at `9fe7816`.
-This mechanism supplies reproducible later-period evaluation, not a new statistical
-method or a claim of unseen data. No collector runs implicitly.
-
-| Version domain | Contract |
-| --- | --- |
-| Study request/run | Historical v1 unchanged; v2 adds required `context` and `execution` |
-| Protocol | v1, with original development/reserved/warmup dates |
-| Source binding | Schema 1 for v1 studies; schema 2 for v2 studies |
-| Analysis request/artifact | v1 bootstrap; v2 monthly jackknife, unchanged gates |
-| Candidate / required-code policy | 1 / 1 |
-
-The old `REQUEST_SCHEMA_VERSION` and `RUN_SCHEMA_VERSION` aliases remain 1.
-`CURRENT_REQUEST_SCHEMA_VERSION` and `CURRENT_RUN_SCHEMA_VERSION` are 2;
-the corresponding `SUPPORTED_*_VERSIONS` tuples contain `(1, 2)`. Version is
-passed explicitly into identity payloads, immutable-file enumeration and seals.
-V1 recipes/families/source bindings acquire no context or execution fields.
-Per-instrument table and bundle versions remain unchanged.
-
-### Study v2 and causal context
-
-Start with the complete tracked [context study](configs/example_study_context_30m.json)
-and [analysis request](configs/example_analysis_context.json). Their canonical
-roster IDs select ETH and SOL targets, factor-only BTC context, and an explicit
-ETH/SOL panel. Each target includes itself in that panel. No operational data
-execution is implied by these examples. Development is still
-`[2025-07-01, 2026-07-01)` UTC; reserve remains `[2026-07-01, 2026-10-01)` UTC.
-
-V2 adds `context={"btc":{"ids":["OKX_BTC-USDT-SWAP"]}}` and
-`execution={"kind":"development"}` to the ordinary request. Empty context is
-permitted. Every alias must be used; its IDs must be nonempty, unique and explicit.
-No roles, implicit BTC, wildcard membership, mixed observation timeframe or
-implicit leave-one-out is supported. A factor-only source cannot be a target.
-The request path, mapping and normalized-object forms all revalidate nested fields.
-
-`FeatureDescriptor(scope="context", context_aliases=callback)` declares alias
-names from normalized parameters. Optional `context_source_count=1` constrains
-each declared alias at admission. `evaluate(grid, parameters, dependencies)`
-receives a `study.context.ContextGrid` with `timeframe_minutes`, dense
-`timestamps_ms` and `sources[alias][instrument_id]`. Each `ContextSeries` contains
-ordinary `BarSeries` and its validity array. It returns aligned `FeatureValue`
-float64 values and Boolean validity. Mappings and input arrays are read-only.
-The [custom extension](examples/context_extension.py) demonstrates registration
-and dependency consumption without changing dispatch. Declare its module,
-source directory and every imported local helper in `extensions`; source bytes
-are hashed and verified before context computation and before accepting output.
-Imported local helper namespaces are checked; trusted dynamic Python must still
-declare later file loads. Archived snapshots are inert and never executed.
-
-Hypotheses and models remain instrument-scoped. Instrument features may depend
-on context outputs through the ordinary dependency mapping; context features
-may depend on other context features, but cannot depend on target features.
-One transitive closure validates scope, parameters, aliases and cycles and takes
-the maximum declared total prior-bar requirement. A rolling transform declares
-its total history, including its inputs. The worker restores read-only NumPy
-flags after deserialization. Missing injected context fails by feature name;
-it never causes a provider to be evaluated against target bars.
-
-The coordinator builds each dense UTC epoch grid in `[warmup_start, study_end)`
-using the target's own observation timeframe and the existing complete-bar
-resampler. Source close at signal close T is allowed; a later close is not.
-Missing slots stay invalid, with no fill or compact-row zipping. Gaps rewarm
-the relevant lookback. Warmup yields no evaluated events; the slot closing at
-the exclusive end is ineligible. State-entry and terminal outcome boundaries
-retain the existing conservative behavior. Unknown context never becomes a
-known-false nonsignal control. Arbitrary trusted Python prefix causality cannot
-be proved by the framework; test each provider with suffix perturbations.
-
-Built-in `btc_close_return` computes `close[t]/close[t-1]-1` from one explicit
-source, requiring contiguous valid slots and positive previous close.
-`two_green_volume_btc` adds its strict `> threshold` filter to the existing
-two-green/rising-quote-volume condition. Threshold defaults to `0.0`, a return
-fraction. `panel_green_fraction` uses all declared members at each slot, with
-green defined as `close > open`; doji is not green. `two_green_volume_panel`
-adds strict `> threshold`, default `0.5`; equality is false. The panel threshold
-must be a finite fraction in `[0,1]`; BTC threshold must be finite. Neither
-feature accepts a separate timeframe parameter. Reports disclose membership,
-roles, self-inclusion, thresholds, valid slots and policy. Comparing the child
-with the inclusive parent is an association, not the filter's causal effect.
-
-Admission order is request/extensions, pinned ready/nonpending pack, exact
-target/context resolution, union metadata coverage/units/roles, full-pack
-integrity, new root, protected metadata freeze, numerical `context` phase, then
-target jobs. Metadata failure creates no root. Context failure/interruption
-leaves every target not started, names its context cause and writes no seal.
-V2 additionally seals `spec/context.json` admission facts and `context.json`
-computed diagnostics. Final data identity includes consumed context fingerprints,
-aliases, roles, feature parameters/versions and alignment/missingness policy.
-Changing a consumed context value changes identity; an irrelevant append, pack
-relocation or worker count does not. `condition_id` retains its existing algorithm;
-its global reference is the pair `(run identity, condition_id)`.
-
-Each distinct context source is read once per preparation pass, all selected
-timeframes are prepared once, and each distinct feature/timeframe is evaluated
-once. Aliases may overlap. A target used as context is read once per role. Raw
-context arrays are released after context outputs are built. Workers receive
-only target bars and compact aligned feature arrays, without panel cubes or
-pack paths. Context memory is additional to the existing W-job bound:
-`raw_context_bytes` and `output_bytes` report array sizes, not peak process RSS.
-The raw count totals the owned dense grids; transient 5m input/resampling buffers
-and Python overhead add memory beyond that count. Provider views are copied into
-owned compact outputs, and the recursive evaluator releases its source mapping
-without waiting for cyclic garbage collection.
-
-### Freeze and validation API
-
-```python
-from tools.pattern_lab.candidate import freeze_candidate, load_candidate, run_validation
-
-# Completed development artifacts must already exist. Dates are explicit.
-frozen = freeze_candidate(
-    study_root=development_study, analysis_root=development_analysis,
-    start=evaluation_start, end=evaluation_end, warmup_start=evaluation_warmup,
-    output=new_candidate_json,
-)
-checked = load_candidate(new_candidate_json)  # mapping input is also accepted
-receipt = run_validation(
-    candidate=checked, data_root=verified_pack, output_root=new_validation_root,
-    workers=2,
-)
-```
-
-The [agent Python example](examples/run_frozen_candidate.py) supplies an importable
-main guard for spawned workers. Equivalent commands are:
-
-```text
-python -m tools.pattern_lab freeze-candidate --study-root DEVELOPMENT_STUDY --analysis-root DEVELOPMENT_ANALYSIS --start UTC --end UTC --warmup-start UTC --output NEW_CANDIDATE.json
-python -m tools.pattern_lab validate-candidate --candidate NEW_CANDIDATE.json --data-root PACK --output-root NEW_VALIDATION_ROOT --workers 2
-python -m tools.pattern_lab analysis-report --analysis-root NEW_VALIDATION_ROOT/analysis
-```
-
-Both commands emit structured JSON: success 0, invalid input/dependency/failure 2,
-busy pack 3, pending update 4, interrupt 130. Freeze verifies metadata and complete
-file digests without a pack, table decoding or unconditional PyArrow probe.
-It accepts only completed development study v1/v2 plus completed monthly-v2
-analysis bound to that exact generation by specification/data/implementation
-identities, evidence-view version and evidence map/set. Relocated discovery
-artifacts are allowed. Partial, mismatched and validation-origin sources fail.
-V1 lifts to v2 with empty context and the same normalized numerical recipe.
-
-The candidate has explicit `schema_version`, `required_code_policy_version`,
-`candidate_id`, `recipe`, `split`, `discovery`, `required_code`, `prior_use` and
-`provenance`. Recipe contains the external study, resolved semantic study and
-family, context admission, full saved analysis request/method and family.
-Selection is frozen as explicit canonical IDs with contracts and roles.
-Discovery records exact completion digests, source binding and analysis
-identities. The candidate ID hashes the acyclic recipe/split/discovery/code
-payload and both versions, excluding its own ID, `provenance`, `prior_use`,
-names/notes/labels and physical source roots. Numerical parameter and model
-setting dictionaries are retained in full, even when a key resembles a label.
-The snapshot contains discovery facts, never a future validation seal or a
-validation request embedding itself. Loading rechecks shape, consistency and ID.
-
-Required-code policy 1 lists `data`, `manifest`; `study.contracts`, `builtins`,
-`spec`, `validation`, `extensions`, `observations`, `job`, `runner`, `results`;
-`analysis.request`, `family`, `estimator`, `monthly`, `source`, `runner`,
-`artifacts`; `study.context` when used; declared extension modules/helpers.
-The exact constants are in `candidate.py`. Digests come from producing artifacts;
-shared required modules must agree. Missing historical attribution leaves the
-artifact readable but requires a fresh discovery generation before freezing.
-Validation compares current file bytes before numerical work. Even a comment
-edit in a required module expires the generation. Evidence serialization,
-transport, locking, candidate orchestration, HTML and Git state are recorded
-provenance; report-only changes do not expire a candidate. This is a reproducibility
-contract, not a signature, registry or anti-tampering service.
-
-Evaluation must be nonempty, start at or after discovery end, and use aligned,
-sufficient warmup no earlier than the protocol floor. Internal reuse stays
-entirely in development outside reserve. Reserved evaluation must equal the
-whole reserve, later than and disjoint from development. Earlier warmup may
-initialize causal features; it cannot contribute events, outcomes or fitting.
-Validation embeds the verified candidate and must match its exact recipe,
-protocol and split. A bare label, ID string or edited normalized object cannot
-bypass admission. Execution and strict source analysis share that policy;
-historical reports use saved metadata without a registry, external candidate,
-original source, market pack, current method defaults or inference rerun.
-
-Runtime overrides are only physical locations and worker count. Updated packs
-are allowed with the frozen membership/contracts/roles/units and adequate
-coverage; consumed validation fingerprints are recorded separately from
-discovery. The new parent contains `candidate.json`, `status.json`, ordinary
-`study/` and `analysis/` children, and final `receipt.json`. Only verified child
-seals permit the atomic receipt, which binds exact completion/evidence-set
-hashes and candidate ID. A later analysis failure preserves a completed study.
-There is no overwrite, retry, reuse or resume. HTML and the flat
-`analysis.load_analysis(...).comparisons()` API include candidate identity,
-discovery/evaluation/warmup periods, fixed family and prior-use limitations.
-
-Three-month evaluation retains the 336-day span, 252-active-day and 48-bin
-inference gates. Supported matched means/lifts and counts remain useful;
-unavailable p-values have named reasons. Unsupported strata retain exclusions
-and counts instead of becoming zero. Every declared member stays in the Holm
-family, including unavailable ones. No automatic significance or edge verdict
-is produced. Fees remain 0.05% per side in the examples, with 1/2/4/8-hour
-horizons, primary 4 hours, both directions, no slippage/funding/equity claim.
-
-The operational reserve is prospective, not historically certified untouched:
-prototype diagnostics reached approximately 2026-07-19 12:30 UTC, and global
-volume ranks/correlations used reserved observations. Freezing does not erase
-that use. Actual reserve execution needs a later explicit user instruction and
-complete data; the M3b implementation uses synthetic fixtures only.
-
-Saved analysis method validation checks the consumed per-version field shapes
-and finite probability domains while allowing additive descriptive metadata.
-`SAVED_V1_*` numeric limits are the historical format; launch policy may tighten.
-Widening launch domains beyond the saved format requires an explicit format
-decision and never changes historical readability.
-
 Pattern Lab is local, research-only tooling. These milestones are implemented:
 
 - **M1a, the data boundary**: a stable Parquet pack, an explicit manifest, a
@@ -3341,6 +3131,274 @@ A different ratio in a smaller experiment does not revise the delivered
 
 `AnalysisResults` also exposes the verified `request`, `family`, `source`,
 `summary`, `provenance`, `status` and `completion` documents.
+
+## Explicit context and frozen validation (M3b)
+
+M3b is implemented pending tech-lead review. M3a remains accepted at `9fe7816`.
+This mechanism supplies reproducible later-period evaluation, not a new statistical
+method or a claim of unseen data. No collector runs implicitly.
+
+| Version domain | Contract |
+| --- | --- |
+| Study request/run | Historical v1 unchanged; v2 adds required `context` and `execution` |
+| Study summary | Study v1 produces summary v1; study v2 produces summary v2; other study versions are refused |
+| Protocol | v1, with original development/reserved/warmup dates |
+| Source binding | Schema 1 for v1 studies; schema 2 for v2 studies |
+| Analysis request/artifact | v1 bootstrap; v2 monthly jackknife, unchanged gates |
+| Candidate / required-code policy | 1 / 1 |
+
+The old `REQUEST_SCHEMA_VERSION` and `RUN_SCHEMA_VERSION` aliases remain 1.
+`CURRENT_REQUEST_SCHEMA_VERSION` and `CURRENT_RUN_SCHEMA_VERSION` are 2;
+the corresponding `SUPPORTED_*_VERSIONS` tuples contain `(1, 2)`. Version is
+passed explicitly into identity payloads, immutable-file enumeration and seals.
+V1 recipes/families/source bindings acquire no context or execution fields.
+Per-instrument table and bundle versions remain unchanged.
+
+### Study v2 and causal context
+
+Start with the complete tracked [context study](configs/example_study_context_30m.json)
+and [analysis request](configs/example_analysis_context.json). Their canonical
+roster IDs select ETH and SOL targets, factor-only BTC context, and an explicit
+ETH/SOL panel. Each target includes itself in that panel. No operational data
+execution is implied by these examples. Development is still
+`[2025-07-01, 2026-07-01)` UTC; reserve remains `[2026-07-01, 2026-10-01)` UTC.
+
+V2 adds `context={"btc":{"ids":["OKX_BTC-USDT-SWAP"]}}` and
+`execution={"kind":"development"}` to the ordinary request. Empty context is
+permitted. Every alias must be used; its IDs must be nonempty, unique and explicit.
+No roles, implicit BTC, wildcard membership, mixed observation timeframe or
+implicit leave-one-out is supported. A factor-only source cannot be a target.
+The request path, mapping and normalized-object forms all revalidate nested fields.
+
+`FeatureDescriptor(scope="context", context_aliases=callback)` declares alias
+names from normalized parameters. Optional `context_source_count=1` constrains
+each declared alias at admission. `evaluate(grid, parameters, dependencies)`
+receives a `study.context.ContextGrid` with `timeframe_minutes`, dense
+`timestamps_ms` and `sources[alias][instrument_id]`. Each `ContextSeries` contains
+ordinary `BarSeries` and its validity array. It returns aligned `FeatureValue`
+float64 values and Boolean validity. Mappings and input arrays are read-only.
+The [custom extension](examples/context_extension.py) demonstrates registration
+and dependency consumption without changing dispatch. Declare its module,
+source directory and every imported local helper in `extensions`; source bytes
+are hashed and verified before context computation and before accepting output.
+Ordinary namespace and scalar imports (`import helper`, `from helper import VALUE`)
+are checked within the declared source root, including transitive helpers and
+cached modules. A temporary import observer lasts only through loading and
+registration and is restored even on interruption. Fresh local Python modules
+execute the verified source bytes directly, bypassing stale bytecode caches
+without deleting them. Cached modules need an established runtime generation
+from this loader; unknown or changed cached generations require a fresh
+interpreter. Successful registration commits the verified records. Failed
+attempts remove only their newly introduced local modules and registrations,
+so correcting a declaration can be retried in the same interpreter when no
+unknown preloaded generation remains. Previously accepted extensions and
+unrelated preloaded modules remain intact. Third-party imports are outside local
+helper declarations. Arbitrary later dynamic imports/file reads remain the
+trusted author's responsibility; this is neither dependency discovery nor a
+sandbox. Archived snapshots are inert and never executed.
+
+Hypotheses and models remain instrument-scoped. Instrument features may depend
+on context outputs through the ordinary dependency mapping; context features
+may depend on other context features, but cannot depend on target features.
+One transitive closure validates scope, parameters, aliases and cycles and takes
+the maximum declared total prior-bar requirement. A rolling transform declares
+its total history, including its inputs. The worker restores read-only NumPy
+flags after deserialization. Missing injected context fails by feature name;
+it never causes a provider to be evaluated against target bars.
+
+The coordinator builds each dense UTC epoch grid in `[warmup_start, study_end)`
+using the target's own observation timeframe and the existing complete-bar
+resampler. Source close at signal close T is allowed; a later close is not.
+Missing slots stay invalid, with no fill or compact-row zipping. Gaps rewarm
+the relevant lookback. Warmup yields no evaluated events; the slot closing at
+the exclusive end is ineligible. State-entry and terminal outcome boundaries
+retain the existing conservative behavior. Unknown context never becomes a
+known-false nonsignal control. Arbitrary trusted Python prefix causality cannot
+be proved by the framework; test each provider with suffix perturbations.
+
+Every epoch slot exists in `ContextSeries.bars`, including missing observations.
+`bars.contiguous_with_previous()` therefore describes slot adjacency; it cannot
+detect missing context data. `ContextSeries.valid` owns availability. A rolling
+feature must require validity across its entire declared lookback and re-warm
+after every invalid slot. For example, a three-observation return declares two
+prior bars and uses:
+
+```python
+for i in range(2, series.bars.row_count):
+    valid[i] = series.valid[i-2:i+1].all()
+    if valid[i]:
+        values[i] = series.bars.close[i] / series.bars.close[i-2] - 1
+```
+
+Initialize `valid` to false and `values` to NaN; also apply the feature's numerical
+domain checks. With valid slots `[1,1,1,0,1,1,1]`, output validity is
+`[0,0,1,0,0,0,1]`: recovery needs three consecutive available observations.
+
+Built-in `btc_close_return` computes `close[t]/close[t-1]-1` from one explicit
+source, requiring contiguous valid slots and positive previous close.
+`two_green_volume_btc` adds its strict `> threshold` filter to the existing
+two-green/rising-quote-volume condition. Threshold defaults to `0.0`, a return
+fraction. `panel_green_fraction` uses all declared members at each slot, with
+green defined as `close > open`; doji is not green. `two_green_volume_panel`
+adds strict `> threshold`, default `0.5`; equality is false. The panel threshold
+must be a finite fraction in `[0,1]`; BTC threshold must be finite. Neither
+feature accepts a separate timeframe parameter. Reports disclose membership,
+roles, self-inclusion, thresholds, valid slots and policy. Comparing the child
+with the inclusive parent is an association, not the filter's causal effect.
+
+Admission order is request/extensions, pinned ready/nonpending pack, exact
+target/context resolution, union metadata coverage/units/roles, full-pack
+integrity, new root, protected metadata freeze, numerical `context` phase, then
+target jobs. Metadata failure creates no root. Context failure/interruption
+leaves every target not started, names its context cause and writes no seal.
+V2 additionally seals `spec/context.json` admission facts and `context.json`
+computed diagnostics. Final data identity includes consumed context fingerprints,
+aliases, roles, feature parameters/versions and alignment/missingness policy.
+Changing a consumed context value changes identity; an irrelevant append, pack
+relocation or worker count does not. `condition_id` retains its existing algorithm;
+its global reference is the pair `(run identity, condition_id)`.
+
+Each distinct context source is read once per preparation pass, all selected
+timeframes are prepared once, and each distinct feature/timeframe is evaluated
+once. Aliases may overlap. A target used as context is read once per role. Raw
+context arrays are released after context outputs are built. Workers receive
+only target bars and compact aligned feature arrays, without panel cubes or
+pack paths. Context memory is additional to the existing W-job bound:
+`raw_context_bytes` and `output_bytes` report array sizes, not peak process RSS.
+The raw count totals the owned dense grids; transient 5m input/resampling buffers
+and Python overhead add memory beyond that count. Provider views are copied into
+owned compact outputs, and the recursive evaluator releases its source mapping
+without waiting for cyclic garbage collection.
+
+### Freeze and validation API
+
+```python
+from tools.pattern_lab.candidate import freeze_candidate, load_candidate, load_validation, run_validation
+
+# Completed development artifacts must already exist. Dates are explicit.
+frozen = freeze_candidate(
+    study_root=development_study, analysis_root=development_analysis,
+    start=evaluation_start, end=evaluation_end, warmup_start=evaluation_warmup,
+    output=new_candidate_json,
+)
+checked = load_candidate(new_candidate_json)  # mapping input is also accepted
+receipt = run_validation(
+    candidate=checked, data_root=verified_pack, output_root=new_validation_root,
+    workers=2,
+)
+verified_receipt = load_validation(new_validation_root)  # also works after relocation
+```
+
+The [agent Python example](examples/run_frozen_candidate.py) supplies an importable
+main guard for spawned workers. Equivalent commands are:
+
+```text
+python -m tools.pattern_lab freeze-candidate --study-root DEVELOPMENT_STUDY --analysis-root DEVELOPMENT_ANALYSIS --start UTC --end UTC --warmup-start UTC --output NEW_CANDIDATE.json
+python -m tools.pattern_lab validate-candidate --candidate NEW_CANDIDATE.json --data-root PACK --output-root NEW_VALIDATION_ROOT --workers 2
+python -m tools.pattern_lab analysis-report --analysis-root NEW_VALIDATION_ROOT/analysis
+```
+
+Both commands emit structured JSON: success 0, invalid input/dependency/failure 2,
+busy pack 3, pending update 4, interrupt 130. Freeze verifies metadata and complete
+file digests without a pack, table decoding or unconditional PyArrow probe.
+It accepts only completed development study v1/v2 plus completed monthly-v2
+analysis bound to that exact generation by specification/data/implementation
+identities, evidence-view version and evidence map/set. Relocated discovery
+artifacts are allowed. Partial, mismatched and validation-origin sources fail.
+V1 lifts to v2 with empty context and the same normalized numerical recipe.
+
+The candidate has explicit `schema_version`, `required_code_policy_version`,
+`candidate_id`, `recipe`, `split`, `discovery`, `required_code`, `prior_use` and
+`provenance`. Recipe contains the external study, resolved semantic study and
+family, context admission, full saved analysis request/method and family.
+Selection is frozen as explicit canonical IDs with contracts and roles.
+Discovery records exact completion digests, source binding and analysis
+identities. The candidate ID hashes the acyclic recipe/split/discovery/code
+payload and both versions, excluding its own ID, `provenance`, `prior_use`,
+names/notes/labels and physical source roots. Numerical parameter and model
+setting dictionaries are retained in full, even when a key resembles a label.
+The snapshot contains discovery facts, never a future validation seal or a
+validation request embedding itself. Loading rechecks shape, consistency and ID.
+
+Required-code policy 1 lists `data`, `manifest`; `study.contracts`, `builtins`,
+`spec`, `validation`, `extensions`, `observations`, `job`, `runner`, `results`;
+`analysis.request`, `family`, `estimator`, `monthly`, `source`, `runner`,
+`artifacts`; `study.context` when used; declared extension modules/helpers.
+The exact constants are in `candidate.py`. Digests come from producing artifacts;
+shared required modules must agree. Missing historical attribution leaves the
+artifact readable but requires a fresh discovery generation before freezing.
+Validation compares current file bytes before numerical work. Even a comment
+edit in a required module expires the generation. Evidence serialization,
+transport, locking, candidate orchestration, HTML and Git state are recorded
+provenance; report-only changes do not expire a candidate. This is a reproducibility
+contract, not a signature, registry or anti-tampering service.
+
+The shared study boundary compares the actual loaded module/helper records with
+the frozen requirement before pack preparation, context computation, jobs or
+output creation. Module names, declared relative paths and exact digests must
+agree with unique, complete coverage. Physical roots remain provenance: an
+identical direct-study source relocation works even if the old root is absent;
+changed bytes fail with the module/helper and expected/actual digests. Strict
+saved-study loading and analysis source admission repeat this comparison using
+saved attribution only, without current code, imports or original files.
+
+Evaluation must be nonempty, start at or after discovery end, and use aligned,
+sufficient warmup no earlier than the protocol floor. Internal reuse stays
+entirely in development outside reserve. Reserved evaluation must equal the
+whole reserve, later than and disjoint from development. Earlier warmup may
+initialize causal features; it cannot contribute events, outcomes or fitting.
+Validation embeds the verified candidate and must match its exact recipe,
+protocol and split. A bare label, ID string or edited normalized object cannot
+bypass admission. Execution and strict source analysis share that policy;
+historical reports use saved metadata without a registry, external candidate,
+original source, market pack, current method defaults or inference rerun.
+
+Full-year discovery leaves only the full reserve for later evaluation under this
+protocol. Shorter discovery permits later internal reuse but does not guarantee
+near-year inference support. Short validation remains descriptive; no support
+gate is lowered.
+
+Runtime overrides are only physical locations and worker count. Updated packs
+are allowed with the frozen membership/contracts/roles/units and adequate
+coverage; consumed validation fingerprints are recorded separately from
+discovery. The new parent contains `candidate.json`, `status.json`, ordinary
+`study/` and `analysis/` children, and final `receipt.json`. Only verified child
+seals permit the atomic receipt, which binds exact completion/evidence-set
+hashes and candidate ID. A later analysis failure preserves a completed study.
+`candidate.load_validation(output_root)` is the supported completion check. It
+returns the verified schema-1 receipt only after checking the saved candidate,
+period/family metadata, both strict child seals, their source agreement and exact
+completion/evidence-set digests. A missing receipt means incomplete even when
+`status.json` says completed; malformed or contradictory evidence is a named
+data error. Status is diagnostic, never the commit point. The reader needs only
+the relocated parent's saved files, without table decoding or execution inputs.
+The atomic receipt remains the last publication write. If that write commits
+and then raises, an ordinary exception recovers the verified result; interruption
+propagates while retaining completed evidence. Without a valid receipt, failure
+status preserves the original cause and any completed children.
+There is no overwrite, retry, reuse or resume. HTML and the flat
+`analysis.load_analysis(...).comparisons()` API include candidate identity,
+discovery/evaluation/warmup periods, fixed family and prior-use limitations.
+
+Three-month evaluation retains the 336-day span, 252-active-day and 48-bin
+inference gates. Supported matched means/lifts and counts remain useful;
+unavailable p-values have named reasons. Unsupported strata retain exclusions
+and counts instead of becoming zero. Every declared member stays in the Holm
+family, including unavailable ones. No automatic significance or edge verdict
+is produced. Fees remain 0.05% per side in the examples, with 1/2/4/8-hour
+horizons, primary 4 hours, both directions, no slippage/funding/equity claim.
+
+The operational reserve is prospective, not historically certified untouched:
+prototype diagnostics reached approximately 2026-07-19 12:30 UTC, and global
+volume ranks/correlations used reserved observations. Freezing does not erase
+that use. Actual reserve execution needs a later explicit user instruction and
+complete data; the M3b implementation uses synthetic fixtures only.
+
+Saved analysis method validation checks the consumed per-version field shapes
+and finite probability domains while allowing additive descriptive metadata.
+`SAVED_V1_*` numeric limits are the historical format; launch policy may tighten.
+Widening launch domains beyond the saved format requires an explicit format
+decision and never changes historical readability.
 
 ## Commands
 
