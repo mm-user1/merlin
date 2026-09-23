@@ -3148,6 +3148,9 @@ method or a claim of unseen data. No collector runs implicitly.
 | Candidate / required-code policy | 1 / 1 |
 
 The old `REQUEST_SCHEMA_VERSION` and `RUN_SCHEMA_VERSION` aliases remain 1.
+For study summaries, the historical `SUMMARY_SCHEMA_VERSION` alias remains 1
+and `CURRENT_SUMMARY_SCHEMA_VERSION` is 2; `SUMMARY_VERSION_BY_STUDY` explicitly
+maps study v1 to summary v1 and study v2 to summary v2.
 `CURRENT_REQUEST_SCHEMA_VERSION` and `CURRENT_RUN_SCHEMA_VERSION` are 2;
 the corresponding `SUPPORTED_*_VERSIONS` tuples contain `(1, 2)`. Version is
 passed explicitly into identity payloads, immutable-file enumeration and seals.
@@ -3182,9 +3185,15 @@ and dependency consumption without changing dispatch. Declare its module,
 source directory and every imported local helper in `extensions`; source bytes
 are hashed and verified before context computation and before accepting output.
 Ordinary namespace and scalar imports (`import helper`, `from helper import VALUE`)
-are checked within the declared source root, including transitive helpers and
-cached modules. A temporary import observer lasts only through loading and
-registration and is restored even on interruption. Fresh local Python modules
+and calls through the public `importlib.import_module` installed during the
+loading window are checked within the declared source root, including transitive
+helpers and cached modules. This includes aliases obtained during that window,
+absolute imports and package-relative calls for declared package helpers.
+Resolution caches are invalidated before loading so newly created helpers are
+visible even when the directory timestamp is unchanged; cached runtime objects
+are neither reloaded nor accepted on that basis. A temporary import observer
+lasts through the main module, helper loading and registration and is restored
+even on interruption. Fresh local Python modules
 execute the verified source bytes directly, bypassing stale bytecode caches
 without deleting them. Cached modules need an established runtime generation
 from this loader; unknown or changed cached generations require a fresh
@@ -3193,9 +3202,18 @@ attempts remove only their newly introduced local modules and registrations,
 so correcting a declaration can be retried in the same interpreter when no
 unknown preloaded generation remains. Previously accepted extensions and
 unrelated preloaded modules remain intact. Third-party imports are outside local
-helper declarations. Arbitrary later dynamic imports/file reads remain the
-trusted author's responsibility; this is neither dependency discovery nor a
-sandbox. Archived snapshots are inert and never executed.
+helper declarations. The observer is process-wide during this window: serialize
+extension loading/registration and do not overlap it with other threads' imports.
+Spawn workers are separate processes, not evidence of thread safety. The entire
+previous `sys.path` is restored afterward, including removal of extensions'
+own import-time path changes; extensions must not rely on those changes persisting.
+
+An importlib callable captured before the window, private bootstrap APIs, custom
+loaders, manual module execution, deliberate `sys.modules` manipulation and
+arbitrary later dynamic loads/file reads are outside this bounded observer.
+Authors must declare dependencies and keep ordinary local loading within the
+supported routes/window. This is neither dependency discovery nor a sandbox.
+Archived snapshots are inert and never executed.
 
 Hypotheses and models remain instrument-scoped. Instrument features may depend
 on context outputs through the ordinary dependency mapping; context features
@@ -3288,6 +3306,11 @@ receipt = run_validation(
 )
 verified_receipt = load_validation(new_validation_root)  # also works after relocation
 ```
+
+`run_validation` / `validate-candidate` replays the candidate's recorded extension
+roots and requires them to exist. Content-identical source relocation is supported
+separately through an explicit direct `study.run_study` request; the validation
+CLI does not offer a source-root relocation override.
 
 The [agent Python example](examples/run_frozen_candidate.py) supplies an importable
 main guard for spawned workers. Equivalent commands are:

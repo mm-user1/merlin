@@ -178,6 +178,7 @@ def _load_verified_extension(record):
     modules_before = set(sys.modules)
     registry_before = {kind: dict(items) for kind, items in contracts._REGISTRY.items()}
     original_import = builtins.__import__
+    original_import_module = importlib.import_module
     original_path = list(sys.path)
 
     def declared(path):
@@ -236,10 +237,8 @@ def _load_verified_extension(record):
                     return found
             return None
 
-    def observed_import(name, globals=None, locals=None, fromlist=(), level=0):
-        imported = original_import(name, globals, locals, fromlist, level)
-        full = (importlib.util.resolve_name("." * level + name, globals.get("__package__"))
-                if level else name)
+    def observe_modules(full, owner, fromlist=()):
+        """One declaration/generation check and dependency record for both routes."""
         names = [".".join(full.split(".")[:i]) for i in range(1, len(full.split(".")) + 1)]
         names.extend(full + "." + item for item in (fromlist or ()) if item != "*")
         for imported_name in names:
@@ -247,16 +246,35 @@ def _load_verified_extension(record):
             if module is not None:
                 check_module(module)
                 origin = getattr(module, "__file__", None)
-                owner = (globals or {}).get("__name__")
                 if owner in pending and origin and root in Path(origin).resolve().parents:
                     imported_dependencies.setdefault(owner, {})[imported_name] = module
+
+    def observed_import(name, globals=None, locals=None, fromlist=(), level=0):
+        imported = original_import(name, globals, locals, fromlist, level)
+        full = (importlib.util.resolve_name("." * level + name, globals.get("__package__"))
+                if level else name)
+        observe_modules(full, (globals or {}).get("__name__"), fromlist)
         return imported
 
+    def observed_import_module(name, package=None):
+        # The public importlib callable has no globals argument. The immediate
+        # caller identifies the source owning this ordinary call, including an
+        # alias acquired inside the observed window. Do not retain its frame.
+        owner = sys._getframe(1).f_globals.get("__name__")
+        imported = original_import_module(name, package)
+        full = importlib.util.resolve_name(name, package) if name.startswith(".") else name
+        observe_modules(full, owner)
+        return imported
+
+    # Refresh resolution before installing any owned hook/path state. An
+    # invalidator failure must propagate without a partially installed window.
+    importlib.invalidate_caches()
     finder = LocalSourceFinder()
     try:
         sys.path.insert(0, str(root))
         sys.meta_path.insert(0, finder)
         builtins.__import__ = observed_import
+        importlib.import_module = observed_import_module
         loader = VerifiedLoader(record.module, record.module_path)
         specification = importlib.util.spec_from_file_location(record.module, record.module_path, loader=loader)
         module = importlib.util.module_from_spec(specification)
@@ -281,6 +299,7 @@ def _load_verified_extension(record):
                 sys.modules.pop(name, None)
         raise
     finally:
+        importlib.import_module = original_import_module
         builtins.__import__ = original_import
         sys.meta_path.remove(finder)
         sys.path[:] = original_path

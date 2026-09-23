@@ -114,6 +114,18 @@ the target-count weighted means independently from checked saved accumulations.
 `test_pattern_lab_extension_generation.py` covers fresh/cached namespace and scalar
 helper imports, transitive declarations, unknown/stale runtime generations,
 verified reuse, stale bytecode avoidance and owned cleanup on failure/interrupt.
+It also covers deterministic stale directory-listing caches (by restoring a
+task-owned directory's recorded mtime), public in-window `importlib.import_module`
+calls at module scope and registration, aliases, relative package imports, all
+three cached-generation defects and transitive cached-helper reuse. No sleeps
+or caller-side cache invalidation stabilize those tests. Hook/path snapshots
+include both public import routes; whole-path restoration is the documented
+policy. These process-wide observer tests run serially within each interpreter;
+do not overlap extension loading with imports from other threads. Spawn checks
+exercise separate interpreters and do not certify thread safety. Fixtures use
+unique module names or restore only their task-owned imported state, leaving
+unrelated cached modules intact. The dense-grid test also drives the shipped
+BTC evaluator and checks independently expected gap/recovery values.
 `test_pattern_lab_frozen_integrity.py` checks actual outer-root generation admission
 for mapping/file/normalized requests, module/helper drift, source relocation with
 direct/spawn parity, strict saved attribution, authoritative parent receipts,

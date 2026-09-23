@@ -69,6 +69,11 @@ def test_dense_three_bar_lookback_rewarms_after_missing_slot():
             values[i] = series.bars.close[i] / series.bars.close[i-2] - 1
     np.testing.assert_array_equal(valid, [0, 0, 1, 0, 0, 0, 1, 1])
     np.testing.assert_allclose(values[valid], [.2, 16/14-1, 17/15-1])
+    actual = context.btc_return(
+        context.ContextGrid(5, series.bars.timestamps_ms, {"btc": {"source": series}}),
+        {"alias": "btc"}, {})
+    np.testing.assert_array_equal(actual.valid, [0, 1, 1, 0, 0, 1, 1, 1])
+    np.testing.assert_allclose(actual.values[actual.valid], [.1, 1/11, 1/14, 1/15, 1/16])
 
 
 def test_context_run_identity_and_single_preparation(tmp_path, monkeypatch):
