@@ -1,4 +1,4 @@
-# Pattern Lab data foundation, event studies and matched comparisons
+# Pattern Lab data foundation, event studies, comparisons and bracket probes
 
 Pattern Lab is local, research-only tooling. These milestones are implemented:
 
@@ -29,7 +29,7 @@ Pattern Lab is local, research-only tooling. These milestones are implemented:
   sealed into its own artifact with a standalone offline report. See
   [Matched comparisons and calibrated inference](#matched-comparisons-and-calibrated-inference).
 
-**M3a is accepted; M3b is implemented pending tech-lead review; M4 is not implemented.**
+**M3a is accepted; M3b is accepted at `908efb4` for the documented research scope and supported extension routes. M4 sequential brackets are delivered pending review.**
 M3b adds [explicit context and frozen validation](#explicit-context-and-frozen-validation-m3b).
 M4 owns sequential
 bracket execution with sizing, leverage and expiry. The M2 event study itself
@@ -1908,6 +1908,126 @@ never counted as signal events. The default order follows the declared family,
 not performance, and the declared primary horizon's emphasis never hides the
 other horizons or directions.
 
+## Sequential ATR bracket probes (M4)
+
+Request v2 supports the built-in `atr_bracket` version `1`, alone or beside
+`fixed_horizon_path`. Request v1 refuses brackets. The tracked
+[`example_study_bracket_30m.json`](configs/example_study_bracket_30m.json) uses the
+existing protocol, two-green/rising-volume hypothesis and an explicit one-month
+development interval. Run it with the ordinary `study` CLI or `run_study` API.
+Every request form, including a caller-created normalized dataclass, goes through
+the same admission. Another leverage cap or RR needs only settings; another
+hypothesis or occurrence policy uses the existing hypothesis/extension API.
+
+Defaults are `directions=["long","short"]`, `reward_risks=[1,2,3]`,
+`atr_length=14`, `swing_lookback=2`, `atr_multiplier=2`,
+`initial_capital=10000` USDT, `risk_pct=2`, `commission_pct_per_side=0.05`,
+`max_leverage=8`, and `max_holding_days=4`. All become explicit in identity.
+Directions are ordered long then short; RRs ascend and semantic duplicates fail.
+The case label (for example `long_rr1.5`) identifies direction/RR; a changed cap
+changes settings/identity without renaming that label. Unknown settings fail.
+Trailing off, no maximum stop-width filter, no price rounding, rejection rather
+than resizing, strict boundary closure, no slippage and no funding are fixed
+versioned semantics in each case, not additional configurable keys.
+
+Each `(instrument_id, timeframe_minutes, variant_id, model_instance_id, case_id)`
+is an independent account. Long/short never reverse each other and cases never
+share capital. `state_entry` uses actual emitted transitions; ending a trade does
+not re-emit a persistent condition. Missing context stops new emissions while
+existing positions continue to be managed against observed prices.
+
+The local Pine ATR uses first-bar high minus low, an arithmetic seed of the first
+`atr_length` true ranges, then `(previous*(length-1)+TR)/length`. It resets at each
+gap; full declared pre-start warmup is consumed. Required prior grid slots are
+`max(atr_length-1,swing_lookback-1)` (13 by default); gaps can still leave research
+signals indicator-unavailable. Finite warmup does not eliminate recursive seed
+effects. Swing extrema include the completed signal bar. Stops are swing low
+minus ATR multiplier for long, swing high plus ATR multiplier for short; target
+is signal close plus/minus RR times that close-to-stop distance.
+
+Risk quantity is the generic reference's float-floor result based on current
+realized balance. Its known decimal-boundary residual is preserved: risk cash
+23, distance 10, step 0.1 produces 2.2, while exact-decimal flooring gives 2.3.
+Integer lots are reconstructed and checked, not floored again. Huge
+unrepresentable lot counts fail. OKX linear-USDT swaps require base-denominated
+positive ctVal and finite ctMult=1; base step/minimum equal contract lot/minimum
+times ctVal. Bybit uses its validated base-unit quantity directly. Minimum lots
+use decimal metadata; optional minimum notional uses the actual fill open.
+An unknown minimum notional stays unknown. Current snapshots are not historical
+rule history. Unrounded prices and a provenance-only tick do not certify live
+exchange order admissibility.
+
+Entries fill at the next contiguous observation open with signal-close size and
+levels unchanged. Both commissions use actual notionals. Entry leverage is
+`abs(q*open)/(balance-proposed_entry_fee)`; equality to the cap is admitted,
+strictly greater rejects without fee, occupancy or resizing. Nonpositive
+denominator/nonfinite fill arithmetic has a separate undefined reason. This is
+an entry-only cap, with no continuous margin or liquidation model. Planned 2%
+risk is not a realized-loss ceiling after fees/gaps.
+
+Execution uses the generic V2 reference ordering and re-entry suppression on the
+selected observation OHLC (30m means 30m execution). Open nearer high takes
+O-H-L-C; otherwise O-L-H-C, including ties. Entry-bar protection is active: a
+gap through a level fills and exits at the same open, with zero gross PnL and two
+fees. Four days is the reference elapsed-time trigger, followed by a next-open
+exit, not an exact 96-hour fill deadline. Strict final-close precedence reads no
+future bar. The final study bar emits no event. At gaps, survivors close at the
+last observed segment close, capital carries, indicators reset and pending orders
+do not cross. This missing-data convention is not a claim of live foreknowledge.
+
+Saved `sequential_attempts`, `sequential_trades` and `sequential_path` tables use
+explicit Arrow schema version 1, including empty tables. The ordinary observation
+view remains version 1; brackets have no per-anchor observation table.
+`load_results(root).sequential_account(instrument_id, timeframe_minutes=30,
+variant_id="two_green_every", model_instance_id="bracket", case_id="long_rr2")`
+returns checked `attempts`, `trades`, and `path` DataFrames. For repeated rankings,
+one `instrument_reader(id).sequential_tables()` decodes all three tables once;
+call `release()` afterward. See
+[`rank_bracket_accounts.py`](examples/rank_bracket_accounts.py) for agent-defined
+sorting from public saved evidence, without execution-code edits.
+
+Attempts preserve one terminal reason per event/case. Filled plus cap-rejected
+attempts form the finite-cap denominator; undefined leverage is separate. Reports
+show all accounts, disposition counts, both pre-cap and executed leverage maxima,
+net-PnL wins/losses/breakeven, fees, planned R, holding duration, stop widths,
+exit/ambiguity counts and distinct realized-balance/bar-close-MTM drawdowns.
+Drawdowns include initial capital and may exceed 100%. Net R divides net PnL by
+rounded quantity times original signal-close risk distance. Durations use the
+entry open and exit-bar open for open/intrabar exits, or terminal bar close.
+An intrabar instant is unknown; saved phase and bar interval remain explicit.
+Profit factor uses net winning PnL / absolute net losing PnL; no losses yields
+null with `no_losses`, or `no_wins_or_losses` when neither exists. This differs
+from Merlin's zero-loss convention and changes no Merlin metrics. No-trade
+accounts retain capital and zero PnL, with unavailable trade means/win rate.
+
+Readers check full model/version/kind dispatch, physical types, membership,
+coverage, links, chronology and money reconciliation (absolute tolerance 1e-8,
+relative 1e-9). Resealing contradictory records does not make them valid; these
+checks do not authenticate a coherent rewrite. Reports regenerate from checked
+saved evidence without pack, network, core or extension execution. Tables are
+batched once per instrument through the existing bounded direct/spawn job path.
+Only the built-in sequential descriptor is allowed; custom per-anchor models,
+hypotheses and saved-result ranking remain supported.
+
+Declared observation metrics cover only per-anchor groups in a mixed study;
+sequential-only studies cannot declare those metrics. Bracket inference is
+unsupported; M3 analysis may explicitly select fixed models in a mixed study.
+Any sequential model prevents freezing the entire study into a candidate.
+Old studies, analyses, candidates and receipts stay readable and their reports
+regenerate offline. Changed pinned modules deliberately prevent old candidates
+from executing under T07: rerun fixed-only development study and analysis under
+one new generation, then freeze a new candidate. Do not mix old/new generations.
+
+Bracket evaluation alone imports repository core lazily with scoped/restored
+`src` path and cached-module origin checks. Registration, fixed-only studies,
+hashing and offline reports do not import core or strategies. Existing core
+initialization imports storage/Optuna/WFA, chooses a database path and can create
+an absent empty `src/storage/` directory; it opens no database here. Pattern Lab
+calls no storage APIs. Bracket code attribution hashes an explicit list of
+consumed reference/adapter/rule/evidence files by path; snapshot timestamps and
+unused price tick stay provenance while normalized execution rules enter data
+identity. No resume/reuse or new compiled mode is implemented.
+
 ## Matched comparisons and calibrated inference
 
 M3a analyses a **completed** M2 study offline. It measures the difference
@@ -3134,7 +3254,8 @@ A different ratio in a smaller experiment does not revise the delivered
 
 ## Explicit context and frozen validation (M3b)
 
-M3b is implemented pending tech-lead review. M3a remains accepted at `9fe7816`.
+M3b is accepted at `908efb4` for the documented research scope and supported
+extension-loading routes. M3a remains accepted at `9fe7816`.
 This mechanism supplies reproducible later-period evaluation, not a new statistical
 method or a claim of unseen data. No collector runs implicitly.
 
@@ -3208,12 +3329,19 @@ Spawn workers are separate processes, not evidence of thread safety. The entire
 previous `sys.path` is restored afterward, including removal of extensions'
 own import-time path changes; extensions must not rely on those changes persisting.
 
-An importlib callable captured before the window, private bootstrap APIs, custom
+An importlib callable captured before the window, `importlib.__import__`, private bootstrap APIs, custom
 loaders, manual module execution, deliberate `sys.modules` manipulation and
 arbitrary later dynamic loads/file reads are outside this bounded observer.
 Authors must declare dependencies and keep ordinary local loading within the
 supported routes/window. This is neither dependency discovery nor a sandbox.
 Archived snapshots are inert and never executed.
+
+Aliases captured during loading refer to a module-level dispatcher. Outside a
+window they perform ordinary Python imports; inside a later window they use that
+window's checks and declarations. They retain no expired root or declaration.
+An outside-window lazy import does not establish a verified source generation
+for a later study. This correction does not cover aliases of the ordinary Python
+callable captured before observation or introduce concurrent loading support.
 
 Hypotheses and models remain instrument-scoped. Instrument features may depend
 on context outputs through the ordinary dependency mapping; context features
@@ -3589,7 +3717,8 @@ its report, and composes the per-series data fingerprint with the selected
 universe, roles and settings into run identity. M2b adds the bounded spawn pool
 and `workers=1/2` equivalence. **M3a adds matched controls and calibrated
 inference over a completed study**; M3b implements explicit external-series/panel
-feature context and a frozen-candidate validation path, pending tech-lead review.
+feature context and a frozen-candidate validation path, accepted at `908efb4`
+for its documented research scope and supported extension-loading routes.
 M4 owns bracket execution, sizing, leverage, expiry and the interpretation of the
 stored instrument rules. M2b block A enforces the boundary contracts M2a
 advertised but did not check; block B adds the bounded spawn pool and the
@@ -3603,7 +3732,8 @@ Known limits of these milestones:
   certified nominal 5% control. Arbitrary dependence across months is uncovered.
   Explicit v1 keeps the legacy failure: 11/15 checks, about 7.5-8.3% rejection
   and noncoverage on persistent-signal fixtures. A nominal Holm rejection from
-  either method is not a validated edge. M3b awaits review; M4 remains unimplemented.
+  either method is not a validated edge. M3b is accepted at `908efb4` within its
+  documented limits; M4 sequential brackets are delivered pending review.
 - **A seven-day block does not control error under dependence substantially
   longer than a week**, and the measurements above show it is already
   anti-conservative at the declared signal persistence. The tracked

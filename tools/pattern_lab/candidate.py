@@ -153,6 +153,12 @@ def _resolved_analysis(recipe):
         variants=study_family["variants"])
 
 
+def _refuse_sequential_recipe(recipe):
+    for model in recipe["study_family"]["models"]:
+        if contracts.is_sequential(model):
+            raise PatternLabDataError("Frozen candidates do not support a study containing any sequential model; rerun a fixed-only development study and analysis under the current generation.")
+
+
 def load_candidate(candidate: Any) -> dict[str, Any]:
     """Verify a candidate path or mapping without pack/source/current-code access."""
     raw = manifest.read_json_file(Path(candidate)) if isinstance(candidate, (str, Path)) else candidate
@@ -164,6 +170,7 @@ def load_candidate(candidate: Any) -> dict[str, Any]:
         recipe = _object(document["recipe"], ("study", "study_semantic", "study_family", "context_admission",
                          "analysis_request", "analysis_family"), "candidate.recipe")
         semantic = contracts.require_mapping(recipe["study_semantic"], "candidate.study_semantic")
+        _refuse_sequential_recipe(recipe)
         _object(semantic, ("schema_version", "study", "instruments", "timeframes_minutes", "hypotheses",
                           "models", "metrics", "protocol", "extensions", "context", "execution"), "candidate.study_semantic")
         _object(recipe["study"], (*spec.REQUEST_KEYS, "context", "execution"), "candidate.study")
@@ -276,6 +283,7 @@ def freeze_candidate(*, study_root, analysis_root, start, end, warmup_start, out
               "analysis_request": copy.deepcopy(analyzed.request), "analysis_family": copy.deepcopy(analyzed.family)}
     if _resolved_analysis(recipe) != analyzed.family:
         raise PatternLabDataError("candidate analysis family differs from its complete declared recipe.")
+    _refuse_sequential_recipe(recipe)
     document = {"schema_version": 1, "required_code_policy_version": 1, "candidate_id": "",
                 "recipe": recipe, "split": _split(recipe, start, end, warmup_start),
                 "discovery": {"binding": binding, "study_completion_sha256": manifest.file_sha256(source.run_root/evidence.COMPLETION_FILE),

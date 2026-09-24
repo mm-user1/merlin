@@ -33,6 +33,43 @@ def hook_state():
     return builtins.__import__, importlib.import_module, list(sys.meta_path), list(sys.path)
 
 
+@pytest.mark.parametrize("ending", ["success", "error", "interrupt"])
+def test_retained_alias_uses_only_current_window(tmp_path, monkeypatch, ending):
+    (tmp_path/"alias_owner.py").write_text(
+        "from importlib import import_module as retained\ndef register(context): pass\n")
+    (tmp_path/"lazy_helper.py").write_text("VALUE = 42\n")
+    hooks = hook_state()
+    extensions.load_extensions([declaration(tmp_path, "alias_owner", ["lazy_helper.py"])])
+    retained = sys.modules["alias_owner"].retained
+    assert extensions._ACTIVE_IMPORT_WINDOW is None
+    monkeypatch.syspath_prepend(str(tmp_path))
+    lazy = retained("lazy_helper")
+    assert lazy.VALUE == 42 and "lazy_helper" not in extensions._VERIFIED_MODULES
+    (tmp_path/"alias_user.py").write_text(
+        "from alias_owner import retained\ndef register(context): retained('lazy_helper')\n")
+    with pytest.raises(PatternLabDataError, match="undeclared local helper lazy_helper"):
+        extensions.load_extensions([declaration(tmp_path, "alias_user", ["alias_owner.py"])])
+    with pytest.raises(PatternLabDataError, match="unknown or changed runtime"):
+        extensions.load_extensions([declaration(tmp_path, "alias_user", ["alias_owner.py", "lazy_helper.py"])])
+    assert extensions._ACTIVE_IMPORT_WINDOW is None
+    for index in range(3):
+        name = f"alias_cycle_{index}"
+        ending_code = {"success": "pass", "error": "raise RuntimeError('probe')",
+                       "interrupt": "raise KeyboardInterrupt('probe')"}[ending]
+        (tmp_path/(name+".py")).write_text(
+            "from alias_owner import retained\ndef register(context):\n"
+            "    assert retained('json').loads('42') == 42\n    " + ending_code + "\n")
+        request = declaration(tmp_path, name, ["alias_owner.py"])
+        if ending == "success":
+            extensions.load_extensions([request])
+        else:
+            with pytest.raises(RuntimeError if ending == "error" else KeyboardInterrupt, match="probe"):
+                extensions.load_extensions([request])
+        assert extensions._ACTIVE_IMPORT_WINDOW is None
+        assert retained("json").loads("42") == 42
+        assert hook_state()[:3] == hooks[:3]
+
+
 @pytest.mark.parametrize("style", ["namespace", "scalar"])
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("declared", [False, True])
@@ -153,7 +190,7 @@ def test_failure_restores_owned_modules_registry_and_hooks(tmp_path, monkeypatch
 
 
 def test_new_helper_is_found_with_unchanged_directory_mtime(tmp_path):
-    assert importlib.machinery.PathFinder.find_spec("checked_helper", [str(tmp_path)]) is None
+    assert importlib.machinery.PathFinder.find_spec("checked_helper", [str(tmp_path.resolve())]) is None
     stamp = tmp_path.stat()
     (tmp_path/"checked_helper.py").write_text("VALUE = 5\n")
     (tmp_path/"checked_extension.py").write_text("from checked_helper import VALUE\ndef register(context): pass\n")

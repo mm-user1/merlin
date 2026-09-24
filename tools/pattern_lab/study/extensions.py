@@ -90,6 +90,22 @@ _LOADED: dict[str, LoadedExtension] = {}
 # committed only after the owning extension successfully registers.
 _VERIFIED_MODULES: dict[str, tuple[ModuleType, Path, str]] = {}
 _VERIFIED_IMPORTS: dict[str, tuple[ModuleType, ...]] = {}
+_IMPORT_MODULE = importlib.import_module
+_ACTIVE_IMPORT_WINDOW = None
+
+
+def _dispatch_import_module(name, package=None):
+    """Retained aliases consult the current window, never an expired closure."""
+    window = _ACTIVE_IMPORT_WINDOW
+    if window is None:
+        delegate = importlib.import_module
+        return (delegate if delegate is not _dispatch_import_module else _IMPORT_MODULE)(name, package)
+    delegate, observe = window
+    owner = sys._getframe(1).f_globals.get("__name__")
+    imported = delegate(name, package)
+    full = importlib.util.resolve_name(name, package) if name.startswith(".") else name
+    observe(full, owner)
+    return imported
 
 
 def _relative_source_path(value, where):
@@ -170,6 +186,9 @@ def _load_verified_extension(record):
     The import observer also sees already-cached scalar/namespace imports.
     Arbitrary later dynamic loading remains the trusted author's responsibility.
     """
+    global _ACTIVE_IMPORT_WINDOW
+    if _ACTIVE_IMPORT_WINDOW is not None:
+        raise PatternLabDataError("Extension loading windows must not overlap.")
     from . import contracts
     root = Path(record.source_root).resolve()
     allowed = {(root / path).resolve(): digest for path, digest in record.files}
@@ -256,16 +275,6 @@ def _load_verified_extension(record):
         observe_modules(full, (globals or {}).get("__name__"), fromlist)
         return imported
 
-    def observed_import_module(name, package=None):
-        # The public importlib callable has no globals argument. The immediate
-        # caller identifies the source owning this ordinary call, including an
-        # alias acquired inside the observed window. Do not retain its frame.
-        owner = sys._getframe(1).f_globals.get("__name__")
-        imported = original_import_module(name, package)
-        full = importlib.util.resolve_name(name, package) if name.startswith(".") else name
-        observe_modules(full, owner)
-        return imported
-
     # Refresh resolution before installing any owned hook/path state. An
     # invalidator failure must propagate without a partially installed window.
     importlib.invalidate_caches()
@@ -274,7 +283,9 @@ def _load_verified_extension(record):
         sys.path.insert(0, str(root))
         sys.meta_path.insert(0, finder)
         builtins.__import__ = observed_import
-        importlib.import_module = observed_import_module
+        delegate = original_import_module if original_import_module is not _dispatch_import_module else _IMPORT_MODULE
+        _ACTIVE_IMPORT_WINDOW = (delegate, observe_modules)
+        importlib.import_module = _dispatch_import_module
         loader = VerifiedLoader(record.module, record.module_path)
         specification = importlib.util.spec_from_file_location(record.module, record.module_path, loader=loader)
         module = importlib.util.module_from_spec(specification)
@@ -299,6 +310,7 @@ def _load_verified_extension(record):
                 sys.modules.pop(name, None)
         raise
     finally:
+        _ACTIVE_IMPORT_WINDOW = None
         importlib.import_module = original_import_module
         builtins.__import__ = original_import
         sys.meta_path.remove(finder)
@@ -505,6 +517,16 @@ def core_source_digests() -> dict[str, str]:
         if origin and Path(origin).is_file():
             digests[name] = file_digest(Path(origin))
     return digests
+
+
+def bracket_source_digests():
+    """Bounded consumed-contract attribution without importing generic core."""
+    root = Path(__file__).resolve().parents[3]
+    paths = ["src/core/engine_v2/"+name+".py" for name in
+             ("kernel", "sizing", "contracts", "price_rounding", "execution_modes", "diagnostics")]
+    paths += ["src/core/backtest_engine.py"]
+    paths += ["tools/pattern_lab/study/"+name+".py" for name in ("bracket", "bracket_rules", "sequential")]
+    return {path:file_digest(root/path) for path in paths}
 
 
 def library_versions() -> dict[str, str]:

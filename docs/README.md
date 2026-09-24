@@ -51,7 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
-| [Pattern Lab data foundation, collector, event studies and matched comparisons](../tools/pattern_lab/README.md) | Research-only pack, collector, study, evidence, identity, extensions and workers; M3a analysis, support gates and calibration; M3b explicit context, frozen candidates, split admission, child-bound validation receipts and offline reports |
+| [Pattern Lab data foundation, studies, comparisons and bracket probes](../tools/pattern_lab/README.md) | Research-only pack, collector, evidence, identity, extensions and workers; M3a inference; M3b context and frozen validation; M4 sequential ATR bracket accounts, quantity rules, checked saved tables and offline descriptive reports (pending review) |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 ## Baseline evidence

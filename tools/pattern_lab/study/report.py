@@ -320,6 +320,19 @@ and fractional excursions; multiply by 100 for percent. Saved machine-readable e
 {''.join(sections)}
 </div>
 """
+    if "sequential_accounts" in summary:
+        body += '<div class="card"><h2>Sequential ATR bracket accounts</h2><p>Descriptive independent accounts, not a portfolio or validated edge. All declared cases are shown; no RR is selected.</p>'
+        body += '<p>Signal-close levels and legacy float risk sizing; next-contiguous-open fills. Entry-only leverage cap rejects without resizing. Commission applies on both executed notionals; slippage, funding, liquidation and maintenance margin are not modeled. Execution uses observation OHLC: O-H-L-C when open is nearer high, otherwise O-L-H-C (including ties).</p>'
+        body += '<p>ATR uses an arithmetic TR seed and recursive Pine update, resetting after gaps. Segment survivors close at the last observed close and capital carries forward. Four days is an elapsed-time expiry trigger followed by next-open closure; terminal closure takes precedence. Intrabar fills have an unknown instant: duration uses the exit bar open, open exits use that open, and terminal exits use the bar close.</p>'
+        body += '<p>Drawdowns include the initial-capital anchor, distinguish realized balance from bar-close MTM, and may exceed 100%. Wins/losses use net PnL after both fees. Planned R uses rounded quantity times signal-close distance. Profit factor is net winning PnL / absolute net losing PnL; no-loss cases remain null with an explicit status.</p>'
+        body += _rows([[a["instrument_id"],a["variant_id"],a["model_instance_id"],str(a["timeframe_minutes"]),a["case_id"],str(a["signals"]),str(a["completed_trades"]),
+            _number(a["net_pnl"]),_number(a["total_fees"]),_number(a["return_pct"]),_number(a["realized_balance_drawdown_pct"]),_number(a["bar_close_mtm_drawdown_pct"])] for a in summary["sequential_accounts"]],
+            header=["Instrument","Variant","Model","Minutes","Case","Signals","Trades","Net PnL USDT","Fees USDT","Return %","Realized DD %","MTM DD %"])
+        for account in summary["sequential_accounts"]:
+            body += '<details><summary>'+escape(' / '.join(str(account[k]) for k in ("instrument_id","variant_id","model_instance_id","case_id")))+'</summary>'
+            body += _definition([(k,str(v)) for k,v in account.items()])+ '</details>'
+        body += '<h3>Frozen quantity rules</h3><p>Current exchange snapshots are not historical rule history. OKX contracts convert through base-denominated ctVal with ctMult=1; Bybit uses base quantity. Integer lots preserve original-unit quantities. Optional minimum notional is enforced only when published. Prices are not tick-rounded; price tick is provenance, not full exchange-order validation.</p>'
+        body += _definition([(key,str(value)) for key,value in summary["sequential_rules"].items()])+'</div>'
     return (
         "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"

@@ -39,7 +39,8 @@ RESERVED_EVIDENCE_FIELDS = (
 
 FIXED_HORIZON_EVIDENCE_KIND = "fixed_horizon_path_v1"
 CUSTOM_CASE_EVIDENCE_KIND = "custom_case_outcomes_v1"
-EVIDENCE_KINDS = (FIXED_HORIZON_EVIDENCE_KIND, CUSTOM_CASE_EVIDENCE_KIND)
+SEQUENTIAL_EVIDENCE_KIND = "sequential_bracket_v1"
+EVIDENCE_KINDS = (FIXED_HORIZON_EVIDENCE_KIND, CUSTOM_CASE_EVIDENCE_KIND, SEQUENTIAL_EVIDENCE_KIND)
 
 
 # --------------------------------------------------------------------------
@@ -356,6 +357,34 @@ class ModelDescriptor:
 
 
 @dataclass(frozen=True)
+class SequentialEvidence:
+    tables: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class SequentialModelDescriptor:
+    """Event-dependent account evaluation; separate from per-anchor evidence."""
+    model_id: str
+    version: str
+    validate_settings: Callable
+    resolve_cases: Callable
+    evaluate: Callable
+    prior_bars: Callable
+    evidence_kind: str = SEQUENTIAL_EVIDENCE_KIND
+    scope: str = INSTRUMENT_SCOPE
+    description: str = ""
+
+
+def is_sequential(instance):
+    """Check the complete reserved saved contract, without loading registrations."""
+    triple = (instance.get("model_id"), instance.get("model_version"), instance.get("evidence_kind"))
+    reserved = triple[0] == "atr_bracket" or triple[2] == SEQUENTIAL_EVIDENCE_KIND
+    if reserved and triple != ("atr_bracket", "1", SEQUENTIAL_EVIDENCE_KIND):
+        raise PatternLabDataError("Unsupported sequential model/version/evidence-kind triple")
+    return reserved
+
+
+@dataclass(frozen=True)
 class MetricDescriptor:
     """A summary metric over saved observations of one declared outcome group."""
 
@@ -435,6 +464,14 @@ def register_hypothesis(descriptor: HypothesisDescriptor, *, builtin: bool = Fal
 
 def register_model(descriptor: ModelDescriptor, *, builtin: bool = False,
                    source_digest: str | None = None, source_path: str | None = None) -> Registration:
+    sequential = is_sequential(dict(model_id=descriptor.model_id, model_version=descriptor.version,
+                                    evidence_kind=descriptor.evidence_kind))
+    if sequential != isinstance(descriptor, SequentialModelDescriptor) or (sequential and not builtin):
+        raise PatternLabDataError("Sequential models require the built-in sequential descriptor; extensions cannot register them")
+    if sequential:
+        from .bracket import DESCRIPTOR
+        if descriptor is not DESCRIPTOR:
+            raise PatternLabDataError("Only the owned built-in atr_bracket descriptor may register sequential evidence")
     require_scope(descriptor.scope, f"model {descriptor.model_id}.scope")
     if descriptor.evidence_kind not in EVIDENCE_KINDS:
         raise PatternLabDataError(

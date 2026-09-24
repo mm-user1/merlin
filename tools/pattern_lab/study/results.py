@@ -95,6 +95,31 @@ class StudyResults:
         return sorted(self.jobs)
 
     def table(self, instrument_id: str, name: str) -> pd.DataFrame:
+        if name.startswith("sequential_"):
+            reader = self.instrument_reader(instrument_id)
+            try:
+                return reader.sequential_tables()[name.removeprefix("sequential_")]
+            finally:
+                reader.release()
+        return self._raw_table(instrument_id, name)
+
+    def sequential_account(self, instrument_id, *, timeframe_minutes, variant_id, model_instance_id, case_id):
+        """Checked attempts/trades/path for exactly one isolated account."""
+        instance = self.model_instance(model_instance_id)
+        if not contracts.is_sequential(instance):
+            raise PatternLabDataError("Expected a sequential account model")
+        self.case(model_instance_id,timeframe_minutes,case_id)
+        if variant_id not in {v["variant_id"] for v in self.family["variants"]}:
+            raise PatternLabDataError("Unknown sequential variant")
+        reader=self.instrument_reader(instrument_id)
+        try:
+            return {name:frame.loc[(frame.timeframe_minutes==timeframe_minutes)&(frame.variant_id==variant_id)&
+                    (frame.model_instance_id==model_instance_id)&(frame.case_id==case_id)].reset_index(drop=True)
+                    for name,frame in reader.sequential_tables().items()}
+        finally:
+            reader.release()
+
+    def _raw_table(self, instrument_id: str, name: str) -> pd.DataFrame:
         """Read one verified raw table of one completed job."""
         if instrument_id not in self.jobs:
             raise PatternLabDataError(
@@ -184,9 +209,27 @@ class InstrumentReader:
     def table(self, name: str) -> pd.DataFrame:
         frame = self._tables.get(name)
         if frame is None:
-            frame = self._results.table(self._instrument_id, name)
+            # Ordinary tables retain the public adapter/observation contract.
+            # Sequential tables are checked together below, without recursion.
+            read = self._results._raw_table if name.startswith("sequential_") else self._results.table
+            frame = read(self._instrument_id, name)
             self._tables[name] = frame
         return frame
+
+    def sequential_tables(self):
+        from . import sequential
+        from ..manifest import to_epoch_ms
+        tables={name:self.table("sequential_"+name) for name in sequential.SCHEMAS}
+        if "sequential" not in self._validated:
+            result=self._results
+            admitted=evidence.read_json(evidence.admitted_path(result.run_root,self._instrument_id))
+            self._sequential_grouped=sequential.validate(tables,instrument_id=self._instrument_id,
+                instances=[m for m in result.family["models"] if contracts.is_sequential(m)],
+                variants=result.family["variants"],emissions=self.table("emissions"),rules=admitted["bracket_rules"],
+                expected_bars=sequential.expected_bars(self.table("conditions"), result.jobs[self._instrument_id]["stats"],
+                                                     to_epoch_ms(result.request["study"]["end_utc"])))
+            self._validated.add("sequential")
+        return tables
 
     def eligible_anchors(self) -> dict[int, np.ndarray]:
         """Every eligible study anchor per timeframe, from the saved conditions.
@@ -208,6 +251,8 @@ class InstrumentReader:
 
     def evidence_table(self, instance: Mapping[str, Any]) -> pd.DataFrame:
         """Return the verified raw table this model instance's cases expand from."""
+        if contracts.is_sequential(instance):
+            raise PatternLabDataError("Sequential models have account evidence, not per-anchor observations")
         if instance["evidence_kind"] == contracts.FIXED_HORIZON_EVIDENCE_KIND:
             return self.table("primitives")
         name = f"custom__{instance['model_instance_id']}"
@@ -250,6 +295,8 @@ class InstrumentReader:
         self._tables.clear()
         self._validated.clear()
         self._anchors = None
+        if hasattr(self, "_sequential_grouped"):
+            del self._sequential_grouped
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +402,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     states, counts = _reconcile(root, status)
     provenance = dict(evidence.read_json(root / evidence.PROVENANCE_FILE))
     family = dict(evidence.read_json(root / evidence.FAMILY_FILE))
+    sequential_models = [m for m in family["models"] if contracts.is_sequential(m)]
     request = dict(evidence.read_json(root / evidence.REQUEST_FILE))
     source = dict(evidence.read_json(root / evidence.SOURCE_FILE))
     if type(request.get("schema_version")) is not int or request["schema_version"] not in evidence.SUPPORTED_RUN_SCHEMA_VERSIONS:
@@ -398,7 +446,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
             "load_results(run_root, allow_partial=True) to inspect it instead.",
             error_code="incomplete_run",
         )
-    return StudyResults(
+    result = StudyResults(
         run_root=root,
         request=request,
         protocol=dict(evidence.read_json(root / evidence.PROTOCOL_FILE)),
@@ -412,6 +460,36 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         job_states=states,
         counts=counts,
     )
+    if sequential_models:
+        from . import bracket
+        from ..manifest import to_epoch_ms
+        if request["schema_version"] != 2:
+            raise PatternLabDataError("Sequential evidence requires study version 2")
+        if family["models"] != request["models"]:
+            raise PatternLabDataError("Sequential request/family models disagree")
+        by_model={m["model_instance_id"]:bracket.prior_bars(m["settings"]) for m in sequential_models
+                  if bracket.prior_bars(m["settings"])}
+        by_variant={v["variant_id"]:v["required_prior_bars"] for v in family["variants"]}
+        needed=max([*by_model.values(),*by_variant.values()],default=0)
+        warmup=to_epoch_ms(request["study"]["start_utc"])-to_epoch_ms(request["study"]["warmup_start_utc"])
+        expected_warmup={str(tf):{"declared_warmup_bars":warmup//(tf*60000),"required_prior_bars":needed,
+                                 "by_variant":by_variant,**({"by_model":by_model} if by_model else {})}
+                         for tf in family["timeframes_minutes"]}
+        if family["warmup_requirements"] != expected_warmup or any(f["declared_warmup_bars"]<needed for f in expected_warmup.values()):
+            raise PatternLabDataError("Saved sequential warmup contract disagrees")
+        for model in sequential_models:
+            settings=bracket.validate_settings(model["settings"],family["timeframes_minutes"])
+            if settings!=model["settings"] or model["cases"]!={str(tf):[c.as_json() for c in bracket.resolve_cases(settings,tf)] for tf in family["timeframes_minutes"]}:
+                raise PatternLabDataError("Saved sequential settings/cases disagree")
+        for identifier in result.completed_instruments:
+            if evidence.read_json(evidence.admitted_path(root,identifier))["warmup_requirements"] != expected_warmup:
+                raise PatternLabDataError("Admitted sequential warmup contract disagrees")
+            reader=result.instrument_reader(identifier)
+            try:
+                reader.sequential_tables()
+            finally:
+                reader.release()
+    return result
 
 
 def load_results(run_root: Any, *, allow_partial: bool = False) -> StudyResults:
@@ -544,6 +622,8 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
             group["case_id"],
         )
         instance = instances[group["model_instance_id"]]
+        if contracts.is_sequential(instance):
+            continue
         case = next(
             item
             for item in instance["cases"][str(int(group["timeframe_minutes"]))]
@@ -663,8 +743,23 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
             }
         )
 
+    sequential_accounts=[]
+    sequential_rules={}
+    sequential_models=[m for m in family["models"] if contracts.is_sequential(m)]
+    if sequential_models:
+        from . import sequential
+        for identifier in results.completed_instruments:
+            reader=results.instrument_reader(identifier)
+            try:
+                reader.sequential_tables()
+                sequential_accounts.extend(sequential.summaries(reader._sequential_grouped,sequential_models))
+                admitted=evidence.read_json(evidence.admitted_path(results.run_root,identifier))
+                sequential_rules[identifier]={"semantic":admitted["bracket_rules"],"snapshot":admitted["rule_snapshot"]}
+            finally:
+                reader.release()
     return {
         "schema_version": summary_version,
+        **({"sequential_accounts":sequential_accounts,"sequential_rules":sequential_rules} if sequential_models else {}),
         **({"context": dict(results.request["context"]),
             "context_admission": evidence.read_json(results.run_root / evidence.CONTEXT_ADMISSION_FILE),
             "context_diagnostics": evidence.read_json(results.run_root / evidence.CONTEXT_FILE),
@@ -735,6 +830,8 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
     for group in family["groups"]:
         timeframe = int(group["timeframe_minutes"])
         instance = instances[group["model_instance_id"]]
+        if contracts.is_sequential(instance):
+            continue
         case = results.case(group["model_instance_id"], timeframe, group["case_id"])
         collected: dict[str, list[pd.DataFrame]] = {
             declaration.declaration_id: [] for declaration in declarations

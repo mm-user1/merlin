@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 import numpy as np
@@ -131,6 +131,76 @@ class KernelResult:
     timestamps: list[pd.Timestamp]
     guardrail_summary: GuardrailSummary
     standing_state: StandingState
+
+
+@dataclass(frozen=True)
+class EntryPolicy:
+    """Opt-in reference admission; deliberately absent from profile/Grid APIs."""
+
+    max_leverage: float
+    minimum_lots: int = 1
+    minimum_notional: float | None = None
+
+    def __post_init__(self):
+        if not math.isfinite(self.max_leverage) or self.max_leverage <= 0:
+            raise ValueError("max_leverage must be finite and positive")
+        if type(self.minimum_lots) is not int or not 1 <= self.minimum_lots <= 2**53:
+            raise ValueError("minimum_lots must be a representable positive integer")
+        if self.minimum_notional is not None and (
+            not math.isfinite(self.minimum_notional) or self.minimum_notional < 0
+        ):
+            raise ValueError("minimum_notional must be finite and nonnegative")
+
+
+@dataclass
+class AttemptTrace:
+    signal_index: int
+    direction: int
+    reason: str
+    fill_index: int | None = None
+    anchor: float | None = None
+    stop: float | None = None
+    target: float | None = None
+    risk_distance: float | None = None
+    quantity: float | None = None
+    lots: int | None = None
+    balance: float | None = None
+    proposed_fee: float | None = None
+    notional: float | None = None
+    required_leverage: float | None = None
+    trade_index: int | None = None
+
+
+@dataclass(frozen=True)
+class ExitTrace:
+    signal_index: int
+    entry_index: int
+    exit_index: int
+    reason: str
+    phase: str
+    entry_fee: float
+    exit_fee: float
+    ambiguous: bool
+
+
+@dataclass
+class KernelTrace:
+    """Branch-produced diagnostics; enabling these alone does not change fills."""
+
+    attempts: list[AttemptTrace] = field(default_factory=list)
+    exits: list[ExitTrace] = field(default_factory=list)
+    positions: list[tuple[int, float, float | None]] = field(default_factory=list)
+
+
+def quantity_lots(quantity: float, step: float) -> int:
+    """Recover the legacy float-sized lot count without flooring a second time."""
+    ratio = quantity / step
+    if not math.isfinite(ratio) or not 0 <= ratio <= 2**53:
+        raise ValueError("Unrepresentable rounded quantity/lot count")
+    lots = round(ratio)
+    if not math.isclose(lots * step, quantity, rel_tol=0, abs_tol=2 * math.ulp(quantity)):
+        raise ValueError("Rounded quantity does not reconstruct from integer lots")
+    return lots
 
 
 @dataclass
@@ -446,10 +516,18 @@ def _standing_state(
     )
 
 
-def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelResult:
+def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
+                         policy: EntryPolicy | None = None,
+                         trace: KernelTrace | None = None) -> KernelResult:
     """Run the deterministic Phase-1 reference execution loop."""
 
     _validate_price_rounding_config(config)
+    if policy is not None and (config.trail_mode != "none" or config.target_mode != "rr"
+                               or config.boundary_mode != "strict_close"
+                               or config.max_stop_pct != math.inf):
+        raise ValueError("Entry policy requires a strict, unfiltered, nontrailing bracket")
+    if trace is not None and (trace.attempts or trace.exits or trace.positions):
+        raise ValueError("Use an empty trace for each execution")
     trail_code = _validate_trail_config(data, config)
     length = len(data.timestamps)
     guardrails = _GuardrailAccumulator()
@@ -479,6 +557,10 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
     previous_close_position = 0
     pending_entry: Optional[_PendingEntry] = None
     pending_market_close = False
+    pending_attempt = None
+    active_attempt = None
+    entry_index = -1
+    trade_ambiguous = False
 
     trades: list[TradeRecord] = []
     equity_curve: list[float] = []
@@ -490,7 +572,7 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
         position = _Position()
         pending_market_close = False
 
-    def close_position(exit_price: float, timestamp: pd.Timestamp) -> None:
+    def close_position(exit_price: float, timestamp: pd.Timestamp, reason: str, phase: str) -> None:
         nonlocal balance
         if position.direction == 0 or position.entry_time is None:
             return
@@ -501,6 +583,10 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
             commission_rate=commission_rate,
         )
         trades.append(trade)
+        if trace is not None:
+            trace.exits.append(ExitTrace(active_attempt.signal_index, entry_index, i,
+                                        reason, phase, position.entry_commission,
+                                        exit_price * position.size * commission_rate, trade_ambiguous))
         balance += balance_delta
         reset_position()
 
@@ -514,11 +600,43 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
         had_position_this_bar = position.direction != 0
 
         if pending_market_close and position.direction != 0:
-            close_position(open_price, timestamp)
+            close_position(open_price, timestamp, "expiry", "open")
+
+        if pending_entry is not None and policy is not None:
+            order = pending_entry
+            notional = abs(open_price * order.size)
+            fee = notional * commission_rate
+            denominator = balance - fee
+            leverage = notional / denominator if denominator > 0 else math.nan
+            finite = all(math.isfinite(x) for x in (notional, fee, denominator))
+            # An overflowing positive-denominator ratio is nonfinite arithmetic;
+            # a nonpositive denominator retains the declared minimum-first order.
+            finite = finite and (denominator <= 0 or math.isfinite(leverage))
+            reason = ("leverage_undefined" if not finite else
+                      "below_min_notional" if policy.minimum_notional is not None and notional < policy.minimum_notional else
+                      "leverage_undefined" if not math.isfinite(leverage) else
+                      "leverage_cap_exceeded" if leverage > policy.max_leverage else "filled")
+            pending_attempt.fill_index = i
+            pending_attempt.balance = balance
+            pending_attempt.notional = notional if math.isfinite(notional) else None
+            pending_attempt.proposed_fee = fee if math.isfinite(fee) else None
+            pending_attempt.required_leverage = leverage if math.isfinite(leverage) else None
+            pending_attempt.reason = reason
+            if reason != "filled":
+                pending_entry = None
+                if reason == "leverage_cap_exceeded":
+                    guardrails.margin_reject_count += 1
 
         if pending_entry is not None and position.direction == 0:
             order = pending_entry
             pending_entry = None
+            active_attempt = pending_attempt
+            entry_index = i
+            trade_ambiguous = False
+            if active_attempt is not None:
+                active_attempt.reason = "filled"
+                active_attempt.fill_index = i
+                active_attempt.trade_index = len(trades)
             position = _Position(
                 direction=order.direction,
                 size=order.size,
@@ -571,10 +689,13 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                 elif target_enabled and open_price <= position.target_price:
                     gap_exit = open_price
             if gap_exit is not None:
-                close_position(gap_exit, timestamp)
+                stop_hit = open_price <= stop_active_for_this_bar if position.direction > 0 else open_price >= stop_active_for_this_bar
+                close_position(gap_exit, timestamp, "stop" if stop_hit else "target", "open")
 
         if position.direction != 0:
             stop_active_for_this_bar = _active_stop(position, trail_enabled)
+            if target_enabled and low <= position.initial_stop <= high and low <= position.target_price <= high:
+                trade_ambiguous = True
             path = intrabar_path(open_price, high, low, close)
             current = path[0]
             for endpoint in path[1:]:
@@ -582,10 +703,12 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                     break
                 rising = endpoint >= current
                 exit_price: Optional[float] = None
+                exit_reason = "stop"
                 if target_enabled:
                     if position.direction > 0:
                         if rising and _between(current, endpoint, position.target_price):
                             exit_price = position.target_price
+                            exit_reason = "target"
                         elif not rising and _between(current, endpoint, position.initial_stop):
                             exit_price = position.initial_stop
                     else:
@@ -593,6 +716,7 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                             exit_price = position.initial_stop
                         elif not rising and _between(current, endpoint, position.target_price):
                             exit_price = position.target_price
+                            exit_reason = "target"
                 elif trail_enabled:
                     if position.direction > 0 and not rising and _between(current, endpoint, stop_active_for_this_bar):
                         exit_price = stop_active_for_this_bar
@@ -600,7 +724,7 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                         exit_price = stop_active_for_this_bar
 
                 if exit_price is not None:
-                    close_position(exit_price, timestamp)
+                    close_position(exit_price, timestamp, exit_reason, "intrabar")
                     break
                 current = endpoint
 
@@ -640,10 +764,23 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
             pending_entry = None
             pending_market_close = False
             if position.direction != 0 and position.entry_time is not None:
-                close_position(close, timestamp)
+                close_position(close, timestamp, "terminal", "close")
 
         in_date_range = _date_allows_entry(timestamp, config, trade_start_idx, i)
         can_plan_entry = (i != last_bar_index) or boundary_none
+        attempt = None
+        direction = (1 if config.enable_long and bool(data.signals.long_entries[i]) else
+                     -1 if config.enable_short and bool(data.signals.short_entries[i]) else 0)
+        if direction and (policy is not None or trace is not None):
+            if policy is not None and not in_date_range:
+                raise ValueError("Emitted signal outside execution bounds")
+            reason = ("no_next_bar" if not can_plan_entry else "occupied" if position.direction else
+                      "reentry_suppressed" if previous_close_position or had_position_this_bar else "planned")
+            if reason == "planned" and pending_entry is not None:
+                raise ValueError("Already pending order at an eligible signal")
+            attempt = AttemptTrace(i, direction, reason, balance=balance)
+            if trace is not None:
+                trace.attempts.append(attempt)
         if (
             can_plan_entry
             and in_date_range
@@ -669,12 +806,47 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                     risk = stop - anchor
                     target = anchor - config.reward_risk * risk
                 stop_pct = 100.0 * risk / anchor if anchor > 0.0 else math.inf
+                if policy is not None:
+                    if not math.isfinite(balance):
+                        raise ValueError("Nonfinite account capital")
+                    swing = data.rolling_low[i] if direction > 0 else data.rolling_high[i]
+                    reason = ("indicator_unavailable" if not math.isfinite(atr_value) or not math.isfinite(swing) else
+                              "invalid_risk_distance" if not math.isfinite(stop) or not math.isfinite(risk) or risk <= 0 else
+                              "nonpositive_capital" if balance <= 0 else None)
+                    if reason is not None:
+                        attempt.reason = reason
+                        # No order is produced; still publish this bar's account state.
+                        equity_curve.append(balance)
+                        balance_curve.append(balance)
+                        timestamps.append(timestamp)
+                        if trace is not None:
+                            trace.positions.append((0, 0.0, None))
+                        previous_close_position = 0
+                        continue
+                    if not math.isfinite(target):
+                        raise ValueError("Unrepresentable planned target")
                 order_size = risk_position_size(
                     balance=balance,
                     risk_distance=risk,
                     risk_per_trade_pct=config.risk_per_trade_pct,
                     contract_size=config.contract_size,
                 )
+                if attempt is not None:
+                    attempt.anchor, attempt.stop, attempt.target = anchor, stop, target
+                    attempt.risk_distance, attempt.quantity = risk, order_size
+                if policy is not None:
+                    if not math.isfinite(order_size):
+                        raise ValueError("Unrepresentable planned quantity")
+                    attempt.lots = quantity_lots(order_size, config.contract_size)
+                    if attempt.lots < policy.minimum_lots:
+                        attempt.reason = "zero_quantity" if order_size == 0 else "below_min_quantity"
+                        equity_curve.append(balance)
+                        balance_curve.append(balance)
+                        timestamps.append(timestamp)
+                        if trace is not None:
+                            trace.positions.append((0, 0.0, None))
+                        previous_close_position = 0
+                        continue
                 if not (math.isfinite(stop) and math.isfinite(risk) and risk > 0.0):
                     guardrails.invalid_stop_distance_count += 1
                     guardrails.flag(GUARDRAIL_FLAG_INVALID_STOP_DISTANCE)
@@ -695,6 +867,7 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
                         target_price=order_target,
                         size=float(order_size),
                     )
+                    pending_attempt = attempt
 
         unrealized = 0.0
         if position.direction > 0:
@@ -702,8 +875,13 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig) -> KernelRes
         elif position.direction < 0:
             unrealized = (position.entry_price - close) * position.size
         equity_curve.append(balance + unrealized)
+        if policy is not None and not all(math.isfinite(x) for x in (balance, balance + unrealized)):
+            raise ValueError("Nonfinite account capital or equity")
         balance_curve.append(balance)
         timestamps.append(timestamp)
+        if trace is not None:
+            trace.positions.append((position.direction, position.size,
+                                    position.entry_price if position.direction else None))
         previous_close_position = position.direction
 
     if guardrails.margin_reject_count:

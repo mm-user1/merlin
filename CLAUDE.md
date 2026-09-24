@@ -72,8 +72,10 @@ baselines, or mutate external systems unless explicitly authorized.
   method passed the declared synthetic screen at G=12, against an 8% upper-bound
   envelope, not certified nominal 5% control. **M3a is accepted at `9fe7816`
   for the documented approximate-screen scope.** M3b explicit context and frozen
-  candidate validation are implemented pending tech-lead review. M4 bracket
-  execution is not implemented. These are approximate development
+  candidate validation are accepted at `908efb4` for the documented supported
+  extension-loading routes and research scope. M4 sequential ATR bracket
+  accounts, checked evidence and offline reports are delivered pending review;
+  bracket inference and candidate validation remain unsupported. These are approximate development
   screens; arbitrary dependence across months is not covered.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.

@@ -204,11 +204,16 @@ error on persistent-signal fixtures). Monthly inference passed the synthetic
 G=12 screen against an 8% upper-bound envelope; it does not certify nominal 5%
 control or arbitrary dependence across months. **M3a is accepted at `9fe7816`
 for this approximate development-screen scope.** M3b context/frozen validation is
-implemented pending tech-lead review: study v2 declares explicit context aliases,
+accepted at `908efb4` for its documented research scope and supported extension
+routes: study v2 declares explicit context aliases,
 `freeze-candidate` binds a completed development generation and monthly family,
 and `validate-candidate` executes its exact later interval into a new parent root.
 See the [M3b contract](pattern_lab/README.md#explicit-context-and-frozen-validation-m3b).
-The M4 sequential bracket probe is not implemented. Neither an M2 descriptive
+The M4 sequential ATR bracket probe is delivered pending review through the same
+study/report CLI and direct/spawn jobs. It saves checked independent-account
+attempts, trades and paths with frozen quantity rules and configurable entry cap;
+see the [bracket guide](pattern_lab/README.md#sequential-atr-bracket-probes-m4).
+Bracket inference and frozen-candidate validation are unsupported. Neither an M2 descriptive
 result nor an M3a nominal Holm rejection is a validated edge. Merlin and Strategy Lab do not
 import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See the
 [Pattern Lab guide](pattern_lab/README.md) for the schema, manifest, roster,

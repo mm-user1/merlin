@@ -32,7 +32,7 @@ from .. import data as pack_data
 from .. import manifest as pack_manifest
 from .. import update_transaction
 from ..manifest import format_epoch_ms, to_epoch_ms
-from . import evidence, extensions as study_extensions, report as study_report
+from . import contracts, evidence, extensions as study_extensions, report as study_report
 from . import results as study_results
 from . import spec as study_spec
 from . import validation as study_validation
@@ -313,6 +313,8 @@ def _declared_identity(entry: Mapping[str, Any], request: StudyRequest,
         },
         "warmup_requirements": family["warmup_requirements"],
         "timeframes": [],
+        **({"bracket_rules":entry["bracket_rules"].semantic(),
+            "rule_snapshot":entry["instrument_rules"]} if "bracket_rules" in entry else {}),
     }
 
 
@@ -494,6 +496,7 @@ def _job_payload(
         timeframes=tuple(prepared),
         variants=tuple(variant.as_json() for variant in request.variants),
         models=tuple(instance.as_json() for instance in request.models),
+        execution_rules=entry.get("bracket_rules"),
     )
 
 
@@ -703,6 +706,9 @@ def run_study(
         "library_versions": study_extensions.library_versions(),
         "evidence_view_version": study_results.EVIDENCE_VIEW_VERSION,
     }
+    has_sequential = any(contracts.is_sequential(m.as_json()) for m in normalized.models)
+    if has_sequential:
+        source_identity["bracket_source"] = study_extensions.bracket_source_digests()
 
     pack_root = Path(data_root).expanduser()
     with pack_data.read_session(pack_root) as session:
@@ -723,6 +729,12 @@ def run_study(
             )
         from . import context as study_context
         entries = resolve_selection(report, normalized)
+        if has_sequential:
+            from .bracket_rules import normalize_rules
+            rule_entries = {entry["instrument_id"]:entry for entry in pack_manifest.read_manifest(pack_root)["instruments"]}
+            entries = [{**entry, "instrument_rules":rule_entries[entry["instrument_id"]].get("instrument_rules")}
+                       for entry in entries]
+            entries = [{**entry, "bracket_rules": normalize_rules(entry)} for entry in entries]
         context_entries = study_context.resolve_entries(report, normalized)
         if candidate is not None:
             from ..candidate import verify_admitted_contracts
@@ -873,6 +885,7 @@ def run_study(
         protocol=study_spec.protocol_document(normalized.protocol),
         run_version=normalized.schema_version,
         context=context_identity,
+        bracket_rules={entry["instrument_id"]:entry["bracket_rules"].semantic() for entry in entries} if has_sequential else None,
     )
     provenance["identities"] = identities
     evidence.write_json(run_root / evidence.PROVENANCE_FILE, provenance)

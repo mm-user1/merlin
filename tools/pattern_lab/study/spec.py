@@ -498,7 +498,7 @@ def _normalize_models(raw: Any, timeframes: Sequence[int]) -> tuple[ModelInstanc
                         f"{where}: case {case.case_id!r} declares timeframe "
                         f"{case.timeframe_minutes}, not the requested {timeframe}."
                     )
-                if not case.outcomes:
+                if not case.outcomes and not isinstance(descriptor, contracts.SequentialModelDescriptor):
                     raise PatternLabDataError(f"{where}: case {case.case_id!r} declares no outcome.")
                 outcome_names: list[str] = []
                 for outcome in case.outcomes:
@@ -660,6 +660,11 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
     variants = _normalize_variants(values.get("hypotheses"))
     models = _normalize_models(values.get("models"), timeframes)
     metrics = _normalize_metrics(values.get("metrics"))
+    sequential = [contracts.is_sequential(model.as_json()) for model in models]
+    if any(sequential) and values.get("schema_version", 1) != 2:
+        raise PatternLabDataError("atr_bracket requires study request version 2")
+    if metrics and all(sequential):
+        raise PatternLabDataError("Observation metrics require at least one per-anchor model")
 
     request = StudyRequest(
         schema_version=version,
@@ -695,9 +700,14 @@ def warmup_requirements(request: StudyRequest) -> dict[str, Any]:
         step_ms = timeframe * 60_000
         declared = (request.study_start_ms - request.warmup_start_ms) // step_ms
         needed = max((variant.required_prior_bars for variant in request.variants), default=0)
+        by_model = {m.model_instance_id: contracts.model(m.model_id).prior_bars(m.settings)
+                    for m in request.models if contracts.is_sequential(m.as_json())
+                    and contracts.model(m.model_id).prior_bars(m.settings)}
+        needed = max(needed, max(by_model.values(), default=0))
         requirements[str(timeframe)] = {
             "declared_warmup_bars": int(declared),
             "required_prior_bars": int(needed),
+            **({"by_model": by_model} if by_model else {}),
             "by_variant": {
                 variant.variant_id: variant.required_prior_bars for variant in request.variants
             },
@@ -712,7 +722,7 @@ def check_warmup_sufficiency(request: StudyRequest) -> None:
             raise PatternLabDataError(
                 f"study.warmup_start_utc: the declared warmup supplies "
                 f"{facts['declared_warmup_bars']} prior {timeframe}m observation bar(s), but the "
-                f"requested hypotheses need {facts['required_prior_bars']}. Declare more warmup; "
+                f"requested {'hypotheses/models' if facts.get('by_model') else 'hypotheses'} need {facts['required_prior_bars']}. Declare more warmup; "
                 "lookbacks are never shortened to fit."
             )
 

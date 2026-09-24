@@ -56,6 +56,7 @@ class InstrumentJobInput:
     timeframes: tuple[TimeframeInput, ...]
     variants: tuple[Mapping[str, Any], ...]
     models: tuple[Mapping[str, Any], ...]
+    execution_rules: Any = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,7 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
     emission_frames: list[pd.DataFrame] = []
     primitive_frames: list[pd.DataFrame] = []
     custom_frames: dict[str, list[pd.DataFrame]] = {}
+    sequential_frames = {}
     stats: dict[str, Any] = {"timeframes": {}}
 
     for prepared in payload.timeframes:
@@ -460,6 +462,19 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
                     f"kind is {descriptor.evidence_kind!r}, but the frozen family declares "
                     f"{instance['evidence_kind']!r}; the run is stopped."
                 )
+            sequential_model = contracts.is_sequential(instance)
+            if sequential_model != isinstance(descriptor, contracts.SequentialModelDescriptor):
+                raise PatternLabDataError("Sequential runtime descriptor type mismatch")
+            if sequential_model:
+                events = pd.concat(emission_frames, ignore_index=True)
+                events = events.loc[events.timeframe_minutes == series.timeframe_minutes]
+                result = descriptor.evaluate(series, events, payload.variants, instance,
+                    (payload.study_start_ms, payload.study_end_ms), payload.execution_rules)
+                if not isinstance(result, contracts.SequentialEvidence):
+                    raise PatternLabDataError("Expected typed SequentialEvidence")
+                for name, frame in result.tables.items():
+                    sequential_frames.setdefault(name, []).append(frame)
+                continue
             model_evidence = descriptor.evaluate(series, settings, anchors)
             if not isinstance(model_evidence, contracts.ModelEvidence):
                 raise PatternLabDataError(
@@ -505,4 +520,12 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
     by_instance = {instance["model_instance_id"]: instance for instance in payload.models}
     for instance_id, frames in custom_frames.items():
         tables[f"custom__{instance_id}"] = _custom_table(by_instance[instance_id], frames)
+    if sequential_frames:
+        from . import sequential
+        prepared_tables = {name:pd.concat(frames, ignore_index=True) for name,frames in sequential_frames.items()}
+        sequential.validate(prepared_tables, instrument_id=payload.instrument_id,
+            instances=[m for m in payload.models if contracts.is_sequential(m)], variants=payload.variants,
+            emissions=tables["emissions"], rules=payload.execution_rules.semantic(),
+            expected_bars={p.timeframe_minutes:list(map(int,p.timestamps_ms[p.research_start_index:])) for p in payload.timeframes})
+        tables.update({"sequential_"+name:frame for name,frame in prepared_tables.items()})
     return InstrumentJobResult(instrument_id=payload.instrument_id, tables=tables, stats=stats)

@@ -96,6 +96,9 @@ def read_json(path: Path) -> Any:
 
 
 def _arrow_schema(pa, name: str, frame: pd.DataFrame):
+    if name.startswith("sequential_"):
+        from .sequential import SCHEMAS
+        return SCHEMAS[name.removeprefix("sequential_")]
     fixed = {
         "instrument_id": pa.string(),
         "timeframe_minutes": pa.int32(),
@@ -153,6 +156,11 @@ def write_table(path: Path, frame: pd.DataFrame, *, name: str) -> None:
 
 def read_table(path: Path) -> pd.DataFrame:
     _pa, pq = pack_data.require_pyarrow()
+    if Path(path).stem.startswith("sequential_"):
+        from .sequential import check_physical
+        table = pq.read_table(Path(path))
+        check_physical(table, Path(path).stem.removeprefix("sequential_"))
+        return table.to_pandas(types_mapper=pd.ArrowDtype)
     return pq.read_table(Path(path)).to_pandas()
 
 
@@ -209,6 +217,7 @@ def implementation_identity(source: Mapping[str, Any], *, run_version: int = 1) 
     return contracts.semantic_digest(
         {
             "core_source": source["core_source"],
+            **({"bracket_source":source["bracket_source"]} if "bracket_source" in source else {}),
             "extensions": source["extensions"],
             "library_versions": source["library_versions"],
             "version": run_version,
@@ -224,6 +233,7 @@ def data_input_identity(
     protocol: Mapping[str, Any],
     run_version: int = 1,
     context: Mapping[str, Any] | None = None,
+    bracket_rules: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the final data-input identity of a completed run.
 
@@ -250,6 +260,7 @@ def data_input_identity(
             "protocol": protocol,
             "version": run_version,
             **({"context": dict(context or {})} if run_version == 2 else {}),
+            **({"bracket_rules":dict(bracket_rules)} if bracket_rules is not None else {}),
         }
     )
 
@@ -323,6 +334,21 @@ def publish_job(
     never mistaken for a completed one.
     """
     run_root = Path(run_root)
+    family = read_json(run_root / FAMILY_FILE)
+    sequential_instances = [m for m in family["models"] if contracts.is_sequential(m)]
+    sequential_names = {name for name in tables if name.startswith("sequential_")}
+    expected_sequential = {"sequential_attempts", "sequential_trades", "sequential_path"} if sequential_instances else set()
+    if sequential_names != expected_sequential:
+        raise PatternLabDataError(f"{instrument_id}: sequential table coverage disagrees with the saved family")
+    if sequential_instances:
+        from . import sequential
+        from ..manifest import to_epoch_ms
+        request = read_json(run_root / REQUEST_FILE)
+        admitted = read_json(admitted_path(run_root, instrument_id))
+        sequential.validate({name:tables["sequential_"+name] for name in sequential.SCHEMAS},
+            instrument_id=instrument_id, instances=sequential_instances,
+            variants=family["variants"], emissions=tables["emissions"], rules=admitted["bracket_rules"],
+            expected_bars=sequential.expected_bars(tables["conditions"], stats, to_epoch_ms(request["study"]["end_utc"])))
     final = job_path(run_root, instrument_id)
     if final.exists():
         raise PatternLabDataError(f"{final}: this job has already been published.")

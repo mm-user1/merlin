@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "study_name": "Sequential ATR brackets, LINK and ENA, July 2025",
+  "notes": "Descriptive independent accounts; all predeclared RR cases. Supply a verified pack with these exact venue-qualified IDs. No downloads or reserve outcomes.",
+  "protocol": "protocol_development_v1.json",
+  "study": {
+    "start_utc": "2025-07-01T00:00:00Z",
+    "end_utc": "2025-08-01T00:00:00Z",
+    "warmup_start_utc": "2025-06-01T00:00:00Z"
+  },
+  "instruments": {"ids": ["OKX_LINK-USDT-SWAP", "BYBIT_ENAUSDT"]},
+  "timeframes_minutes": [30],
+  "hypotheses": [{"id": "two_green_every", "hypothesis": "two_green_rising_quote_volume", "parameters": {}, "occurrence": "every_qualifying_bar"}],
+  "models": [
+    {"id": "bracket", "model": "atr_bracket", "settings": {"directions": ["long", "short"], "reward_risks": [1, 2, 3], "max_leverage": 8}},
+    {"id": "fixed_horizon", "model": "fixed_horizon_path", "settings": {
+      "directions": ["long", "short"], "commission_pct_per_side": 0.05,
+      "by_timeframe": {"30": {"horizons_minutes": [60, 120, 240, 480], "primary_horizon_minutes": 240}}
+    }}
+  ],
+  "metrics": [],
+  "extensions": [],
+  "context": {},
+  "execution": {"kind": "development"}
+}

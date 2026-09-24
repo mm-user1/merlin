@@ -238,8 +238,13 @@ and a 95% availability floor. These correlated checks do not certify nominal
 month counts remain available with an explicit calibration-scope disclosure.
 **M3a is accepted at `9fe7816` for the documented approximate development-screen scope.**
 M3b adds explicit external-series/panel context and frozen-candidate validation,
-pending tech-lead review. It reuses monthly v2 without lowering support gates;
-short validation can remain descriptive. M4 bracket execution is not implemented.
+accepted at `908efb4` for its documented research scope and supported extension
+routes. It reuses monthly v2 without lowering support gates;
+short validation can remain descriptive. M4 sequential ATR bracket accounts are
+delivered pending review: the generic reference enforces frozen minimum-order
+rules and a configurable entry-leverage cap, with checked attempts/trades/path
+tables and offline descriptive reports. Bracket inference and frozen-candidate
+validation are unsupported; fixed-only workflows remain available.
 A nominal rejection is an approximate development-screen
 result, not a validated edge or production acceptance.
 

@@ -261,6 +261,26 @@ identity pins without requiring the server client.
 
 ## Isolation, preflight, and retention
 
+Pattern Lab M4 coverage is in `test_pattern_lab_bracket.py` and
+`test_pattern_lab_sequential_evidence.py`: hand-computed bidirectional RR trades,
+Pine ATR bitwise parity, quantity-unit conversion, closed settings, warmup,
+gap/expiry/occupancy, cap admission, explicit Arrow schemas, resealed semantic
+contradictions and offline reports. Fresh subprocess tests unset PYTHONPATH,
+parse complete CLI stdout as JSON and compare direct/spawn mixed-study tables.
+Fixed-only API/report tests keep core/strategies unloaded. The storage-import
+probe copies source to task-owned temporary storage; it never removes or renames
+the actual storage directory. Existing worker cancellation/failure and frozen
+candidate/receipt suites remain preservation gates. Importer tests include
+cross-window retained aliases and resolved-path, unchanged-mtime cache priming.
+
+After changing the generic reference policy/trace, run
+`tests/v2/test_v2_kernel_execution.py tests/v2/test_v2_stateful_trails.py
+tests/v2/test_v2_tick_rounding.py tests/v2/test_v2_s06_b2_parity.py`.
+Default-mode preservation and trace-on/off numerical parity do not certify a
+new compiled mode. Keep known Windows symlink privilege failures visible; do
+not regenerate baselines or rerun calibration for bracket implementation work.
+
+
 `tools/run_tests.py` uses only the standard library and launches pytest with
 `sys.executable`, the repository cwd, and its tracked pytest configuration.
 Supported options and targets after `--` are pytest input. Every mode rejects nonblank `PYTEST_ADDOPTS`:

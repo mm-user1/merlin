@@ -4,6 +4,110 @@ import pytest
 
 from core.engine_v2.contracts import Signals
 from core.engine_v2.kernel import ExecutionData, KernelConfig, intrabar_path, run_reference_kernel
+from core.engine_v2.kernel import EntryPolicy, KernelTrace, quantity_lots
+
+
+@pytest.mark.parametrize("cap,filled", [(2.0, True), (1.999, False), (2.001, True)])
+def test_reference_policy_exact_cap_and_rejection_state(cap, filled):
+    data = _data(open_=[100, 100, 100], high=[101, 101, 101], low=[90, 99, 99],
+                 close=[100, 100, 100], long=[True, True, False])
+    trace = KernelTrace()
+    result = run_reference_kernel(data, KernelConfig(initial_capital=100, risk_per_trade_pct=20,
+                                  contract_size=1, stop_x=0), policy=EntryPolicy(cap), trace=trace)
+    assert trace.attempts[0].quantity == 2
+    assert trace.attempts[0].required_leverage == 2
+    assert trace.attempts[0].reason == ("filled" if filled else "leverage_cap_exceeded")
+    assert trace.attempts[1].reason == ("occupied" if filled else "leverage_cap_exceeded")
+    assert result.balance_curve == [100, 100, 100]
+    assert result.guardrail_summary.margin_reject_count == (0 if filled else 2)
+    assert not result.guardrail_summary.no_capital_halt
+
+
+@pytest.mark.parametrize("fee,minimum,reason", [(1, None, "leverage_cap_exceeded"),
+                                               (0, 201, "below_min_notional"),
+                                               (60, None, "leverage_undefined")])
+def test_reference_policy_fee_denominator_and_minimum(fee, minimum, reason):
+    trace = KernelTrace()
+    data = _data(open_=[100, 100], high=[100, 100], low=[90, 99], close=[100, 100], long=[True, False])
+    result = run_reference_kernel(data, KernelConfig(initial_capital=100, risk_per_trade_pct=20,
+                                  contract_size=1, stop_x=0, commission_pct=fee),
+                                  policy=EntryPolicy(2, minimum_notional=minimum), trace=trace)
+    assert trace.attempts[0].reason == reason
+    assert result.trades == [] and result.balance_curve == [100, 100]
+    if fee == 1:
+        assert trace.attempts[0].required_leverage == 200/98
+    assert result.guardrail_summary.margin_reject_count == int(reason == "leverage_cap_exceeded")
+
+
+def test_reference_policy_gap_entry_two_fees_and_trace_only_preservation():
+    data = _data(open_=[100, 80], high=[100, 82], low=[90, 79], close=[100, 81], long=[True, False])
+    config = KernelConfig(initial_capital=100, risk_per_trade_pct=20, contract_size=1,
+                          stop_x=0, commission_pct=.5)
+    plain = run_reference_kernel(data, config)
+    trace_only = KernelTrace()
+    observed = run_reference_kernel(data, config, trace=trace_only)
+    trace = KernelTrace()
+    checked = run_reference_kernel(data, config, policy=EntryPolicy(8), trace=trace)
+    from dataclasses import asdict
+    for result in (observed, checked):
+        assert result.trades == plain.trades
+        assert result.balance_curve == plain.balance_curve
+        assert result.equity_curve == plain.equity_curve
+        assert result.timestamps == plain.timestamps
+        assert result.guardrail_summary == plain.guardrail_summary
+        for key, value in asdict(plain.standing_state).items():
+            actual = getattr(result.standing_state, key)
+            assert (np.isnan(actual) if isinstance(value, float) and np.isnan(value) else actual == value)
+    assert checked.trades[0].net_pnl == -1.6
+    assert checked.trades[0].exit_reason is None
+    assert trace.exits[0].reason == "stop" and trace.exits[0].phase == "open"
+    assert trace.exits[0].entry_fee == trace.exits[0].exit_fee == .8
+    assert not trace.exits[0].ambiguous
+
+
+def test_reference_policy_precedence_and_lot_boundary():
+    from core.engine_v2.sizing import risk_position_size
+    q = risk_position_size(balance=23, risk_distance=10, risk_per_trade_pct=100, contract_size=.1)
+    assert q == 2.2 and quantity_lots(q, .1) == 22
+    with pytest.raises(ValueError, match="Unrepresentable"):
+        quantity_lots(1e30, .1)
+    data = _data(open_=[100]*3, high=[100]*3, low=[90]*3, close=[100]*3,
+                 long=[True]*3, atr=[np.nan, 0, 0])
+    trace = KernelTrace()
+    run_reference_kernel(data, KernelConfig(initial_capital=0, stop_x=0),
+                         policy=EntryPolicy(8), trace=trace)
+    assert [a.reason for a in trace.attempts] == ["indicator_unavailable", "nonpositive_capital", "no_next_bar"]
+
+
+@pytest.mark.parametrize("minimum,reason",[(2,"filled"),(3,"below_min_quantity")])
+def test_reference_policy_integer_minimum_lots(minimum,reason):
+    data=_data(open_=[100,100],high=[100,100],low=[90,99],close=[100,100],long=[True,False])
+    trace=KernelTrace()
+    result=run_reference_kernel(data,KernelConfig(initial_capital=100,risk_per_trade_pct=20,contract_size=1,stop_x=0),
+                                policy=EntryPolicy(8,minimum_lots=minimum),trace=trace)
+    assert trace.attempts[0].reason==reason and trace.attempts[0].lots==2
+    assert len(result.trades)==int(reason=="filled")
+
+
+def test_reference_policy_nonfinite_fill_is_not_a_minimum_pass():
+    data=_data(open_=[100,float('inf')],high=[100,float('inf')],low=[90,100],close=[100,100],long=[True,False])
+    trace=KernelTrace()
+    result=run_reference_kernel(data,KernelConfig(initial_capital=100,risk_per_trade_pct=20,contract_size=1,stop_x=0),
+                                policy=EntryPolicy(8,minimum_notional=1000),trace=trace)
+    assert trace.attempts[0].reason=="leverage_undefined" and not result.trades
+    assert result.guardrail_summary.margin_reject_count==0
+
+
+def test_reference_policy_overflowing_ratio_precedes_minimum_comparison():
+    data = _data(open_=[2e-300, 1e100], high=[2e-300, 1e100], low=[1e-300, 1e100],
+                 close=[2e-300, 1e100], long=[True, False])
+    trace = KernelTrace()
+    result = run_reference_kernel(data, KernelConfig(initial_capital=1e-300, risk_per_trade_pct=100,
+                                  contract_size=1, stop_x=0),
+                                  policy=EntryPolicy(8, minimum_notional=1e101), trace=trace)
+    assert trace.attempts[0].notional == 1e100
+    assert trace.attempts[0].reason == "leverage_undefined"
+    assert trace.attempts[0].required_leverage is None and not result.trades
 
 
 def _data(
