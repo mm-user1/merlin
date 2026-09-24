@@ -7,7 +7,6 @@ from decimal import Decimal, InvalidOperation
 import math
 
 import numpy as np
-import pyarrow as pa
 
 from .. import PatternLabDataError
 from . import contracts

@@ -186,7 +186,7 @@ save their original summaries before re-scoring; the command replaces top-level
 summaries. The [candidate guide](pattern_lab/README.md#the-experimental-monthly-jackknife-candidate)
 owns the format, optional checksum and platform contracts. The numerical method
 is integrated into ordinary v2 analysis; this research driver remains separate.
-M3a acceptance awaits tech-lead review.
+M3a is accepted at `9fe7816` for its documented approximate-screen scope.
 
 `study` accepts any positive `--workers`, default `1`; above `1` the same
 instrument job runs in an explicit spawn pool bounded by the selected instrument
@@ -209,10 +209,17 @@ routes: study v2 declares explicit context aliases,
 `freeze-candidate` binds a completed development generation and monthly family,
 and `validate-candidate` executes its exact later interval into a new parent root.
 See the [M3b contract](pattern_lab/README.md#explicit-context-and-frozen-validation-m3b).
-The M4 sequential ATR bracket probe is delivered pending review through the same
+The M4 sequential ATR bracket probe is accepted at `c26334e` through the same
 study/report CLI and direct/spawn jobs. It saves checked independent-account
 attempts, trades and paths with frozen quantity rules and configurable entry cap;
 see the [bracket guide](pattern_lab/README.md#sequential-atr-bracket-probes-m4).
+M5 integrated workflow is delivered pending tech-lead review. Its tracked
+`configs/pilot_m5_study.json` and `configs/pilot_m5_analysis.json` freeze the
+44-target development workload. `examples/pilot_extension.py` supplies the
+causal prior-high breakout and descriptive downside RMS;
+`examples/rank_bracket_accounts.py` demonstrates checked offline account ranking.
+See the [agent quick start](pattern_lab/README.md#agent-quick-start-m5).
+Resume remains deferred.
 Bracket inference and frozen-candidate validation are unsupported. Neither an M2 descriptive
 result nor an M3a nominal Holm rejection is a validated edge. Merlin and Strategy Lab do not
 import Pattern Lab, and ordinary Merlin CSV behavior is unchanged. See the

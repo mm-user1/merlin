@@ -609,6 +609,8 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
 
         if pending_entry is not None and policy is not None:
             order = pending_entry
+            # Downstream bracket-v1 saved readers recheck these exact expressions;
+            # reordering operands changes their saved arithmetic contract.
             notional = abs(open_price * order.size)
             fee = notional * commission_rate
             denominator = balance - fee

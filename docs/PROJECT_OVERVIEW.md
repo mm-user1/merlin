@@ -203,6 +203,9 @@ contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
 ## Pattern Lab integration
 
+M5 integrated research workflow is delivered pending tech-lead review; resume
+remains deferred. M4 remains accepted at `c26334e` for its documented scope.
+
 Pattern Lab is separate local, research-only tooling for testing hypotheses
 before a strategy exists. Merlin and Strategy Lab do not import it, and it does
 not change Merlin runtime behavior or CSV handling. Implemented capabilities are
@@ -242,7 +245,7 @@ M3b adds explicit external-series/panel context and frozen-candidate validation,
 accepted at `908efb4` for its documented research scope and supported extension
 routes. It reuses monthly v2 without lowering support gates;
 short validation can remain descriptive. M4 sequential ATR bracket accounts are
-delivered pending review: the generic reference enforces frozen minimum-order
+accepted at `c26334e` for their documented descriptive scope: the generic reference enforces frozen minimum-order
 rules and a configurable entry-leverage cap, with checked attempts/trades/path
 tables and offline descriptive reports. Bracket inference and frozen-candidate
 validation are unsupported; fixed-only workflows remain available.

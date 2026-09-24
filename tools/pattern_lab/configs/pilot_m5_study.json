@@ -1,0 +1,145 @@
+{
+  "context": {},
+  "execution": {
+    "kind": "development"
+  },
+  "extensions": [
+    {
+      "helpers": [],
+      "module": "pilot_extension",
+      "source_root": "../examples"
+    }
+  ],
+  "hypotheses": [
+    {
+      "hypothesis": "two_green_rising_quote_volume",
+      "id": "two_green_every",
+      "occurrence": "every_qualifying_bar",
+      "parameters": {}
+    },
+    {
+      "hypothesis": "prior_high_breakout",
+      "id": "breakout20",
+      "occurrence": "every_qualifying_bar",
+      "parameters": {
+        "lookback": 20
+      }
+    }
+  ],
+  "instruments": {
+    "ids": [
+      "BYBIT_ENAUSDT",
+      "BYBIT_PENDLEUSDT",
+      "BYBIT_SEIUSDT",
+      "BYBIT_ZECUSDT",
+      "OKX_AAVE-USDT-SWAP",
+      "OKX_ADA-USDT-SWAP",
+      "OKX_ALGO-USDT-SWAP",
+      "OKX_APT-USDT-SWAP",
+      "OKX_ARB-USDT-SWAP",
+      "OKX_ATOM-USDT-SWAP",
+      "OKX_AVAX-USDT-SWAP",
+      "OKX_BCH-USDT-SWAP",
+      "OKX_BNB-USDT-SWAP",
+      "OKX_CRV-USDT-SWAP",
+      "OKX_DOGE-USDT-SWAP",
+      "OKX_DOT-USDT-SWAP",
+      "OKX_ETC-USDT-SWAP",
+      "OKX_ETH-USDT-SWAP",
+      "OKX_FIL-USDT-SWAP",
+      "OKX_HBAR-USDT-SWAP",
+      "OKX_INJ-USDT-SWAP",
+      "OKX_JUP-USDT-SWAP",
+      "OKX_LDO-USDT-SWAP",
+      "OKX_LINK-USDT-SWAP",
+      "OKX_LTC-USDT-SWAP",
+      "OKX_NEAR-USDT-SWAP",
+      "OKX_ONDO-USDT-SWAP",
+      "OKX_OP-USDT-SWAP",
+      "OKX_PENGU-USDT-SWAP",
+      "OKX_PEPE-USDT-SWAP",
+      "OKX_POL-USDT-SWAP",
+      "OKX_SHIB-USDT-SWAP",
+      "OKX_SOL-USDT-SWAP",
+      "OKX_STX-USDT-SWAP",
+      "OKX_SUI-USDT-SWAP",
+      "OKX_TAO-USDT-SWAP",
+      "OKX_TIA-USDT-SWAP",
+      "OKX_TRX-USDT-SWAP",
+      "OKX_UNI-USDT-SWAP",
+      "OKX_VIRTUAL-USDT-SWAP",
+      "OKX_WIF-USDT-SWAP",
+      "OKX_WLD-USDT-SWAP",
+      "OKX_XLM-USDT-SWAP",
+      "OKX_XRP-USDT-SWAP"
+    ]
+  },
+  "metrics": [
+    {
+      "id": "downside_rms",
+      "metric": "downside_rms"
+    }
+  ],
+  "models": [
+    {
+      "id": "bracket",
+      "model": "atr_bracket",
+      "settings": {
+        "directions": [
+          "long",
+          "short"
+        ],
+        "max_leverage": 8,
+        "reward_risks": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "id": "fixed_horizon",
+      "model": "fixed_horizon_path",
+      "settings": {
+        "by_timeframe": {
+          "30": {
+            "horizons_minutes": [
+              60,
+              120,
+              240,
+              480
+            ],
+            "primary_horizon_minutes": 240
+          },
+          "60": {
+            "horizons_minutes": [
+              60,
+              120,
+              240,
+              480
+            ],
+            "primary_horizon_minutes": 240
+          }
+        },
+        "commission_pct_per_side": 0.05,
+        "directions": [
+          "long",
+          "short"
+        ]
+      }
+    }
+  ],
+  "notes": "Fixed 44-target development workload; brackets descriptive, no RR selection. Reserve excluded.",
+  "protocol": "protocol_development_v1.json",
+  "schema_version": 2,
+  "study": {
+    "end_utc": "2026-07-01T00:00:00Z",
+    "start_utc": "2025-07-01T00:00:00Z",
+    "warmup_start_utc": "2025-06-01T00:00:00Z"
+  },
+  "study_name": "M5 frozen development pilot",
+  "timeframes_minutes": [
+    30,
+    60
+  ]
+}

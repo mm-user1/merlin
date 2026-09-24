@@ -65,15 +65,15 @@ SCRIPT = """
 
 
 def _account_label(account):
-    return " / ".join(str(account[key]) for key in
-        ("instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id")) + " (timeframe in minutes)"
+    return " / ".join(str(account[key])+('m' if key == 'timeframe_minutes' else '') for key in
+        ("instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id"))
 
 
 def _fact_table(facts, *, caption):
     """Small nested facts as escaped scalar rows, never dictionary reprs."""
     units = {"initial_capital":"USDT", "minimum_notional":"USDT", "max_holding_days":"days",
              "commission_pct_per_side":"% per side", "risk_pct":"%", "max_leverage":"x",
-             "requested_end_ms":"UTC ms", "last_observed_close_ms":"UTC ms"}
+             "requested_end_ms":"UTC", "last_observed_close_ms":"UTC"}
     rows = []
     def visit(values, prefix=""):
         for key, value in values.items():
@@ -85,6 +85,8 @@ def _fact_table(facts, *, caption):
                     value = ", ".join(map(str,value))
                 elif value is None:
                     value = "unavailable"
+                elif key in ("requested_end_ms", "last_observed_close_ms"):
+                    value = datetime.fromtimestamp(value / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
                 rows.append([label, str(value), units.get(key, "")])
     visit(facts)
     return _rows(rows, header=["Fact", "Value", "Unit"], caption=caption)
@@ -127,8 +129,10 @@ def _sequential_report(summary):
             parts.append('<p>Requested-end coverage unavailable in this older summary.</p>')
         else:
             if not coverage["tail_complete"]:
-                parts.append('<p class="banner">Missing tail: '+escape(str(coverage["missing_tail_slots"]))+
-                    ' grid slots. '+escape(str(coverage["terminal_exits_before_requested_end"]))+
+                slots = coverage["missing_tail_slots"]
+                missing = "slot count unavailable" if slots is None else str(slots)+" grid slots"
+                parts.append('<p class="banner">Missing tail: '+escape(missing)+
+                    '. '+escape(str(coverage["terminal_exits_before_requested_end"]))+
                     ' terminal exits closed at the last observed close before the requested end. These are not internal gap-boundary exits.</p>')
             parts.append(_fact_table(coverage,caption="Requested-end coverage (does not certify internal gap absence)"))
         parts.extend([_fact_table(account["dispositions"],caption="Signal dispositions (counts)"),

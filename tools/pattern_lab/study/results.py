@@ -201,8 +201,12 @@ class InstrumentReader:
         return self._instrument_id
 
     def table(self, name: str) -> pd.DataFrame:
+        """Return a caller-owned copy of the requested checked table."""
         if name.startswith("sequential_"):
-            return self.sequential_tables()[name.removeprefix("sequential_")]
+            return self._checked_sequential()[name.removeprefix("sequential_")].copy(deep=True)
+        return self._cached_table(name).copy(deep=True)
+
+    def _cached_table(self, name: str) -> pd.DataFrame:
         frame = self._tables.get(name)
         if frame is None:
             frame = self._results.table(self._instrument_id, name)
@@ -223,8 +227,8 @@ class InstrumentReader:
             admitted = evidence.read_json(evidence.admitted_path(result.run_root,self._instrument_id))
             self._sequential_grouped = sequential.validate(tables,instrument_id=self._instrument_id,
                 instances=[m for m in result.family["models"] if contracts.is_sequential(m)],
-                variants=result.family["variants"],emissions=self.table("emissions"),rules=admitted["bracket_rules"],
-                expected_bars=sequential.expected_bars(self.table("conditions"), result.jobs[self._instrument_id]["stats"],
+                variants=result.family["variants"],emissions=self._cached_table("emissions"),rules=admitted["bracket_rules"],
+                expected_bars=sequential.expected_bars(self._cached_table("conditions"), result.jobs[self._instrument_id]["stats"],
                     to_epoch_ms(result.request["study"]["end_utc"])))
             self._validated.add("sequential")
         return tables
@@ -260,6 +264,10 @@ class InstrumentReader:
                                    timeframe_minutes,to_epoch_ms(self._results.request["study"]["end_utc"]))
 
     def eligible_anchors(self) -> dict[int, np.ndarray]:
+        """Caller-owned eligible anchor arrays, keyed by timeframe."""
+        return {key: value.copy() for key, value in self._eligible_anchors().items()}
+
+    def _eligible_anchors(self) -> dict[int, np.ndarray]:
         """Every eligible study anchor per timeframe, from the saved conditions.
 
         The all-anchor conditions table is the run's own record of what the
@@ -267,7 +275,7 @@ class InstrumentReader:
         prove that a row is missing.
         """
         if self._anchors is None:
-            conditions = self.table("conditions")
+            conditions = self._cached_table("conditions")
             anchors: dict[int, np.ndarray] = {}
             if len(conditions):
                 stamps = conditions["anchor_open_ms"].to_numpy(dtype=np.int64)
@@ -278,19 +286,22 @@ class InstrumentReader:
         return self._anchors
 
     def evidence_table(self, instance: Mapping[str, Any]) -> pd.DataFrame:
-        """Return the verified raw table this model instance's cases expand from."""
+        """Return a caller-owned copy of this model's verified evidence."""
+        return self._evidence_table(instance).copy(deep=True)
+
+    def _evidence_table(self, instance: Mapping[str, Any]) -> pd.DataFrame:
         if contracts.is_sequential(instance):
             raise PatternLabDataError("Sequential models have account evidence, not per-anchor observations")
         if instance["evidence_kind"] == contracts.FIXED_HORIZON_EVIDENCE_KIND:
-            return self.table("primitives")
+            return self._cached_table("primitives")
         name = f"custom__{instance['model_instance_id']}"
-        frame = self.table(name)
+        frame = self._cached_table(name)
         if name not in self._validated:
             study_observations.validate_custom_table(
                 frame,
                 instance=instance,
                 instrument_id=self._instrument_id,
-                expected_anchors=self.eligible_anchors(),
+                expected_anchors=self._eligible_anchors(),
                 where=f"{self._instrument_id}: saved {name}.parquet",
             )
             self._validated.add(name)
@@ -306,7 +317,7 @@ class InstrumentReader:
     ) -> pd.DataFrame:
         frame = study_observations.expand_case(
             evidence_kind=instance["evidence_kind"],
-            table=self.evidence_table(instance),
+            table=self._evidence_table(instance),
             model_instance_id=instance["model_instance_id"],
             case=case,
             timeframe_minutes=timeframe_minutes,
@@ -314,7 +325,7 @@ class InstrumentReader:
         if variant_id is None:
             return frame
         return study_observations.join_events(
-            frame, self.table("emissions"), variant_id=variant_id,
+            frame, self._cached_table("emissions"), variant_id=variant_id,
             timeframe_minutes=timeframe_minutes,
         )
 

@@ -1,6 +1,4 @@
 """Version-one sequential tables: explicit physical types and shared checks."""
-from decimal import Decimal
-import math
 
 import numpy as np
 import pandas as pd
@@ -8,7 +6,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from .. import PatternLabDataError
-from . import contracts
 
 SCHEMA_VERSION = 1
 KEY = ("instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id")

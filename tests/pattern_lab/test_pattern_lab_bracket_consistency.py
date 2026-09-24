@@ -387,7 +387,7 @@ def test_report_comparisons_escape_text_and_show_coverage_status(tmp_path):
     a["coverage"].update(tail_complete=False,missing_tail_slots=2,terminal_exits_before_requested_end=1)
     html=report.render_report(summary)
     for label in ("Win rate %","Mean net R","Finite-cap attempts","Max required x","Mean / median holding hours",
-                  "no_wins_or_losses","Missing tail: 2","2.5","Rule snapshot provenance","UTC ms"):
+                  "no_wins_or_losses","Missing tail: 2","2.5","Rule snapshot provenance","UTC"):
         assert label in html
     assert "&lt;script&gt;bad &amp; text&lt;/script&gt;" in html
     assert "<script>bad" not in html and "Four days is" not in html and "{'" not in html.split("Sequential ATR bracket accounts")[1]

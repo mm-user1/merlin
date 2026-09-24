@@ -1,0 +1,9 @@
+{
+  "analysis_name": "M5 fixed-horizon development screen",
+  "model_instances": [
+    "fixed_horizon"
+  ],
+  "notes": "Both nonsignal comparisons in one Holm family; no pairwise comparisons or bracket inference.",
+  "pairwise": [],
+  "schema_version": 2
+}

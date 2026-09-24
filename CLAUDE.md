@@ -74,9 +74,12 @@ baselines, or mutate external systems unless explicitly authorized.
   for the documented approximate-screen scope.** M3b explicit context and frozen
   candidate validation are accepted at `908efb4` for the documented supported
   extension-loading routes and research scope. M4 sequential ATR bracket
-  accounts, checked evidence and offline reports are delivered pending review;
+  accounts, checked evidence and offline reports are accepted at `c26334e`
+  for their documented descriptive scope;
   bracket inference and candidate validation remain unsupported. These are approximate development
   screens; arbitrary dependence across months is not covered.
+  M5 integrated research workflow is delivered pending tech-lead review;
+  resume remains deferred.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.
 

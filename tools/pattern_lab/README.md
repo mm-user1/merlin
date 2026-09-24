@@ -29,7 +29,7 @@ Pattern Lab is local, research-only tooling. These milestones are implemented:
   sealed into its own artifact with a standalone offline report. See
   [Matched comparisons and calibrated inference](#matched-comparisons-and-calibrated-inference).
 
-**M3a is accepted; M3b is accepted at `908efb4` for the documented research scope and supported extension routes. M4 sequential brackets are delivered pending review.**
+**M3a is accepted; M3b is accepted at `908efb4` for the documented research scope and supported extension routes. M4 sequential brackets are accepted at `c26334e` for their documented descriptive scope.**
 M3b adds [explicit context and frozen validation](#explicit-context-and-frozen-validation-m3b).
 M4 owns sequential
 bracket execution with sizing, leverage and expiry. The M2 event study itself
@@ -57,6 +57,83 @@ fallback to another venue.
 their synthetic verification are complete; populating a real market-data root is
 a separate, explicitly authorized operational run, and running a study on real
 data is another.
+
+## Agent quick start (M5)
+
+M5 integrates the existing research workflow and is **delivered pending tech-lead
+review**. The two `configs/pilot_m5_*.json` files are a fixed performance and
+usability workload, not a strategy recommendation. Supply your own verified
+pack containing all 44 explicit targets; no command downloads missing data.
+On Windows use the configured interpreter from [the test guide](../../tests/README.md).
+
+1. Define a trusted extension with `register(context)` and declare its module,
+   source root and helpers in the study JSON. See
+   [extension contracts](#agent-extensions-and-source-integrity).
+   `examples/pilot_extension.py` implements `prior_high_breakout` version 1:
+   `close[t] > max(high[t-lookback:t])`, with integer `lookback=20` by default.
+   Current high is excluded; equality is false. The current bar and all prior
+   lookback bars must be contiguous valid observations. Missing history is
+   unknown, not a false-condition control; gaps require rewarming.
+2. Freeze the question before examining outcomes. The pilot uses July 2025
+   through June 2026, June 2025 warmup, 30m/60m, both directions, every qualifying
+   breakout and two-green/rising-volume signal. It declares four fixed horizons
+   (60/120/240/480 minutes, primary 240) and all three bracket RRs (1/2/3).
+   Protocol and extension paths resolve relative to the declaring JSON.
+3. Run a new study with explicit pack, output and workers. From the repo root:
+
+   ```text
+   python -m tools.pattern_lab study --spec tools/pattern_lab/configs/pilot_m5_study.json --data-root <pack> --output-root <new-study> --workers 2
+   ```
+
+   For Python automation use `study.run_study(...)` inside a `__main__` guard;
+   `workers=1` is direct, larger counts spawn instrument jobs. Verify completion
+   with `study.load_results(root)`. A report alone is not a completion check.
+   Interrupted runs remain partial; retries need new roots. Resume, checkpoint
+   reuse, cache registries and orchestration services remain deferred.
+4. Analyze the completed study's fixed model:
+
+   ```text
+   python -m tools.pattern_lab analyze --spec tools/pattern_lab/configs/pilot_m5_analysis.json --run-root <new-study> --output-root <new-analysis>
+   ```
+
+   Both nonsignal comparisons share one 32-member Holm family; pairwise is empty.
+   No bracket inference is supported: sequential occupancy, controls and sizing
+   require their own estimand. Short studies can be descriptively complete while
+   inference is unavailable. Preserve those rows and their support reasons.
+5. Read checked evidence and add a descriptive statistic without replaying data:
+
+   ```python
+   from tools.pattern_lab import study
+   from tools.pattern_lab.examples.rank_bracket_accounts import rank_accounts
+   saved = study.load_results("<new-study>")
+   summary = study.summarize_results(saved)
+   ranked = rank_accounts("<new-study>")  # all accounts, including no-trade
+   reader = saved.instrument_reader(saved.completed_instruments[0])
+   try:
+       trades = reader.table("sequential_trades")  # caller-owned checked copy
+       by_account = ["timeframe_minutes", "variant_id", "model_instance_id", "case_id"]
+       extra = trades.groupby(by_account).net_pnl.median()  # per-account only
+   finally:
+       reader.release()
+   # Export summary["sequential_accounts"] with json.dump, or flatten for CSV.
+   # Join extra onto that complete account list: an empty trade group stays null.
+   ```
+
+   Public `table`, `evidence_table` and `eligible_anchors` return independent
+   copies. Release each reader before the next instrument. Ranking is an explicit
+   descriptive presentation, not RR selection, a portfolio, or inference.
+6. Copy a sealed artifact to a new directory, then regenerate with `report
+   --run-root <copy>` or `analysis-report --analysis-root <copy>` under
+   `python -m tools.pattern_lab`. Neither needs the original pack or extension;
+   saved source snapshots are inert. See [saved tables](#reading-the-saved-tables).
+
+`downside_rms` is `sqrt(mean(min(net_return, 0)**2))` across **all valid** returns,
+including positive and zero values in the denominator. Its unit is a fraction;
+it is descriptive, unannualized, and not Sortino or inference. Valid nonfinite
+returns are errors. With no valid observations its recorded value is null and
+framework availability remains `available` when inputs exist. The hypothesis
+runs in instrument jobs; the metric runs in the coordinator and is saved for
+offline reports. It applies to fixed observations, never bracket accounts.
 
 ## Dependency setup
 
@@ -3756,6 +3833,34 @@ guard rather than the real socket path.
 
 ## Milestone handoff and known limits
 
+### M5 development prior use, 2026-09-24
+
+The frozen pilot examined 44 explicit trading targets over
+`[2025-07-01, 2026-07-01)`, with June 2025 warmup: two-green/rising quote volume
+and prior-high breakout (lookback 20), 30m/60m, long/short, fixed horizons
+60/120/240/480 minutes (primary 240), and independent ATR brackets at RR 1/2/3.
+The 32 fixed comparisons form one Holm family; 1,056 bracket accounts remain
+descriptive. This records development data use, not a first-ever-use claim;
+historical use is not fully known. Any later hypothesis selected from these
+results is post-selection on this development period. The existing disclosure
+of prototype use of reserved observations remains in force. This pilot performs
+no reserve calculation, candidate freeze or reserve validation.
+
+The full study's recorded identities are:
+
+- Specification: `8a94fac508e6defa488385076101c8f4380bb0b8c0ed6df3687046ed23bd6dd8`
+- Data input: `b305e7ad3110d425b69da736f98aa41dda12bc8d7bdcf5fda524ec8fc5cd79f3`
+- Implementation: `30b03a64357fabd25beb13ec7740e64157e1843ce4e43daa9c1dd448cd9fcca6`
+
+Local ignored evidence lives at
+`docs/_work/pattern-lab-runs/T08-260924T115803Z/full` and
+`docs/_work/dev_02_pattern-lab/T08_evidence/artifact-index.json`;
+the [T08 handoff](../../docs/_work/dev_02_pattern-lab/T08_agent-answer.md) records
+verification, resources, comparisons and limitations. These local artifacts may
+be absent in another checkout; the tracked requests and extension define the
+reusable workload. M5 remains pending tech-lead review, with a whole-architecture
+audit deferred to a later task. Resume remains explicitly deferred.
+
 M1a defines the schemas and the reader; M1b adds the collector, the exclusion lock
 and the recovery contract; M2a adds the sequential event study, its evidence and
 its report, and composes the per-series data fingerprint with the selected
@@ -3778,7 +3883,9 @@ Known limits of these milestones:
   Explicit v1 keeps the legacy failure: 11/15 checks, about 7.5-8.3% rejection
   and noncoverage on persistent-signal fixtures. A nominal Holm rejection from
   either method is not a validated edge. M3b is accepted at `908efb4` within its
-  documented limits; M4 sequential brackets are delivered pending review.
+  documented limits; M4 sequential brackets are accepted at `c26334e` for their
+  descriptive scope. Bracket inference and frozen-candidate validation remain
+  unsupported; Windows symlink privilege checks remain separately unverified.
 - **A seven-day block does not control error under dependence substantially
   longer than a week**, and the measurements above show it is already
   anti-conservative at the declared signal persistence. The tracked

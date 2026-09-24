@@ -67,4 +67,3 @@ def build(root, *, mixed=True):
         hypotheses=[TWO_GREEN_EVERY_BAR,TWO_GREEN_STATE_ENTRY],models=models)
     request.update(schema_version=2,context={},execution={"kind":"development"})
     return request
-
