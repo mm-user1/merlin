@@ -19,6 +19,8 @@ FIXED = dict(trailing="none", maximum_stop_width_pct=None, price_rounding="none"
 
 
 def validate_settings(raw, timeframes):
+    # Version 1 normalization/cases are also the saved-reader contract. Changes
+    # to them or the exact v1 entry expressions require a versioned contract.
     contracts.closed_keys(raw, DEFAULTS, "atr_bracket.settings")
     values = {**DEFAULTS, **raw}
     directions = values["directions"]
@@ -104,6 +106,7 @@ def reference_core():
 
 def evaluate(series, events, variants, instance, bounds, rules):
     """Prepare indicators once, then run isolated variant/case accounts in RAM."""
+    import pyarrow as pa
     from . import sequential
     kernel = reference_core()
     settings = instance["settings"]
@@ -119,6 +122,7 @@ def evaluate(series, events, variants, instance, bounds, rules):
         high = pd.Series(values[:,1]).rolling(swing, min_periods=swing).max().to_numpy()
         segments.append((segment, first, end, values, atr, low, high))
     rows = {name: [] for name in sequential.SCHEMAS}
+    path_chunks = []
     for variant in variants:
         selected = events.loc[events.variant_id == variant["variant_id"]]
         by_stamp = {int(row.anchor_open_ms): row.event_id for row in selected.itertuples()}
@@ -177,17 +181,26 @@ def evaluate(series, events, variants, instance, bounds, rules):
                         "gross_pnl":(trade.exit_price-trade.entry_price)*trade.size*(1 if direction == "long" else -1),
                         "net_pnl":trade.net_pnl, "net_r":trade.net_pnl/risk_cash,
                         "entry_leverage":a.required_leverage, "exit_reason":reason, "ambiguous":exit_.ambiguous})
-                for i, (realized, equity, position) in enumerate(zip(result.balance_curve, result.equity_curve, trace.positions)):
-                    if int(local_stamps[i]) < bounds[0]:
-                        continue
-                    rows["path"].append({**common, "bar_index":first+i, "bar_open_ms":int(local_stamps[i]),
-                        "segment":segment, "segment_end":i == len(values)-1,
-                        "study_end":first+i == len(stamps)-1, "close_price":float(values[i,3]),
-                        "balance":realized, "equity":equity, "position_direction":position[0],
-                        "position_quantity":position[1], "entry_price":position[2]})
+                begin = int(np.searchsorted(local_stamps, bounds[0]))
+                count = len(values)-begin
+                if count:
+                    indices = np.arange(first+begin, end, dtype=np.int64)
+                    positions = trace.positions[begin:]
+                    columns = {key: pa.repeat(value, count) for key, value in common.items()}
+                    columns.update(bar_index=indices, bar_open_ms=local_stamps[begin:],
+                        segment=np.full(count, segment, dtype=np.int64),
+                        segment_end=indices == end-1, study_end=indices == len(stamps)-1,
+                        close_price=values[begin:,3], balance=result.balance_curve[begin:],
+                        equity=result.equity_curve[begin:],
+                        position_direction=[p[0] for p in positions],
+                        position_quantity=[p[1] for p in positions], entry_price=[p[2] for p in positions])
+                    path_chunks.append(pa.Table.from_pydict(columns, schema=sequential.SCHEMAS["path"]))
                 balance = result.balance_curve[-1]
                 trade_count += len(result.trades)
-    return contracts.SequentialEvidence({name:sequential.frame(name, data) for name,data in rows.items()})
+    tables = {name:sequential.frame(name, data) for name,data in rows.items() if name != "path"}
+    tables["path"] = (pa.concat_tables(path_chunks).to_pandas(types_mapper=pd.ArrowDtype)
+                      if path_chunks else sequential.frame("path", []))
+    return contracts.SequentialEvidence(tables)
 
 
 DESCRIPTOR = contracts.SequentialModelDescriptor("atr_bracket", "1", validate_settings, resolve_cases,

@@ -49,7 +49,8 @@ compositions above are valid.
 
 `run_reference_kernel(..., policy=EntryPolicy(...), trace=KernelTrace())` adds an
 opt-in reference-only admission/diagnostic boundary for strict nontrailing
-brackets without a stop-width filter. Integer-lot minimums, optional minimum
+brackets without a stop-width filter or price rounding (`price_rounding_mode`
+must be `none`; ordinary no-policy tick rounding is unchanged). Integer-lot minimums, optional minimum
 notional and an exact configurable entry-leverage cap run at their planning/fill
 boundaries. Cap rejections increment margin rejection count/flag; undefined
 leverage and minimum-rule refusals remain separate reasons. No resizing or fee
@@ -58,6 +59,8 @@ The legacy executed-fill leverage diagnostic is unchanged; trace consumers own
 separate pre-cap/executed populations. Trace records decisions, exit phases,
 fees and ambiguous intrabar processing directly at execution branches and leaves
 default TradeRecord exit reasons unchanged. Trace alone preserves numbers.
+Exhaustive terminal attempt reasons are guaranteed only with the policy;
+trace-only historical modes can retain `planned` for unclassified refusals.
 These arguments are absent from profile/compiled/Grid APIs; no new compiled
 mode or strategy certification is claimed. The no-policy path and certified
 sizing, fill, trailing, boundary and guardrail contracts remain preservation

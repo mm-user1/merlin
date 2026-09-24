@@ -17,7 +17,8 @@ src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
 tools/strategy_lab/   local V2-only research pipeline
 tools/pattern_lab/    local research-only market-data pack, collector,
-                      descriptive event studies and matched comparisons
+                      descriptive event studies, matched comparisons, and
+                      sequential bracket probes via the generic V2 reference
 tests/                core/server, V2, JavaScript, Strategy Lab, and
                       Pattern Lab suites
 ```

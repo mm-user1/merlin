@@ -16,26 +16,9 @@ from tools.pattern_lab import PatternLabDataError, study, pack_lock
 from tools.pattern_lab.study import evidence, spec, contracts
 from ._helpers import (ANCHOR_MS, timeframe_bars, instrument_source, publish,
     study_request, study_protocol, fixed_horizon_model, TWO_GREEN_EVERY_BAR, TWO_GREEN_STATE_ENTRY)
-from .test_pattern_lab_bracket import rule_entry
+from ._bracket_helpers import rule_entry, build
 
 
-def build(root, *, mixed=True):
-    values=[(100+i,102+i,99+i,101+i,10+i) for i in range(40)]
-    stamps,bars=timeframe_bars(30,values)
-    sources=[]
-    for venue in ("OKX","BYBIT"):
-        entry=rule_entry(venue)
-        source=instrument_source(stamps,bars,venue=venue,contract=entry["contract"])
-        sources.append(replace(source,instrument_rules=entry["instrument_rules"]))
-    publish(root,sources)
-    end=ANCHOR_MS+40*1800000
-    models=[{"id":"br","model":"atr_bracket","settings":{}}]
-    if mixed: models.append(fixed_horizon_model(30,[30,60]))
-    request=study_request(protocol=study_protocol(first_ms=ANCHOR_MS,coverage_end_ms=end),
-        start_ms=ANCHOR_MS+14*1800000,end_ms=end,warmup_ms=ANCHOR_MS,timeframes=[30],
-        hypotheses=[TWO_GREEN_EVERY_BAR,TWO_GREEN_STATE_ENTRY],models=models)
-    request.update(schema_version=2,context={},execution={"kind":"development"})
-    return request
 
 
 def test_mixed_public_accounts_typed_tables_and_locked_offline_relocation(tmp_path):

@@ -15,15 +15,16 @@ def rank_accounts(root):
     for instrument in results.completed_instruments:
         reader = results.instrument_reader(instrument)
         try:
-            tables = reader.sequential_tables()
             keys = ["instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id"]
-            for key, path in tables["path"].groupby(keys, sort=True):
-                trades = tables["trades"]
-                for column, value in zip(keys, key):
-                    trades = trades.loc[trades[column] == value]
+            # One checked grouping for this instrument; returned frames are copies.
+            for key in reader.sequential_keys():
+                selection = dict(zip(keys[1:], key[1:]))
+                tables = reader.sequential_account(**selection)
+                trades, path = tables["trades"], tables["path"]
                 ranked.append({**dict(zip(keys,key)), "completed_trades": len(trades),
                                "net_pnl": float(trades.net_pnl.sum()),
-                               "final_capital": float(path.iloc[-1].balance)})
+                               "final_capital": float(path.iloc[-1].balance) if len(path) else None,
+                               "coverage": reader.sequential_coverage(**selection)})
         finally:
             reader.release()
     return sorted(ranked, key=lambda row: (-row["net_pnl"], str(row)))

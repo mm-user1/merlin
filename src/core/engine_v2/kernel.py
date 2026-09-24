@@ -185,7 +185,11 @@ class ExitTrace:
 
 @dataclass
 class KernelTrace:
-    """Branch-produced diagnostics; enabling these alone does not change fills."""
+    """Branch diagnostics; trace alone does not change fills.
+
+    Exhaustive terminal attempt reasons are guaranteed in policy mode only.
+    Trace-only historical modes may leave unclassified refusals as ``planned``.
+    """
 
     attempts: list[AttemptTrace] = field(default_factory=list)
     exits: list[ExitTrace] = field(default_factory=list)
@@ -524,8 +528,9 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
     _validate_price_rounding_config(config)
     if policy is not None and (config.trail_mode != "none" or config.target_mode != "rr"
                                or config.boundary_mode != "strict_close"
+                               or config.price_rounding_mode != "none"
                                or config.max_stop_pct != math.inf):
-        raise ValueError("Entry policy requires a strict, unfiltered, nontrailing bracket")
+        raise ValueError("Entry policy requires a strict, unfiltered, nontrailing bracket without price rounding")
     if trace is not None and (trace.attempts or trace.exits or trace.positions):
         raise ValueError("Use an empty trace for each execution")
     trail_code = _validate_trail_config(data, config)

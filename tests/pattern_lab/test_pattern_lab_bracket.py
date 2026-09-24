@@ -12,28 +12,11 @@ from tools.pattern_lab import PatternLabDataError
 from tools.pattern_lab.study import bracket, contracts, sequential, spec, validation
 from tools.pattern_lab.study.bracket_rules import ExecutionRules, normalize_rules
 from ._helpers import ANCHOR_MS, study_request, study_protocol, TWO_GREEN_EVERY_BAR
+from ._bracket_helpers import RULES, rule_entry, evaluate
 
 
-RULES = ExecutionRules("OKX", "AAA-USDT-SWAP", "AAA", "USDT", "USDT", "contracts",
-                       "1", "1", "0.1", "0.1", 1, None, "0.1", "1")
 
 
-def rule_entry(venue="OKX"):
-    from ._helpers import okx_instrument, bybit_instrument
-    raw=okx_instrument()
-    fields={k:raw[k] for k in ("instType","ctType","settleCcy","ctVal","ctValCcy","ctMult","lotSz","minSz","tickSz","listTime","state")}
-    rules=dict(schema_version=1,source_reference="synthetic",as_of_utc="2026-09-24T00:00:00Z",
-        contract_type="linear_perpetual",base_currency="AAA",quote_currency="USDT",settlement_currency="USDT",
-        quantity_unit="contracts",quantity_step="1",minimum_quantity="1",price_tick="0.001",minimum_notional=None,
-        listed_at_utc="2023-11-14T22:13:20Z",trading_status="live",raw_contract_fields=fields)
-    contract="AAA-USDT-SWAP"
-    if venue=="BYBIT":
-        contract="AAAUSDT"
-        fields=dict(contractType="LinearPerpetual",baseCoin="AAA",quoteCoin="USDT",settleCoin="USDT",
-            launchTime="1700000000000",status="Trading",qtyStep="0.1",minOrderQty="0.1",minNotionalValue="5",tickSize="0.001")
-        rules.update(quantity_unit="AAA",quantity_step="0.1",minimum_quantity="0.1",minimum_notional="5",
-                     trading_status="Trading",raw_contract_fields=fields)
-    return dict(instrument_id=venue+"_"+contract,venue=venue,contract=contract,instrument_rules=rules)
 
 
 @pytest.mark.parametrize("venue",["OKX","BYBIT"])
@@ -57,24 +40,6 @@ def test_unsupported_multiplier_refused_even_in_opaque_archival_rules(multiplier
     with pytest.raises(PatternLabDataError,match="ctMult"): normalize_rules(entry)
 
 
-def evaluate(values, *, signals=(0,), direction="long", rr=1, slots=None, **settings):
-    values = np.array(values,dtype=np.float64)
-    slots = np.arange(len(values)) if slots is None else np.array(slots)
-    stamps = ANCHOR_MS+slots*1800000
-    series = contracts.BarSeries("OKX_AAA-USDT-SWAP",30,1800000,stamps,stamps//1800000,values,0)
-    options=dict(atr_length=1,swing_lookback=1,atr_multiplier=1,initial_capital=1000,risk_pct=2,
-                 commission_pct_per_side=0,directions=[direction],reward_risks=[rr])
-    options.update(settings)
-    normalized = bracket.validate_settings(options,[30])
-    instance = dict(model_instance_id="br",model_id="atr_bracket",model_version="1",
-        evidence_kind=contracts.SEQUENTIAL_EVIDENCE_KIND,settings=normalized,
-        cases={"30":[c.as_json() for c in bracket.resolve_cases(normalized,30)]})
-    events = pd.DataFrame([dict(variant_id="v",event_id=str(i),anchor_open_ms=int(stamps[i]),timeframe_minutes=30) for i in signals],
-                          columns=["variant_id","event_id","anchor_open_ms","timeframe_minutes"])
-    result = bracket.evaluate(series,events,[{"variant_id":"v"}],instance,(int(stamps[0]),int(stamps[-1])+1800000),RULES)
-    sequential.validate(result.tables,instrument_id=series.instrument_id,instances=[instance],variants=[{"variant_id":"v"}],
-                        emissions=events,expected_bars={30:list(map(int,stamps))},rules=RULES.semantic())
-    return result.tables
 
 
 @pytest.mark.parametrize("direction",["long","short"])

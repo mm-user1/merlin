@@ -525,7 +525,7 @@ def bracket_source_digests():
     paths = ["src/core/engine_v2/"+name+".py" for name in
              ("kernel", "sizing", "contracts", "price_rounding", "execution_modes", "diagnostics")]
     paths += ["src/core/backtest_engine.py"]
-    paths += ["tools/pattern_lab/study/"+name+".py" for name in ("bracket", "bracket_rules", "sequential")]
+    paths += ["tools/pattern_lab/study/"+name+".py" for name in ("bracket", "bracket_rules", "sequential", "sequential_checks")]
     return {path:file_digest(root/path) for path in paths}
 
 

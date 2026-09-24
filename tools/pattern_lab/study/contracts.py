@@ -378,7 +378,7 @@ class SequentialModelDescriptor:
 def is_sequential(instance):
     """Check the complete reserved saved contract, without loading registrations."""
     triple = (instance.get("model_id"), instance.get("model_version"), instance.get("evidence_kind"))
-    reserved = triple[0] == "atr_bracket" or triple[2] == SEQUENTIAL_EVIDENCE_KIND
+    reserved = triple[2] == SEQUENTIAL_EVIDENCE_KIND
     if reserved and triple != ("atr_bracket", "1", SEQUENTIAL_EVIDENCE_KIND):
         raise PatternLabDataError("Unsupported sequential model/version/evidence-kind triple")
     return reserved
@@ -464,6 +464,10 @@ def register_hypothesis(descriptor: HypothesisDescriptor, *, builtin: bool = Fal
 
 def register_model(descriptor: ModelDescriptor, *, builtin: bool = False,
                    source_digest: str | None = None, source_path: str | None = None) -> Registration:
+    if descriptor.model_id == "atr_bracket":
+        from .bracket import DESCRIPTOR
+        if descriptor is not DESCRIPTOR or not builtin:
+            raise PatternLabDataError("atr_bracket requires the owned built-in descriptor; extensions cannot register it")
     sequential = is_sequential(dict(model_id=descriptor.model_id, model_version=descriptor.version,
                                     evidence_kind=descriptor.evidence_kind))
     if sequential != isinstance(descriptor, SequentialModelDescriptor) or (sequential and not builtin):

@@ -110,6 +110,12 @@ def test_reference_policy_overflowing_ratio_precedes_minimum_comparison():
     assert trace.attempts[0].required_leverage is None and not result.trades
 
 
+def test_entry_policy_refuses_otherwise_valid_tick_rounding():
+    data = _data(open_=[100,100], high=[101,101], low=[99,99], close=[100,100], long=[True,False])
+    with pytest.raises(ValueError, match="without price rounding"):
+        run_reference_kernel(data, KernelConfig(price_rounding_mode="tick_outward", tick_size=.1), policy=EntryPolicy(8))
+
+
 def _data(
     *,
     open_,

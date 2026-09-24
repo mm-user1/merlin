@@ -320,6 +320,25 @@ def read_job_records(run_root: Path) -> dict[str, dict[str, Any]]:
     return records
 
 
+def check_table_coverage(models, names, *, where):
+    """One publication/read rule for additive model tables, including old names."""
+    names = list(names)
+    if len(names) != len(set(names)):
+        raise PatternLabDataError(f"{where}: duplicate evidence tables")
+    sequential = any(contracts.is_sequential(model) for model in models)
+    expected = {"sequential_attempts", "sequential_trades", "sequential_path"} if sequential else set()
+    if {name for name in names if name.startswith("sequential_")} != expected:
+        raise PatternLabDataError(f"{where}: sequential table coverage disagrees with the saved family")
+    custom = {"custom__"+model["model_instance_id"] for model in models
+              if model["evidence_kind"] == contracts.CUSTOM_CASE_EVIDENCE_KIND}
+    if {name for name in names if name.startswith("custom__")} != custom:
+        raise PatternLabDataError(f"{where}: custom table coverage disagrees with the saved family")
+    if any(model["evidence_kind"] not in contracts.EVIDENCE_KINDS for model in models):
+        raise PatternLabDataError(f"{where}: unsupported model evidence kind")
+    if set(names) - set(TABLE_NAMES) - custom - expected:
+        raise PatternLabDataError(f"{where}: unknown evidence table")
+
+
 def publish_job(
     run_root: Path,
     instrument_id: str,
@@ -336,10 +355,7 @@ def publish_job(
     run_root = Path(run_root)
     family = read_json(run_root / FAMILY_FILE)
     sequential_instances = [m for m in family["models"] if contracts.is_sequential(m)]
-    sequential_names = {name for name in tables if name.startswith("sequential_")}
-    expected_sequential = {"sequential_attempts", "sequential_trades", "sequential_path"} if sequential_instances else set()
-    if sequential_names != expected_sequential:
-        raise PatternLabDataError(f"{instrument_id}: sequential table coverage disagrees with the saved family")
+    check_table_coverage(family["models"], tables, where=instrument_id)
     if sequential_instances:
         from . import sequential
         from ..manifest import to_epoch_ms

@@ -521,11 +521,8 @@ def run_instrument_job(payload: InstrumentJobInput) -> InstrumentJobResult:
     for instance_id, frames in custom_frames.items():
         tables[f"custom__{instance_id}"] = _custom_table(by_instance[instance_id], frames)
     if sequential_frames:
-        from . import sequential
         prepared_tables = {name:pd.concat(frames, ignore_index=True) for name,frames in sequential_frames.items()}
-        sequential.validate(prepared_tables, instrument_id=payload.instrument_id,
-            instances=[m for m in payload.models if contracts.is_sequential(m)], variants=payload.variants,
-            emissions=tables["emissions"], rules=payload.execution_rules.semantic(),
-            expected_bars={p.timeframe_minutes:list(map(int,p.timestamps_ms[p.research_start_index:])) for p in payload.timeframes})
+        # Owned built-in output is checked unconditionally by the coordinator
+        # before publication; workers do not duplicate that full account pass.
         tables.update({"sequential_"+name:frame for name,frame in prepared_tables.items()})
     return InstrumentJobResult(instrument_id=payload.instrument_id, tables=tables, stats=stats)

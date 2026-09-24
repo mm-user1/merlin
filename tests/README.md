@@ -272,6 +272,17 @@ probe copies source to task-owned temporary storage; it never removes or renames
 the actual storage directory. Existing worker cancellation/failure and frozen
 candidate/receipt suites remain preservation gates. Importer tests include
 cross-window retained aliases and resolved-path, unchanged-mtime cache priming.
+`test_pattern_lab_bracket_consistency.py` adds exact executed-entry/admission links,
+the complete stage/null matrix, saved anchor/exit/expiry invariants, missing-tail
+pipeline coverage, historical custom-name/candidate compatibility, table-family
+agreement, reader-copy isolation and one grouping/interval/sweep per account.
+Source/rule identity composition, actual-open Bybit minimums, overflow at its
+reachable boundary, state-entry transitions and context-missing price exits are
+durable regressions. Synthetic builders live in `_bracket_helpers.py`; tests
+must not import other test modules or ignored benchmark/audit scripts.
+Performance comparisons use deterministic month/year inputs, native lifetime
+peak RSS with initialized-process baselines and separate fresh processes.
+They are review evidence, never CI timing thresholds or weaker semantic checks.
 
 After changing the generic reference policy/trace, run
 `tests/v2/test_v2_kernel_execution.py tests/v2/test_v2_stateful_trails.py

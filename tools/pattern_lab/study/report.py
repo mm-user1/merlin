@@ -64,6 +64,88 @@ SCRIPT = """
 """
 
 
+def _account_label(account):
+    return " / ".join(str(account[key]) for key in
+        ("instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id")) + " (timeframe in minutes)"
+
+
+def _fact_table(facts, *, caption):
+    """Small nested facts as escaped scalar rows, never dictionary reprs."""
+    units = {"initial_capital":"USDT", "minimum_notional":"USDT", "max_holding_days":"days",
+             "commission_pct_per_side":"% per side", "risk_pct":"%", "max_leverage":"x",
+             "requested_end_ms":"UTC ms", "last_observed_close_ms":"UTC ms"}
+    rows = []
+    def visit(values, prefix=""):
+        for key, value in values.items():
+            label = prefix+key.replace("_", " ")
+            if isinstance(value, Mapping):
+                visit(value, label+" / ")
+            else:
+                if isinstance(value, (list, tuple)):
+                    value = ", ".join(map(str,value))
+                elif value is None:
+                    value = "unavailable"
+                rows.append([label, str(value), units.get(key, "")])
+    visit(facts)
+    return _rows(rows, header=["Fact", "Value", "Unit"], caption=caption)
+
+
+def _sequential_report(summary):
+    accounts = summary["sequential_accounts"]
+    performance, diagnostics = [], []
+    for account in accounts:
+        a = account
+        win_rate = None if a["win_rate"] is None else 100*a["win_rate"]
+        performance.append([_account_label(a), a["completed_trades"], _number(win_rate,2),
+            _number(a["profit_factor"],3)+" ("+a["profit_factor_status"]+")",
+            _number(a["net_planned_r"]["mean"],3), _number(a["net_planned_r"]["median"],3),
+            _number(a["net_pnl"],2), _number(a["return_pct"],2),
+            _number(a["realized_balance_drawdown_pct"],2), _number(a["bar_close_mtm_drawdown_pct"],2)])
+        share = None if a["cap_rejection_share"] is None else 100*a["cap_rejection_share"]
+        duration = a["holding_ms"]
+        holding = " / ".join(_number(None if duration[k] is None else duration[k]/3600000,2) for k in ("mean","median"))
+        exits = ", ".join(f"{key}: {value}" for key,value in a["exits"].items())
+        diagnostics.append([_account_label(a), a["signals"], a["finite_cap_attempt_count"],
+            a["dispositions"]["leverage_cap_exceeded"], _number(share,2),
+            _number(a["max_attempt_required_leverage"],3), _number(a["max_executed_entry_leverage"],3),
+            holding, exits, a["ambiguous_trades"]])
+    parts = ['<section class="card"><h2>Sequential ATR bracket accounts</h2>',
+        '<p>Descriptive independent accounts, not a portfolio or validated edge. All declared cases are shown; no RR is selected.</p>',
+        '<p>Signal-close levels and float-floor risk sizing; next-contiguous-open entry. Entry-only leverage cap rejects without resizing. Both executed notionals incur commission. No slippage, funding, liquidation or maintenance margin is modeled.</p>',
+        '<p>Observation OHLC uses O-H-L-C when open is nearer high, otherwise O-L-H-C (including ties). ATR uses an arithmetic TR seed and Pine recurrence, resetting at gaps. Segment survivors close at the last observed close and carry capital.</p>',
+        '<p>The configured maximum holding days (settings below) is an elapsed-time trigger followed by next-open closure. A trigger on the final observed bar yields strict close instead. Intrabar execution time is unknown: duration uses exit-bar open for open/intrabar fills and exit-bar close for terminal fills.</p>',
+        '<p>Win rate is a percent here (a fraction in JSON); wins/losses use net PnL after both fees. Planned R divides net PnL by rounded signal-close cash risk. Profit factor uses net winning PnL / absolute net losing PnL; unavailable values retain their status. No-trade means and win rate are unavailable.</p>',
+        '<p>Balance and bar-close MTM drawdowns include initial capital and can exceed 100%. Coverage to the requested end is separate from raw last-observed terminal flags.</p>',
+        '<h3>Performance comparison</h3><div style="overflow-x:auto">',
+        _rows(performance,header=["Account", "Trades", "Win rate %", "Profit factor / status", "Mean net R", "Median net R", "Net PnL USDT", "Return %", "Balance DD %", "MTM DD %"]),
+        '</div><h3>Execution diagnostics</h3><div style="overflow-x:auto">',
+        _rows(diagnostics,header=["Account", "Signals", "Finite-cap attempts", "Cap rejects", "Cap rejection %", "Max required x", "Max executed x", "Mean / median holding hours", "Exit counts", "Ambiguous trades"]), '</div>']
+    for account in accounts:
+        parts.append('<details><summary>'+escape(_account_label(account))+'</summary>')
+        coverage = account.get("coverage")
+        if coverage is None:
+            parts.append('<p>Requested-end coverage unavailable in this older summary.</p>')
+        else:
+            if not coverage["tail_complete"]:
+                parts.append('<p class="banner">Missing tail: '+escape(str(coverage["missing_tail_slots"]))+
+                    ' grid slots. '+escape(str(coverage["terminal_exits_before_requested_end"]))+
+                    ' terminal exits closed at the last observed close before the requested end. These are not internal gap-boundary exits.</p>')
+            parts.append(_fact_table(coverage,caption="Requested-end coverage (does not certify internal gap absence)"))
+        parts.extend([_fact_table(account["dispositions"],caption="Signal dispositions (counts)"),
+            _fact_table(account["settings"],caption="Resolved bracket settings"),
+            _fact_table({key:account[key] for key in ("gross_pnl","total_fees","initial_capital","final_capital")},caption="Account money (USDT)"),
+            _fact_table(account["stop_width_pct"],caption="Planned stop width (%)"), '</details>'])
+    parts.append('<h3>Frozen quantity rules and provenance</h3><p>Current snapshots are not historical rule history. OKX contracts use base ctVal and ctMult=1; Bybit uses base quantity. Published minimum notional is enforced; absent values remain unknown. Prices are not tick-rounded and these checks do not certify exchange-order admissibility.</p>')
+    for identifier, rules in summary["sequential_rules"].items():
+        parts.append('<h4>'+escape(identifier)+'</h4>')
+        parts.append(_fact_table(rules["semantic"],caption="Normalized execution rules"))
+        snapshot = rules["snapshot"]
+        parts.append(_fact_table({k:v for k,v in snapshot.items() if k != "raw_contract_fields"},caption="Rule snapshot provenance"))
+        parts.append('<details><summary>Raw venue fields</summary>'+_fact_table(snapshot.get("raw_contract_fields",{}),caption="Published venue fields")+'</details>')
+    parts.append('</section>')
+    return "".join(parts)
+
+
 def _number(value: Any, digits: int = 6) -> str:
     if value is None:
         return "—"
@@ -321,18 +403,7 @@ and fractional excursions; multiply by 100 for percent. Saved machine-readable e
 </div>
 """
     if "sequential_accounts" in summary:
-        body += '<div class="card"><h2>Sequential ATR bracket accounts</h2><p>Descriptive independent accounts, not a portfolio or validated edge. All declared cases are shown; no RR is selected.</p>'
-        body += '<p>Signal-close levels and legacy float risk sizing; next-contiguous-open fills. Entry-only leverage cap rejects without resizing. Commission applies on both executed notionals; slippage, funding, liquidation and maintenance margin are not modeled. Execution uses observation OHLC: O-H-L-C when open is nearer high, otherwise O-L-H-C (including ties).</p>'
-        body += '<p>ATR uses an arithmetic TR seed and recursive Pine update, resetting after gaps. Segment survivors close at the last observed close and capital carries forward. Four days is an elapsed-time expiry trigger followed by next-open closure; terminal closure takes precedence. Intrabar fills have an unknown instant: duration uses the exit bar open, open exits use that open, and terminal exits use the bar close.</p>'
-        body += '<p>Drawdowns include the initial-capital anchor, distinguish realized balance from bar-close MTM, and may exceed 100%. Wins/losses use net PnL after both fees. Planned R uses rounded quantity times signal-close distance. Profit factor is net winning PnL / absolute net losing PnL; no-loss cases remain null with an explicit status.</p>'
-        body += _rows([[a["instrument_id"],a["variant_id"],a["model_instance_id"],str(a["timeframe_minutes"]),a["case_id"],str(a["signals"]),str(a["completed_trades"]),
-            _number(a["net_pnl"]),_number(a["total_fees"]),_number(a["return_pct"]),_number(a["realized_balance_drawdown_pct"]),_number(a["bar_close_mtm_drawdown_pct"])] for a in summary["sequential_accounts"]],
-            header=["Instrument","Variant","Model","Minutes","Case","Signals","Trades","Net PnL USDT","Fees USDT","Return %","Realized DD %","MTM DD %"])
-        for account in summary["sequential_accounts"]:
-            body += '<details><summary>'+escape(' / '.join(str(account[k]) for k in ("instrument_id","variant_id","model_instance_id","case_id")))+'</summary>'
-            body += _definition([(k,str(v)) for k,v in account.items()])+ '</details>'
-        body += '<h3>Frozen quantity rules</h3><p>Current exchange snapshots are not historical rule history. OKX contracts convert through base-denominated ctVal with ctMult=1; Bybit uses base quantity. Integer lots preserve original-unit quantities. Optional minimum notional is enforced only when published. Prices are not tick-rounded; price tick is provenance, not full exchange-order validation.</p>'
-        body += _definition([(key,str(value)) for key,value in summary["sequential_rules"].items()])+'</div>'
+        body += _sequential_report(summary)
     return (
         "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"

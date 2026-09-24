@@ -1969,7 +1969,7 @@ Execution uses the generic V2 reference ordering and re-entry suppression on the
 selected observation OHLC (30m means 30m execution). Open nearer high takes
 O-H-L-C; otherwise O-L-H-C, including ties. Entry-bar protection is active: a
 gap through a level fills and exits at the same open, with zero gross PnL and two
-fees. Four days is the reference elapsed-time trigger, followed by a next-open
+fees. The configured `max_holding_days` (four by default) is the reference elapsed-time trigger, followed by a next-open
 exit, not an exact 96-hour fill deadline. Strict final-close precedence reads no
 future bar. The final study bar emits no event. At gaps, survivors close at the
 last observed segment close, capital carries, indicators reset and pending orders
@@ -1980,9 +1980,14 @@ explicit Arrow schema version 1, including empty tables. The ordinary observatio
 view remains version 1; brackets have no per-anchor observation table.
 `load_results(root).sequential_account(instrument_id, timeframe_minutes=30,
 variant_id="two_green_every", model_instance_id="bracket", case_id="long_rr2")`
-returns checked `attempts`, `trades`, and `path` DataFrames. For repeated rankings,
-one `instrument_reader(id).sequential_tables()` decodes all three tables once;
-call `release()` afterward. See
+returns checked `attempts`, `trades`, and `path` DataFrames as a fresh-read
+convenience. For repeated account lookups, open one `instrument_reader(id)`,
+iterate `sequential_keys()`, and use that reader's `sequential_account(...)`
+with the same four account selectors. It validates/groups once for the instrument
+and returns caller-owned copies. `sequential_tables()` also returns copies;
+caller mutations cannot poison subsequent checked account access. Call `release()`
+to drop tables and indexes before proceeding to another instrument. A new reader
+or public load freshly verifies evidence; there is no process-global cache. See
 [`rank_bracket_accounts.py`](examples/rank_bracket_accounts.py) for agent-defined
 sorting from public saved evidence, without execution-code edits.
 
@@ -2003,11 +2008,48 @@ accounts retain capital and zero PnL, with unavailable trade means/win rate.
 Readers check full model/version/kind dispatch, physical types, membership,
 coverage, links, chronology and money reconciliation (absolute tolerance 1e-8,
 relative 1e-9). Resealing contradictory records does not make them valid; these
-checks do not authenticate a coherent rewrite. Reports regenerate from checked
+checks do not authenticate a coherent rewrite. Filled notional, proposed/actual
+entry fee and guarded leverage use exact version-1 expressions and cap decisions;
+only accumulated money and the other existing reconciliations use the tolerance.
+Stage-specific nullable fields, positive sizing capital/minimum lots, signal-close
+anchors, price/phase/reason and the floating expiry clock are checked from saved
+facts. Indicator causes, intrabar highs/lows and ambiguity, independent flat-bar
+closes, and relabels consistent with every saved fact cannot be reconstructed.
+Rejected attempts lack an actual fill price: their saved arithmetic is checked,
+not the authenticity of that omitted price. Reports regenerate from checked
 saved evidence without pack, network, core or extension execution. Tables are
 batched once per instrument through the existing bounded direct/spawn job path.
 Only the built-in sequential descriptor is allowed; custom per-anchor models,
 hypotheses and saved-result ranking remain supported.
+
+The path is built and checked as typed columns. Per-account entry/exit and
+occupancy indexes support a chronological balance sweep, avoiding per-bar or
+per-attempt scans of all trades. Emissions are grouped once per timeframe/variant.
+Validation is O(B+A+T log B) per account (expiry uses bounded search), with bounded
+instrument memory. The coordinator always checks before publishing. The owned
+built-in child no longer duplicates that check. Normal direct execution retains
+three instrument validation passes (publication, prepublication load, summary);
+report regeneration retains two (fresh load, summary). Separate public account
+convenience calls each validate freshly; repeated loops should use one reader.
+
+Raw schema-v1 `study_end` and `terminal` mean the last observed row/segment close,
+even if final grid slots before the requested end are missing. They do not prove
+complete tail coverage. Derived summaries and
+`reader.sequential_coverage(timeframe_minutes=..., variant_id=...,
+model_instance_id=..., case_id=...)` share one calculation returning
+`requested_end_ms`, `last_observed_close_ms`, `tail_complete`, `missing_tail_slots`,
+and `terminal_exits_before_requested_end`. A complete tail does not certify no
+internal gaps. The report warns about early last-observed closures without
+reclassifying them as internal gap exits or changing raw values/PnL. Older summaries
+without coverage show unavailable; historical raw tables derive it offline.
+
+Saved classification follows the evidence kind. A historical ordinary per-anchor
+model named `atr_bracket` stays readable, including offline frozen candidates;
+new runtime registrations still reserve that name for the owned built-in.
+Strict reads and publication share table/family coverage checks. Sequential kind
+requires the exact supported triple and three tables; custom per-anchor instances
+require their own custom table. Version-1 normalization/cases and exact entry
+expressions are saved-reader contracts; changes require explicit version handling.
 
 Declared observation metrics cover only per-anchor groups in a mixed study;
 sequential-only studies cannot declare those metrics. Bracket inference is
@@ -2020,7 +2062,10 @@ one new generation, then freeze a new candidate. Do not mix old/new generations.
 
 Bracket evaluation alone imports repository core lazily with scoped/restored
 `src` path and cached-module origin checks. Registration, fixed-only studies,
-hashing and offline reports do not import core or strategies. Existing core
+hashing and offline reports do not import core or strategies. The existing
+origin checks cover `core` modules, not every transitive top-level package (for
+example a preloaded foreign `indicators`). This is not a general import sandbox.
+Existing core
 initialization imports storage/Optuna/WFA, chooses a database path and can create
 an absent empty `src/storage/` directory; it opens no database here. Pattern Lab
 calls no storage APIs. Bracket code attribution hashes an explicit list of

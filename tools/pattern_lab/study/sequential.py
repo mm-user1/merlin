@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from .. import PatternLabDataError
 from . import contracts
@@ -47,139 +48,24 @@ def check_physical(table, name):
         if not field.nullable and column.null_count:
             raise PatternLabDataError(f"sequential {name}.{field.name}: null in required field")
         if pa.types.is_floating(field.type):
-            if any(x is not None and not math.isfinite(x) for x in column.to_pylist()):
+            if pc.all(pc.fill_null(pc.is_finite(column), True)).as_py() is False:
                 raise PatternLabDataError(f"sequential {name}.{field.name}: nonfinite value")
 
 
-def _records(table, name):
+def checked_table(table, name):
     try:
         actual = pa.Table.from_pandas(table, schema=SCHEMAS[name], preserve_index=False)
         if list(table.columns) != SCHEMAS[name].names:
             raise ValueError("column order/coverage mismatch")
         check_physical(actual, name)
-        return actual.to_pylist()
+        return actual
     except (ValueError, TypeError, pa.ArrowException) as exc:
         raise PatternLabDataError(f"sequential {name}: invalid typed evidence: {exc}") from exc
 
 
-def validate(tables, *, instrument_id, instances, variants, emissions, expected_bars, rules):
-    """Check saved consistency, not engine replay or adversarial authenticity.
-
-    Money reconciliation uses abs_tol=1e-8, rel_tol=1e-9. IDs, integer counts,
-    admission comparisons and membership are exact.
-    """
-    def require(ok, message):
-        if not ok:
-            raise PatternLabDataError(f"{instrument_id}: sequential evidence: {message}")
-    def same(a,b):
-        return a is not None and b is not None and math.isclose(a,b, rel_tol=1e-9, abs_tol=1e-8)
-    accounts = {}
-    for instance in instances:
-        require(contracts.is_sequential(instance), "unsupported model contract")
-        for timeframe,cases in instance["cases"].items():
-            for variant in variants:
-                for case in cases:
-                    accounts[(instrument_id,int(timeframe),variant["variant_id"],instance["model_instance_id"],case["case_id"])] = case["parameters"]
-    grouped = {name:{key:[] for key in accounts} for name in SCHEMAS}
-    for name in SCHEMAS:
-        require(name in tables, f"missing {name} table")
-        for row in _records(tables[name], name):
-            key = tuple(row[k] for k in KEY)
-            require(key in accounts, f"unknown account in {name}")
-            grouped[name][key].append(row)
-    events = {(int(row.timeframe_minutes), row.variant_id, row.event_id):int(row.anchor_open_ms)
-              for row in emissions.itertuples()}
-    for key, settings in accounts.items():
-        attempts, trades, path = [grouped[name][key] for name in SCHEMAS]
-        expected = {e:stamp for (tf,v,e),stamp in events.items() if (tf,v)==(key[1],key[2])}
-        require(len(attempts)==len(expected) and {a["event_id"] for a in attempts}==set(expected), "duplicate/missing attempts")
-        require([p["bar_open_ms"] for p in path] == list(expected_bars[key[1]]), "missing/unordered account path bars")
-        require(len({p["bar_index"] for p in path})==len(path), "duplicate path indices")
-        by_bar = {p["bar_index"]:p for p in path}
-        for index,p in enumerate(path):
-            last=index==len(path)-1
-            boundary=last or path[index+1]["bar_open_ms"]-p["bar_open_ms"]!=key[1]*60000
-            require(p["segment_end"]==boundary and p["study_end"]==last, "path boundary flags")
-            if not last:
-                following=path[index+1]
-                require(following["bar_index"]==p["bar_index"]+1 and following["segment"]==p["segment"]+int(boundary), "path segment/index chronology")
-        by_trade = {t["trade_id"]:t for t in trades}
-        require(len(by_trade)==len(trades), "duplicate trades")
-        filled = [a for a in attempts if a["reason"]=="filled"]
-        require(len(filled)==len(trades) and {a["trade_id"] for a in filled}==set(by_trade), "filled/trade links disagree")
-        fee_rate = settings["commission_pct_per_side"]/100
-        for a in attempts:
-            require(a["reason"] in REASONS, "unknown terminal reason")
-            require(a["anchor_open_ms"]==expected[a["event_id"]] and a["intended_fill_ms"]==a["anchor_open_ms"]+key[1]*60000, "attempt event timing")
-            require(a["signal_index"] in by_bar and by_bar[a["signal_index"]]["bar_open_ms"]==a["anchor_open_ms"], "attempt signal index")
-            require((a["trade_id"] is not None)==(a["reason"]=="filled"), "rejected attempt links trade")
-            signal=by_bar[a["signal_index"]]
-            previous=by_bar.get(a["signal_index"]-1)
-            had_position=any(t["entry_index"]<=a["signal_index"]<=t["exit_index"] for t in trades)
-            priority=("no_next_bar" if signal["segment_end"] else "occupied" if signal["position_direction"] else
-                      "reentry_suppressed" if had_position or (previous and previous["segment"]==signal["segment"] and previous["position_direction"]) else None)
-            require(priority==a["reason"] if priority else a["reason"] not in ("no_next_bar","occupied","reentry_suppressed"), "signal disposition priority")
-            require(same(a["pre_entry_balance"],signal["balance"]), "attempt capital differs from signal close")
-            if a["lots"] is not None:
-                require(0<=a["lots"]<=2**53 and same(a["quantity"],a["lots"]*float(rules["base_step"])), "integer lot reconstruction")
-                require((a["reason"]=="zero_quantity")==(a["lots"]==0), "zero quantity disposition")
-                if a["lots"]>0:
-                    require((a["reason"]=="below_min_quantity")==(a["lots"]<rules["minimum_lots"]), "minimum quantity disposition")
-                require(a["risk_distance"] is not None and a["risk_distance"]>0, "planned distance")
-                sign=1 if settings["direction"]=="long" else -1
-                require(same(a["risk_distance"],sign*(a["anchor_price"]-a["stop"])) and
-                        same(a["target"],a["anchor_price"]+sign*settings["reward_risk"]*a["risk_distance"]), "planned levels")
-            if a["reason"] in ("filled","leverage_cap_exceeded"):
-                require(a["fill_index"] in by_bar and a["fill_index"]==a["signal_index"]+1, "noncontiguous fill")
-                require(a["notional"] is not None and same(a["proposed_fee"],a["notional"]*fee_rate), "proposed fee")
-                denominator = a["pre_entry_balance"]-a["proposed_fee"]
-                require(denominator>0 and same(a["required_leverage"],a["notional"]/denominator), "required leverage")
-                require((a["required_leverage"]<=settings["max_leverage"])==(a["reason"]=="filled"), "cap admission")
-                require(rules["minimum_notional"] is None or a["notional"]>=float(rules["minimum_notional"]), "minimum notional admission")
-            if a["reason"]=="below_min_notional":
-                require(rules["minimum_notional"] is not None and a["notional"] is not None and
-                        a["notional"]<float(rules["minimum_notional"]), "minimum notional disposition")
-            if a["reason"]=="leverage_undefined":
-                require(a["required_leverage"] is None, "undefined leverage must be null")
-            if a["reason"]=="nonpositive_capital":
-                require(a["pre_entry_balance"]<=0, "nonpositive capital disposition")
-            if a["reason"]=="filled":
-                t = by_trade[a["trade_id"]]
-                require(t["event_id"]==a["event_id"] and t["signal_index"]==a["signal_index"] and t["entry_index"]==a["fill_index"], "trade origin link")
-                for field in ("quantity","lots","stop","target"):
-                    require(t[field]==a[field], "trade plan changed")
-                require(same(t["planned_cash_risk"],a["quantity"]*a["risk_distance"]), "planned risk")
-                require(t["entry_leverage"]==a["required_leverage"], "trade leverage")
-        for t in trades:
-            require(t["direction"]==settings["direction"], "trade direction")
-            require(t["exit_phase"] in ("open","intrabar","close") and t["exit_reason"] in ("stop","target","expiry","terminal","gap_boundary"), "exit attribution")
-            require(t["entry_index"] in by_bar and t["exit_index"] in by_bar and t["entry_index"]<=t["exit_index"], "trade chronology")
-            entry,exit_ = by_bar[t["entry_index"]],by_bar[t["exit_index"]]
-            require(entry["segment"]==exit_["segment"], "trade crosses a gap")
-            require(t["entry_time_ms"]==entry["bar_open_ms"] and t["exit_bar_open_ms"]==exit_["bar_open_ms"] and t["exit_bar_end_ms"]==exit_["bar_open_ms"]+key[1]*60000, "trade times")
-            require(t["holding_ms"]==t["exit_bar_open_ms"]+(key[1]*60000 if t["exit_phase"]=="close" else 0)-t["entry_time_ms"], "duration clock")
-            require(t["quantity"]>0 and t["planned_cash_risk"]>0, "nonpositive trade size/risk")
-            require(Decimal(t["instrument_quantity"])==Decimal(t["lots"])*Decimal(rules["quantity_step"]), "instrument quantity units")
-            gross=(t["exit_price"]-t["entry_price"])*t["quantity"]*(1 if t["direction"]=="long" else -1)
-            require(same(t["gross_pnl"],gross) and same(t["entry_fee"],t["entry_price"]*t["quantity"]*fee_rate) and same(t["exit_fee"],t["exit_price"]*t["quantity"]*fee_rate), "PnL/fee contradiction")
-            require(same(t["net_pnl"],gross-t["entry_fee"]-t["exit_fee"]) and same(t["net_r"],t["net_pnl"]/t["planned_cash_risk"]), "net PnL/R contradiction")
-            if t["exit_reason"] in ("terminal","gap_boundary"):
-                require(exit_["segment_end"] and t["exit_phase"]=="close" and (t["exit_reason"]=="terminal")==exit_["study_end"], "boundary attribution")
-        balance = settings["initial_capital"]
-        for p in path:
-            i=p["bar_index"]
-            balance -= sum(t["entry_fee"] for t in trades if t["entry_index"]==i)
-            balance += sum(t["gross_pnl"]-t["exit_fee"] for t in trades if t["exit_index"]==i)
-            active=[t for t in trades if t["entry_index"]<=i<t["exit_index"]]
-            require(len(active)<=1, "overlapping positions")
-            quantity=active[0]["quantity"] if active else 0
-            direction=(1 if settings["direction"]=="long" else -1) if active else 0
-            unrealized=(p["close_price"]-active[0]["entry_price"])*quantity*direction if active else 0
-            require(same(p["balance"],balance) and same(p["equity"],balance+unrealized), "account balance/equity contradiction")
-            require(p["position_direction"]==direction and same(p["position_quantity"],quantity), "account position contradiction")
-            require(p["entry_price"]==(active[0]["entry_price"] if active else None), "account entry price")
-            require(not p["segment_end"] or not active, "position carried across boundary")
-    return grouped
+def validate(tables, **kwargs):
+    from .sequential_checks import validate as check
+    return check(tables, **kwargs)
 
 
 def expected_bars(conditions, stats, end_ms):
@@ -198,7 +84,7 @@ def expected_bars(conditions, stats, end_ms):
     return result
 
 
-def summaries(grouped, instances):
+def summaries(grouped, instances, *, requested_end_ms=None):
     cases={(m["model_instance_id"],int(tf),c["case_id"]):c["parameters"]
            for m in instances for tf,cs in m["cases"].items() for c in cs}
     result=[]
@@ -223,8 +109,8 @@ def summaries(grouped, instances):
         winning=[t["net_pnl"] for t in trades if t["net_pnl"]>0]
         losing=[t["net_pnl"] for t in trades if t["net_pnl"]<0]
         initial=settings["initial_capital"]
-        final=path[-1]["balance"] if path else initial
-        result.append({**dict(zip(KEY,key)),"settings":settings,"signals":len(attempts),"dispositions":counts,
+        final=float(path["balance"][-1]) if len(path["balance"]) else initial
+        result.append({**dict(zip(KEY,key)),"settings":settings,**({"coverage":coverage(path,trades,key[1],requested_end_ms)} if requested_end_ms is not None else {}),"signals":len(attempts),"dispositions":counts,
             "completed_trades":len(trades),"wins":len(winning),"losses":len(losing),
             "breakeven":len(trades)-len(winning)-len(losing),"win_rate":len(winning)/len(trades) if trades else None,
             "initial_capital":initial,"final_capital":final,"gross_pnl":sum(t["gross_pnl"] for t in trades),
@@ -234,8 +120,8 @@ def summaries(grouped, instances):
             "profit_factor_status":"available" if losing else "no_losses" if winning else "no_wins_or_losses",
             "net_planned_r":describe([t["net_r"] for t in trades]),
             "holding_ms":describe([t["holding_ms"] for t in trades]),
-            "realized_balance_drawdown_pct":drawdown([p["balance"] for p in path],initial),
-            "bar_close_mtm_drawdown_pct":drawdown([p["equity"] for p in path],initial),
+            "realized_balance_drawdown_pct":drawdown(path["balance"],initial),
+            "bar_close_mtm_drawdown_pct":drawdown(path["equity"],initial),
             "finite_cap_attempt_count":finite_cap,"cap_rejection_share":counts["leverage_cap_exceeded"]/finite_cap if finite_cap else None,
             "max_attempt_required_leverage":max(required) if required else None,
             "max_executed_entry_leverage":max(used) if used else None,
@@ -245,3 +131,20 @@ def summaries(grouped, instances):
             "ambiguous_trades":sum(t["ambiguous"] for t in trades),
             "ambiguous_bars":len({t["exit_index"] for t in trades if t["ambiguous"]})})
     return result
+
+
+def coverage(path, trades, timeframe_minutes, requested_end_ms):
+    """Derived tail facts; raw v1 terminal flags still mean last observed row."""
+    step = timeframe_minutes * 60000
+    stamps = path["bar_open_ms"]
+    last_close = int(stamps[-1])+step if len(stamps) else None
+    missing = None
+    if last_close is not None:
+        gap = requested_end_ms-last_close
+        if gap < 0 or gap % step:
+            raise PatternLabDataError("Sequential coverage: impossible requested end/path bounds")
+        missing = gap//step
+    return dict(requested_end_ms=requested_end_ms, last_observed_close_ms=last_close,
+                tail_complete=last_close == requested_end_ms, missing_tail_slots=missing,
+                terminal_exits_before_requested_end=sum(t["exit_reason"] == "terminal" and
+                    t["exit_bar_end_ms"] < requested_end_ms for t in trades))
