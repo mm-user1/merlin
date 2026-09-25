@@ -3,7 +3,8 @@
 One Python entry point normalizes the request for both the CLI and agent
 scripts.  Everything that changes what is computed is semantic; the data root,
 the output root and the worker count are execution arguments recorded as
-provenance only.
+provenance only. Saved extension declarations retain physical roots; identity
+policy 2 projects those top-level roots out without altering nested candidates.
 """
 
 from __future__ import annotations
@@ -653,6 +654,10 @@ def normalize_request(document: Any, *, source: str, base: Path | None) -> Study
         )
 
     extensions = _normalize_extensions(values.get("extensions"), base=base)
+    if execution["kind"] == "validation":
+        from ..candidate import load_candidate, verify_extension_generation
+        frozen = load_candidate(execution["candidate"])
+        verify_extension_generation(frozen, study_extensions.declared_source_records(extensions))
     # Trusted modules are hashed, imported and registered before any descriptor
     # is looked up, so a declared custom hypothesis or model exists by name.
     study_extensions.load_extensions(extensions)

@@ -33,11 +33,11 @@ root, request_file, output, form, refuse = sys.argv[1:]
 doc = json.loads(Path(request_file).read_text())
 request = doc
 if form == 'file': request = Path(request_file)
-if form == 'normalized': request = replace(validation.validated_request(doc), notes='edited normalized object')
 if refuse == 'yes':
     def forbidden(*args, **kwargs): raise AssertionError('pack/numerical work reached')
     data.read_session = forbidden
 try:
+    if form == 'normalized': request = replace(validation.validated_request(doc), notes='edited normalized object')
     study.run_study(request=request, data_root=Path(root)/'pack', output_root=output)
 except PatternLabDataError as error:
     print(json.dumps({'error':str(error), 'output_exists':Path(output).exists()}))
@@ -71,7 +71,8 @@ def test_actual_alternate_generation_fails_before_pack_or_output(generation, tmp
     doc = validation_document(frozen)
     declared = doc["extensions"][0]
     path = alternate/(declared["module"] + ".py" if changed == "module" else declared["helpers"][0])
-    path.write_text(path.read_text() + "\n# alternate generation\n")
+    marker = tmp_path/"IMPORTED"
+    path.write_bytes((f"from pathlib import Path as _P\n_P({str(marker)!r}).write_text('imported')\n").encode() + path.read_bytes())
     declared["source_root"] = str(alternate)
     result = probe(root, doc, tmp_path, form, True)
     required = {f["path"]:f["sha256"] for f in frozen["required_code"]["extensions"][0]["files"]}
@@ -79,6 +80,7 @@ def test_actual_alternate_generation_fails_before_pack_or_output(generation, tmp
     assert required[path.name] in result["error"]
     assert extensions.file_digest(path) in result["error"]
     assert not result["output_exists"]
+    assert not marker.exists()
 
 
 def test_identical_move_without_old_source_root_and_spawn_parity(tmp_path):

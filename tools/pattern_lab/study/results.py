@@ -444,6 +444,9 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     sequential_models = [m for m in family["models"] if contracts.is_sequential(m)]
     request = dict(evidence.read_json(root / evidence.REQUEST_FILE))
     source = dict(evidence.read_json(root / evidence.SOURCE_FILE))
+    if "identity_policy_version" in source and (
+            type(source["identity_policy_version"]) is not int or source["identity_policy_version"] != 2):
+        raise PatternLabDataError("source: unsupported saved identity_policy_version.", error_code="corrupt_evidence")
     if type(request.get("schema_version")) is not int or request["schema_version"] not in evidence.SUPPORTED_RUN_SCHEMA_VERSIONS:
         raise PatternLabDataError("request: unsupported saved study version.")
     if request.get("schema_version") == 2:

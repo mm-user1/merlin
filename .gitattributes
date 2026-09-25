@@ -1,2 +1,13 @@
 data/raw/** -text
 data/baseline_v2/** -text
+
+# Exact-byte Pattern Lab generations use LF on every checkout.
+tools/pattern_lab/*.py text eol=lf
+tools/pattern_lab/**/*.py text eol=lf
+src/core/backtest_engine.py text eol=lf
+src/core/engine_v2/kernel.py text eol=lf
+src/core/engine_v2/sizing.py text eol=lf
+src/core/engine_v2/contracts.py text eol=lf
+src/core/engine_v2/price_rounding.py text eol=lf
+src/core/engine_v2/execution_modes.py text eol=lf
+src/core/engine_v2/diagnostics.py text eol=lf

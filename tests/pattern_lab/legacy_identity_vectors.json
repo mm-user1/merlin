@@ -1,0 +1,358 @@
+[
+  {
+    "run_version": 1,
+    "request": {
+      "extensions": [
+        {
+          "module": "probe",
+          "source_root": "C:/execution",
+          "helpers": [
+            "helper.py"
+          ]
+        }
+      ],
+      "execution": {
+        "kind": "validation",
+        "candidate": {
+          "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "recipe": {
+            "study": {
+              "extensions": [
+                {
+                  "module": "probe",
+                  "source_root": "C:/original",
+                  "helpers": [
+                    "helper.py"
+                  ]
+                }
+              ]
+            }
+          },
+          "provenance": {
+            "frozen_utc": "2026-09-01T00:00:00Z",
+            "path": "C:/discovery"
+          }
+        }
+      },
+      "parameters": {
+        "source_root": "meaningful",
+        "path": "also meaningful",
+        "label": "retained"
+      }
+    },
+    "family": {
+      "execution": {
+        "kind": "validation",
+        "candidate": {
+          "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "recipe": {
+            "study": {
+              "extensions": [
+                {
+                  "module": "probe",
+                  "source_root": "C:/original",
+                  "helpers": [
+                    "helper.py"
+                  ]
+                }
+              ]
+            }
+          },
+          "provenance": {
+            "frozen_utc": "2026-09-01T00:00:00Z",
+            "path": "C:/discovery"
+          }
+        }
+      },
+      "context": {
+        "reference": {
+          "instrument_id": "BTC",
+          "lag": 1
+        }
+      }
+    },
+    "source": {
+      "core_source": {
+        "module": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "bracket_source": {
+        "src/core/backtest_engine.py": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "extensions": [
+        {
+          "module": "probe",
+          "source_root": "C:/execution",
+          "module_path": "C:/execution/probe.py",
+          "files": [
+            {
+              "path": "probe.py",
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "path": "helper.py",
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ]
+        }
+      ],
+      "library_versions": {
+        "python": "3.13.7",
+        "numpy": "2.3.2",
+        "pandas": "2.3.1",
+        "pyarrow": "21.0.0"
+      }
+    },
+    "data": {
+      "fingerprints": [
+        {
+          "instrument_id": "AAA",
+          "timeframe_minutes": 60,
+          "input_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      ],
+      "semantic_specification": {
+        "extensions": [
+          {
+            "module": "probe",
+            "source_root": "C:/execution",
+            "helpers": [
+              "helper.py"
+            ]
+          }
+        ],
+        "execution": {
+          "kind": "validation",
+          "candidate": {
+            "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "recipe": {
+              "study": {
+                "extensions": [
+                  {
+                    "module": "probe",
+                    "source_root": "C:/original",
+                    "helpers": [
+                      "helper.py"
+                    ]
+                  }
+                ]
+              }
+            },
+            "provenance": {
+              "frozen_utc": "2026-09-01T00:00:00Z",
+              "path": "C:/discovery"
+            }
+          }
+        },
+        "parameters": {
+          "source_root": "meaningful",
+          "path": "also meaningful",
+          "label": "retained"
+        }
+      },
+      "universe": [
+        {
+          "instrument_id": "AAA",
+          "roles": [
+            "target"
+          ]
+        }
+      ],
+      "protocol": {
+        "reserved": "never consumed"
+      },
+      "context": {
+        "features": {
+          "reference": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      },
+      "bracket_rules": {
+        "AAA": {
+          "tick_size": "0.01"
+        }
+      }
+    },
+    "expected": {
+      "specification": "2315a2c260aa249095c48e4e012e1ca2c5dd3ab3b74a8ca4221793fed25fb918",
+      "implementation": "1800760614da22cb180dc9ad7789770bb3af68d1ac034b04e3143cb41450c714",
+      "data_input": "efbc08fc3077c5dd116528f63848eea7dcb33c02533aca8813895eaab3766524"
+    }
+  },
+  {
+    "run_version": 2,
+    "request": {
+      "extensions": [
+        {
+          "module": "probe",
+          "source_root": "C:/execution",
+          "helpers": [
+            "helper.py"
+          ]
+        }
+      ],
+      "execution": {
+        "kind": "validation",
+        "candidate": {
+          "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "recipe": {
+            "study": {
+              "extensions": [
+                {
+                  "module": "probe",
+                  "source_root": "C:/original",
+                  "helpers": [
+                    "helper.py"
+                  ]
+                }
+              ]
+            }
+          },
+          "provenance": {
+            "frozen_utc": "2026-09-01T00:00:00Z",
+            "path": "C:/discovery"
+          }
+        }
+      },
+      "parameters": {
+        "source_root": "meaningful",
+        "path": "also meaningful",
+        "label": "retained"
+      }
+    },
+    "family": {
+      "execution": {
+        "kind": "validation",
+        "candidate": {
+          "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "recipe": {
+            "study": {
+              "extensions": [
+                {
+                  "module": "probe",
+                  "source_root": "C:/original",
+                  "helpers": [
+                    "helper.py"
+                  ]
+                }
+              ]
+            }
+          },
+          "provenance": {
+            "frozen_utc": "2026-09-01T00:00:00Z",
+            "path": "C:/discovery"
+          }
+        }
+      },
+      "context": {
+        "reference": {
+          "instrument_id": "BTC",
+          "lag": 1
+        }
+      }
+    },
+    "source": {
+      "core_source": {
+        "module": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "bracket_source": {
+        "src/core/backtest_engine.py": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "extensions": [
+        {
+          "module": "probe",
+          "source_root": "C:/execution",
+          "module_path": "C:/execution/probe.py",
+          "files": [
+            {
+              "path": "probe.py",
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "path": "helper.py",
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ]
+        }
+      ],
+      "library_versions": {
+        "python": "3.13.7",
+        "numpy": "2.3.2",
+        "pandas": "2.3.1",
+        "pyarrow": "21.0.0"
+      }
+    },
+    "data": {
+      "fingerprints": [
+        {
+          "instrument_id": "AAA",
+          "timeframe_minutes": 60,
+          "input_fingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      ],
+      "semantic_specification": {
+        "extensions": [
+          {
+            "module": "probe",
+            "source_root": "C:/execution",
+            "helpers": [
+              "helper.py"
+            ]
+          }
+        ],
+        "execution": {
+          "kind": "validation",
+          "candidate": {
+            "candidate_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "recipe": {
+              "study": {
+                "extensions": [
+                  {
+                    "module": "probe",
+                    "source_root": "C:/original",
+                    "helpers": [
+                      "helper.py"
+                    ]
+                  }
+                ]
+              }
+            },
+            "provenance": {
+              "frozen_utc": "2026-09-01T00:00:00Z",
+              "path": "C:/discovery"
+            }
+          }
+        },
+        "parameters": {
+          "source_root": "meaningful",
+          "path": "also meaningful",
+          "label": "retained"
+        }
+      },
+      "universe": [
+        {
+          "instrument_id": "AAA",
+          "roles": [
+            "target"
+          ]
+        }
+      ],
+      "protocol": {
+        "reserved": "never consumed"
+      },
+      "context": {
+        "features": {
+          "reference": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      },
+      "bracket_rules": {
+        "AAA": {
+          "tick_size": "0.01"
+        }
+      }
+    },
+    "expected": {
+      "specification": "0526b02b77e3f4a862a3f5b50cf6de7d01d200d56012d4afe3396c2a1ef89e9c",
+      "implementation": "9f0b035fd3c5fcdebca70d71c8963880fc426a5ebebe168d14793bfa4982f6ca",
+      "data_input": "51abbcfadedd796f056edfef27e8a457935a8f4e383fee81a2e3814e51cce99e"
+    }
+  }
+]

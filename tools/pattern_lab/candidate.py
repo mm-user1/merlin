@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-from pathlib import Path
+import os
+from pathlib import Path, PureWindowsPath
 import re
 from typing import Any, Mapping
 
@@ -323,11 +324,8 @@ def verify_current_generation(candidate, *, actual_extensions=None):
         if module is None or not module.origin or extensions.file_digest(Path(module.origin)) != digest:
             raise PatternLabDataError(f"candidate required generation changed: {name}; produce a fresh development generation.")
     if actual_extensions is None:
-        actual_extensions = []
-        for item in candidate["recipe"]["study"]["extensions"]:
-            declaration = spec.ExtensionDeclaration(**item)
-            actual_extensions.append({"module": item["module"], "files": [
-                {"path": name, "sha256": digest} for name, digest in extensions._resolve_digests(declaration)]})
+        actual_extensions = extensions.declared_source_records(
+            spec.ExtensionDeclaration(**item) for item in candidate["recipe"]["study"]["extensions"])
     verify_extension_generation(candidate, actual_extensions)
 
 
@@ -408,15 +406,42 @@ def load_validation(output_root):
         raise PatternLabDataError(f"{root}: malformed validation receipt/evidence: {error}") from error
 
 
-def run_validation(*, candidate, data_root, output_root, workers=1):
+def _relocate_extensions(document, extension_roots):
+    """Apply explicit local directories to the caller's private recipe copy."""
+    if extension_roots is None:
+        return
+    if not isinstance(extension_roots, Mapping):
+        raise PatternLabDataError("extension_roots must be a mapping of declared module names to absolute directories.")
+    declared = {item["module"]: item for item in document["extensions"]}
+    for module, value in extension_roots.items():
+        if not isinstance(module, str) or module not in declared:
+            raise PatternLabDataError(f"extension_roots: unknown declared module {module!r}.")
+        try:
+            raw = os.fspath(value)
+        except TypeError as error:
+            raise PatternLabDataError(f"extension_roots[{module!r}]: expected a nonempty absolute directory path.") from error
+        if not isinstance(raw, str) or not raw.strip():
+            raise PatternLabDataError(f"extension_roots[{module!r}]: expected a nonempty text directory path.")
+        path = Path(raw)
+        windows = PureWindowsPath(raw)
+        if not path.is_absolute() or ((windows.drive or raw.startswith("\\")) and not windows.is_absolute()):
+            raise PatternLabDataError(f"extension_roots[{module!r}]: expected an absolute local directory, got {raw!r}.")
+        if not path.is_dir():
+            raise PatternLabDataError(f"extension_roots[{module!r}]: {raw!r} is not an existing directory.")
+        declared[module]["source_root"] = str(path.resolve())
+
+
+def run_validation(*, candidate, data_root, output_root, workers=1, extension_roots=None):
     """Run the frozen recipe. Runtime arguments are locations and worker count only."""
     from . import PatternLabPendingError
     from .study import runner, context
     from .analysis import runner as analysis_runner
     frozen = load_candidate(candidate)
-    verify_current_generation(frozen)
     runner.normalize_workers(workers)
     document = copy.deepcopy(frozen["recipe"]["study"])
+    _relocate_extensions(document, extension_roots)
+    effective = tuple(spec.ExtensionDeclaration(**item) for item in document["extensions"])
+    verify_current_generation(frozen, actual_extensions=extensions.declared_source_records(effective))
     document.update(study=frozen["split"]["evaluation"], execution={"kind":"validation", "candidate":frozen})
     normalized = validation.validated_request(document)
     if _resolved_analysis(frozen["recipe"]) != frozen["recipe"]["analysis_family"]:
@@ -443,6 +468,7 @@ def run_validation(*, candidate, data_root, output_root, workers=1):
             raise PatternLabDataError("validation integrity: " + "; ".join(integrity["problems"]))
     root = Path(output_root).expanduser().resolve()
     protected = [pack]
+    protected.extend(Path(item.source_root).resolve() for item in effective)
     if isinstance(candidate, (str, Path)):
         protected.append(Path(candidate).expanduser().resolve())
     protected.extend(Path(frozen["provenance"][key]).resolve() for key in ("study_root", "analysis_root")
@@ -464,7 +490,7 @@ def run_validation(*, candidate, data_root, output_root, workers=1):
         analysis_runner.run_analysis(request=analyzed_request, run_root=root/"study", output_root=root/"analysis")
         phase = "receipt"
         children = _verified_validation_children(root, frozen)
-        verify_current_generation(frozen)
+        verify_current_generation(frozen, actual_extensions=extensions.declared_source_records(effective))
         if load_candidate(root/"candidate.json") != frozen:
             raise PatternLabDataError("validation candidate snapshot changed during execution.")
         receipt = {"schema_version":1, "status":"completed", **validation_metadata(frozen),

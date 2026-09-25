@@ -32,6 +32,13 @@ reader ownership and requested-table copy count, and synthetic study-to-analysis
 and saved-report integration. Existing bracket, context, candidate and worker
 tests remain preservation gates.
 
+`test_pattern_lab_portability.py` pins pre-T09 policy-1 digest vectors, checks
+policy-2 saved-input recomputation and source-only markers, exercises frozen
+extension relocation and import/final-receipt refusals, and guards scoped LF
+source bytes. Its temporary Git checkout tests `core.autocrlf=true` without
+changing repository or global Git settings. Frozen-integrity tests retain the
+offline receipt and contradictory saved-attribution checks.
+
 Fast adds `-m "not slow"`. Full includes every normally discovered test with no
 cost filter. Focused mode (no mode before `--`) adds no selector. Pytest owns
 discovery through `testpaths = tests`; new ordinary tests enter full automatically.

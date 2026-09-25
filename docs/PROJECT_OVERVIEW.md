@@ -203,8 +203,11 @@ contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
 ## Pattern Lab integration
 
-M5 integrated research workflow is delivered pending tech-lead review; resume
-remains deferred. M4 remains accepted at `c26334e` for its documented scope.
+M5 integrated research workflow is accepted at `d423016` within its documented
+scope and the identity-portability limits of that generation; resume remains deferred.
+Post-M5 T09 implements prospective policy-2 identities and verified frozen extension
+relocation, pending owner review; historical artifacts remain unchanged.
+M4 remains accepted at `c26334e` for its documented scope.
 
 Pattern Lab is separate local, research-only tooling for testing hypotheses
 before a strategy exists. Merlin and Strategy Lab do not import it, and it does

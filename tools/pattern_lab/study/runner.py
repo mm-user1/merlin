@@ -682,7 +682,8 @@ def run_study(
     Every form is revalidated here: a normalized object's semantic settings are
     resolved again and its derived facts must agree.  ``data_root`` and
     ``output_root`` are execution arguments: they are recorded as provenance and
-    never enter semantic or data identity.
+    never enter semantic or data identity. New runs use identity policy 2, which
+    also projects top-level extension locations out of all three identities.
     """
     started = _now()
     clock = time.monotonic()
@@ -701,6 +702,7 @@ def run_study(
     used = study_validation.require_used_sources(normalized, loaded, where="study preflight")
     declared_digests = study_validation.declared_digests(loaded)
     source_identity = {
+        "identity_policy_version": 2,
         "core_source": study_extensions.core_source_digests(),
         "extensions": [record.as_json() for record in loaded],
         "library_versions": study_extensions.library_versions(),
@@ -759,8 +761,8 @@ def run_study(
         request_document = normalized.request_document()
         semantic = normalized.semantic_document()
         identities = {
-            "specification_sha256": evidence.specification_identity(semantic, family, run_version=normalized.schema_version),
-            "implementation_sha256": evidence.implementation_identity(source_identity, run_version=normalized.schema_version),
+            "specification_sha256": evidence.specification_identity(semantic, family, run_version=normalized.schema_version, identity_policy_version=2),
+            "implementation_sha256": evidence.implementation_identity(source_identity, run_version=normalized.schema_version, identity_policy_version=2),
             "data_input_sha256": None,
         }
 
@@ -880,6 +882,7 @@ def run_study(
     }
     identities["data_input_sha256"] = evidence.data_input_identity(
         fingerprints=state.ordered_fingerprints(),
+        identity_policy_version=2,
         semantic_specification=semantic,
         universe=family["instruments"],
         protocol=study_spec.protocol_document(normalized.protocol),

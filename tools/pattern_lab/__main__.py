@@ -20,6 +20,7 @@ from typing import Sequence
 from . import (
     PatternLabBusyError,
     PatternLabDependencyError,
+    PatternLabDataError,
     PatternLabError,
     PatternLabPendingError,
     PatternLabStudyError,
@@ -266,6 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     for flag in ("candidate", "data-root", "output-root"):
         validator.add_argument("--" + flag, type=Path, required=True)
     validator.add_argument("--workers", type=int, default=1)
+    validator.add_argument("--extension-root", action="append", default=[], metavar="MODULE=LOCAL_DIRECTORY",
+                           help="Relocate a declared extension and helpers without editing the candidate; repeat per module. Relative directories resolve from the current directory. Exact frozen bytes are required; use a fresh interpreter.")
     return parser
 
 
@@ -295,6 +298,18 @@ def _collector_status(result) -> int:
     return EXIT_OK
 
 
+def _extension_roots(values):
+    roots = {}
+    for value in values:
+        module, separator, directory = value.partition("=")
+        if not separator or not module.strip() or not directory.strip():
+            raise PatternLabDataError("--extension-root requires MODULE=LOCAL_DIRECTORY with nonempty fields.")
+        if module in roots:
+            raise PatternLabDataError(f"--extension-root: duplicate module {module!r}.")
+        roots[module] = str(Path(directory).expanduser().resolve())
+    return roots
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.command == "freeze-candidate":
         from .candidate import freeze_candidate
@@ -305,7 +320,8 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "validate-candidate":
         from .candidate import run_validation
         _emit(run_validation(candidate=args.candidate, data_root=args.data_root,
-                             output_root=args.output_root, workers=args.workers))
+                             output_root=args.output_root, workers=args.workers,
+                             extension_roots=_extension_roots(args.extension_root)))
         return EXIT_OK
     # Every data command needs the pinned reader; report the dependency once, up front.
     pack_data.require_pyarrow()

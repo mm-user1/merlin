@@ -208,12 +208,18 @@ accepted at `908efb4` for its documented research scope and supported extension
 routes: study v2 declares explicit context aliases,
 `freeze-candidate` binds a completed development generation and monthly family,
 and `validate-candidate` executes its exact later interval into a new parent root.
+Repeat `--extension-root MODULE=LOCAL_DIRECTORY` to relocate declared main/helper
+files while preserving the candidate and exact required bytes. Use a fresh process;
+the API accepts an optional `extension_roots` map of absolute directories.
 See the [M3b contract](pattern_lab/README.md#explicit-context-and-frozen-validation-m3b).
 The M4 sequential ATR bracket probe is accepted at `c26334e` through the same
 study/report CLI and direct/spawn jobs. It saves checked independent-account
 attempts, trades and paths with frozen quantity rules and configurable entry cap;
 see the [bracket guide](pattern_lab/README.md#sequential-atr-bracket-probes-m4).
-M5 integrated workflow is delivered pending tech-lead review. Its tracked
+M5 integrated workflow is accepted at `d423016` within the guide's documented
+scope and the identity-portability limits of that generation. T09's prospective
+policy-2 identities and verified extension relocation remain pending owner review.
+Its tracked
 `configs/pilot_m5_study.json` and `configs/pilot_m5_analysis.json` freeze the
 44-target development workload. `examples/pilot_extension.py` supplies the
 causal prior-high breakout and descriptive downside RMS;

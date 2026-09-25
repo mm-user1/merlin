@@ -60,10 +60,12 @@ data is another.
 
 ## Agent quick start (M5)
 
-M5 integrates the existing research workflow and is **delivered pending tech-lead
-review**. The two `configs/pilot_m5_*.json` files are a fixed performance and
-usability workload, not a strategy recommendation. Supply your own verified
+M5 integrates the existing research workflow and is **accepted at `d423016`
+within the documented workflow scope and limitations**. The two
+`configs/pilot_m5_*.json` files are a fixed performance and usability workload, not a strategy recommendation. Supply your own verified
 pack containing all 44 explicit targets; no command downloads missing data.
+Reusing these configs at another checkout does not guarantee identical aggregate
+identifiers: see [identity policy and portability](#identity-policy-and-portability).
 On Windows use the configured interpreter from [the test guide](../../tests/README.md).
 
 1. Define a trusted extension with `register(context)` and declare its module,
@@ -1523,12 +1525,74 @@ Four identities are kept apart:
    `integrity_scope=full_pack` record, the source snapshot, commit and dirty
    state, Python and platform, worker count, roots and timings.
 
-Adding data outside the consumed interval, moving the root, the worker count and
-unrelated Git edits leave identical fixed inputs identical. Relevant code changes
-stay visible in implementation identity. An incomplete run keeps its planned
-identity and its known job identities, never a complete all-input identity. There
+Adding data outside the consumed interval, moving only the market-data/output
+root, changing worker count or making unrelated Git edits leaves fixed-input
+identities unchanged. Under policy 2, moving identical declared extension bytes
+also preserves all three identities, subject to the snapshot and environment
+requirements below.
+Relevant code changes stay visible in implementation identity. An incomplete
+run keeps its planned identity and its known job identities, never a complete all-input identity. There
 is no resume or reuse in this milestone: retained bundles are evidence, not a
 cache.
+
+#### Identity policy and portability
+
+Historical policy 1 includes physical extension locations in all three study
+identities. M5 was accepted at `d423016` with that limitation. The T09 patch
+implements policy 2 for new studies and remains pending owner review; it does
+not change historical pilot identifiers or acceptance. Request schemas 1/2 and
+analysis methods 1/2 are independent of identity policy. New runs store one
+integer `identity_policy_version: 2` in sealed `spec/source.json`. An absent
+marker means historical policy 1; explicit 1 or any malformed marker is rejected
+by strict and partial readers. Readers do not recompute study identities.
+
+Policy 2 excludes only `source_root` from top-level extension declarations and
+`source_root`/`module_path` from attributed extension records. Saved request and
+source files retain those paths for provenance. Module names, ordered helper
+membership, relative file names, exact SHA-256 digests, parameters, context,
+computed context output digests and bracket rules remain inputs. A numerical
+parameter called `path`, `source_root` or `label` is still meaningful. Every
+policy-2 hash includes the discriminator, even without extensions: do not compare
+policy-1 and policy-2 digests as equivalent generations.
+
+Validation retains the **whole parsed candidate snapshot** in request execution
+and the family. Moving that same candidate and byte-identical source preserves
+the study identities and therefore the downstream analysis identities under the
+same environment. Reformatting its JSON is harmless; independently freezing an
+otherwise identical candidate can change freeze provenance while retaining the
+same candidate ID, and then changes study and analysis semantic identities.
+Physical provenance, completion seals, timestamps and serialized file hashes
+need not agree. Compare decoded numerical tables and metrics as well as IDs.
+
+Study implementation identity hashes the exact Python version string and the
+recorded NumPy, pandas and PyArrow versions, along with consumed source bytes.
+SciPy is not part of that version mapping. Windows Python 3.13.7 and the VPS
+Python 3.11.0rc1 therefore have different implementation identities by design.
+Do not change either environment just to force a match. Analysis implementation
+identity instead hashes attributed modules, evidence-view version and artifact
+version; library versions are recorded separately and are not hashed there.
+Candidate required-code admission checks source bytes, not environment versions.
+
+Exact-byte integrity is unchanged. Scoped `.gitattributes` rules require LF for
+tracked Pattern Lab Python and the seven attributed V2 sources. They do not
+normalize external extensions, historical snapshots or runtime hashes. LF and
+CRLF extension copies have different implementation identities and fail a frozen
+generation's byte check. Transfer main modules and every declared helper without
+text conversion. Patch A and the later performance/report patch B both expire
+affected required generations; freeze research candidates after both from fresh
+fixed-only development evidence. Historical evidence remains readable offline,
+and old discovery artifacts can still be frozen with their original requirements.
+
+Matching identities are not a universal bitwise numerical guarantee. The C-04
+audit found Python-minor-version differences in built-in `sum()` affecting bracket
+ATR seeds near short warmup or gaps, and small derived money sums. The audited
+pilot's trading bars were unaffected; convergence within 103 bars was an observed
+probe result, not a general bound. ATR and money arithmetic remain unchanged.
+Frozen candidates remain fixed-horizon only; bracket candidates are unsupported.
+Custom context code can also depend on environment arithmetic; computed context
+outputs enter data-input identity. Trusted extensions may use their location in
+their own calculations, so removing a locator from a hash is not a sandbox.
+Linux relocation replay is a review handoff, not yet certified by this patch.
 
 For scale, a full-year 44-instrument 30m run with four horizons produces about
 **3.08 million** primitive rows, representing about 6.17 million logical
@@ -1936,6 +2000,13 @@ interpreter imported by another path cannot have its source generation
 established, so the error asks for a fresh interpreter. This checks cooperating
 stable source files — it is **not** a sandbox against an adversarial filesystem
 or hidden dependencies of trusted Python.
+
+An already imported extension cannot switch roots in the same interpreter,
+even with identical bytes. Start a fresh process for relocation. Candidate-bound
+requests compare every declared main/helper file with frozen requirements before
+any extension import or registration, including file, mapping and normalized
+request routes. Required core checks and actual loaded-generation checks still
+run at the later execution boundaries.
 
 A metric declares the saved columns it requires, its value and unit. When a
 group's observation view does not expose them the metric is recorded as
@@ -2679,8 +2750,11 @@ method and the source's semantic inputs, and an **analysis implementation
 digest** of the modules actually used — including the shared expansion and
 statistic code, explicitly `study/builtins.py`, `study/observations.py` and the
 resolved `EVIDENCE_VIEW_VERSION`. Paths, labels, wall-clock timings and worker
-provenance are physical metadata, not numerical identity. Dependency versions are
-recorded; bitwise cross-platform equality is not claimed universally.
+provenance are physical metadata, not numerical identity. Artifact version is
+also hashed in the analysis implementation identity. Dependency versions are
+recorded separately, not hashed into that identity. The complete embedded
+validation candidate remains in the source semantic inputs. Bitwise
+cross-platform equality is not claimed universally.
 
 Source runs from `workers=1` and `workers=2` may have different physical
 evidence hashes while their semantic identities and numerical results are
@@ -3557,10 +3631,37 @@ receipt = run_validation(
 verified_receipt = load_validation(new_validation_root)  # also works after relocation
 ```
 
-`run_validation` / `validate-candidate` replays the candidate's recorded extension
-roots and requires them to exist. Content-identical source relocation is supported
-separately through an explicit direct `study.run_study` request; the validation
-CLI does not offer a source-root relocation override.
+`run_validation` / `validate-candidate` uses recorded extension roots by default.
+The optional API `extension_roots={"module": absolute_directory}` overrides only
+declared modules in a private recipe copy. Values are nonempty absolute local
+directory strings or text `os.PathLike` objects. Partial maps are allowed; two
+modules may share a directory. Unknown modules, relative API paths and missing
+main/helper files fail before extension import, pack access or output creation.
+`None` and an empty map retain the default behavior.
+
+The repeatable CLI option `--extension-root MODULE=LOCAL_DIRECTORY` resolves
+relative directories from the current working directory, splits on the first
+equals sign, and rejects duplicate keys. Quote values containing spaces. It never
+edits the candidate, its ID, required digests or discovery bindings. Copy every
+declared helper byte for byte and start a fresh interpreter. For example:
+
+```powershell
+& $py -m tools.pattern_lab validate-candidate --candidate C:\research\candidate.json --data-root C:\research\pack --output-root C:\research\validation-new --extension-root "signal=C:\research\moved sources" --workers 2
+```
+
+```bash
+python -m tools.pattern_lab validate-candidate --candidate /research/candidate.json --data-root /research/pack --output-root /research/validation-new --extension-root signal=/research/sources --workers 2
+```
+
+The equivalent API is `run_validation(candidate=snapshot, data_root=pack,
+output_root=new_root, extension_roots={"signal": Path("/research/sources")})`;
+on Windows use `Path(r"C:\research\moved sources")`. Substitute the candidate's
+actual declared module name. The original Windows directories need not exist on
+Linux when all unavailable roots are explicitly overridden. Effective roots are
+saved in the child request/source records; the parent and embedded candidate
+snapshots remain unchanged. Output must not overlap effective source directories.
+Receipt publication re-hashes those effective files, including unchanged-location
+declarations, so an edit after admission cannot produce a successful receipt.
 
 The [agent Python example](examples/run_frozen_candidate.py) supplies an importable
 main guard for spawned workers. Equivalent commands are:
@@ -3606,9 +3707,9 @@ transport, locking, candidate orchestration, HTML and Git state are recorded
 provenance; report-only changes do not expire a candidate. This is a reproducibility
 contract, not a signature, registry or anti-tampering service.
 
-The shared study boundary compares the actual loaded module/helper records with
-the frozen requirement before pack preparation, context computation, jobs or
-output creation. Module names, declared relative paths and exact digests must
+The shared study boundary checks declared bytes before import, then compares the
+actual loaded module/helper records with the frozen requirement before pack
+preparation, context computation, jobs or output creation. Module names, declared relative paths and exact digests must
 agree with unique, complete coverage. Physical roots remain provenance: an
 identical direct-study source relocation works even if the old root is absent;
 changed bytes fail with the module/helper and expected/actual digests. Strict
@@ -3855,11 +3956,32 @@ The full study's recorded identities are:
 Local ignored evidence lives at
 `docs/_work/pattern-lab-runs/T08-260924T115803Z/full` and
 `docs/_work/dev_02_pattern-lab/T08_evidence/artifact-index.json`;
-the [T08 handoff](../../docs/_work/dev_02_pattern-lab/T08_agent-answer.md) records
-verification, resources, comparisons and limitations. These local artifacts may
-be absent in another checkout; the tracked requests and extension define the
-reusable workload. M5 remains pending tech-lead review, with a whole-architecture
-audit deferred to a later task. Resume remains explicitly deferred.
+the local handoff `docs/_work/dev_02_pattern-lab/T08_agent-answer.md` and acceptance
+review `docs/_work/dev_02_pattern-lab/T08_tech-lead-review.md` record verification,
+resources, comparisons and limitations. These ignored artifacts may be absent in
+another checkout; the tracked requests and extension define the reusable workload,
+subject to the identity limits above. M5 is accepted at `d423016` for this workflow;
+the whole-architecture audit is the next review step. Resume remains deferred.
+
+The Windows source binding was checked before acceptance: all 38 raw source
+hashes match the pilot, and their content matches the committed Git blobs after
+CRLF-to-LF comparison. This review comparison does not change runtime digest rules.
+The full pilot took about 348 seconds through verification; about 216 seconds
+followed the final job bundle. Repeated coordinator metric decoding is a future
+performance item, not evidence that additional workers will remove that tail.
+Rendered HTML layout remains unverified. The Windows offline probe observes
+Python audit events/imports, not Arrow-native filesystem opens; the independent
+Linux review separately reports zero pack/extension accesses in a syscall trace.
+Stop probes establish interrupted status and cleanup at job/publication entry;
+their short latency does not measure interruption of long native calculations.
+Monitoring overhead was not isolated from the reported wall time.
+
+For this fixed-model nonsignal family, the 32 directional members form 16
+long/short mirror pairs with effectively equal two-sided raw p-values. These are
+16 distinct contrasts, still dependent across horizons and signals, not 32
+independent confirmations. Both negative directional net means reflect costs as
+well as small gross effects. The frozen 32-member Holm family remains unchanged;
+any future deduplication must be predeclared rather than selected after results.
 
 M1a defines the schemas and the reader; M1b adds the collector, the exclusion lock
 and the recovery contract; M2a adds the sequential event study, its evidence and

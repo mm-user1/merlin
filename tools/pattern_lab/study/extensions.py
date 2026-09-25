@@ -346,6 +346,13 @@ def _resolve_digests(declaration) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((name, file_digest(path)) for name, path in _declared_files(declaration)))
 
 
+def declared_source_records(declarations):
+    """Hash every declared main/helper file before importing any extension."""
+    return [{"module": declaration.module, "files": [
+        {"path": name, "sha256": digest} for name, digest in _resolve_digests(declaration)
+    ]} for declaration in declarations]
+
+
 def load_extensions(declarations: Sequence[Any]) -> tuple[LoadedExtension, ...]:
     """Hash, import and register the declared trusted modules.
 
@@ -367,6 +374,12 @@ def load_extensions(declarations: Sequence[Any]) -> tuple[LoadedExtension, ...]:
         previous = _LOADED.get(declaration.module)
         if previous is not None:
             runtime = _VERIFIED_MODULES.get(declaration.module)
+            if previous.files == digests and previous.source_root != root:
+                raise PatternLabDataError(
+                    f"extension {declaration.module!r}: its source root changed after import. "
+                    "Relocation requires a fresh interpreter even when source bytes match.",
+                    error_code="source_changed",
+                )
             if (previous.files != digests or previous.source_root != root
                     or runtime is None or sys.modules.get(declaration.module) is not runtime[0]):
                 raise PatternLabDataError(

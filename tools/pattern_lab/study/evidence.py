@@ -205,20 +205,42 @@ def require_run_directory(run_root: Path) -> Path:
 # identity
 # --------------------------------------------------------------------------
 
-def specification_identity(request_document: Mapping[str, Any], family: Mapping[str, Any], *, run_version: int = 1) -> str:
+def _identity_policy(policy: int) -> dict[str, int]:
+    if type(policy) is not int or policy not in (1, 2):
+        raise PatternLabDataError("identity_policy_version must be integer 1 or 2.")
+    return {"identity_policy_version": 2} if policy == 2 else {}
+
+
+def _identity_specification(document: Mapping[str, Any], policy: int) -> Mapping[str, Any]:
+    """Project only owned top-level declarations; preserve full candidate snapshots."""
+    if policy == 1 or "extensions" not in document:
+        return document
+    return {**document, "extensions": [
+        {key: value for key, value in item.items() if key != "source_root"}
+        for item in document["extensions"]
+    ]}
+
+
+def specification_identity(request_document: Mapping[str, Any], family: Mapping[str, Any], *, run_version: int = 1, identity_policy_version: int = 1) -> str:
     """Semantic identity of the normalized request, protocol and planned family."""
     return contracts.semantic_digest(
-        {"specification": request_document, "family": family, "version": run_version}
+        {**_identity_policy(identity_policy_version),
+         "specification": _identity_specification(request_document, identity_policy_version),
+         "family": family, "version": run_version}
     )
 
 
-def implementation_identity(source: Mapping[str, Any], *, run_version: int = 1) -> str:
+def implementation_identity(source: Mapping[str, Any], *, run_version: int = 1, identity_policy_version: int = 1) -> str:
     """Identity of the consumed source digests and numerical library versions."""
     return contracts.semantic_digest(
         {
+            **_identity_policy(identity_policy_version),
             "core_source": source["core_source"],
             **({"bracket_source":source["bracket_source"]} if "bracket_source" in source else {}),
-            "extensions": source["extensions"],
+            "extensions": source["extensions"] if identity_policy_version == 1 else [
+                {key: value for key, value in item.items() if key not in ("source_root", "module_path")}
+                for item in source["extensions"]
+            ],
             "library_versions": source["library_versions"],
             "version": run_version,
         }
@@ -234,16 +256,18 @@ def data_input_identity(
     run_version: int = 1,
     context: Mapping[str, Any] | None = None,
     bracket_rules: Mapping[str, Any] | None = None,
+    identity_policy_version: int = 1,
 ) -> str:
     """Compose the final data-input identity of a completed run.
 
     Ordered per-instrument/timeframe fingerprints, the semantic settings, the
-    selected universe with its roles and the protocol enter it.  Roots, worker
-    count, data added outside the consumed interval and unrelated Git edits do
-    not.
+    selected universe with its roles and the protocol enter it. Policy 2 excludes
+    top-level extension roots; policy 1 retains them. Full embedded candidates
+    remain inputs. Pack/output roots and worker count are execution provenance.
     """
     return contracts.semantic_digest(
         {
+            **_identity_policy(identity_policy_version),
             "fingerprints": [
                 {
                     "instrument_id": item["instrument_id"],
@@ -252,7 +276,7 @@ def data_input_identity(
                 }
                 for item in fingerprints
             ],
-            "specification": semantic_specification,
+            "specification": _identity_specification(semantic_specification, identity_policy_version),
             "universe": [
                 {"instrument_id": item["instrument_id"], "roles": list(item["roles"])}
                 for item in universe
