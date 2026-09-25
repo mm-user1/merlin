@@ -12,6 +12,55 @@ from tools.pattern_lab.study import evidence, report
 from ._bracket_helpers import build
 from ._helpers import ANCHOR_MS
 from tools.pattern_lab.manifest import format_epoch_ms
+from . import _helpers as h
+from tools.pattern_lab.study import validation
+
+
+def test_nonempty_pilot_direct_spawn_persistence_and_ownership(tmp_path):
+    # Only closes 103, 109 and 139 exceed their preceding high. Their next
+    # bars return -1/4, +1/4 and unavailable respectively, independently of RMS.
+    bars = [(100,101,99,100,10), (100,104,99,103,10), (100,101,74,75,10),
+            (80,130,79,109,10), (100,126,99,125,10), (100,126,99,100,10),
+            (100,140,99,139,10), (100,101,99,100,10), (100,101,99,100,10)]
+    stamps, values = h.timeframe_bars(30, bars, drop_groups=[7])
+    h.publish(tmp_path / "pack", [h.instrument_source(stamps, values),
+        h.instrument_source(stamps, values, symbol="BBB", contract="BBB-USDT-SWAP")])
+    request = validation.external_document(h.normalized_study(start_group=1, end_group=9,
+        models=[h.fixed_horizon_model(30, [30], directions=["long"], commission_pct_per_side=0)]))
+    request.update(schema_version=2, context={}, execution={"kind":"development"})
+    request["extensions"] = [{"module":"pilot_extension", "source_root":str(Path(pilot.__file__).parent), "helpers":[]}]
+    request["hypotheses"] = [{"id":"breakout", "hypothesis":"prior_high_breakout", "parameters":{"lookback":1}, "occurrence":"every_qualifying_bar"}]
+    request["metrics"] = [{"id":"downside", "metric":"downside_rms"}]
+    runs = []
+    for workers in (1, 2):
+        root = tmp_path / str(workers)
+        study.run_study(request=request, data_root=tmp_path / "pack", output_root=root, workers=workers)
+        saved = study.load_results(root)
+        metric = study.summarize_results(saved)["metrics"]["values"]
+        assert len(metric) == 1 and metric[0]["availability"] == "available"
+        assert metric[0]["value"] == np.sqrt((.25 ** 2) / 2)
+        instance = saved.family["models"][0]
+        case = saved.case("fh", 30, instance["cases"]["30"][0]["case_id"])
+        tables = []
+        for identifier in saved.completed_instruments:
+            reader = saved.instrument_reader(identifier)
+            emitted = reader.table("emissions")
+            assert emitted.anchor_open_ms.tolist() == [ANCHOR_MS + i * 1800000 for i in (1,3,6)]
+            observations = reader.observations(instance=instance, case=case, timeframe_minutes=30, variant_id="breakout")
+            assert observations.return_valid.tolist() == [True, True, False]
+            assert observations.net_return.iloc[:2].tolist() == [-.25, .25]
+            tables.append([reader.table(name) for name in ("conditions", "episodes", "emissions", "primitives")])
+            public = reader.table("primitives"); public.loc[:, "exit_price"] = -999
+            public = reader.evidence_table(instance); public.loc[:, "exit_price"] = -999
+            pd.testing.assert_frame_equal(observations, reader.observations(instance=instance, case=case, timeframe_minutes=30, variant_id="breakout"))
+            reader.release()
+        study.regenerate_report(root)
+        assert study.summarize_results(study.load_results(root))["metrics"]["values"] == metric
+        runs.append((saved, tables, metric))
+    assert runs[0][0].provenance["identities"] == runs[1][0].provenance["identities"]
+    assert runs[0][2] == runs[1][2]
+    for direct, spawned in zip(runs[0][1], runs[1][1]):
+        for left, right in zip(direct, spawned): pd.testing.assert_frame_equal(left, right)
 
 
 def series(high, close=None, slots=None):

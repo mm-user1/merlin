@@ -216,15 +216,19 @@ def reverify_source(source: AdmittedSource, *, where: str) -> None:
     filesystem security model.  If the source's own immutable evidence changed
     while it was being read, the analysis fails without a completion seal.
     """
-    fresh = study_results.load_results(source.run_root)
+    fresh = evidence.verify_completion(source.run_root)
     expected = dict(source.results.completion or {}).get("evidence_set_sha256")
-    actual = dict(fresh.completion or {}).get("evidence_set_sha256")
+    actual = fresh.get("evidence_set_sha256")
     if expected != actual:
         raise PatternLabDataError(
             f"{where}: the source study's evidence set changed during this analysis "
             f"({expected} -> {actual}). No completion seal is written.",
             error_code="corrupt_evidence",
         )
+    admitted = source.results
+    study_results._verify_completion_agreement(source.run_root, fresh, status=admitted.status,
+        counts=admitted.counts, provenance=admitted.provenance, family=admitted.family,
+        request_version=admitted.request["schema_version"])
 
 
 # --------------------------------------------------------------------------
@@ -251,8 +255,8 @@ def _aligned_masks(
     where: str,
 ) -> _TimeframeMasks:
     """Align the saved conditions and emissions to the canonical anchor order."""
-    conditions = reader.table("conditions")
-    emissions = reader.table("emissions")
+    conditions = reader._cached_table("conditions")
+    emissions = reader._cached_table("emissions")
     tf_conditions = conditions.loc[
         exact_int64(conditions["timeframe_minutes"].to_numpy(), f"{where}.timeframe_minutes")
         == timeframe

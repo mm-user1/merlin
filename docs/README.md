@@ -56,8 +56,8 @@ tracked repository.
 
 Pattern Lab M5 integrated research workflow is accepted at `d423016` within its
 documented scope and the identity-portability limits of that generation; resume remains deferred.
-The guide now documents T09's prospective policy-2 identities and verified extension
-relocation, pending owner review without changing historical M5 artifacts.
+Prospective policy-2 identities and verified extension relocation are accepted at
+`9db9402` for the guide's documented scope, without changing historical M5 artifacts.
 M4 remains accepted at `c26334e` for its documented scope.
 
 ## Baseline evidence

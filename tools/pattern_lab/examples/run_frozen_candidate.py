@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 from tools.pattern_lab import analysis
+from tools.pattern_lab import PatternLabDataError
 from tools.pattern_lab.candidate import freeze_candidate, run_validation
 from tools.pattern_lab.__main__ import _extension_roots
 
@@ -23,11 +24,15 @@ def main():
     parser.add_argument("--extension-root", action="append", default=[], metavar="MODULE=LOCAL_DIRECTORY",
                         help="Repeat for relocated extension roots; preserve exact module/helper bytes and use a fresh process.")
     args = parser.parse_args()
+    roots = _extension_roots(args.extension_root)
+    for module, root in roots.items():
+        if not Path(root).is_dir():
+            raise PatternLabDataError(f"extension_roots[{module!r}]: {root!r} is not an existing directory.")
     frozen = freeze_candidate(study_root=args.study_root, analysis_root=args.analysis_root,
         start=args.start, end=args.end, warmup_start=args.warmup_start, output=args.candidate_output)
     receipt = run_validation(candidate=frozen, data_root=args.data_root,
                              output_root=args.output_root, workers=args.workers,
-                             extension_roots=_extension_roots(args.extension_root))
+                             extension_roots=roots)
     result = analysis.load_analysis(args.output_root/"analysis")
     print(json.dumps(receipt, indent=2))
     print(result.comparisons().to_string(index=False))

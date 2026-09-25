@@ -1100,6 +1100,47 @@ def test_an_interrupt_during_publication_stops_dispatch_and_cleans_up(tmp_path):
     assert not study_evidence.completion_path(run_root).is_file()
     assert status["counts"]["completed"] == 0
     assert pids and not any(live(pid) for pid in pids)
+    assert status["failure"]["instrument_id"] == seen[0]
+
+
+@pytest.mark.parametrize("receive", ["poll", "take"])
+def test_interrupt_wait_after_accepted_job_has_no_instrument(tmp_path, monkeypatch, receive):
+    pack = build_pack(tmp_path / "pack", {"AAA-USDT-SWAP": {}, "BBB-USDT-SWAP": {}, "CCC-USDT-SWAP": {}})
+    root = tmp_path / "run"
+    accepted, pids = [], []
+    publish = study_runner._publish_result
+    start = study_workers.SpawnJobPool.start
+    poll = study_workers.SpawnJobPool.poll
+    take = study_workers.SpawnJobPool.take
+    def record_start(self):
+        start(self); pids.extend(self.worker_pids)
+    def record_publish(*args):
+        result = publish(*args)
+        accepted.append(args[2])
+        return result
+    def interrupted_poll(self):
+        if accepted:
+            if receive == "poll": raise KeyboardInterrupt
+            return None  # exercise the blocking receive with work still in flight
+        return poll(self)
+    def interrupted_take(self, *args, **kw):
+        if accepted: raise KeyboardInterrupt
+        return take(self, *args, **kw)
+    monkeypatch.setattr(study_workers.SpawnJobPool, "start", record_start)
+    monkeypatch.setattr(study_workers.SpawnJobPool, "poll", interrupted_poll)
+    monkeypatch.setattr(study_workers.SpawnJobPool, "take", interrupted_take)
+    monkeypatch.setattr(study_runner, "_publish_result", record_publish)
+    with pytest.raises(KeyboardInterrupt):
+        pack_study.run_study(request=request_for(), data_root=pack, output_root=root, workers=2)
+    status = study_evidence.read_status(root)
+    assert accepted and status["counts"]["completed"] == len(accepted)
+    assert status["terminal_status"] == "interrupted"
+    assert status["failure"]["instrument_id"] is None
+    for item in status["instruments"]:
+        if item["instrument_id"] in accepted: assert item["state"] == "completed"
+        elif item["state"] != "not_started": assert item["error"].startswith("aborted:")
+    assert not study_evidence.completion_path(root).exists()
+    assert pids and wait_until(lambda: not any(live(pid) for pid in pids), timeout=30)
 
 
 # --------------------------------------------------------------------------

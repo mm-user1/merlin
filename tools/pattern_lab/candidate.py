@@ -441,7 +441,16 @@ def run_validation(*, candidate, data_root, output_root, workers=1, extension_ro
     document = copy.deepcopy(frozen["recipe"]["study"])
     _relocate_extensions(document, extension_roots)
     effective = tuple(spec.ExtensionDeclaration(**item) for item in document["extensions"])
-    verify_current_generation(frozen, actual_extensions=extensions.declared_source_records(effective))
+    try:
+        actual_extensions = extensions.declared_source_records(effective)
+    except PatternLabDataError as error:
+        missing = [item.module for item in effective if not Path(item.source_root).is_dir()]
+        if missing:
+            raise PatternLabDataError(f"{error} For modules {missing}, supply absolute directories with "
+                "the extension_roots mapping or --extension-root MODULE=LOCAL_DIRECTORY.",
+                error_code=error.error_code) from error
+        raise
+    verify_current_generation(frozen, actual_extensions=actual_extensions)
     document.update(study=frozen["split"]["evaluation"], execution={"kind":"validation", "candidate":frozen})
     normalized = validation.validated_request(document)
     if _resolved_analysis(frozen["recipe"]) != frozen["recipe"]["analysis_family"]:

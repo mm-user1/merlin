@@ -379,6 +379,7 @@ def _verify_completion_agreement(
     counts: Mapping[str, int],
     provenance: Mapping[str, Any],
     family: Mapping[str, Any],
+    request_version: int = 1,
 ) -> None:
     """Cross-check a shape-verified completion record against the run's own facts.
 
@@ -389,6 +390,8 @@ def _verify_completion_agreement(
     whole-run verification pass.
     """
     path = evidence.completion_path(run_root)
+    if request_version == 2 and completion.get("schema_version") != 2:
+        raise PatternLabDataError("completion: run version contradicts request version 2.")
     if status.get("terminal_status") != evidence.TERMINAL_COMPLETED:
         raise PatternLabDataError(
             f"{path}: the completion record claims a completed study, but the run's terminal "
@@ -460,13 +463,12 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
         for name, document in (("status", status), ("family", family), ("provenance", provenance)):
             if document.get("schema_version") != 2:
                 raise PatternLabDataError(f"{name}: run version contradicts request version 2.")
-        if completion is not None and completion.get("schema_version") != 2:
-            raise PatternLabDataError("completion: run version contradicts request version 2.")
         if any(family.get(key) != request.get(key) for key in ("context", "execution")):
             raise PatternLabDataError("family: context/execution contradicts saved request.")
     if completion is not None:
         _verify_completion_agreement(
-            root, completion, status=status, counts=counts, provenance=provenance, family=family
+            root, completion, status=status, counts=counts, provenance=provenance, family=family,
+            request_version=request["schema_version"],
         )
     jobs = {
         identifier: evidence.verify_job_bundle(root, identifier)
@@ -686,7 +688,7 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
     for instrument_id in results.completed_instruments:
         reader = InstrumentReader(results, instrument_id)
         try:
-            episodes = reader.table("episodes")
+            episodes = reader._cached_table("episodes")
             for key, accumulator in accumulators.items():
                 variant_id, instance_id, timeframe, case_id = key
                 variant = variants[variant_id]
@@ -854,6 +856,95 @@ def summarize_results(results: StudyResults) -> dict[str, Any]:
 
 METRICS_SCHEMA_VERSION = 1
 
+# Additional retained inputs only, not total RSS. Three copies reserve space for
+# owned parts, concatenation and a callback's pooled copy. Readers/observations
+# and arbitrary callback allocations are outside this budget.
+_METRIC_BUFFER_BUDGET = 64 * 1024 * 1024
+_METRIC_WIDTHS = {name: 8 for name in (
+    "net_return", "gross_return", "commission_return", "mfe", "mae", "entry_price",
+    "exit_price", "path_high", "path_low", "anchor_open_ms", "signal_time_ms",
+    "entry_time_ms", "exit_time_ms", "timeframe_minutes", "horizon_minutes")}
+_METRIC_WIDTHS.update(return_valid=1, path_valid=1)
+
+
+def _metric_row_hint(bundle, group, condition_id):
+    """Saved counts guide planning only; never skip or reject observations."""
+    try:
+        events = bundle["stats"]["timeframes"][str(group["timeframe_minutes"])]["conditions"][condition_id]["events_by_variant"]
+        if isinstance(events, Mapping):
+            count = events.get(group["variant_id"], 0)
+            if type(count) is int and count >= 0:
+                return count
+    except (KeyError, TypeError):
+        pass
+    for item in bundle.get("files", []):
+        count = item.get("row_count")
+        if item.get("table") == "emissions" and type(count) is int and count >= 0:
+            return count
+    return None
+
+
+def _metric_batch_plan(estimates, budget):
+    """Contiguous index batches; unknown/oversized groups retain the old path."""
+    batch, size = [], 0
+    for index, estimate in enumerate(estimates):
+        if estimate is None or estimate > budget:
+            if batch:
+                yield batch
+                batch, size = [], 0
+            yield [index]
+        else:
+            if batch and size + estimate > budget:
+                yield batch
+                batch, size = [], 0
+            batch.append(index)
+            size += estimate
+    if batch:
+        yield batch
+
+
+def _metric_part_bytes(parts):
+    """Owned data plus deep index storage, with pooled/copy headroom."""
+    return 3 * sum(int(part.memory_usage(deep=True, index=True).sum()) for part in parts)
+
+
+def _collect_metric_batch(results, groups, instances, descriptors, budget):
+    collected = [[[] for _ in descriptors] for _ in groups]
+    missing = [[[] for _ in descriptors] for _ in groups]
+    retained = 0
+    for instrument_id in results.completed_instruments:
+        reader = InstrumentReader(results, instrument_id)
+        try:
+            for index, group in enumerate(groups):
+                timeframe = int(group["timeframe_minutes"])
+                frame = reader.observations(instance=instances[group["model_instance_id"]],
+                    case=results.case(group["model_instance_id"], timeframe, group["case_id"]),
+                    timeframe_minutes=timeframe, variant_id=group["variant_id"])
+                for column, descriptor in enumerate(descriptors):
+                    if missing[index][column]:
+                        continue
+                    absent = [name for name in descriptor.required_columns if name not in frame.columns]
+                    if absent:
+                        missing[index][column] = absent
+                        retained -= _metric_part_bytes(collected[index][column])
+                        collected[index][column] = []
+                        continue
+                    # Each declaration owns both its numeric blocks and index.
+                    part = frame.loc[:, list(descriptor.required_columns)].copy(deep=True)
+                    part.index = part.index.copy(deep=True)
+                    size = _metric_part_bytes([part])
+                    if len(groups) > 1 and (retained + size > budget or any(
+                            dtype.kind not in "biuf" for dtype in part.dtypes)):
+                        # No callback has run. Release this unfinished batch and
+                        # let the caller process its groups individually once.
+                        return None
+                    collected[index][column].append(part)
+                    retained += size
+                    del part
+        finally:
+            reader.release()
+    return collected, missing
+
 
 def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) -> dict[str, Any]:
     """Compute each declared metric once per group, or record why it is unavailable.
@@ -863,54 +954,50 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
     nothing is guessed, and a descriptive metric never becomes a selection
     objective.
 
-    One group's observation view is assembled once per instrument and shared by
-    every declared metric of that group.  A metric may need whole-group rows, so
-    the frames stay bounded to the group being computed; the deliberate tradeoff
-    is that a later group reads those tables again rather than retaining every
-    group's frames at once.
+    A bounded contiguous group batch shares one reader per instrument. Every
+    declaration retains its own required columns. Counts are planning hints;
+    actual owned buffers enforce the multi-group budget before callbacks run.
+    Unknown-width and oversized single groups keep the whole-group contract.
     """
     family = results.family
     instances = {item["model_instance_id"]: item for item in family["models"]}
     values: list[dict[str, Any]] = []
-    for group in family["groups"]:
-        timeframe = int(group["timeframe_minutes"])
-        instance = instances[group["model_instance_id"]]
-        if contracts.is_sequential(instance):
-            continue
-        case = results.case(group["model_instance_id"], timeframe, group["case_id"])
-        collected: dict[str, list[pd.DataFrame]] = {
-            declaration.declaration_id: [] for declaration in declarations
-        }
-        missing: dict[str, list[str]] = {
-            declaration.declaration_id: [] for declaration in declarations
-        }
-        for instrument_id in results.completed_instruments:
-            reader = InstrumentReader(results, instrument_id)
-            try:
-                frame = reader.observations(
-                    instance=instance,
-                    case=case,
-                    timeframe_minutes=timeframe,
-                    variant_id=group["variant_id"],
-                )
-                for declaration in declarations:
-                    if missing[declaration.declaration_id]:
-                        continue
-                    descriptor = contracts.metric(declaration.metric_id)
-                    absent = [
-                        name for name in descriptor.required_columns if name not in frame.columns
-                    ]
-                    if absent:
-                        missing[declaration.declaration_id] = absent
-                        collected[declaration.declaration_id] = []
-                        continue
-                    collected[declaration.declaration_id].append(
-                        frame.loc[:, list(descriptor.required_columns)]
-                    )
-            finally:
-                reader.release()
-        for declaration in declarations:
-            descriptor = contracts.metric(declaration.metric_id)
+    groups = [g for g in family["groups"] if not contracts.is_sequential(instances[g["model_instance_id"]])]
+    descriptors = [contracts.metric(d.metric_id) for d in declarations]
+    variants = {v["variant_id"]: v for v in family["variants"]}
+    estimates = []
+    for group in groups if declarations else []:
+        counts = [_metric_row_hint(results.jobs[i], group, variants[group["variant_id"]]["condition_id"])
+                  for i in results.completed_instruments]
+        columns = [name for descriptor in descriptors for name in descriptor.required_columns]
+        if (instances[group["model_instance_id"]]["model_id"] != "fixed_horizon_path"
+                or any(name not in _METRIC_WIDTHS for name in columns) or None in counts):
+            estimates.append(None)
+        else:
+            width = sum(_METRIC_WIDTHS[name] for name in columns) + 8 * len(declarations)
+            estimates.append(3 * (sum(counts) * width + 132 * len(counts) * len(declarations)))
+    for batch in _metric_batch_plan(estimates, _METRIC_BUFFER_BUDGET):
+        selected = [groups[i] for i in batch]
+        collected = _collect_metric_batch(results, selected, instances, descriptors, _METRIC_BUFFER_BUDGET)
+        if collected is None:
+            for group in selected:
+                parts = _collect_metric_batch(results, [group], instances, descriptors, _METRIC_BUFFER_BUDGET)
+                values.extend(_metric_records([group], declarations, descriptors, parts))
+                del parts
+        else:
+            values.extend(_metric_records(selected, declarations, descriptors, collected))
+        del collected
+    return {
+        "schema_version": METRICS_SCHEMA_VERSION,
+        "declarations": [declaration.as_json() for declaration in declarations],
+        "values": values,
+    }
+
+
+def _metric_records(groups, declarations, descriptors, parts):
+    collected, missing = parts
+    for index, group in enumerate(groups):
+        for column, (declaration, descriptor) in enumerate(zip(declarations, descriptors)):
             record = {
                 "declaration_id": declaration.declaration_id,
                 "metric_id": declaration.metric_id,
@@ -918,16 +1005,16 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
                 "unit": declaration.unit,
                 "variant_id": group["variant_id"],
                 "model_instance_id": group["model_instance_id"],
-                "timeframe_minutes": timeframe,
+                "timeframe_minutes": int(group["timeframe_minutes"]),
                 "case_id": group["case_id"],
             }
-            absent = missing[declaration.declaration_id]
+            absent = missing[index][column]
             if absent:
                 record.update(
                     {"availability": "missing_inputs", "missing_columns": absent, "value": None}
                 )
             else:
-                frames = collected[declaration.declaration_id]
+                frames = collected[index][column]
                 pooled = (
                     pd.concat(frames, ignore_index=True)
                     if frames
@@ -945,12 +1032,7 @@ def compute_metric_values(results: StudyResults, declarations: Sequence[Any]) ->
                         "value": None if computed is None else float(computed),
                     }
                 )
-            values.append(record)
-    return {
-        "schema_version": METRICS_SCHEMA_VERSION,
-        "declarations": [declaration.as_json() for declaration in declarations],
-        "values": values,
-    }
+            yield record
 
 
 def recorded_metrics(run_root: Path) -> dict[str, Any] | None:

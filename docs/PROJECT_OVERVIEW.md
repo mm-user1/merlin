@@ -205,8 +205,10 @@ contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
 M5 integrated research workflow is accepted at `d423016` within its documented
 scope and the identity-portability limits of that generation; resume remains deferred.
-Post-M5 T09 implements prospective policy-2 identities and verified frozen extension
-relocation, pending owner review; historical artifacts remain unchanged.
+Post-M5 prospective policy-2 identities and verified frozen extension relocation
+are accepted at `9db9402` for their documented scope; historical artifacts remain
+unchanged. The Windows-to-Linux replay verifies the shipped synthetic fixture,
+not universal cross-platform numerical equality.
 M4 remains accepted at `c26334e` for its documented scope.
 
 Pattern Lab is separate local, research-only tooling for testing hypotheses

@@ -230,8 +230,8 @@ def run_analysis(
                     "finished_utc": finished,
                     "elapsed_seconds": round(time.monotonic() - clock, 3),
                     "note": (
-                        "Wall time includes both full source-integrity passes: strict admission "
-                        "and the pre-publication reverification."
+                        "Wall time includes one strict admission and a final full immutable-file "
+                        "hash plus completion-fact agreement check."
                     ),
                 },
             },

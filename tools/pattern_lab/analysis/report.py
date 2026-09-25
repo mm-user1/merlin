@@ -56,6 +56,9 @@ h3 { font-size: 15px; margin: 18px 0 6px; }
            padding: 10px 12px; margin: 8px 0 12px; }
 .card { background: #ffffff; border: 1px solid #dfe3e9; border-radius: 6px;
         padding: 14px 16px; margin-bottom: 16px; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
+p, h1, h2, h3, h4, summary, li, code { overflow-wrap: anywhere; }
+th, td, th *, td * { overflow-wrap: normal; word-break: normal; }
 table { border-collapse: collapse; width: 100%; margin: 6px 0 12px; background: #ffffff; }
 th, td { border: 1px solid #dfe3e9; padding: 5px 8px; text-align: right; }
 th { background: #eef1f5; font-weight: 600; text-align: right; }
@@ -97,7 +100,7 @@ def _flag(value: Any) -> str:
 
 
 def _rows(rows: Sequence[Sequence[Any]], *, header: Sequence[str], caption: str = "") -> str:
-    parts = ["<table>"]
+    parts = ['<div class="table-scroll"><table>']
     if caption:
         parts.append(f"<caption>{escape(caption)}</caption>")
     parts.append("<thead><tr>")
@@ -111,7 +114,7 @@ def _rows(rows: Sequence[Sequence[Any]], *, header: Sequence[str], caption: str 
             css = ' class="key"' if index == 0 else ""
             parts.append(f"<td{css}>{escape(str(cell))}</td>")
         parts.append("</tr>")
-    parts.append("</tbody></table>")
+    parts.append("</tbody></table></div>")
     return "".join(parts)
 
 

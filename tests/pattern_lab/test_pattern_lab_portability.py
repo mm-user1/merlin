@@ -14,7 +14,7 @@ from tools.pattern_lab import PatternLabDataError, analysis, candidate, data, st
 from tools.pattern_lab import __main__ as cli
 from tools.pattern_lab.study import contracts, evidence, extensions, validation
 from . import _helpers as h, _portable as p
-from .test_pattern_lab_context import context_fixture
+from ._context_helpers import context_fixture
 
 VECTORS = json.loads(Path(__file__).with_name("legacy_identity_vectors.json").read_text())
 
@@ -197,6 +197,23 @@ def test_normalized_revalidation_preflights_before_cached_import(generation, tmp
     with pytest.raises(PatternLabDataError, match="candidate validation"):
         study.run_study(request=normalized, data_root=root / "pack", output_root=tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+def test_missing_recorded_root_has_relocation_hint_and_original_cause(generation, tmp_path, monkeypatch):
+    root, original = generation
+    frozen = copy.deepcopy(original)
+    # Keep the signed candidate intact; simulate an absent recorded directory at
+    # the source preflight boundary without changing another test's generation.
+    recorded = (root / "sources").resolve()
+    is_dir = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda path: False if path.resolve() == recorded else is_dir(path))
+    with pytest.raises(PatternLabDataError) as caught:
+        candidate.run_validation(candidate=frozen, data_root=root / "pack", output_root=tmp_path / "out")
+    assert "extension_roots" in str(caught.value) and "--extension-root" in str(caught.value)
+    assert "portable_signal" in str(caught.value)
+    assert isinstance(caught.value.__cause__, PatternLabDataError)
+    assert caught.value.error_code == caught.value.__cause__.error_code
+    assert frozen == original and not (tmp_path / "out").exists()
 
 
 @pytest.mark.parametrize("values", [["bad"], ["=dir"], ["portable_signal="], ["portable_signal=x", "portable_signal=x"], ["unknown=x"]])

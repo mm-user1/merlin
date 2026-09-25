@@ -1538,9 +1538,9 @@ cache.
 #### Identity policy and portability
 
 Historical policy 1 includes physical extension locations in all three study
-identities. M5 was accepted at `d423016` with that limitation. The T09 patch
-implements policy 2 for new studies and remains pending owner review; it does
-not change historical pilot identifiers or acceptance. Request schemas 1/2 and
+identities. M5 was accepted at `d423016` with that limitation. Prospective policy 2
+and verified extension relocation are accepted at `9db9402` for the scope below;
+they do not change historical pilot identifiers or acceptance. Request schemas 1/2 and
 analysis methods 1/2 are independent of identity policy. New runs store one
 integer `identity_policy_version: 2` in sealed `spec/source.json`. An absent
 marker means historical policy 1; explicit 1 or any malformed marker is rejected
@@ -1578,10 +1578,17 @@ tracked Pattern Lab Python and the seven attributed V2 sources. They do not
 normalize external extensions, historical snapshots or runtime hashes. LF and
 CRLF extension copies have different implementation identities and fail a frozen
 generation's byte check. Transfer main modules and every declared helper without
-text conversion. Patch A and the later performance/report patch B both expire
-affected required generations; freeze research candidates after both from fresh
-fixed-only development evidence. Historical evidence remains readable offline,
-and old discovery artifacts can still be frozen with their original requirements.
+text conversion. Attributes do not rewrite files already present in an older
+checkout. Before freezing or replaying a generation there, inspect
+`git ls-files --eol` and use the scoped CR-free source test. If conversion is
+needed, preserve local edits and change only the scoped files' CRLF endings to
+LF; do not delete/reset a working directory or edit frozen digests to force a match.
+This portability update expires affected required generations. T10 coordinator
+changes also alter required source bytes and remain pending tech-lead review;
+create operational research candidates from fresh fixed-only evidence after
+those changes are accepted.
+Historical evidence remains readable offline, and old discovery artifacts can
+still be frozen with their original requirements.
 
 Matching identities are not a universal bitwise numerical guarantee. The C-04
 audit found Python-minor-version differences in built-in `sum()` affecting bracket
@@ -1592,7 +1599,15 @@ Frozen candidates remain fixed-horizon only; bracket candidates are unsupported.
 Custom context code can also depend on environment arithmetic; computed context
 outputs enter data-input identity. Trusted extensions may use their location in
 their own calculations, so removing a locator from a hash is not a sandbox.
-Linux relocation replay is a review handoff, not yet certified by this patch.
+The Windows-frozen synthetic candidate was successfully replayed on Ubuntu 22.04
+at `9db9402`, through `validate-candidate --extension-root` with two spawn workers
+and unavailable original roots. The candidate was unchanged; public offline
+receipt reads passed after relocation. Decoded results, specification/data-input
+identities and analysis identities matched. Study implementation identities
+differed only through the recorded Python versions, as confirmed by in-memory
+diagnostic recomputation without changing saved evidence. This verifies that
+fixed-only synthetic fixture; it does not certify arbitrary context features,
+bracket arithmetic or native Windows symlink behavior.
 
 For scale, a full-year 44-instrument 30m run with four horizons produces about
 **3.08 million** primitive rows, representing about 6.17 million logical
@@ -1792,13 +1807,50 @@ table is decoded at most once per instrument, reused across every declared group
 and released before the next instrument; the summary read count therefore does
 not grow with the group count. The public observation API and the summary share
 one expansion implementation, and no all-instrument or all-directional cache is
-kept. A group's assembled observation columns are shared between that group's
-declared metrics instead of being decoded again for every metric; metrics may
-need whole-group rows, so those frames stay bounded to the group being computed
-and a later group reads the tables again rather than retaining every group at
-once. Exact summary quantiles still retain compact per-group sample arrays across
+kept. Internal analysis masks and summary episodes use the reader's private
+cached tables; public tables, evidence tables and eligible-anchor arrays remain
+caller-owned copies. Public mutation cannot change later observations.
+
+Declared metrics use contiguous batches with a default **64 MiB additional
+retained-input budget**. Each instrument is decoded once per batch. Each metric
+declaration owns its selected columns and index, including when one instrument
+supplies the entire group. Callbacks still receive the whole group, in family
+group/declaration order, with instrument order, column order and dtypes preserved.
+This is not a total RSS bound: instrument tables, expanded observations, the
+transient incoming part, Python overhead, arbitrary callback allocations and
+exact summary samples are outside it.
+
+The pure planner uses saved per-condition `events_by_variant` counts, falling
+back to emissions `row_count`. An absent variant is zero only inside a valid
+events mapping; absent/malformed parents and boolean counts are not zero hints.
+Hints never skip observations or validate artifacts. Retained parts are owned
+copies measured with `memory_usage(deep=True, index=True)`, multiplied by three
+for parts, pooled input and copy headroom. If actual storage would exceed a
+multi-group budget, the unfinished batch is discarded before any callback runs
+and its groups are computed individually. Unknown/custom column widths and
+oversized groups also use the single-group path. One oversized group may exceed
+64 MiB because the existing callback contract requires all its rows. Executed
+callbacks are never retried; there is no persistent cross-batch cache. With
+multiple independent defects, which error is observed first is not guaranteed.
+
+Exact summary quantiles still retain compact per-group sample arrays across
 instruments: that is a separate memory cost from the one live instrument's
 frames, and it is not covered by any per-job bound.
+
+Both standalone reports put every table in a local horizontal scroll container.
+Long prose, headings and code can wrap; table cells retain normal wrapping so
+numbers remain legible. Resolved settings display an absent maximum stop width
+as "disabled (not applied)". Normalized BYBIT rules display absent `ct_val` and
+`ct_mult` as "not applicable", and an absent, unenforced minimum notional as
+"not published by venue (not enforced)". Raw venue fields, snapshots, coverage
+and missing diagnostics retain their literal unavailable disclosure. Rendered
+1440px/390px browser verification was blocked by the unavailable browser in this
+workstation session; structural HTML checks do not establish visual acceptance.
+
+Pool interruptions while polling or waiting for the next result have no current
+instrument, including after another job has completed. Preparation and publication
+failures retain their known instrument. Tests inject handled interrupts at those
+boundaries; they do not measure responsiveness inside native calculations.
 
 ### Workers and the bounded spawn pool
 
@@ -2762,9 +2814,15 @@ identical; both facts are preserved. A relocated source or analysis stays
 readable, because paths are recorded provenance and not integrity proofs. Saved
 source code is inert provenance and is never imported by this workflow.
 
-The admitted source binding is verified **again** before final publication: if
-its immutable evidence changed while it was being read, the analysis fails
-without a completion seal. Cooperative immutable input is assumed; this is not
+Analysis performs one initial strict admission, including semantic checks of
+unselected bracket accounts. Before final publication it re-hashes the complete
+immutable evidence set, checks that binding against the admitted set, and checks
+completion schema, identities and counts against the admitted facts through the
+same agreement validator as the strict reader. This final check neither decodes
+instrument tables nor repeats bracket-account validation. Changed immutable
+evidence or contradictory completion-only edits fail without a completion seal.
+Relocation, additive completion metadata and excluded derived regeneration remain
+allowed. Cooperative immutable input is assumed; this is not
 an adversarial filesystem security model, and no lock or recovery journal is
 added to an otherwise immutable study run.
 
@@ -3663,8 +3721,13 @@ snapshots remain unchanged. Output must not overlap effective source directories
 Receipt publication re-hashes those effective files, including unchanged-location
 declarations, so an edit after admission cannot produce a successful receipt.
 
-The [agent Python example](examples/run_frozen_candidate.py) supplies an importable
-main guard for spawned workers. Equivalent commands are:
+An absent recorded extension directory now reports the module names and points
+to `extension_roots` / `--extension-root`, preserving its original error code and
+cause. Changed source bytes still fail the required-generation check; the hint
+does not permit a substitute implementation. The
+[agent Python example](examples/run_frozen_candidate.py) checks malformed,
+duplicate and nonexistent/file-valued override directories before freezing and
+supplies an importable main guard for spawned workers. Equivalent commands are:
 
 ```text
 python -m tools.pattern_lab freeze-candidate --study-root DEVELOPMENT_STUDY --analysis-root DEVELOPMENT_ANALYSIS --start UTC --end UTC --warmup-start UTC --output NEW_CANDIDATE.json
@@ -3967,8 +4030,9 @@ The Windows source binding was checked before acceptance: all 38 raw source
 hashes match the pilot, and their content matches the committed Git blobs after
 CRLF-to-LF comparison. This review comparison does not change runtime digest rules.
 The full pilot took about 348 seconds through verification; about 216 seconds
-followed the final job bundle. Repeated coordinator metric decoding is a future
-performance item, not evidence that additional workers will remove that tail.
+followed the final job bundle. T10 bounds coordinator metric batching and removes
+the duplicate final analysis admission; these changes are pending tech-lead
+review. Its saved-subset measurements do not rerun or revise this historical pilot.
 Rendered HTML layout remains unverified. The Windows offline probe observes
 Python audit events/imports, not Arrow-native filesystem opens; the independent
 Linux review separately reports zero pack/extension accesses in a syscall trace.
@@ -4056,8 +4120,9 @@ Known limits of these milestones:
 - Read-side custom-evidence validation is structural and value-level. It proves
   that a saved sample is complete and coherent against the run's own frozen
   family and saved anchors; it cannot prove that a model's numbers are right.
-- Summary and metric memory is bounded per instrument and per group, not for the
-  whole run: exact quantiles keep compact per-group samples across instruments.
+- Metric batching bounds additional retained inputs as described above; a single
+  oversized group and exact summary samples across instruments remain outside a
+  total-process memory guarantee.
 - M2a is descriptive: no p-value, confidence interval, significance badge, edge
   verdict, matched control or automatic winner selection exists there. Those
   live only in an M3a analysis artifact, which adds no automatic practical-effect

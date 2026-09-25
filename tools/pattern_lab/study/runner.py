@@ -573,6 +573,7 @@ def _execute_pooled(
             while index < len(entries) or inflight:
                 drained = False
                 while True:
+                    state.current = None
                     message = pool.poll()
                     if message is None:
                         break
@@ -597,6 +598,7 @@ def _execute_pooled(
                     inflight.add(identifier)
                     continue
                 if inflight:
+                    state.current = None
                     _accept(run_root, state, checks, pool.take(), inflight)
         except study_workers.WorkerLostError as exc:
             aborting = True

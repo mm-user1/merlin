@@ -34,6 +34,9 @@ h3 { font-size: 15px; margin: 18px 0 6px; }
           padding: 12px 14px; font-weight: 600; margin: 12px 0 18px; }
 .card { background: #ffffff; border: 1px solid #dfe3e9; border-radius: 6px;
         padding: 14px 16px; margin-bottom: 16px; }
+.table-scroll { max-width: 100%; overflow-x: auto; }
+p, h1, h2, h3, h4, summary, li, code { overflow-wrap: anywhere; }
+th, td, th *, td * { overflow-wrap: normal; word-break: normal; }
 table { border-collapse: collapse; width: 100%; margin: 6px 0 12px; background: #ffffff; }
 th, td { border: 1px solid #dfe3e9; padding: 5px 8px; text-align: right; }
 th { background: #eef1f5; font-weight: 600; text-align: right; }
@@ -69,7 +72,7 @@ def _account_label(account):
         ("instrument_id", "timeframe_minutes", "variant_id", "model_instance_id", "case_id"))
 
 
-def _fact_table(facts, *, caption):
+def _fact_table(facts, *, caption, context=None):
     """Small nested facts as escaped scalar rows, never dictionary reprs."""
     units = {"initial_capital":"USDT", "minimum_notional":"USDT", "max_holding_days":"days",
              "commission_pct_per_side":"% per side", "risk_pct":"%", "max_leverage":"x",
@@ -84,7 +87,14 @@ def _fact_table(facts, *, caption):
                 if isinstance(value, (list, tuple)):
                     value = ", ".join(map(str,value))
                 elif value is None:
-                    value = "unavailable"
+                    if context == "settings" and key == "maximum_stop_width_pct":
+                        value = "disabled (not applied)"
+                    elif context == "rules" and key in ("ct_val", "ct_mult") and facts.get("venue") == "BYBIT":
+                        value = "not applicable"
+                    elif context == "rules" and key == "minimum_notional" and facts.get("enforce_minimum_notional") is False:
+                        value = "not published by venue (not enforced)"
+                    else:
+                        value = "unavailable"
                 elif key in ("requested_end_ms", "last_observed_close_ms"):
                     value = datetime.fromtimestamp(value / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
                 rows.append([label, str(value), units.get(key, "")])
@@ -118,10 +128,10 @@ def _sequential_report(summary):
         '<p>The configured maximum holding days (settings below) is an elapsed-time trigger followed by next-open closure. A trigger on the final observed bar yields strict close instead. Intrabar execution time is unknown: duration uses exit-bar open for open/intrabar fills and exit-bar close for terminal fills.</p>',
         '<p>Win rate is a percent here (a fraction in JSON); wins/losses use net PnL after both fees. Planned R divides net PnL by rounded signal-close cash risk. Profit factor uses net winning PnL / absolute net losing PnL; unavailable values retain their status. No-trade means and win rate are unavailable.</p>',
         '<p>Balance and bar-close MTM drawdowns include initial capital and can exceed 100%. Coverage to the requested end is separate from raw last-observed terminal flags.</p>',
-        '<h3>Performance comparison</h3><div style="overflow-x:auto">',
+        '<h3>Performance comparison</h3>',
         _rows(performance,header=["Account", "Trades", "Win rate %", "Profit factor / status", "Mean net R", "Median net R", "Net PnL USDT", "Return %", "Balance DD %", "MTM DD %"]),
-        '</div><h3>Execution diagnostics</h3><div style="overflow-x:auto">',
-        _rows(diagnostics,header=["Account", "Signals", "Finite-cap attempts", "Cap rejects", "Cap rejection %", "Max required x", "Max executed x", "Mean / median holding hours", "Exit counts", "Ambiguous trades"]), '</div>']
+        '<h3>Execution diagnostics</h3>',
+        _rows(diagnostics,header=["Account", "Signals", "Finite-cap attempts", "Cap rejects", "Cap rejection %", "Max required x", "Max executed x", "Mean / median holding hours", "Exit counts", "Ambiguous trades"])]
     for account in accounts:
         parts.append('<details><summary>'+escape(_account_label(account))+'</summary>')
         coverage = account.get("coverage")
@@ -136,13 +146,13 @@ def _sequential_report(summary):
                     ' terminal exits closed at the last observed close before the requested end. These are not internal gap-boundary exits.</p>')
             parts.append(_fact_table(coverage,caption="Requested-end coverage (does not certify internal gap absence)"))
         parts.extend([_fact_table(account["dispositions"],caption="Signal dispositions (counts)"),
-            _fact_table(account["settings"],caption="Resolved bracket settings"),
+            _fact_table(account["settings"],caption="Resolved bracket settings",context="settings"),
             _fact_table({key:account[key] for key in ("gross_pnl","total_fees","initial_capital","final_capital")},caption="Account money (USDT)"),
             _fact_table(account["stop_width_pct"],caption="Planned stop width (%)"), '</details>'])
     parts.append('<h3>Frozen quantity rules and provenance</h3><p>Current snapshots are not historical rule history. OKX contracts use base ctVal and ctMult=1; Bybit uses base quantity. Published minimum notional is enforced; absent values remain unknown. Prices are not tick-rounded and these checks do not certify exchange-order admissibility.</p>')
     for identifier, rules in summary["sequential_rules"].items():
         parts.append('<h4>'+escape(identifier)+'</h4>')
-        parts.append(_fact_table(rules["semantic"],caption="Normalized execution rules"))
+        parts.append(_fact_table(rules["semantic"],caption="Normalized execution rules",context="rules"))
         snapshot = rules["snapshot"]
         parts.append(_fact_table({k:v for k,v in snapshot.items() if k != "raw_contract_fields"},caption="Rule snapshot provenance"))
         parts.append('<details><summary>Raw venue fields</summary>'+_fact_table(snapshot.get("raw_contract_fields",{}),caption="Published venue fields")+'</details>')
@@ -157,7 +167,7 @@ def _number(value: Any, digits: int = 6) -> str:
 
 
 def _rows(rows: Sequence[Sequence[str]], *, header: Sequence[str], caption: str = "") -> str:
-    parts = ["<table>"]
+    parts = ['<div class="table-scroll"><table>']
     if caption:
         parts.append(f"<caption>{escape(caption)}</caption>")
     parts.append("<thead><tr>")
@@ -171,7 +181,7 @@ def _rows(rows: Sequence[Sequence[str]], *, header: Sequence[str], caption: str 
             css = ' class="key"' if index == 0 else ""
             parts.append(f"<td{css}>{escape(str(cell))}</td>")
         parts.append("</tr>")
-    parts.append("</tbody></table>")
+    parts.append("</tbody></table></div>")
     return "".join(parts)
 
 
