@@ -59,6 +59,10 @@ documented scope and the identity-portability limits of that generation; resume 
 Prospective policy-2 identities and verified extension relocation are accepted at
 `9db9402` for the guide's documented scope, without changing historical M5 artifacts.
 M4 remains accepted at `c26334e` for its documented scope.
+Post-M5 coordinator performance and report corrections are accepted at `4dcfb9e`,
+including the owner's manual HTML check. Core development is complete for the
+documented research scope; further work can focus on experiments and demonstrated
+needs. The Pattern Lab guide owns the remaining limits and generation rules.
 
 ## Baseline evidence
 

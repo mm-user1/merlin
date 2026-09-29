@@ -209,6 +209,9 @@ Post-M5 prospective policy-2 identities and verified frozen extension relocation
 are accepted at `9db9402` for their documented scope; historical artifacts remain
 unchanged. The Windows-to-Linux replay verifies the shipped synthetic fixture,
 not universal cross-platform numerical equality.
+Post-M5 bounded coordinator performance and report corrections are accepted at
+`4dcfb9e`, including owner-confirmed HTML appearance. The agreed core development
+is complete for the documented research scope and ready for experiments.
 M4 remains accepted at `c26334e` for its documented scope.
 
 Pattern Lab is separate local, research-only tooling for testing hypotheses

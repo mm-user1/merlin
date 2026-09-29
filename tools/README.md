@@ -220,6 +220,10 @@ M5 integrated workflow is accepted at `d423016` within the guide's documented
 scope and the identity-portability limits of that generation. Prospective policy-2
 identities and verified extension relocation are accepted at `9db9402` for the
 documented scope, including the synthetic Windows-to-Linux validation replay.
+Post-M5 bounded metric batching, source reverification and report corrections
+are accepted at `4dcfb9e`, with both HTML reports manually checked by the owner.
+Core development is complete for the documented research scope. Create fresh
+development evidence and candidates under the accepted source generation.
 The tracked
 `configs/pilot_m5_study.json` and `configs/pilot_m5_analysis.json` freeze the
 44-target development workload. `examples/pilot_extension.py` supplies the

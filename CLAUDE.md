@@ -83,6 +83,10 @@ baselines, or mutate external systems unless explicitly authorized.
   Post-M5 prospective identity policy 2 and verified extension relocation are
   accepted at `9db9402` for their documented scope. Historical artifacts and M5
   acceptance are unchanged; cross-host numerical equality is fixture-specific.
+  Post-M5 bounded coordinator performance and report corrections are accepted
+  at `4dcfb9e`, including owner-confirmed HTML appearance. The agreed core
+  development is complete for the documented research scope; proceed with
+  experiments rather than reopening accepted milestones without new evidence.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.
 

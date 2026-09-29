@@ -1584,9 +1584,11 @@ checkout. Before freezing or replaying a generation there, inspect
 needed, preserve local edits and change only the scoped files' CRLF endings to
 LF; do not delete/reset a working directory or edit frozen digests to force a match.
 This portability update expires affected required generations. T10 coordinator
-changes also alter required source bytes and remain pending tech-lead review;
-create operational research candidates from fresh fixed-only evidence after
-those changes are accepted.
+changes are accepted at `4dcfb9e` for their documented scope, with the owner
+confirming correct appearance of both rendered HTML reports. The agreed core
+development is complete and ready for research experiments. These changes alter
+required source bytes: create operational research candidates from fresh
+post-T10 fixed-only evidence.
 Historical evidence remains readable offline, and old discovery artifacts can
 still be frozen with their original requirements.
 
@@ -1844,8 +1846,10 @@ as "disabled (not applied)". Normalized BYBIT rules display absent `ct_val` and
 `ct_mult` as "not applicable", and an absent, unenforced minimum notional as
 "not published by venue (not enforced)". Raw venue fields, snapshots, coverage
 and missing diagnostics retain their literal unavailable disclosure. Rendered
-1440px/390px browser verification was blocked by the unavailable browser in this
-workstation session; structural HTML checks do not establish visual acceptance.
+1440px/390px automated browser verification was blocked by the unavailable browser
+in the implementation session. The owner subsequently opened both reports and
+confirmed correct appearance, closing manual visual acceptance. Exact viewport
+measurements and per-control results were not separately recorded.
 
 Pool interruptions while polling or waiting for the next result have no current
 instrument, including after another job has completed. Preparation and publication
@@ -4023,17 +4027,23 @@ the local handoff `docs/_work/dev_02_pattern-lab/T08_agent-answer.md` and accept
 review `docs/_work/dev_02_pattern-lab/T08_tech-lead-review.md` record verification,
 resources, comparisons and limitations. These ignored artifacts may be absent in
 another checkout; the tracked requests and extension define the reusable workload,
-subject to the identity limits above. M5 is accepted at `d423016` for this workflow;
-the whole-architecture audit is the next review step. Resume remains deferred.
+subject to the identity limits above. M5 is accepted at `d423016` for this workflow.
+The subsequent whole-architecture audits informed T09 and T10; their accepted
+implementation scopes are described above. Resume remains deferred.
 
 The Windows source binding was checked before acceptance: all 38 raw source
 hashes match the pilot, and their content matches the committed Git blobs after
 CRLF-to-LF comparison. This review comparison does not change runtime digest rules.
 The full pilot took about 348 seconds through verification; about 216 seconds
 followed the final job bundle. T10 bounds coordinator metric batching and removes
-the duplicate final analysis admission; these changes are pending tech-lead
-review. Its saved-subset measurements do not rerun or revise this historical pilot.
-Rendered HTML layout remains unverified. The Windows offline probe observes
+the duplicate final analysis admission; these changes are accepted at `4dcfb9e`
+for their documented numerical and integrity scope. Windows subset measurements
+and Linux saved full-pilot metric recomputation confirm exact result preservation
+and reduced decoding. These measurements do not rerun or revise the historical
+trading pilot.
+The owner later confirmed correct appearance of both T10 HTML report previews;
+this does not retroactively certify rendering of the original M5 pages.
+The Windows offline probe observes
 Python audit events/imports, not Arrow-native filesystem opens; the independent
 Linux review separately reports zero pack/extension accesses in a syscall trace.
 Stop probes establish interrupted status and cleanup at job/publication entry;
