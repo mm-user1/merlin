@@ -2372,6 +2372,11 @@ bad shapes and active disabled streams fail validation before execution.
 `entryFilter` accepts exactly one `EntryFilter` or `None`, never a list. There
 is no implicit permission stored in preparation. Permissions gate fresh pulses
 at their decision close only, and never close a position.
+Generic `EntryFilter` permission flags are meaningful only where `known` is
+true; the executor rejects unknown states before checking permission. The
+built-in `candle_filter` emits both flags false on unknown rows, preserving raw
+aligned values and source evidence. Known neutral also has both flags false,
+but remains distinct through its true `known` mask.
 
 | Policy | fixedBracket | signalManaged |
 | --- | --- | --- |

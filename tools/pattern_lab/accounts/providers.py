@@ -13,7 +13,7 @@ def candle_filter(prepared, requestId):
     a = feature.aligned
     source = next(v for v in prepared.inputs if v.inputId == feature.request["inputId"])
     return EntryFilter(prepared.identity, a.decisionMs, a.known,
-        a.value == 1, a.value == -1, a.sourceIndex, a.observedAtMs, a.availableAtMs,
+        a.known & (a.value == 1), a.known & (a.value == -1), a.sourceIndex, a.observedAtMs, a.availableAtMs,
         a.validUntilMs, a.unknownReason, dict(provider="candleDirection", version="1", request=feature.request,
             sourceHeader=source.header, inputFingerprint=source.inputFingerprint))
 

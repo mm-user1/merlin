@@ -5,8 +5,9 @@ import numpy as np
 import pytest
 
 from tools.pattern_lab import PatternLabDataError as Error
-from tools.pattern_lab.accounts import execute_account, AccountWindow, ExecutionPolicy, SideCommands
-from ._account_helpers import prepared, bundle, side, policy, window, rules, filter_for, STEP
+from tools.pattern_lab.accounts import (execute_account, AccountWindow, ExecutionPolicy, SideCommands,
+    prepare_inputs, candle_filter)
+from ._account_helpers import prepared, binding, feature, bundle, side, policy, window, rules, filter_for, STEP
 
 
 def run(p, c, pol=None, w=None, r=None):
@@ -92,6 +93,34 @@ def test_side_precedes_unknown_conflict_precedes_bad_stop_and_boundary():
     assert run(p, c).attempts["reason"].to_pylist() == ["entryConflict"]*4
     c = replace(c, entryFilter=filter_for(p, known=False))
     assert run(p, c, policy(direction="long")).attempts["reason"].to_pylist() == ["filterUnknown", "directionDisabled"]*2
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_candle_filter_canonical_permissions_preserve_execution(sign):
+    p = prepare_inputs(binding([(100, 102, 98, 100+sign)]*6), (),
+        (feature("state", "candleDirection", priorBars=1, candleType="real", confirmationBars=1),))
+    a = p.feature("state").aligned
+    filt = candle_filter(p, "state")
+    former = replace(filt, allowLong=a.value == 1, allowShort=a.value == -1)
+    assert a.value[0] == sign and not a.known[0]
+    assert filt.identity != former.identity
+    name = "long" if sign == 1 else "short"
+    commands = bundle(p, filt=filt, **{name: side(6, entries=[0, 1],
+        stop=90 if sign == 1 else 110, exits=[3])})
+    former_commands = replace(commands, entryFilter=former)
+    assert commands.identity != former_commands.identity
+    corrected, previous = run(p, commands), run(p, former_commands)
+    for result in (corrected, previous):
+        assert result.attempts["reason"].to_pylist() == ["filterUnknown", "filled"]
+        assert result.attempts["filterKnown"].to_pylist() == [False, True]
+        assert len(result.trades) == 1
+    assert corrected.attempts["filterAllowed"].to_pylist() == [False, True]
+    assert previous.attempts["filterAllowed"].to_pylist() == [True, True]
+    # Event IDs include command identity; compare execution facts, not those IDs.
+    trade_columns = [n for n in corrected.trades.column_names if n != "eventId"]
+    assert corrected.trades.select(trade_columns).equals(previous.trades.select(trade_columns))
+    assert corrected.path.equals(previous.path)  # includes quantity, balance and equity
+    assert corrected.finalBalance == previous.finalBalance
 
 
 def test_occupied_exit_bar_suppression_new_pulse_and_shared_balance():

@@ -32,6 +32,8 @@ preparation bindings, independent timeframe features, causal state expiry,
 immutable transport, generic command modes, shared long/short accounting,
 windows and boundary chronology, unchanged bracket/V2 differentials, an
 independent scalar forward-search oracle and semantic evidence tampering.
+Provider regressions cover canonical false permissions on unknown candle states
+and unchanged long/short execution versus the former raw-value permissions.
 `_account_helpers.py` and `_account_oracle.py` contain synthetic fixtures only.
 The fresh-process public example denies ignored-work reads and removes
 PYTHONPATH. One explicit spawn child checks failed mutations and exact same-host

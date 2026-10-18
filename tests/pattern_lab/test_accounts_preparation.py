@@ -56,6 +56,28 @@ def test_complete_htf_independent_ha_and_expiry_at_missing_update():
     assert p.feature("sourceHA").values[1, 0] == (src_values[1, 0]+src_values[1, 3])/2  # gap reset
     filt = candle_filter(p, "F06")
     assert filt.known[at[4*3600000]] and filt.allowLong[at[4*3600000]]
+    expired = at[8*3600000]
+    assert a.value[expired] == 1  # retain the expired directional source evidence
+    assert not filt.known[expired] and filt.unknownReason[expired] == 3
+    assert not filt.allowLong[expired] and not filt.allowShort[expired]
+    for name in ("known", "sourceIndex", "observedAtMs", "availableAtMs", "validUntilMs", "unknownReason"):
+        np.testing.assert_array_equal(getattr(filt, name), getattr(a, name))
+
+
+def test_candle_filter_unknown_nonzero_and_known_directional_neutral_states():
+    bars = [(100, 102, 98, 101), (100, 102, 98, 101),
+            (100, 102, 98, 99), (100, 102, 98, 100)]
+    p = prepare_inputs(binding(bars), (), (feature("state", "candleDirection", priorBars=1,
+        candleType="real", confirmationBars=1),))
+    a = p.feature("state").aligned
+    filt = candle_filter(p, "state")
+    assert a.value.tolist() == [1, 1, -1, 0]
+    assert a.known.tolist() == [False, True, True, True]
+    assert a.unknownReason.tolist() == [2, 0, 0, 0]
+    assert filt.allowLong.tolist() == [False, True, False, False]
+    assert filt.allowShort.tolist() == [False, False, True, False]
+    for name in ("known", "sourceIndex", "observedAtMs", "availableAtMs", "validUntilMs", "unknownReason"):
+        np.testing.assert_array_equal(getattr(filt, name), getattr(a, name))
 
 
 def test_generic_alignment_latest_unknown_no_fallback_and_neutral():
@@ -149,7 +171,7 @@ def test_command_identity_content_provenance_and_single_filter():
     assert bundle(p, long=a, filt=f).identity != bundle(p, long=a, filt=replace(f, allowLong=~f.allowLong)).identity
     with pytest.raises(Error):
         bundle(p, filt=[f])
-    with pytest.raises(TypeError):
+    with pytest.raises((TypeError, ValueError)):
         replace(c, identity="stale")
     with pytest.raises(Error):
         replace(c, decisionMs=c.decisionMs.astype(np.float64))
