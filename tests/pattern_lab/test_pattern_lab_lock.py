@@ -178,7 +178,7 @@ class TestLockFile:
 
     def test_the_root_identity_resolves_through_an_existing_parent(self, tmp_path):
         alias = tmp_path / "alias"
-        alias.symlink_to(tmp_path / "real")
+        alias.symlink_to(tmp_path / "real", target_is_directory=True)
         (tmp_path / "real").mkdir()
         assert pack_lock.resolve_root_identity(alias / "pack") == os.path.normcase(
             str((tmp_path / "real" / "pack").resolve())
