@@ -2277,6 +2277,193 @@ consumed reference/adapter/rule/evidence files by path; snapshot timestamps and
 unused price tick stay provenance while normalized execution rules enter data
 identity. No resume/reuse or new compiled mode is implemented.
 
+## Reusable account Python API (T01A)
+
+`tools.pattern_lab.accounts` provides the separate schema
+`pattern-lab.account.v1`. This is a library API for one independent ticker
+account, with one balance and at most one position, including shared long/short
+execution. It is **not registered in `run_study`, the CLI, saved readers or
+reports**. T01B must add a separately versioned native route, disk evidence and
+reporting around this executor. It must not add another numerical account loop.
+Accepted `atr_bracket` v1 settings, identities, schemas and results are unchanged.
+
+The public operations are `prepare_inputs`, `build_commands`, `execute_account`
+and `validate_result`. The latter checks supplied evidence without executing a
+second strategy or searching for the first possible exit. A runnable synthetic
+example, using no market pack or ignored work files, is:
+
+```powershell
+python -m tools.pattern_lab.examples.account_synthetic
+```
+
+Use the repository-configured interpreter on Windows. The example exposes
+`run()` returning an `AccountResult`; its module entry point prints only a small
+JSON summary. It performs no file writes, downloads or worker creation.
+
+### Preparation and providers
+
+The caller prepares each timeframe independently from consumed **5m** OHLCV
+using `data.prepare_series`. Bind it as
+`PreparedInput(inputId, series, header)`, retaining the canonical header supplied
+through `data.fingerprint_header`. All bindings share `warmup_start_ms`,
+`start_ms`, and exclusive `end_ms`, aligned to every timeframe. Supply a target,
+a tuple of source bindings and a tuple of `AccountFeatureRequest` objects:
+
+```python
+from tools.pattern_lab.accounts import (
+    AccountFeatureRequest, HARecipe, AccountWindow, ExecutionPolicy,
+    prepare_inputs, build_commands, candle_filter, execute_account,
+)
+
+requests = (
+    AccountFeatureRequest("targetHA", "ha", "1", "target30m", {}, 64),
+    AccountFeatureRequest("targetATR", "atr", "1", "target30m", {"length": 14}, 13),
+    AccountFeatureRequest("F06", "candleDirection", "1", "btc4h",
+                          {"candleType": "real", "confirmationBars": 2}, 28),
+)
+prepared = prepare_inputs(target30m, (btc4h,), requests)
+commands = build_commands(
+    prepared, HARecipe("targetHA", "realSwingAtr", entryRunLength=6,
+                       atrRequestId="targetATR"),
+    mode="fixedBracket", stopUpdates=False,
+    entryFilter=candle_filter(prepared, "F06"),
+)
+policy = ExecutionPolicy("fixedBracket", "both", 3., False, 4.)
+result = execute_account(prepared, commands, policy,
+                         AccountWindow(startMs, endMs), normalizedRules)
+```
+
+Here `target30m`, `btc4h`, bounds and `normalizedRules` are caller-supplied;
+the standalone example shows complete construction. `normalizedRules` is the
+existing `bracket_rules.normalize_rules` output. F04 is another explicit source
+request: BTC 2h, `candleType="ha"`, `confirmationBars=2`, `priorBars=28`.
+F04/F06 illustrate reviewed mechanics, not recommended profitable filters.
+
+HA and Pine ATR restart at each gap. HA initializes open from real `(O+C)/2`,
+then averages previous HA open/close. Neutral colour breaks runs. HA entry is
+exact `run == entryRunLength`; a run that passed that length before eligibility
+does not re-emit. Signal-managed exit uses opposite colour with
+`run >= exitRunLength`. Warmup is the referenced HA request's declared prior
+bars, not a universal 64-bar rule. Stop providers are `haLast`, `haSwing2`, and
+`realSwingAtr` (default two-bar real swing and ATR multiplier 2; explicitly
+declare the ATR14 request). Dependencies must already exist on the target grid.
+HA is computed independently from real complete bars at each timeframe.
+
+`StateRows` / `align_states` implement latest-available state lookup. Observation
+must precede or equal availability; availability is inclusive, validity end is
+exclusive. There is no fallback from an unknown/expired latest row. Candle
+states expire at the next **scheduled** close: a 04:00 four-hour state is unknown
+at exactly 08:00 if that update is missing. Alignment retains chosen source
+index/times and reason codes: 0 known, 1 before first availability, 2 unknown
+source row, 3 expired. Known neutral is distinct from unknown.
+
+Preparation owns copied, bytes-backed read-only arrays. Pickle/spawn restores
+their read-only storage; caller aliases cannot change later windows. It retains
+the native consumed-5m fingerprint rather than hashing aggregated OHLCV again.
+Structural checks do not authenticate a caller-forged native fingerprint.
+Local recursion sharing ends with preparation; there is no global cache.
+
+### Commands, modes and chronology
+
+Generic providers can construct `SideCommands` and `CommandBundle` directly.
+Each side has separate entry, initial-stop, exit and proposed-stop arrays with
+known masks. Decisions equal target bar close. Known NaN, infinity, wrong dtypes,
+bad shapes and active disabled streams fail validation before execution.
+`entryFilter` accepts exactly one `EntryFilter` or `None`, never a list. There
+is no implicit permission stored in preparation. Permissions gate fresh pulses
+at their decision close only, and never close a position.
+
+| Policy | fixedBracket | signalManaged |
+| --- | --- | --- |
+| direction | long / short / both | long / short / both |
+| rewardRisk | finite positive | None |
+| stopUpdates | False | False / True |
+| explicit exits | inactive | next real open |
+| maxHoldingDays | explicitly positive or None | explicitly None |
+| protection | fixed stop and target | initial or tightening stop, no target |
+
+Defaults: capital 10000, risk 2%, commission 0.05% per side, entry leverage cap 8.
+`maxHoldingDays` has no implicit default: `None` disables expiry; 4 preserves
+the native trigger and its 96.5-hour exit on continuous 30m bars.
+
+Sizing uses realized balance at decision and native V2 float-floor/lot recovery.
+Next-open admission checks minimum notional and leverage using actual open and
+entry fee. Cap equality passes; rejected orders consume their pulse, pay no fee
+and create no occupancy. No resizing, price rounding, funding, slippage,
+liquidation or capital replenishment is modeled.
+
+Carried bracket expiry precedes opening protection. Signal-managed opening stop
+precedes a pending explicit exit; simultaneous trigger facts are retained and
+only one exit fee is charged. Entry-bar protection is active. Intrabar fills
+use real OHLC and native O-H-L-C when open is strictly nearer high, otherwise
+O-L-H-C including ties. Stop/target touching is inclusive. Surviving positions
+close at the last observed segment/window close. The last in-window observation
+always has `terminal` precedence over `gapBoundary`, including missing tails.
+This retrospective strict-boundary convention does not claim live foresight.
+
+Stop proposals apply at the next open and only tighten; crossing the current
+close is allowed. Unavailable, nonpositive, equal and looser proposals have
+distinct trace statuses. Entry bars and neutral bars can propose updates.
+Original risk, quantity and target never change. Signals while occupied or on
+an exit bar are consumed; there is no same-bar reversal or deferred pulse.
+
+Admission disposition order is disabled side, unknown/blocked filter, conflict
+between both remaining eligible sides, no next contiguous in-window bar,
+occupied/exit-bar suppression, then stop/risk/capital/target/sizing and actual
+open admission. Conflicting eligible sides both reject. This differs deliberately
+from legacy long-first priority. Other deliberate differences are positive
+stop/target requirements, explicit null expiry, and the new camelCase reason
+vocabulary (`stopUnavailable` maps to legacy `indicator_unavailable` on compatible
+fixtures). Legacy parity excludes conflicting eligible pulses and nonpositive
+levels accepted by the legacy route.
+
+### Windows, identities and evidence
+
+Windows are `[startMs,endMs)` on the target grid within the header's research
+interval. Each execution restarts flat at initial capital, retaining feature
+history but importing no pending pre-window event or position. Features and
+commands are reusable across windows without recalculation. A missing first or
+last slot never expands the window. Empty subwindows return initial capital,
+`noObservedBars` and an empty path; native preparation still rejects a whole span
+with no complete research bar.
+
+Preparation identity includes sorted native fingerprints/headers, aliases,
+feature requests, seed origin and preparation/alignment versions. Command
+identity adds provider parameters/versions, mode, update setting, explicit filter
+identity/null, and a versioned digest of actual named command/permission arrays.
+Arrays hash in sorted-name order, canonical little-endian C bytes, canonical
+unknown NaNs, preserving signed zero. Digests are constructor-computed, not
+caller-supplied. Account identity adds the complete policy/window and normalized
+rule semantics. Paths, worker counts and snapshot provenance are not economic
+IDs. `ExecutionRules` has no snapshot provenance field; the coordinator retains
+the original rule snapshot separately. Changed future bytes change whole-span
+identities even when earlier decisions are unchanged.
+
+`AccountResult` holds schema/identities, typed policy/window/rules and coverage,
+final balance, the shared immutable command bundle (including masks/provenance),
+and Arrow tables with explicit schemas in `accounts/evidence.py`: `attempts`,
+`trades`, `proposals`, `exitCommands`, `path`. Nullability is explicit. Exit traces
+include known false and unknown decisions on surviving position closes;
+`unknownExitDecisions` records their unknown count explicitly. Paths
+retain float64 balances/equity, real closes, position and stop state, segment and
+window-end flags. Initial capital is separate; no missing path row represents
+zero equity. MTM adds unrealized gross PnL without an unpaid closing fee.
+Intrabar holding time uses bar open; close-boundary exits use bar close.
+
+`execute_account` calls `validate_result` before returning. Validation checks
+identities, chronology/links, original sizing/admission, exact single-event
+expressions, stop activation, permissions/occupancy, real-price fill plausibility,
+coverage and full cashflow/path reconciliation. Accumulated money uses symmetric
+`math.isclose(rel_tol=1e-9, abs_tol=1e-8)`, with finite values required.
+The independent forward-search oracle is test-only. This is consistency checking,
+not authentication of a coherent rewrite or a proof of tradability.
+
+The library starts no pools. One explicit Windows spawn child is covered along
+with pickle, failed array mutation and same-host equality. T01B owns integrated
+six-worker equality, separately versioned request/readers, disk codecs, common
+metrics and reports; local research remains capped at six workers. No cross-host
+bitwise parity or bracket inference/candidate support is added here.
+
 ## Matched comparisons and calibrated inference
 
 M3a analyses a **completed** M2 study offline. It measures the difference

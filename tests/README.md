@@ -26,6 +26,19 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Pattern Lab's `test_accounts_preparation.py`, `test_accounts_execution.py` and
+`test_accounts_verification.py` cover the T01A library account API: native 5m
+preparation bindings, independent timeframe features, causal state expiry,
+immutable transport, generic command modes, shared long/short accounting,
+windows and boundary chronology, unchanged bracket/V2 differentials, an
+independent scalar forward-search oracle and semantic evidence tampering.
+`_account_helpers.py` and `_account_oracle.py` contain synthetic fixtures only.
+The fresh-process public example denies ignored-work reads and removes
+PYTHONPATH. One explicit spawn child checks failed mutations and exact same-host
+result equality; integrated six-worker account routing belongs to T01B.
+Preservation gates are all `tests/pattern_lab` and
+`tests/v2/test_v2_kernel_execution.py`.
+
 Pattern Lab's `test_pattern_lab_pilot.py` covers the M5 breakout loop oracle,
 warmup/gaps and future invariance, downside RMS validity/null semantics, public
 reader ownership and requested-table copy count, and synthetic study-to-analysis
