@@ -33,11 +33,12 @@ def build_pack(root, *, count=2, gaps=False, slots=96):
     return ['BYBIT_'+symbol+'USDT' for symbol in symbols]
 
 
-def request(instruments, *, filtered=True, slots=96, multiple=True):
+def request(instruments, *, filtered=True, slots=96, multiple=True, own_source=False):
     utc = lambda n: format_epoch_ms(ANCHOR_MS+n*STEP)
     ha = dict(requestId='ha', featureId='ha', version='1', inputId='target', parameters={}, priorBars=2)
     atr = dict(requestId='atr', featureId='atr', version='1', inputId='target', parameters=dict(length=3), priorBars=0)
-    state = dict(requestId='state', featureId='candleDirection', version='1', inputId='own4h',
+    source_alias = 'own4h' if own_source else 'btc4h'
+    state = dict(requestId='state', featureId='candleDirection', version='1', inputId=source_alias,
                  parameters=dict(candleType='real', confirmationBars=1), priorBars=0)
     allocation = dict(allocationId='rr2', timeframeMinutes=30, features=[ha],
         provider=dict(providerId='haRun', version='1', recipe=dict(haRequestId='ha', entryRunLength=2)),
@@ -47,7 +48,7 @@ def request(instruments, *, filtered=True, slots=96, multiple=True):
     if filtered:
         allocation['features'].append(state)
         allocation['entryFilter'] = dict(providerId='candleDirection', version='1', requestId='state')
-        sources.append(dict(inputId='own4h', instrumentId='target', timeframeMinutes=240))
+        sources.append(dict(inputId=source_alias, instrumentId='target' if own_source else 'BYBIT_BTCUSDT', timeframeMinutes=240))
     if multiple:
         rr = deepcopy(allocation); rr['allocationId']='rr3'; rr['policy']['rewardRisk']=3.
         managed = deepcopy(allocation); managed['allocationId']='trailing'
@@ -62,6 +63,38 @@ def request(instruments, *, filtered=True, slots=96, multiple=True):
         preparationStartUtc=utc(0), instruments=instruments, sources=sources,
         windows=[dict(windowId='full', startUtc=utc(16), endUtc=utc(slots)),
                  dict(windowId='overlap', startUtc=utc(32), endUtc=utc(slots))], allocations=allocations)
+
+
+def assert_filtered_trades(reader):
+    """Every allocation/window must exercise fills, not just equal empty tables."""
+    counts = {}
+    reasons = set()
+    for key in reader.accountKeys:
+        record = reader.account(key); result = record.result
+        assert result.commands.entryFilter is not None
+        group = (record.labels['allocationId'], record.labels['windowId'])
+        row = counts.setdefault(group, dict(trades=0, filledFilteredAttempts=0, proposals=0))
+        row['trades'] += len(result.trades)
+        row['proposals'] += len(result.proposals)
+        fills = []
+        for attempt in result.attempts.to_pylist():
+            reasons.add(attempt['reason'])
+            if attempt['reason'] != 'filled': continue
+            assert attempt['filterKnown'] and attempt['filterAllowed']
+            assert attempt['sourceIndex'] >= 0 and attempt['sourceReason'] == 0
+            assert attempt['observedAtMs'] <= attempt['availableAtMs'] <= attempt['decisionMs'] < attempt['validUntilMs']
+            fills.append(attempt['tradeId'])
+        assert set(fills) == set(result.trades['tradeId'].to_pylist())
+        row['filledFilteredAttempts'] += len(fills)
+    doc = reader.study['request']
+    assert len(reader.accountKeys) == len(doc['instruments'])*len(doc['allocations'])*len(doc['windows'])
+    for allocation in doc['allocations']:
+        for window in doc['windows']:
+            row = counts[allocation['allocationId'], window['windowId']]
+            assert row['trades'] > 0 and row['filledFilteredAttempts'] == row['trades'], (allocation, window, row)
+            if allocation['policy']['stopUpdates']: assert row['proposals'] > 0
+    assert 'filterBlocked' in reasons
+    return counts
 
 
 def reseal(root):

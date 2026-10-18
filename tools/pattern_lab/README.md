@@ -2522,7 +2522,9 @@ python -m tools.pattern_lab.examples.account_study_synthetic --output-root NEW_E
 
 Use the required interpreter and external temporary storage from `tests/README.md`.
 The last command creates only a small deterministic synthetic pack, request,
-36 accounts, checked standard bundle and report. It downloads nothing. The
+36 accounts, checked standard bundle and report. Six gapped synthetic targets
+use a fixed synthetic BTC four-hour candle filter, with trade-bearing bracket
+and ATR-based trailing allocations across overlapping windows. It downloads nothing. The
 example's `build_inputs(packRoot)` returns the complete illustrative request.
 
 ### Request and admission
@@ -2542,7 +2544,9 @@ or null, and native `ExecutionPolicy` fields in `policy`. Defaults are expanded;
 `maxHoldingDays` remains required, including explicit null. The first provider
 is `{providerId:"haRun", version:"1", recipe:{haRequestId:..., ...}}`, using
 native `HARecipe`. All three native stop providers and both account modes are
-reachable. A filter is `{providerId:"candleDirection", version:"1",
+reachable. `atrRequestId` must be null unless `stopProvider` is `realSwingAtr`;
+an unused ATR dependency is rejected before pack access or output creation.
+A filter is `{providerId:"candleDirection", version:"1",
 requestId:...}`. Stacked filters and unknown versions are rejected.
 
 `target` is the per-job input alias. Each source has `inputId`, `instrumentId`,

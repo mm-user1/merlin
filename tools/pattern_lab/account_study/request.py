@@ -141,6 +141,8 @@ def normalize_request(value):
         if recipe.stopProvider == 'realSwingAtr':
             atr = features.get(recipe.atrRequestId)
             require(atr is not None and atr.featureId == 'atr' and atr.inputId == 'target', 'ATR dependency')
+        else:
+            require(recipe.atrRequestId is None, 'unused ATR dependency')
         f = a['entryFilter']
         if f is not None:
             closed(f, ('providerId', 'version', 'requestId'))

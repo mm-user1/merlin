@@ -42,7 +42,11 @@ The `test_account_study_{integration,evidence,metrics}.py` modules cover the
 separate T01B route: native admission/warmup, overlapping windows, fixed/per-target
 sources, mode/direction adapters, direct/six-worker equality, failure cleanup,
 generic codecs, standard offline validation/rebuild, safe ZIP import and metric
-boundaries. `node tests/pattern_lab/account_report_interactions.cjs` checks report
+boundaries. Primary parity/offline fixtures assert filtered trades in every
+allocation/window and nonempty trailing proposals using a fixed synthetic BTC
+source; dedicated own-ticker cases retain blocked/unknown permission and source
+subset checks. Unused ATR dependencies are refused before pack/output access.
+`node tests/pattern_lab/account_report_interactions.cjs` checks report
 interaction state without claiming browser/focus coverage. Synthetic fixtures
 are under `_account_study_helpers.py`; the runnable public synthetic example
 uses no test/ignored-work imports. Retain a Windows-produced compact bundle for

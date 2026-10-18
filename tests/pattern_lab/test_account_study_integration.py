@@ -12,11 +12,11 @@ from tools.pattern_lab.account_study import (run_account_study, normalize_reques
 from tools.pattern_lab.account_study import runner
 from tools.pattern_lab.account_study.codec import equal_records, load_debug_preparation
 from tools.pattern_lab.accounts import build_commands, HARecipe, candle_filter, execute_account
-from ._account_study_helpers import build_pack, request
+from ._account_study_helpers import build_pack, request, assert_filtered_trades
 
 
 def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch):
-    pack = tmp_path/'pack'; ids=build_pack(pack,gaps=True)
+    pack = tmp_path/'pack'; ids=build_pack(pack,count=6,gaps=True)
     raw=request(ids)
     path=tmp_path/'request.json'; path.write_text(json.dumps(raw))
     normalized=normalize_request(path)
@@ -25,6 +25,7 @@ def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch):
     debug=run_account_study(path,data_root=pack,output_root=tmp_path/'debug',retention_profile='debug')
     assert standard.study['identities'] == debug.study['identities']
     assert standard.summary == debug.summary
+    assert assert_filtered_trades(standard) == assert_filtered_trades(debug)
     for key in standard.accountKeys:
         s,d=standard.account(key),debug.account(key)
         assert equal_records(s,d)
@@ -47,6 +48,7 @@ def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(runner.data,'read_session',denied)
     monkeypatch.setattr('tools.pattern_lab.accounts.execute_account',denied)
     assert verify_account_study(standard.root)['accountsChecked']==len(standard.accountKeys)
+    assert verify_account_study(debug.root)['accountsChecked']==len(debug.accountKeys)
     rebuild_account_report(standard.root,output_root=tmp_path/'rebuilt')
     for name in ('summary.json','report.html'):
         assert (standard.root/'derived'/name).read_bytes()==(tmp_path/'rebuilt/derived'/name).read_bytes()
@@ -54,6 +56,7 @@ def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch):
     export_account_bundle(standard.root,zip_path=tmp_path/'bundle.zip')
     imported=import_account_bundle(tmp_path/'bundle.zip',output_root=tmp_path/'imported')
     assert imported.summary==standard.summary
+    assert assert_filtered_trades(imported) == assert_filtered_trades(standard)
     assert verify_account_study(imported.root)['status']=='verified'
 
 
@@ -68,17 +71,19 @@ def test_six_workers_same_evidence_and_bounded_payload(tmp_path):
     assert pooled.status['effectiveWorkers']==6 and pooled.status['maximumInFlight']<=6
     assert len(pooled.status['workerPids'])==6
     assert direct.study['identities']==pooled.study['identities']
+    assert assert_filtered_trades(direct) == assert_filtered_trades(pooled)
     for key in direct.accountKeys: assert equal_records(direct.account(key),pooled.account(key))
     for name in ('summary.json','report.html'):
         assert (direct.root/'derived'/name).read_bytes()==(pooled.root/'derived'/name).read_bytes()
 
 
-@pytest.mark.parametrize('change', ['warmup','source','atr','stop','version','duplicate','stacked','policy','reserve'])
+@pytest.mark.parametrize('change', ['warmup','source','atr','stop','version','duplicate','stacked','policy','reserve',
+    'unusedAtr_haLast','unusedAtr_haSwing2'])
 def test_invalid_request_before_pack_or_output(tmp_path,monkeypatch,change):
     raw=request(['BYBIT_AAAUSDT'])
     a=raw['allocations'][0]
     if change=='warmup': raw['preparationStartUtc']=raw['windows'][0]['startUtc']
-    elif change=='source': raw['sources'].append(dict(inputId='unused',instrumentId='BYBIT_BTCUSDT',timeframeMinutes=240))
+    elif change=='source': raw['sources'].append(dict(inputId='unused',instrumentId='BYBIT_UNUSEDUSDT',timeframeMinutes=240))
     elif change=='atr': raw['allocations'][2]['features'][-1]['parameters']['length']=100
     elif change=='stop': raw['allocations'][2]['provider']['recipe']['swingBars']=100
     elif change=='version': a['provider']['version']='2'
@@ -86,7 +91,12 @@ def test_invalid_request_before_pack_or_output(tmp_path,monkeypatch,change):
     elif change=='stacked': a['entryFilter']=[a['entryFilter']]
     elif change=='policy': del a['policy']['maxHoldingDays']
     elif change=='reserve': raw['protocol']['reserved']=deepcopy(raw['protocol']['development'])
+    elif change.startswith('unusedAtr_'):
+        a['features'].append(dict(requestId='atr',featureId='atr',version='1',inputId='target',
+            parameters=dict(length=3),priorBars=0))
+        a['provider']['recipe'].update(stopProvider=change.split('_')[1],atrRequestId='atr')
     monkeypatch.setattr(runner.data,'read_session',lambda *a: pytest.fail('premature pack read'))
+    with pytest.raises(Error,match='unused ATR dependency' if change.startswith('unusedAtr_') else None): normalize_request(raw)
     with pytest.raises(Error): run_account_study(raw,data_root=tmp_path/'none',output_root=tmp_path/'out')
     assert not (tmp_path/'out').exists()
 
@@ -127,8 +137,8 @@ def test_mode_direction_adapter_matrix(tmp_path,direction,mode,updates,stop):
 
 
 def test_fixed_source_once_per_span_and_allocation_subsets(tmp_path,monkeypatch):
-    pack=tmp_path/'pack';ids=build_pack(pack,count=2,slots=112)
-    raw=request(ids,slots=96)
+    pack=tmp_path/'pack';ids=build_pack(pack,count=2,slots=112,gaps=True)
+    raw=request(ids,slots=96,own_source=True)
     a=deepcopy(raw['allocations'][0]);a['allocationId']='fixed'
     a['features'][1]['inputId']='btc4h'
     raw['allocations'].append(a)
@@ -148,10 +158,14 @@ def test_fixed_source_once_per_span_and_allocation_subsets(tmp_path,monkeypatch)
         assert aliases=={'target','btc4h' if r.labels['allocationId']=='fixed' else 'own4h'}
         if 'own4h' in aliases:
             assert all(v['header']['instrument_id']==r.labels['instrumentId'] for v in r.preparationFacts['inputs'])
+            assert len(r.result.trades)==0
+    own_reasons={reason for key in reader.accountKeys if reader.account(key).labels['allocationId']!='fixed'
+        for reason in reader.account(key).result.attempts['reason'].to_pylist()}
+    assert {'filterBlocked','filterUnknown'} <= own_reasons
 
 
 def test_source_close_warmup_off_by_one():
-    raw=request(['BYBIT_AAAUSDT'],multiple=False)
+    raw=request(['BYBIT_AAAUSDT'],multiple=False,own_source=True)
     # At 08:30 the latest completed 4h source bar has index 1, not 2.
     raw['allocations'][0]['features'][1]['parameters']['confirmationBars']=3
     with pytest.raises(Error,match='insufficient declared warmup.*own4h'): normalize_request(raw)
