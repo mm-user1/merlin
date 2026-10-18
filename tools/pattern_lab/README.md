@@ -2279,12 +2279,19 @@ identity. No resume/reuse or new compiled mode is implemented.
 
 ## Reusable account Python API (T01A)
 
+Accepted at `41b1f34` after the T01A-1 and T01A-2 follow-ups. The focused
+account suites passed 135 tests on both Windows and Linux. The complete Windows
+preservation gate (`tests/pattern_lab` and `tests/v2/test_v2_kernel_execution.py`)
+passed 1882 tests with a symlink-capable token. Its one existing read-only-directory
+environment skip is accepted and covered by the final Linux lock suite (15
+passed, no skips). This acceptance covers the library API, not T01B integration.
+
 `tools.pattern_lab.accounts` provides the separate schema
 `pattern-lab.account.v1`. This is a library API for one independent ticker
 account, with one balance and at most one position, including shared long/short
 execution. It is **not registered in `run_study`, the CLI, saved readers or
-reports**. T01B must add a separately versioned native route, disk evidence and
-reporting around this executor. It must not add another numerical account loop.
+reports**. The separate [account-study route](#native-account-studies-t01b) adds
+disk evidence and reporting around this executor without another numerical loop.
 Accepted `atr_bracket` v1 settings, identities, schemas and results are unchanged.
 
 The public operations are `prepare_inputs`, `build_commands`, `execute_account`
@@ -2463,11 +2470,203 @@ coverage and full cashflow/path reconciliation. Accumulated money uses symmetric
 The independent forward-search oracle is test-only. This is consistency checking,
 not authentication of a coherent rewrite or a proof of tradability.
 
-The library starts no pools. One explicit Windows spawn child is covered along
-with pickle, failed array mutation and same-host equality. T01B owns integrated
-six-worker equality, separately versioned request/readers, disk codecs, common
-metrics and reports; local research remains capped at six workers. No cross-host
+The numerical library starts no pools. One explicit Windows spawn child is
+covered along with pickle, failed array mutation and same-host equality. The
+account-study coordinator owns integrated workers, disk codecs, metrics and
+reports; local research remains capped at six workers. No universal cross-host
 bitwise parity or bracket inference/candidate support is added here.
+
+## Native account studies (T01B)
+
+`tools.pattern_lab.account_study` adds a separate native request, coordinator,
+reader and offline report around the accepted account API. It never enters
+legacy `run_study`, inference or frozen-candidate routes. The existing numerical
+executor and validator are unchanged. The only existing runtime extensions are
+CLI routing and a typed account-job branch in the existing bounded spawn pool.
+The pool's default legacy dispatch and extension-generation checks remain.
+Changing the worker module changes implementation attribution for new legacy
+runs; the required/context candidate modules and candidate policy remain
+byte-identical, preserving existing candidate generations.
+
+```python
+from tools.pattern_lab.account_study import (
+    normalize_request, run_account_study, load_account_study,
+    verify_account_study, rebuild_account_report,
+    export_account_bundle, import_account_bundle,
+)
+reader = run_account_study(request, data_root=pack, output_root=new_run,
+                           workers=6, retention_profile="standard")
+record = reader.account(reader.accountKeys[0])
+result, target_view = record.result, record.prepared
+summary = reader.summary
+verification = verify_account_study(new_run)
+rebuild_account_report(new_run, output_root=new_report)
+export_account_bundle(new_run, zip_path=new_zip)
+relocated = import_account_bundle(new_zip, output_root=new_import)
+```
+
+`normalize_request` accepts a mapping, JSON path or immutable
+`AccountStudyRequest`; all forms pass the same validation. Its `document`
+property returns a fresh mapping. `run_account_study` returns an `AccountStudy`
+reader with `root`, `study`, `status`, `accountKeys`, `key_for(instrumentId,
+allocationId, windowId)`, `account(key)` and `summary`. Each account access
+decodes independent immutable arrays/tables; no mutable reader cache is exposed.
+Every output must be a new directory and must not overlap its input. Rebuilds
+write a separate derived directory and never alter the original seal.
+
+```powershell
+python -m tools.pattern_lab account-study --request request.json --data-root PACK --output-root NEW_RUN --workers 6
+python -m tools.pattern_lab account-report --run-root RUN --output-root NEW_REPORT
+python -m tools.pattern_lab.examples.account_study_synthetic --output-root NEW_EXTERNAL_ROOT --workers 6
+```
+
+Use the required interpreter and external temporary storage from `tests/README.md`.
+The last command creates only a small deterministic synthetic pack, request,
+36 accounts, checked standard bundle and report. It downloads nothing. The
+example's `build_inputs(packRoot)` returns the complete illustrative request.
+
+### Request and admission
+
+Schema is `pattern-lab.account-study-request.v1`, with closed camelCase keys:
+`studyId`, `protocol`, `preparationStartUtc`, `instruments`, `sources`, `windows`,
+`allocations`, and optional descriptive `notes`. The embedded existing protocol
+keeps its snake_case fields; it may be an explicit document or file path
+(relative to the request JSON). Targets are explicit, unique and canonically
+sorted. Windows have `windowId`, `startUtc`, `endUtc` and must be within protocol
+development; the entire consumed envelope must avoid reserve and respect the
+warmup floor. No later bars, automatic shifted windows or downloads are added.
+
+An allocation declares `allocationId`, `timeframeMinutes`, native
+`AccountFeatureRequest` records in `features`, `provider`, explicit `entryFilter`
+or null, and native `ExecutionPolicy` fields in `policy`. Defaults are expanded;
+`maxHoldingDays` remains required, including explicit null. The first provider
+is `{providerId:"haRun", version:"1", recipe:{haRequestId:..., ...}}`, using
+native `HARecipe`. All three native stop providers and both account modes are
+reachable. A filter is `{providerId:"candleDirection", version:"1",
+requestId:...}`. Stacked filters and unknown versions are rejected.
+
+`target` is the per-job input alias. Each source has `inputId`, `instrumentId`,
+`timeframeMinutes`; `instrumentId:"target"` means the current job's ticker at
+that source timeframe. Explicit fixed sources may be factor-only. Targets must
+be trading/research-only admissible and have supported instrument rules.
+Coverage, closure, blockers, integrity and rules fail admission without dropping
+targets. Unused or equivalent duplicate source bindings are rejected. Each
+allocation includes only its referenced sources/features in preparation.
+
+The common preparation header starts research at the earliest window start and
+ends at the latest window end. Exact input/feature sets and commands are reused
+inside each target job. Each window starts flat at its declared initial capital.
+Declared warmup checks feature `priorBars`, ATR length, candle confirmations,
+entry/exit runs and stop windows before output or pack access. The source check
+uses its last *completed* bar at the first target decision, not elapsed source
+slots. Internal gaps remain valid and reset native features; per-enabled-side
+unknown-entry, unknown-initial-stop and union counts disclose actual readiness
+over observed in-window bars, including the final bar, independent of attempts.
+
+Only the coordinator reads/publishes. Raw 5m rows are reused across timeframes;
+common fixed sources are read once per consumed span. Children receive RAM-only
+typed jobs. At most the effective worker count of instrument payloads is in
+flight. Requested/effective workers and thread observations are operational
+status, never financial parameters. There is no retry, restart or silent CPU cap.
+Failures retain phase/job diagnostics and partial artifacts without completion.
+`allow_partial=True` returns diagnostic metadata only, with no account/aggregate
+success claim. Default readers reject incomplete runs.
+
+### Retained formats and verification levels
+
+Root schema: `pattern-lab.account-study.v1`, format version 1. Record schema:
+`pattern-lab.account-record.v1`. Separate specification, data-input and
+implementation identities retain native preparation/command/account IDs.
+Paths, workers, clocks and implementation byte digests never enter those native
+economic IDs. Exact source digests and library versions are implementation
+attribution; physical pack/rule snapshots remain separate provenance.
+
+Standard retains exact float64 target OHLCV (including quote volume), timestamps,
+research/segment masks and coverage once per distinct grid; complete commands
+once per identity; and every account's five native result tables, parameters,
+coverage, final balance and unknown-exit count. NPZ arrays use no pickle;
+Parquet tables use lossless Zstandard compression. Path timestamp/close columns
+are reconstructed exactly from the retained grid and bar indices. There is no
+float32 money, rounded path or monthly-only substitute. Every original input
+header/fingerprint, feature request and seed/version rule is retained to
+recompute preparation identity even when source arrays are absent.
+
+Saved attempts add `filterPresent`. Without a filter, source facts are null and
+both `filterKnown`/`filterAllowed` are true. The reversible adapter restores the
+native `sourceIndex=-1`, `sourceReason=0` sentinels on decoding. With a filter,
+all native source facts and unknown-first permissions remain authoritative.
+
+Debug additionally retains source grids and feature/aligned-state arrays for
+built-in command regeneration. Standard reconstructs a target-only preparation
+view, not a full prepared feature/source object. Its identities establish saved
+binding consistency, not authentication of missing original 5m rows or arbitrary
+provider signals. Arbitrary caller-built commands round-trip through the private
+record codec; no artifact names executable providers or imports code.
+
+Strict loading checks the exact completion/member set, hashes/sizes, schemas,
+IDs, roster, shapes, nullability, chronology/links and flat-cash gap invariant.
+It is not a second financial-state sweep. `verify_account_study` explicitly
+calls the unchanged T01A validator for every reconstructed account. Publication
+already has mandatory execution validation and additionally checks codec equality;
+ordinary loads, rebuilds and ZIP operations do not silently rerun full validation.
+Neither level authenticates a coherently forged bundle or searches for first exits.
+
+`completion.json` is the sole non-self-hashed sealing envelope. It lists every
+other run file, including original derived tables/HTML and final `status.json`.
+Completion is published last. Missing, extra, duplicate or changed members fail.
+Later verification receipts belong outside the sealed run. ZIP import/export
+uses the same member set and directory verifier, canonical portable paths,
+collision/type/CRC/size/hash checks, bounded extraction and fresh staging; no
+`extractall`, code execution or automatic remote deployment is involved.
+
+### Metrics, synchronized gaps and report
+
+Metric schema is `pattern-lab.account-metrics.v1`; money is USDT, durations are
+milliseconds and returns are percentages. Net return uses initial capital;
+full-path MTM DD includes initial capital as the first peak and every bar-close
+equity point, without clipping at 100%. This differs from Merlin's realized DD.
+No main-return annualization, Sharpe, significance or automatic ranking verdict
+is added. Trade wins/losses/PF use net trade PnL; PF without losses and win rate
+without trades are null with explicit status/counts. Forced gap/terminal exits
+and PnL remain separate from ordinary exit-reason counts.
+
+`timeInMarketPct` uses native holding milliseconds/requested duration; intrabar
+exits use the open clock. `occupiedBarSharePct` counts the union of touched
+observed bars, including same-open entry/exit, excluding later opening-exit bars.
+Return per exposure-day is descriptive and null at zero exposure. Aggregates
+use mean account exposure-days, not total exposure across the roster.
+
+Aggregates use the complete canonical roster, matching allocation/window/grid
+and equal starting capital. Equity is summed on the expected grid before DD.
+Missing slots carry only demonstrably flat cash after a gap/terminal closure or
+initial cash before the first observation; never prices/open-position marks.
+Synthetic slots are marked market-unobserved. A wholly unobserved account makes
+its full-roster aggregate unavailable rather than silently shrinking the roster.
+
+UTC monthly rows are `continuousContribution`: opening/closing equity, PnL,
+PnL/initial-capital contribution and PnL/positive-opening-equity return. A close
+at midnight closes the preceding month. Partial edge months and stale/nonexact
+boundaries are disclosed. Contributions reconcile to total PnL; monthly returns
+are not added. Unobserved months have null returns and are excluded from breadth;
+aggregate full-month breadth requires all planned accounts to have observations.
+Counts disclose observed/full/partial months. These are not T03 monthly restarts.
+
+Concentration divides top-five positive ticker PnL or largest positive monthly
+PnL by aggregate net PnL only when positive; ratios may exceed 100%. Passive
+long price change and its negative fixed-quantity short reference use first
+real open/last real close, with boundaries/coverage. They exclude fees, funding,
+liquidation and sizing and are not matched controls or fake strategy trades.
+
+One offline light-theme report embeds only summaries/monthly points, safely
+escaped. Curves start at zero and use actual calendar endpoints. Window selection
+never mixes equity windows; explicitly selected allocations can be compared.
+Only otherwise identical bracket allocations receive RR grouping labels.
+Numeric sort is descending first, nulls last, with canonical ticker ties;
+selection, dropdown and clamped arrows follow the displayed order. Unrelated
+controls keep their keys. Node state tests do not claim browser/focus coverage;
+appearance remains owner review. Same-host rebuilds are deterministic for
+`derived/summary.json` and `derived/report.html`; cross-host exactness must be
+checked on the specific fixture, not assumed.
 
 ## Matched comparisons and calibrated inference
 
@@ -4273,7 +4472,9 @@ Known limits of these milestones:
   either method is not a validated edge. M3b is accepted at `908efb4` within its
   documented limits; M4 sequential brackets are accepted at `c26334e` for their
   descriptive scope. Bracket inference and frozen-candidate validation remain
-  unsupported; Windows symlink privilege checks remain separately unverified.
+  unsupported. Windows symlink checks were unverified at those historical
+  milestone acceptances; the T01A preservation gate at `41b1f34` subsequently
+  verified them with a symlink-capable token (see the T01A section above).
 - **A seven-day block does not control error under dependence substantially
   longer than a week**, and the measurements above show it is already
   anti-conservative at the declared signal persistence. The tracked

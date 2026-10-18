@@ -259,7 +259,13 @@ def _worker_main(settings: WorkerSettings, tasks, results) -> None:
             results.put(("started", job_id, os.getpid()))
             payload = pickle.loads(blob)
             del blob
-            result = run_instrument_job(payload)
+            if type(payload).__module__ == "tools.pattern_lab.account_study.job":
+                from ..account_study.job import AccountJob, run_account_job
+                if not isinstance(payload, AccountJob):
+                    raise PatternLabDataError("unsupported account worker payload")
+                result = run_account_job(payload)
+            else:
+                result = run_instrument_job(payload)
             del payload
             encoded = pickle.dumps(result, protocol=pickle.HIGHEST_PROTOCOL)
             del result

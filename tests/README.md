@@ -38,6 +38,15 @@ and unchanged long/short execution versus the former raw-value permissions.
 The fresh-process public example denies ignored-work reads and removes
 PYTHONPATH. One explicit spawn child checks failed mutations and exact same-host
 result equality; integrated six-worker account routing belongs to T01B.
+The `test_account_study_{integration,evidence,metrics}.py` modules cover the
+separate T01B route: native admission/warmup, overlapping windows, fixed/per-target
+sources, mode/direction adapters, direct/six-worker equality, failure cleanup,
+generic codecs, standard offline validation/rebuild, safe ZIP import and metric
+boundaries. `node tests/pattern_lab/account_report_interactions.cjs` checks report
+interaction state without claiming browser/focus coverage. Synthetic fixtures
+are under `_account_study_helpers.py`; the runnable public synthetic example
+uses no test/ignored-work imports. Retain a Windows-produced compact bundle for
+Linux full verification and rebuild comparison after the owner's Git update.
 Preservation gates are all `tests/pattern_lab` and
 `tests/v2/test_v2_kernel_execution.py`.
 

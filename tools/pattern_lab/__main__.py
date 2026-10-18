@@ -48,7 +48,7 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # structured JSON status; the older data commands keep their existing behavior
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate")
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report")
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -221,6 +221,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    account_command = commands.add_parser("account-study", help="Run a native account study into a new directory.")
+    for flag in ("request", "data-root", "output-root"):
+        account_command.add_argument("--" + flag, type=Path, required=True)
+    account_command.add_argument("--workers", type=int, default=1)
+    account_command.add_argument("--retention-profile", choices=("standard", "debug"), default="standard")
+    account_report = commands.add_parser("account-report", help="Rebuild account metrics/report offline into a new directory.")
+    for flag in ("run-root", "output-root"):
+        account_report.add_argument("--" + flag, type=Path, required=True)
+
     analyzer = commands.add_parser(
         "analyze",
         help="Analyze a COMPLETED event study: matched comparisons and calibrated inference.",
@@ -380,6 +389,17 @@ def _run(args: argparse.Namespace) -> int:
             timeframe_minutes=args.timeframe_minutes,
         )
         _emit(pack_data.slice_metadata(loaded))
+        return EXIT_OK
+    if args.command == "account-study":
+        from .account_study import run_account_study
+        result = run_account_study(args.request, data_root=args.data_root, output_root=args.output_root,
+            workers=args.workers, retention_profile=args.retention_profile)
+        _emit({"status": "complete", "runRoot": str(result.root), "accounts": len(result.accountKeys),
+               "identities": result.study["identities"]})
+        return EXIT_OK
+    if args.command == "account-report":
+        from .account_study import rebuild_account_report
+        _emit(rebuild_account_report(args.run_root, output_root=args.output_root))
         return EXIT_OK
     if args.command == "study":
         result = pack_study.run_study(

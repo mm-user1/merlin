@@ -1,0 +1,23 @@
+"use strict";
+const assert = require('node:assert/strict');
+const ui = require('../../tools/pattern_lab/account_study/report.js');
+const rows = [{instrumentId:'BBB',x:2},{instrumentId:'CCC',x:null},{instrumentId:'AAA',x:2},{instrumentId:'DDD',x:-1}];
+let state = ui.sortState({key:'',descending:true},'x');
+assert.equal(state.descending,true);
+let sorted=ui.orderTickers(rows,state.key,state.descending);
+assert.deepEqual(sorted.map(r=>r.instrumentId),['AAA','BBB','DDD','CCC']);
+state=ui.sortState(state,'x');
+assert.equal(state.descending,false);
+sorted=ui.orderTickers(rows,state.key,state.descending);
+assert.deepEqual(sorted.map(r=>r.instrumentId),['DDD','AAA','BBB','CCC']);
+assert.equal(ui.moveTicker(sorted.map(r=>r.instrumentId),'AAA',1),'BBB');
+assert.equal(ui.moveTicker(sorted.map(r=>r.instrumentId),'DDD',-1),'DDD');
+assert.equal(ui.moveTicker(sorted.map(r=>r.instrumentId),'CCC',1),'CCC');
+assert.equal(ui.profitableCount(rows,'x'),'2/3');
+assert.equal(ui.moveTicker([],null,1),null);
+const ticker={},region={},other={};
+assert.equal(ui.acceptsArrow(ticker,ticker,region),true);
+assert.equal(ui.acceptsArrow(region,ticker,region),true);
+assert.equal(ui.acceptsArrow(other,ticker,region),false);
+assert.equal(rows[0].instrumentId,'BBB'); // sorting never mutates the canonical input
+console.log('Account report interaction state checks passed (no browser/focus claim).');
