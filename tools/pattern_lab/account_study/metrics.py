@@ -7,8 +7,9 @@ import math
 import numpy as np
 
 from ..accounts.contracts import require
+from . import robustness
 
-VERSION = 'pattern-lab.account-metrics.v1'
+VERSION = 'pattern-lab.account-metrics.v2'
 DAY = 86400000
 
 
@@ -154,6 +155,7 @@ def account_metrics(record):
         returnPctPerExposureDay=100*(final/initial-1)/(total_holding/DAY) if total_holding else None,
         passive=passive, months=months, monthBreadth=breadth(months),
         curve=curve(months, r.window.startMs, r.window.endMs, initial) if len(indices) else [])
+    result['robustness'] = robustness.account_facts(record,result)
     return result
 
 
@@ -213,9 +215,12 @@ def derive(reader):
     for allocation, window in sorted({(s['allocationId'], s['windowId']) for s in accounts}):
         summaries = [s for s in accounts if (s['allocationId'], s['windowId']) == (allocation, window)]
         keys = [reader.key_for(s['instrumentId'], allocation, window) for s in summaries]
-        aggregate.append(aggregate_metrics((reader.account(k) for k in keys), summaries))
+        row = aggregate_metrics((reader.account(k) for k in keys), summaries)
+        row['robustness'] = robustness.aggregate_facts(row,summaries)
+        aggregate.append(row)
     return dict(schema=VERSION, units=dict(money='quote currency USDT', returns='percent', duration='milliseconds'),
-        accounts=accounts, aggregates=aggregate,
+        accounts=accounts, aggregates=aggregate, robustness=robustness.window_facts(reader.study['request']),
+        derivation=robustness.attribution(reader,VERSION),
         limitations=['Descriptive independent accounts, not shared margin or a validated edge.',
             'Intrabar exits use the bar open clock; exact intrabar exposure time is unknown.',
             'Passive price references exclude fees, funding, liquidation and account sizing.',

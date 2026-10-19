@@ -24,7 +24,62 @@ function profitableCount(rows, key) {
 function acceptsArrow(target, tickerSelect, tickerRegion) {
   return target === tickerSelect || target === tickerRegion;
 }
-if (typeof module !== "undefined") module.exports = {orderTickers, sortState, moveTicker, profitableCount, acceptsArrow};
+function closeNumber(a,b) {
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a-b) <= Math.max(1e-9*Math.max(Math.abs(a),Math.abs(b)),1e-8);
+}
+function direction(value) {return !Number.isFinite(value) ? null : closeNumber(value,0) ? "flat" : value > 0 ? "up" : "down";}
+function localView(summary, window, ids) {
+  const match=a=>a.windowId===window && ids.includes(a.allocationId);
+  return {accounts:summary.accounts.filter(match),aggregates:summary.aggregates.filter(match)};
+}
+function globalView(data, allocation) {
+  const windows=data.summary.robustness?.windows || [];
+  return windows.map(w=>({...w,aggregate:data.summary.aggregates.find(a=>a.allocationId===allocation && a.windowId===w.windowId)}));
+}
+function monthlyMatrix(data, allocation) {
+  const windows=globalView(data,allocation);
+  const labels=[...new Set(windows.flatMap(w=>w.aggregate?.robustness.passiveMonths.map(m=>m.month)||[]))].sort();
+  return labels.map(month=>({month,cells:windows.map(w=>({windowId:w.windowId,
+    strategy:w.aggregate?.months.find(m=>m.month===month)||null,
+    passive:w.aggregate?.robustness.passiveMonths.find(m=>m.month===month)||null,
+    status:w.aggregate?.robustness.passiveMonths.some(m=>m.month===month) ? w.aggregate.status : 'outsideWindow'}))}));
+}
+function pairView(data, window, baseline, candidate) {
+  const unavailable=reason=>({status:'incompatible',reason,tickers:[],months:[]});
+  if (!baseline || !candidate) return unavailable('Select baseline and candidate explicitly');
+  if (baseline===candidate) return unavailable('Choose two different allocations');
+  const find=id=>data.summary.aggregates.find(a=>a.windowId===window && a.allocationId===id);
+  const b=find(baseline),c=find(candidate);
+  if (!b || !c || b.status!=='available' || c.status!=='available') return unavailable('Both complete-roster aggregates must be available');
+  if (b.initialCapital/b.plannedAccounts!==c.initialCapital/c.plannedAccounts || b.plannedAccounts!==c.plannedAccounts) return unavailable('Unequal initial capital or roster');
+  const classify=(x,y)=>!Number.isFinite(x)||!Number.isFinite(y) ? 'unavailable' : closeNumber(x,y) ? 'tied' : x>y ? 'improved' : 'worse';
+  const tickers=data.request.instruments.slice().sort().map(instrumentId=>{
+    const findAccount=id=>data.summary.accounts.find(a=>a.windowId===window && a.allocationId===id && a.instrumentId===instrumentId);
+    const x=findAccount(baseline),y=findAccount(candidate);
+    const bv=x?.coverage.observedBars ? x.returnPct : null,cv=y?.coverage.observedBars ? y.returnPct : null;
+    const status=classify(cv,bv);
+    return {instrumentId,baselineReturnPct:bv,candidateReturnPct:cv,delta:status==='unavailable'?null:cv-bv,status};
+  });
+  const labels=[...new Set([...b.months,...c.months].map(m=>m.month))].sort();
+  const months=labels.map(month=>{
+    const x=b.months.find(m=>m.month===month),y=c.months.find(m=>m.month===month);
+    const same=x && y && x.startMs===y.startMs && x.endMs===y.endMs;
+    const eligible=!!(same && x.pairEligible && y.pairEligible);
+    return {month,startMs:same?x.startMs:null,endMs:same?x.endMs:null,
+      baselineReturnPct:x?.returnPct??null,candidateReturnPct:y?.returnPct??null,
+      delta:same && Number.isFinite(x.returnPct) && Number.isFinite(y.returnPct)?y.returnPct-x.returnPct:null,
+      eligible,status:eligible?classify(y.returnPct,x.returnPct):'excluded',
+      reason:eligible?null:!same?'Different or absent interval':'Unavailable return, incomplete accounts or non-exact boundary',
+      partialEdgeMonth:!!(x?.partialEdgeMonth||y?.partialEdgeMonth),
+      interiorGap:!!(x && x.observedBars<x.expectedBars || y && y.observedBars<y.expectedBars)};
+  });
+  const counts=rows=>({improved:rows.filter(r=>r.status==='improved').length,tied:rows.filter(r=>r.status==='tied').length,
+    worse:rows.filter(r=>r.status==='worse').length,valid:rows.filter(r=>['improved','tied','worse'].includes(r.status)).length,planned:rows.length});
+  return {status:'available',deltas:Object.fromEntries(['returnPct','maxDrawdownMtmPct','netPnl','trades','timeInMarketPct'].map(k=>[k,c[k]-b[k]])),
+    tickers,months,tickerCounts:counts(tickers),monthCounts:counts(months),
+    eligiblePartialEdgeMonths:months.filter(m=>m.eligible&&m.partialEdgeMonth).length};
+}
+if (typeof module !== "undefined") module.exports = {orderTickers, sortState, moveTicker, profitableCount, acceptsArrow,closeNumber,direction,localView,globalView,monthlyMatrix,pairView};
 if (typeof document !== "undefined") {
   const data = JSON.parse(document.getElementById("account-data").textContent);
   const byId = id => document.getElementById(id);
@@ -37,6 +92,12 @@ if (typeof document !== "undefined") {
   function option(select, value, text) { const e = element("option", text, select); e.value = value; return e; }
   for (const w of data.request.windows) option(selectWindow, w.windowId, `${w.windowId}: ${w.startUtc} — ${w.endUtc}`);
   for (const a of data.request.allocations) option(selectAllocations, a.allocationId, data.allocationLabels[a.allocationId]).selected = true;
+  const overviewAllocation=byId('overviewAllocation'), baseline=byId('baseline'),candidate=byId('candidate');
+  option(baseline,'','Select baseline');option(candidate,'','Select candidate');
+  for (const a of data.request.allocations) {
+    for (const control of [overviewAllocation,baseline,candidate]) option(control,a.allocationId,data.allocationLabels[a.allocationId]);
+  }
+  let pairSort={key:'',descending:true};
   function active() { return Array.from(selectAllocations.selectedOptions).map(x => x.value); }
   function table(id, headers, rows) {
     const table = byId(id); table.replaceChildren();
@@ -58,9 +119,8 @@ if (typeof document !== "undefined") {
   }
   function update() {
     const ids = active(), window = selectWindow.value;
-    const accounts = data.summary.accounts.filter(a => a.windowId === window && ids.includes(a.allocationId));
-    const aggregates = data.summary.aggregates.filter(a => a.windowId === window && ids.includes(a.allocationId));
-    table("comparison", ["Allocation", "Status", "Return %", "MTM DD %", "Profitable tickers", "Positive months / full", "Observed / partial months", "Trades", "Exposure %", "Fees USDT", "Top 5 / net %", "Top month / net %"], aggregates.map(a =>
+    const {accounts,aggregates} = localView(data.summary,window,ids);
+    table("comparison", ["Allocation", "Status", "Return %", "MTM DD %", "Profitable tickers", "Positive / all-account-observed months", "Observed / incomplete-account months", "Trades", "Exposure %", "Fees USDT", "Top 5 / net %", "Top month / net %"], aggregates.map(a =>
       [data.allocationLabels[a.allocationId], a.status, a.returnPct, a.maxDrawdownMtmPct, a.availableTickers == null ? null : `${a.profitableTickers}/${a.availableTickers}`, a.monthBreadth ? `${a.monthBreadth.positiveMonths}/${a.monthBreadth.breadthDenominator}` : null, a.monthBreadth ? `${a.monthBreadth.observedMonths}/${a.monthBreadth.partialMonths}` : null, a.trades,a.timeInMarketPct,a.fees,a.topFiveTickerContributionPct,a.largestPositiveMonthContributionPct]));
     plot("aggregateCurve", aggregates); byId("aggregateLegend").textContent = ids.map(id => data.allocationLabels[id]).join(" · ");
     const map = new Map();
@@ -81,7 +141,45 @@ if (typeof document !== "undefined") {
     table("months",["Ticker", "Allocation", "Month", "PnL USDT", "Contribution %", "Return %", "Status", "Observed / expected", "Partial edge", "Exact boundaries"], rows.flatMap(a => a.months.map(m =>
       [a.instrumentId,a.allocationId,m.month,m.pnl,m.contributionPct,m.returnPct,m.returnStatus,`${m.observedBars}/${m.expectedBars}`,m.partialEdgeMonth,`${m.openingExact}/${m.closingExact}`])));
     byId("disclosures").textContent = JSON.stringify({request:data.request,identities:data.identities,limitations:data.summary.limitations,selectedAccounts:selectedAccounts.map(({curve,months,...rest})=>rest),aggregates:aggregates.map(({curve,months,...rest})=>rest)},null,2);
+    updateRobustness(aggregates,selectedAccounts,window);
   }
+  const date=t=>t==null?'Unavailable':new Date(t).toISOString();
+  function updateRobustness(aggregates,selectedAccounts,window) {
+    const overview=globalView(data,overviewAllocation.value);
+    byId('protocol').textContent=JSON.stringify(data.request.protocol,null,2);
+    table('windowOverview',['Window','Start UTC','End UTC','Days','Status','Return %','Bar-close DD %','Net USDT','Trades','Time in market %','Profitable / available tickers','Positive / all-account-observed months','Observed months','Calendar edge months','Incomplete-account months','Non-exact boundary months'],overview.map(w=>{
+      const a=w.aggregate,r=a?.robustness;
+      return [w.windowId,date(w.startMs),date(w.endMs),w.durationMs/86400000,a?.status,a?.returnPct,a?.maxDrawdownMtmPct,a?.netPnl,a?.trades,a?.timeInMarketPct,a?.availableTickers==null?null:`${a.profitableTickers}/${a.availableTickers}`,a?.monthBreadth?`${a.monthBreadth.positiveMonths}/${a.monthBreadth.breadthDenominator}`:null,r?.observedMonths,r?.partialEdgeMonths,r?.incompleteAccountMonths,r?.nonExactBoundaryMonths];
+    }));
+    table('overlaps',['Window A','Window B','Shared hours','% of A','% of B'],(data.summary.robustness?.overlaps||[]).map(x=>[x.windowA,x.windowB,x.sharedMs/3600000,x.sharedPctOfA,x.sharedPctOfB]));
+    const matrix=monthlyMatrix(data,overviewAllocation.value);
+    table('monthMatrix',['Month',...overview.map(w=>w.windowId)],matrix.map(row=>[row.month,...row.cells.map(c=>{
+      if(c.status==='outsideWindow')return 'Outside window';
+      const m=c.strategy,p=c.passive;
+      return `${date(p.startMs)} to ${date(p.endMs)} | Strategy: ${fmt(m?.returnPct)}% (${m?.returnStatus||c.status}); PnL ${fmt(m?.pnl)} USDT; contribution ${fmt(m?.contributionPct)}%; observed ${fmt(m?.observedBars)}/${fmt(m?.expectedBars)}; all accounts ${fmt(m?.allAccountsObserved)}; calendar edge ${p.partialEdgeMonth}; exact boundaries ${fmt(m?.openingExact)}/${fmt(m?.closingExact)} | Passive long price: ${fmt(p.returnPct)}% ${p.direction||p.reason}; endpoints ${p.usableAccounts}/${p.plannedAccounts}; bars ${p.observedBars}/${p.expectedBars}; interior gap ${p.interiorGap}`;
+    })]));
+    table('tickerRemoval',['Allocation','Requested / removed','Removed tickers','Original / remaining accounts','Original / remaining capital USDT','Original / remaining PnL USDT','Remaining return %','Status'],aggregates.flatMap(a=>{
+      const r=a.robustness?.removals;if(!r||r.status!=='available')return [[a.allocationId,null,null,null,null,null,null,r?.reason||'unavailable']];
+      return r.tickerExTop.map(x=>[a.allocationId,`${x.requestedCount}/${x.removedCount}`,x.removedIds.join(', '),`${x.originalCount}/${x.remainingCount}`,`${fmt(x.originalCapital)}/${fmt(x.remainingCapital)}`,`${fmt(x.originalPnl)}/${fmt(x.remainingPnl)}`,x.remainingReturnPct,x.status]);
+    }));
+    table('erasure',['Allocation','Unit','Status','Removed / original count','Removed fraction','Selected IDs','Remaining PnL USDT','All units removed'],aggregates.flatMap(a=>['ticker','month'].map(unit=>{
+      const x=a.robustness?.removals?.[unit+'ProfitErasure'];return [a.allocationId,unit,x?.status||'unavailable',x?`${fmt(x.removedCount)}/${x.originalCount}`:null,x?.removedFraction,x?.removedIds.join(', '),x?.remainingPnl,x?.allRemoved];
+    })));
+    table('monthRemoval',['Allocation','Selected month / count','Removed PnL USDT','Original capital USDT','Remaining accounting PnL USDT','Remaining contribution %','Selected coverage flags','Total / observed months','Calendar edges / incomplete-account months'],aggregates.map(a=>{
+      const r=a.robustness,x=r?.removals?.monthExBest;return [a.allocationId,x?`${x.selectedMonth||'None'} / ${x.removedCount}`:r?.removals.reason,x?.removedPnl,x?.originalCapital,x?.remainingPnl,x?.remainingContributionPct,JSON.stringify(x?.selectedFlags),`${fmt(r?.totalMonths)}/${fmt(r?.observedMonths)}`,`${fmt(r?.partialEdgeMonths)}/${fmt(r?.incompleteAccountMonths)}`];
+    }));
+    table('sideAttribution',['Account / allocation','Side','Status','Trades','Gross USDT','Fees USDT','Net USDT','Holding hours','Capital contribution %','Time in market %'],[...aggregates,...selectedAccounts].flatMap(a=>(a.robustness?.sides||[]).map(s=>[`${a.instrumentId||'Aggregate'} / ${a.allocationId}`,s.side,s.status,s.trades,s.grossPnl,s.fees,s.netPnl,s.holdingMs==null?null:s.holdingMs/3600000,s.contributionPct,s.timeInMarketPct])));
+    const pair=pairView(data,window,baseline.value,candidate.value);
+    byId('pairStatus').textContent=pair.status==='available'?`Candidate minus baseline; ticker breadth ${JSON.stringify(pair.tickerCounts)}; monthly breadth ${JSON.stringify(pair.monthCounts)}; eligible calendar edges ${pair.eligiblePartialEdgeMonths}. Lower drawdown is better.`:pair.reason;
+    table('pairTotals',['Return pp','Bar-close DD pp','Net USDT','Trades','Time in market pp'],pair.deltas?[Object.values(pair.deltas)]:[]);
+    table('pairMonths',['Month','Interval UTC','Baseline return %','Candidate return %','Delta pp','Breadth status','Exclusion reason','Calendar edge','Gaps disclosed'],pair.months.map(m=>[m.month,`${date(m.startMs)} to ${date(m.endMs)}`,m.baselineReturnPct,m.candidateReturnPct,m.delta,m.status,m.reason,m.partialEdgeMonth,m.interiorGap]));
+    const tickerRows=orderTickers(pair.tickers,pairSort.key,pairSort.descending);
+    table('pairTickers',['Ticker','Baseline return %','Candidate return %','Delta pp','Status'],tickerRows.map(r=>[r.instrumentId,r.baselineReturnPct,r.candidateReturnPct,r.delta,r.status]));
+    const headers=byId('pairTickers').querySelectorAll('th');
+    ['baselineReturnPct','candidateReturnPct','delta'].forEach((key,i)=>{headers[i+1].replaceChildren();const b=element('button',['Baseline return %','Candidate return %','Delta pp'][i],headers[i+1]);b.onclick=()=>{pairSort=sortState(pairSort,key);update();};});
+    byId('pairSettings').textContent=JSON.stringify(data.request.allocations.filter(a=>[baseline.value,candidate.value].includes(a.allocationId)),null,2);
+  }
+  overviewAllocation.onchange=update;baseline.onchange=update;candidate.onchange=update;
   selectWindow.onchange = update; selectAllocations.onchange = update;
   selectTicker.onchange = () => {selected=selectTicker.value;update();};
   function move(delta) {selected=moveTicker(displayed.map(r=>r.instrumentId),selected,delta);update();}

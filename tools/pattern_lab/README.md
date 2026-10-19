@@ -2625,7 +2625,8 @@ collision/type/CRC/size/hash checks, bounded extraction and fresh staging; no
 
 ### Metrics, synchronized gaps and report
 
-Metric schema is `pattern-lab.account-metrics.v1`; money is USDT, durations are
+Newly derived summaries use `pattern-lab.account-metrics.v2`; sealed v1 summaries
+remain readable as stored. Money is USDT, durations are
 milliseconds and returns are percentages. Net return uses initial capital;
 full-path MTM DD includes initial capital as the first peak and every bar-close
 equity point, without clipping at 100%. This differs from Merlin's realized DD.
@@ -2653,7 +2654,9 @@ at midnight closes the preceding month. Partial edge months and stale/nonexact
 boundaries are disclosed. Contributions reconcile to total PnL; monthly returns
 are not added. Unobserved months have null returns and are excluded from breadth;
 aggregate full-month breadth requires all planned accounts to have observations.
-Counts disclose observed/full/partial months. These are not T03 monthly restarts.
+Legacy `fullMonths` counts all-account-observed months; `partialMonths` counts
+incomplete account coverage, not calendar clipping. These values remain unchanged.
+These are not T03 monthly restarts.
 
 Concentration divides top-five positive ticker PnL or largest positive monthly
 PnL by aggregate net PnL only when positive; ratios may exceed 100%. Passive
@@ -2671,6 +2674,103 @@ controls keep their keys. Node state tests do not claim browser/focus coverage;
 appearance remains owner review. Same-host rebuilds are deterministic for
 `derived/summary.json` and `derived/report.html`; cross-host exactness must be
 checked on the specific fixture, not assumed.
+
+### Descriptive account robustness (T02)
+
+The normal study publication and `account-report` rebuild now add six descriptive
+views: all declared windows and exact overlaps, monthly strategy matrix, monthly
+passive price context, positive ticker/month removal, long/short attribution,
+and an explicitly selected allocation pair in the local window. No account is
+re-executed. No p-values, confidence intervals, combined stability score,
+parameter search, automatic winner or validated-edge label is produced.
+
+New summary fields use camelCase:
+
+- Top-level `robustness.windows` has `windowId`, `startMs`, `endMs`, `durationMs`,
+  sorted by start/end/ID. `robustness.overlaps` has `windowA`, `windowB`, `sharedMs`,
+  `sharedPctOfA`, `sharedPctOfB`. Shared duration is the positive intersection
+  of half-open intervals; each percentage uses that window's duration. Overlap
+  is not independent replication. Legacy arrays/selectors keep their old order.
+- Each account's `robustness.sides` has long/short `trades`, `grossPnl`, `fees`,
+  `netPnl`, `holdingMs`, `contributionPct`, `timeInMarketPct`, and `status`.
+  Fees include entry and exit; closed trades retain their actual side, including
+  forced exits. Zero-trade sides remain present. Capital contribution uses the
+  original capital. This is attribution within the executed account, not a
+  separately executed side strategy or side drawdown.
+- Account `robustness.passiveMonths` records each clipped `month`, `startMs`,
+  `endMs`, `partialEdgeMonth`, `returnPct`, `direction`, status/reason,
+  `expectedBars`, `observedBars`, `interiorGap`, `openingExact`, `closingExact`.
+  It requires an observed real open exactly at the left boundary and real close
+  exactly at the right. Missing/nonaligned endpoints return null with a reason;
+  no observations are borrowed. Interior gaps remain disclosed but do not
+  invalidate an endpoint price change. This is a resetting monthly long-price
+  reference, excluding fees/funding/liquidation/sizing, not alpha or a matched
+  execution benchmark. It is distinct from continuous-window passive metrics.
+- Aggregate `robustness.passiveMonths` averages the whole equal-weight declared
+  roster only when all endpoints exist; otherwise return/direction are null.
+  `usableAccounts`, `plannedAccounts`, `unavailableInstruments`, expected/observed
+  counts and interior gaps disclose why. Strategy months retain independent
+  availability. A missing market reference never erases strategy evidence.
+- Aggregate `robustness.sides` sums side facts; time in market divides summed
+  holding time by account count times window duration. The two sides reconcile
+  to existing totals. Unavailable aggregate side metrics remain null.
+- Aggregate `robustness.partialEdgeMonths` counts declared calendar clipping,
+  including unavailable windows. `incompleteAccountMonths` preserves the legacy
+  incomplete-account coverage meaning. `observedMonths`, `totalMonths`,
+  `nonExactBoundaryMonths` and `coverageStatus` keep these concepts distinct;
+  unavailable coverage counts are null. Each existing aggregate monthly row adds
+  `pairEligible`: finite available return AND all accounts observed AND exact
+  opening and closing boundaries. Matching calendar edge months can be eligible.
+- Aggregate `robustness.removals` has `tickerExTop` (requested 1/5 positive
+  contributors), `tickerProfitErasure`, `monthExBest`, `monthProfitErasure` and
+  explicit statuses/counts/IDs/denominators. Rankings descend by positive net
+  contribution, with ID/month ties canonical. New sums use stable summation;
+  existing aggregate net PnL P stays the authoritative total. Ticker ex-top return
+  is `100*(P-removedPnl)/((N-removedCount)*C)`. No remaining account means null
+  `emptyRemainingRoster`. No losers are removed to reach a requested count.
+  For positive P, profit erasure uses the smallest positive prefix leaving a
+  nonpositive remainder and at least one account; otherwise
+  `noNonemptySubsetErasesProfit`. Nonpositive P gives `originalNetNonpositive`
+  and null erasure count. This is an ex-post subset, not a selection strategy.
+  Month removal divides remaining accounting net by original capital. It can
+  remove all months, marked `allRemoved`; no positive month means zero removed.
+  Both month diagnostics are "Accounting removal; no account re-execution" and
+  retain original sizing, entries, fees and subsequent PnL. Calendar/coverage
+  flags and totals remain visible. There is no trade-removal variant.
+
+The global overview and monthly matrix use their own allocation selector and
+retain all windows when the old local window control changes. The local controls
+apply to existing views, removals and sides. Baseline/Candidate start unselected;
+identical choices, unavailable aggregates or unequal per-account capital are
+incompatible. The pair shows candidate minus baseline: return/DD/time-in-market
+percentage points, net USDT, trades, per-ticker returns and per-month differences.
+Different settings are disclosed, not treated as a controlled filter experiment.
+Monthly breadth intersects Python `pairEligible` and identical intervals, with
+explicit exclusions and separate calendar-edge/gap flags. Ticker/month breadth
+is descriptive, not an inferential sample size. Null is never a tie; monthly
+percentage differences are never added to derive the aggregate difference.
+
+For finite a/b, Python and JS use
+`abs(a-b) <= max(1e-9*max(abs(a),abs(b)),1e-8)`. A paired tie compares the original
+candidate and baseline returns, not their difference to zero. Passive direction
+is flat iff close(return,0). Removal stops at a remainder <=0 or close(remainder,0).
+Calculations are unrounded; displayed rounding does not determine classification.
+
+Top-level `derivation` records `metricSchema`, sorted `sources` hashes for every
+`.py`/`.js` directly in `account_study/`, `inputStudy` (original schema/identities),
+`python` and `libraries` (numpy/pandas/pyarrow/numba). It includes no timestamps,
+absolute paths or hostnames. New logic stays in this directory and is included
+in automatic implementation attribution without editing legacy digest lists.
+Same-source/environment rebuilds are byte-identical. Cross-host source/version
+metadata may differ; numerical comparisons use the stated tolerances, while
+same-artifact identities and original member hashes remain exact.
+
+Old v1 summaries and archived HTML are read as stored. Strict loading, full
+validation, import/export and seals are unchanged. Rebuild writes v2 summary/HTML
+in a fresh separate directory; it never reseals or adds members to an old run.
+Only compact summaries/monthly points are embedded. No all-pairs archive, market
+pack access, network dependency or additional execution is needed. Owner visual
+review is separate from Node pure-function checks; no browser/focus claim is made.
 
 ## Matched comparisons and calibrated inference
 

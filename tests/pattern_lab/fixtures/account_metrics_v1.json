@@ -1,0 +1,373 @@
+{
+  "baseline": "29574bb1aef90b40fa36e964bb049b78185d475b",
+  "metricsSha256": "3c654763b78a286afc946590b0eb5e373581ddffb73fd8daab1f11569c9c890e",
+  "note": "Captured before T02 metrics edits; explicit integer prices; no generated identities/fingerprints pinned.",
+  "accounts": [
+    {
+      "instrumentId": "A",
+      "allocationId": "base",
+      "windowId": "w",
+      "coverage": {
+        "requestedStartMs": 0,
+        "requestedEndMs": 9000000,
+        "firstObservedOpenMs": 0,
+        "lastObservedCloseMs": 9000000,
+        "expectedBars": 5,
+        "observedBars": 4,
+        "missingBars": 1,
+        "missingHeadSlots": 0,
+        "missingTailSlots": 0
+      },
+      "terminalStatus": "closed",
+      "initialCapital": 10000.0,
+      "finalCapital": 9918.04,
+      "netPnl": -81.95999999999913,
+      "grossPnl": -80.0,
+      "fees": 1.96,
+      "returnPct": -0.819599999999987,
+      "maxDrawdownMtmPct": 1.5969838277606818,
+      "trades": 1,
+      "wins": 0,
+      "losses": 1,
+      "breakevens": 0,
+      "winRatePct": 0.0,
+      "profitFactor": 0.0,
+      "profitFactorStatus": "available",
+      "attemptDispositions": {
+        "filled": 1,
+        "noNextBar": 1
+      },
+      "exitReasons": {
+        "gapBoundary": 1
+      },
+      "forcedExits": {
+        "terminal": {
+          "trades": 0,
+          "netPnl": 0
+        },
+        "gapBoundary": {
+          "trades": 1,
+          "netPnl": -81.96
+        }
+      },
+      "ambiguousTrades": 0,
+      "openingStops": 0,
+      "openingTargets": 0,
+      "explicitExitPending": 0,
+      "expiryPending": 0,
+      "unknownExitDecisions": 0,
+      "commandReadiness": {
+        "long": {
+          "observedDecisionBars": 4,
+          "unknownEntryDecisionBars": 0,
+          "unknownInitialStopDecisionBars": 0,
+          "unknownEitherDecisionBars": 0
+        },
+        "short": {
+          "observedDecisionBars": 4,
+          "unknownEntryDecisionBars": 0,
+          "unknownInitialStopDecisionBars": 0,
+          "unknownEitherDecisionBars": 0
+        }
+      },
+      "filterUnknownDecisionBars": 0,
+      "filterUnknownAttempts": 0,
+      "filterBlockedAttempts": 0,
+      "conflictAttempts": 0,
+      "holdingMs": 3600000,
+      "holdingDistributionMs": {
+        "min": 3600000.0,
+        "median": 3600000.0,
+        "p90": 3600000.0,
+        "max": 3600000.0
+      },
+      "meanEntryLeverage": 0.2000200020002,
+      "maxEntryLeverage": 0.2000200020002,
+      "timeInMarketPct": 40.0,
+      "occupiedBarSharePct": 50.0,
+      "returnPctPerExposureDay": -19.670399999999688,
+      "passive": {
+        "status": "available",
+        "firstOpen": 100.0,
+        "lastClose": 104.0,
+        "firstOpenMs": 0,
+        "lastCloseMs": 9000000,
+        "observedSpanMs": 9000000,
+        "longReturnPct": 4.0000000000000036,
+        "shortReturnPct": -4.0000000000000036,
+        "coverage": {
+          "requestedStartMs": 0,
+          "requestedEndMs": 9000000,
+          "firstObservedOpenMs": 0,
+          "lastObservedCloseMs": 9000000,
+          "expectedBars": 5,
+          "observedBars": 4,
+          "missingBars": 1,
+          "missingHeadSlots": 0,
+          "missingTailSlots": 0
+        }
+      },
+      "months": [
+        {
+          "month": "1970-01",
+          "viewKind": "continuousContribution",
+          "startMs": 0,
+          "endMs": 9000000,
+          "openingEquity": 10000.0,
+          "closingEquity": 9918.04,
+          "pnl": -81.95999999999913,
+          "contributionPct": -0.8195999999999912,
+          "returnPct": -0.8195999999999912,
+          "returnStatus": "available",
+          "observedBars": 4,
+          "expectedBars": 5,
+          "coveragePct": 80.0,
+          "partialEdgeMonth": true,
+          "openingSampleMs": 0,
+          "closingSampleMs": 9000000,
+          "openingExact": true,
+          "closingExact": true
+        }
+      ],
+      "monthBreadth": {
+        "positiveMonths": 0,
+        "breadthDenominator": 1,
+        "observedMonths": 1,
+        "fullMonths": 1,
+        "partialMonths": 0,
+        "unobservedMonths": 0
+      },
+      "curve": [
+        {
+          "timeMs": 0,
+          "returnPct": 0.0
+        },
+        {
+          "timeMs": 9000000,
+          "returnPct": -0.819599999999987
+        }
+      ]
+    },
+    {
+      "instrumentId": "B",
+      "allocationId": "base",
+      "windowId": "w",
+      "coverage": {
+        "requestedStartMs": 0,
+        "requestedEndMs": 9000000,
+        "firstObservedOpenMs": 0,
+        "lastObservedCloseMs": 9000000,
+        "expectedBars": 5,
+        "observedBars": 4,
+        "missingBars": 1,
+        "missingHeadSlots": 0,
+        "missingTailSlots": 0
+      },
+      "terminalStatus": "closed",
+      "initialCapital": 10000.0,
+      "finalCapital": 9918.04,
+      "netPnl": -81.95999999999913,
+      "grossPnl": -80.0,
+      "fees": 1.96,
+      "returnPct": -0.819599999999987,
+      "maxDrawdownMtmPct": 1.5969838277606818,
+      "trades": 1,
+      "wins": 0,
+      "losses": 1,
+      "breakevens": 0,
+      "winRatePct": 0.0,
+      "profitFactor": 0.0,
+      "profitFactorStatus": "available",
+      "attemptDispositions": {
+        "filled": 1,
+        "noNextBar": 1
+      },
+      "exitReasons": {
+        "gapBoundary": 1
+      },
+      "forcedExits": {
+        "terminal": {
+          "trades": 0,
+          "netPnl": 0
+        },
+        "gapBoundary": {
+          "trades": 1,
+          "netPnl": -81.96
+        }
+      },
+      "ambiguousTrades": 0,
+      "openingStops": 0,
+      "openingTargets": 0,
+      "explicitExitPending": 0,
+      "expiryPending": 0,
+      "unknownExitDecisions": 0,
+      "commandReadiness": {
+        "long": {
+          "observedDecisionBars": 4,
+          "unknownEntryDecisionBars": 0,
+          "unknownInitialStopDecisionBars": 0,
+          "unknownEitherDecisionBars": 0
+        },
+        "short": {
+          "observedDecisionBars": 4,
+          "unknownEntryDecisionBars": 0,
+          "unknownInitialStopDecisionBars": 0,
+          "unknownEitherDecisionBars": 0
+        }
+      },
+      "filterUnknownDecisionBars": 0,
+      "filterUnknownAttempts": 0,
+      "filterBlockedAttempts": 0,
+      "conflictAttempts": 0,
+      "holdingMs": 3600000,
+      "holdingDistributionMs": {
+        "min": 3600000.0,
+        "median": 3600000.0,
+        "p90": 3600000.0,
+        "max": 3600000.0
+      },
+      "meanEntryLeverage": 0.2000200020002,
+      "maxEntryLeverage": 0.2000200020002,
+      "timeInMarketPct": 40.0,
+      "occupiedBarSharePct": 50.0,
+      "returnPctPerExposureDay": -19.670399999999688,
+      "passive": {
+        "status": "available",
+        "firstOpen": 100.0,
+        "lastClose": 96.0,
+        "firstOpenMs": 0,
+        "lastCloseMs": 9000000,
+        "observedSpanMs": 9000000,
+        "longReturnPct": -4.0000000000000036,
+        "shortReturnPct": 4.0000000000000036,
+        "coverage": {
+          "requestedStartMs": 0,
+          "requestedEndMs": 9000000,
+          "firstObservedOpenMs": 0,
+          "lastObservedCloseMs": 9000000,
+          "expectedBars": 5,
+          "observedBars": 4,
+          "missingBars": 1,
+          "missingHeadSlots": 0,
+          "missingTailSlots": 0
+        }
+      },
+      "months": [
+        {
+          "month": "1970-01",
+          "viewKind": "continuousContribution",
+          "startMs": 0,
+          "endMs": 9000000,
+          "openingEquity": 10000.0,
+          "closingEquity": 9918.04,
+          "pnl": -81.95999999999913,
+          "contributionPct": -0.8195999999999912,
+          "returnPct": -0.8195999999999912,
+          "returnStatus": "available",
+          "observedBars": 4,
+          "expectedBars": 5,
+          "coveragePct": 80.0,
+          "partialEdgeMonth": true,
+          "openingSampleMs": 0,
+          "closingSampleMs": 9000000,
+          "openingExact": true,
+          "closingExact": true
+        }
+      ],
+      "monthBreadth": {
+        "positiveMonths": 0,
+        "breadthDenominator": 1,
+        "observedMonths": 1,
+        "fullMonths": 1,
+        "partialMonths": 0,
+        "unobservedMonths": 0
+      },
+      "curve": [
+        {
+          "timeMs": 0,
+          "returnPct": 0.0
+        },
+        {
+          "timeMs": 9000000,
+          "returnPct": -0.819599999999987
+        }
+      ]
+    }
+  ],
+  "aggregate": {
+    "allocationId": "base",
+    "windowId": "w",
+    "status": "available",
+    "plannedAccounts": 2,
+    "initialCapital": 20000.0,
+    "finalCapital": 19836.08,
+    "netPnl": -163.91999999999825,
+    "returnPct": -0.819599999999987,
+    "medianTickerReturnPct": -0.819599999999987,
+    "maxDrawdownMtmPct": 1.5969838277606818,
+    "profitableTickers": 0,
+    "availableTickers": 2,
+    "trades": 2,
+    "fees": 3.92,
+    "meanExposureDays": 0.041666666666666664,
+    "timeInMarketPct": 40.0,
+    "returnPctPerExposureDay": -19.670399999999688,
+    "marketUnobservedAccountSlots": 2,
+    "topFiveTickerContributionPct": null,
+    "largestPositiveMonthContributionPct": null,
+    "concentrationStatus": "nonpositiveNetPnl",
+    "passiveLongReturnPct": 0.0,
+    "passiveShortReturnPct": 0.0,
+    "passiveBoundariesDiffer": false,
+    "months": [
+      {
+        "month": "1970-01",
+        "viewKind": "continuousContribution",
+        "startMs": 0,
+        "endMs": 9000000,
+        "openingEquity": 20000.0,
+        "closingEquity": 19836.08,
+        "pnl": -163.91999999999825,
+        "contributionPct": -0.8195999999999912,
+        "returnPct": -0.8195999999999912,
+        "returnStatus": "available",
+        "observedBars": 8,
+        "expectedBars": 10,
+        "coveragePct": 80.0,
+        "partialEdgeMonth": true,
+        "openingSampleMs": 0,
+        "closingSampleMs": 9000000,
+        "openingExact": true,
+        "closingExact": true,
+        "observedAccounts": 2,
+        "allAccountsObserved": true,
+        "openingSamples": {
+          "A": 0,
+          "B": 0
+        },
+        "closingSamples": {
+          "A": 9000000,
+          "B": 9000000
+        }
+      }
+    ],
+    "monthBreadth": {
+      "positiveMonths": 0,
+      "breadthDenominator": 1,
+      "observedMonths": 1,
+      "fullMonths": 1,
+      "partialMonths": 0,
+      "unobservedMonths": 0
+    },
+    "curve": [
+      {
+        "timeMs": 0,
+        "returnPct": 0.0
+      },
+      {
+        "timeMs": 9000000,
+        "returnPct": -0.819599999999987
+      }
+    ]
+  }
+}

@@ -51,6 +51,23 @@ interaction state without claiming browser/focus coverage. Synthetic fixtures
 are under `_account_study_helpers.py`; the runnable public synthetic example
 uses no test/ignored-work imports. Retain a Windows-produced compact bundle for
 Linux full verification and rebuild comparison after the owner's Git update.
+`test_account_robustness.py` adds independent overlap, passive endpoint, removal,
+side reconciliation, calendar/coverage and pair-eligibility checks. The portable
+v1 expectation in `fixtures/account_metrics_v1.json` was captured at accepted
+`29574bb` before T02 metrics edits with explicit integer prices; it pins metric
+values/labels/counts, not freshly generated identities or raw float bytes. The
+exact old Windows ZIP is a separate explicit delivery/review gate, never an
+ordinary test dependency. The multi-month dyadic fixture asserts both trade sides,
+missing passive endpoints, non-exact/calendar edges, tied/differing pairs and a
+nonempty profit-erasing ticker subset. Generated HTML remains in external temp.
+The Node wrapper locates Node with `shutil.which` and passes that generated HTML
+to the existing executable harness. Only this wrapper skips if Node is absent;
+record the Node gate pending until it executes on the review host. The harness
+also accepts no argument, preserves ticker-navigation checks and reads shared
+numeric vectors in `fixtures/robustness_numbers.json`. Neither form certifies
+browser layout or focus. Account integration tests retain standard/debug and
+one/six-worker exact derived parity. Run the new module plus all six existing
+account/account-study modules, then the named preservation gate after final edits.
 Preservation gates are all `tests/pattern_lab` and
 `tests/v2/test_v2_kernel_execution.py`.
 
