@@ -10,7 +10,7 @@ import zipfile
 import numpy as np
 
 from ..accounts.contracts import require, array, ExecutionPolicy, integer
-from ..account_study.common import (closed, read_json, write_json, json_text, parse_json,
+from ..account_study.common import (closed, read_json, json_text, parse_json,
     file_hash, digest_id, member_names)
 from ..account_study import verify_account_study
 from ..auxiliary.storage import safe_path
@@ -21,12 +21,23 @@ from .scorers import registry
 from .engine import (source_hashes, implementation, build_scores, validate_scores_saved,
     validate_ledger, data_identity, path_identity)
 from .arithmetic import calculate
+from .capacity import MAX_JSON, admit_results_capacity
 
 SCHEMA='pattern-lab.universe-selection.v1'
-MAX_JSON=16*1024*1024
 MAX_FILE=256*1024*1024
 MAX_TOTAL=1024*1024*1024
 DERIVED=('derived/summary.json','derived/report.html')
+
+
+def write_json(path, value):
+    # Match the existing serializer and native text-mode newline, but check the
+    # exact emitted UTF-8 bytes before creating either destination or temp file.
+    payload=(json_text(value)+os.linesep).encode('utf-8')
+    require(len(payload)<=MAX_JSON,
+        f'selection JSON write bound: {Path(path).name}, {len(payload)} bytes exceeds {MAX_JSON}')
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_name(path.name+'.tmp')
+    temporary.write_bytes(payload);os.replace(temporary,path)
 
 
 def new_destination(value, source=None):
@@ -172,10 +183,12 @@ def run_selection(request, *, parent_root, output_root, scorers=None):
     before={k:v for k,v in before.items() if k in used}
     parent_root=safe_path(parent_root);target=new_destination(output_root,parent_root)
     parent=admit_parent(doc,parent_root)
+    admit_results_capacity(doc,parent.study['request']['instruments'])
     ledger,paths,roster=extract_ledger(parent,doc);validate_ledger(doc,roster,ledger,paths)
     target.mkdir(parents=True)
     try:
         scores=build_scores(parent,doc,ledger,roster,registered)
+        validate_scores_saved(doc,ledger,roster,scores)
         require(before=={k:v for k,v in source_hashes(registered).items() if k in used},'experimental source changed during run')
         attribution=implementation(before)
         allocation=next(a for a in parent.study['request']['allocations'] if a['allocationId']==doc['allocationId'])

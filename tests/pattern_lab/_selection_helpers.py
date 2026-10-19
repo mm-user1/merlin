@@ -6,6 +6,49 @@ import numpy as np
 from tools.pattern_lab.selection.request import month_bounds
 
 
+def experimental_selection(parent, root):
+    """Real x. evidence with two distinct stable contracts, reusable by review."""
+    from tools.pattern_lab.selection import Scorer, run_selection
+    from tools.pattern_lab.examples.selection_synthetic import selection_request
+    import importlib.util
+    root.mkdir()
+    source=root/'experimental.py'
+    source.write_text('from tools.pattern_lab.selection import Score\n'
+        'def score(view, parameters):\n'
+        '    return [Score(i, True, (1., 0.), None, {}) for i in view.instruments]\n',encoding='utf-8')
+    spec=importlib.util.spec_from_file_location('selection_contract_fixture',source)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    scorer=Scorer('x.contract','1',lambda p:dict(p),lambda p:p['months'],('first','second'),
+        module.score,{'experimental.py':source},True)
+    doc=selection_request(parent)
+    doc['selectors']=[dict(selectorId=s,scorerId='x.contract',version='1',parameters=dict(months=n))
+        for s,n in (('long',2),('short',1))]
+    return run_selection(doc,parent_root=parent.root,output_root=root/'valid',scorers={'x.contract':scorer}),source
+
+
+def forge_contract(reader, parent, output, field):
+    """Coherently reseal only one month's contract; all old checks remain valid."""
+    import shutil
+    from tools.pattern_lab.account_study.common import write_json
+    from tools.pattern_lab.selection.artifacts import Selection, write_derived, seal_directory
+    from tools.pattern_lab.selection.engine import data_identity
+    from tools.pattern_lab.selection.ledger import score_view
+    shutil.copytree(reader.root,output)
+    meta=reader.selection;scores=reader.scores;b=scores[0];c=b['contract']
+    if field=='lookbackMonths':
+        c['lookbackMonths']=1;b['historyMonths']=b['historyMonths'][-1:]
+        _,b['barDependencies']=score_view(parent,meta['request'],reader.ledger,b['commonPool'],
+            b['historyMonths'],b['cutoffMs'],True)
+    elif field=='keyNames':c['keyNames'].reverse()
+    elif field=='needsBars':c['needsBars']=False;b['barDependencies']=[]
+    else:raise AssertionError(field)
+    meta['identities']['dataInput']=data_identity(meta['request'],reader.ledger,reader._paths,scores,meta['allocation'])
+    write_json(output/'selection.json',meta);write_json(output/'scores.json',scores)
+    altered=Selection(output,meta,reader.ledger,scores,reader.results,reader._paths,reader._curves)
+    write_derived(altered,output);seal_directory(output)
+    return output
+
+
 def request_template():
     return dict(schema='pattern-lab.selection-request.v1',selectionId='test',
         parent={k:'0'*64 for k in ('specification','dataInput','implementation','completionSha256')},allocationId='base',

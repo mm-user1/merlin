@@ -5,7 +5,7 @@ const SelectionReport = (() => {
   const number = value => value === null || value === undefined ? "Unavailable" : Number(value).toLocaleString("en-US", {maximumFractionDigits:6});
   const percentage = value => value === null || value === undefined ? "Unavailable" : number(value) + "%";
   const equivalent = (a,b) => a !== null && b !== null && Math.abs(a-b) <= Math.max(1e-9*Math.max(Math.abs(a),Math.abs(b)),1e-8);
-  const reasonText = value => ({noObservedBars:'No observed bars',insufficientCoverage:'Insufficient observed coverage',missingMonth:'Missing history month'}[value] || value);
+  const reasonText = value => ({noObservedBars:'No observed bars',insufficientCoverage:'Insufficient observed coverage',missingMonth:'Missing history month',noAvailableMonths:'No evaluation months have sufficient data',incompleteEvaluationPeriod:'Some evaluation months have insufficient data; full-period results are unavailable'}[value] || value);
   const choose = (data,selector,k) => data.comparisons.find(c => c.selectorId === selector && c.k === Number(k));
   const table = (headers,rows) => '<div class="scroll"><table><thead><tr>'+headers.map(h=>'<th>'+escape(h)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(cell=>'<td>'+escape(cell)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
   function chart(c) {
@@ -27,9 +27,14 @@ const SelectionReport = (() => {
     let out='<section><h2>Fixed-reference performance</h2>'+table(['Series','Cumulative return (pp)','Max drawdown (pp)','Net PnL (USDT)'],['selected','allEligible'].map(name=>[name,number(c.fullPeriod[name].cumulativeReturnPp),number(c.fullPeriod[name].maxDrawdownPp),number(c.fullPeriod[name].netPnl)]))+chart(c)+'</section>';
     out+='<section><h2>'+(c.fullPeriodAvailable?'Random-K full-period distribution':'Matched available-month subtotal — partial period')+'</h2>';
     out+='<p>Used '+partial.usedMonths+' of '+partial.requestedMonths+' requested months: '+escape(partial.months.join(', ')||'none')+'.</p>';
+    if (distribution.reason) out+='<p>'+escape(reasonText(distribution.reason))+'.</p>';
+    if (!c.fullPeriodAvailable && c.randomFullDistribution.reason) out+='<p>'+escape(reasonText(c.randomFullDistribution.reason))+'.</p>';
     if (!c.fullPeriodAvailable) out+=table(['Selected subtotal (pp)','All-eligible subtotal (pp)'],[[number(partial.selectedReturnPp),number(partial.allEligibleReturnPp)]])+'<p>Full-period total and drawdown remain unavailable. No concatenated-fragment drawdown is reported.</p>';
     out+=table(['Random p10 (pp)','Median (pp)','p90 (pp)','Below selected','Equal','Above selected'],[[number(distribution.p10),number(distribution.median),number(distribution.p90),number(distribution.below),number(distribution.equal),number(distribution.above)]])+'<p>Underfilled months: '+c.underfilledMonths+'; empty-pool cash months: '+c.emptyPoolMonths+'.</p></section>';
     out+='<section><h2>Monthly capital, coverage and membership</h2>'+table(['Month','Final pool','Selected / idle slots','Selected capital','All-eligible capital','Selected return','All-eligible return','Fees / trades','Availability'],c.months.map(m=>[m.month,m.eligiblePool.join(', ')||'Empty pool',m.selected.members.join(', ')+' / '+m.selected.idleSlots,number(m.selected.plannedCapital),number(m.allEligible.plannedCapital),percentage(m.selected.returnPct),percentage(m.allEligible.returnPct),number(m.selected.fees)+' / '+number(m.selected.trades),m.available?'Available':m.unavailableReasons.map(r=>r.instrumentId+': '+reasonText(r.reason)).join('; ')]))+'</section>';
+    out+='<section><h2>Monthly financial values</h2>'+table(['Month','Series','Planned capital (USDT)','Funded capital (USDT)','Utilization','Net PnL (USDT)','Return','Idle slots'],c.months.flatMap(m=>['selected','allEligible'].map(name=>{
+      const p=m[name];return [m.month,name==='selected'?'Selected':'All-eligible',number(p.plannedCapital),number(p.fundedCapital),percentage(p.utilizationPct),number(p.netPnl),percentage(p.returnPct),p.idleSlots];
+    })))+'</section>';
     out+='<section><h2>Ranking, exclusions and boundary ties</h2>';
     for (const m of c.months) {
       const batch=data.scores.find(s=>s.selectorId===c.selectorId&&s.month===m.month);

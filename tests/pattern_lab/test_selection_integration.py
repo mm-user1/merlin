@@ -30,6 +30,67 @@ def monthly_parent(tmp_path_factory):
     return parent
 
 
+def test_oversized_capacity_refused_before_work(monthly_parent,tmp_path,monkeypatch):
+    import tools.pattern_lab.selection.artifacts as artifacts
+    doc=selection_request(monthly_parent);doc['randomControl']['replicates']=2000
+    def denied(*a,**kw):raise AssertionError('capacity admission reached expensive work')
+    for name in ('extract_ledger','build_scores','calculate'):monkeypatch.setattr(artifacts,name,denied)
+    with pytest.raises(PatternLabDataError,match='planning budget'):
+        run_selection(doc,parent_root=monthly_parent.root,output_root=tmp_path/'rejected')
+    assert not (tmp_path/'rejected').exists()
+
+
+@pytest.mark.parametrize('field',['lookbackMonths','keyNames','needsBars'])
+def test_one_contract_per_selector_offline(monthly_parent,tmp_path,monkeypatch,field):
+    from ._selection_helpers import experimental_selection,forge_contract
+    import tools.pattern_lab.selection.artifacts as artifacts
+    reader,source=experimental_selection(monthly_parent,tmp_path/'research')
+    changed=forge_contract(reader,monthly_parent,tmp_path/'changed',field)
+    source.unlink()  # Offline loading has no experimental module to import.
+    assert load_selection(reader.root).scores==reader.scores
+    assert verify_selection(reader.root,parent_root=monthly_parent.root)['scorers']=={'long':'storedOutputsOnly','short':'storedOutputsOnly'}
+    def denied(*a,**kw):raise AssertionError('inconsistent contract reached portfolio calculation')
+    monkeypatch.setattr(artifacts,'calculate',denied)
+    for action in (lambda:load_selection(changed),
+        lambda:rebuild_selection_report(changed,output_root=tmp_path/'rebuilt'),
+        lambda:verify_selection(changed,parent_root=monthly_parent.root)):
+        with pytest.raises(PatternLabDataError,match='contract changes across months'):action()
+    archive=tmp_path/'changed.zip'
+    with zipfile.ZipFile(archive,'w') as z:
+        for p in changed.rglob('*'):
+            if p.is_file():z.write(p,p.relative_to(changed).as_posix())
+    with pytest.raises(PatternLabDataError,match='contract changes across months'):
+        import_selection_bundle(archive,output_root=tmp_path/'imported')
+    assert not (tmp_path/'imported').exists() and not (tmp_path/'rebuilt').exists()
+
+
+def test_generation_changing_contract_fails_before_calculate(monthly_parent,tmp_path,monkeypatch):
+    import tools.pattern_lab.selection.artifacts as artifacts
+    source=tmp_path/'source.py';source.write_text('# trusted fixture\n')
+    calls=iter([2,1,2,2])  # admission, then May/June/July
+    scorer=Scorer('x.changing','1',lambda p:p,lambda p:next(calls),('key',),
+        lambda v,p:[Score(i,True,(0.,),None,{}) for i in v.instruments],{'source.py':source})
+    doc=selection_request(monthly_parent)
+    doc['selectors']=[dict(selectorId='changing',scorerId='x.changing',version='1',parameters={})]
+    def denied(*a,**kw):raise AssertionError('changing contract reached portfolio calculation')
+    monkeypatch.setattr(artifacts,'calculate',denied)
+    with pytest.raises(PatternLabDataError,match='contract changes across months'):
+        run_selection(doc,parent_root=monthly_parent.root,output_root=tmp_path/'failed',scorers={'x.changing':scorer})
+    assert read_json(tmp_path/'failed/status.json')['state']=='failed'
+    assert not (tmp_path/'failed/completion.json').exists()
+
+
+def test_unexpected_json_oversize_leaves_failed_unsealed_run(monthly_parent,tmp_path,monkeypatch):
+    import tools.pattern_lab.selection.artifacts as artifacts
+    # Small byte guard exercises the actual write path; it does not change the
+    # independent planning budget and allocates no large result/metadata fixture.
+    monkeypatch.setattr(artifacts,'MAX_JSON',512)
+    with pytest.raises(PatternLabDataError,match='JSON write bound'):
+        run_selection(selection_request(monthly_parent),parent_root=monthly_parent.root,output_root=tmp_path/'failed')
+    assert read_json(tmp_path/'failed/status.json')['state']=='failed'
+    assert not (tmp_path/'failed/selection.json').exists() and not (tmp_path/'failed/completion.json').exists()
+
+
 def test_real_monthly_selection(monthly_parent,tmp_path):
     request=selection_request(monthly_parent)
     reader=run_selection(request,parent_root=monthly_parent.root,output_root=tmp_path/'selection')

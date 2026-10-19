@@ -118,6 +118,18 @@ the transferred parent with a freshly regenerated fixture. Linux review needs th
 selection modules, these archive gates and installed Node; protected module suites
 need no additional Linux sweep without a concrete regression reason.
 
+For the narrow T04A-1 follow-up, run the two selection modules plus
+`test_selection_capacity.py`. They cover early dimension/identifier-aware
+capacity refusal, practical 44-ticker sizing, planning/write byte boundaries,
+failed unsealed writes and one offline contract per selector. Genuine x. fixtures
+and coherently resealed contract mutations are built by `_selection_helpers.py`;
+they require no ignored files. The Node harness checks rendered monthly capital,
+utilization and PnL for both series, underfill, empty pools and readable unavailable
+states. Exact original T04A ZIP compatibility remains an explicit delivery gate:
+unchanged economic identities/results and original hashes, two identical new
+rebuilds, expected updated HTML. No full preservation/UAC rerun is required for
+this scoped follow-up absent regression evidence or material scope expansion.
+
 Pattern Lab's `test_pattern_lab_pilot.py` covers the M5 breakout loop oracle,
 warmup/gaps and future invariance, downside RMS validity/null semantics, public
 reader ownership and requested-table copy count, and synthetic study-to-analysis

@@ -4982,6 +4982,8 @@ The callable receives `(view, normalizedParameters)` and returns one `Score` per
 common-pool instrument. `Score` fields are instrumentId, eligible bool, finite key
 tuple (or null when ineligible), reason (nonempty only when ineligible), and finite
 strict-JSON components. Omissions, duplicates and extra instruments are errors.
+Keys/components require plain Python `int`/`float`; convert NumPy scalars with
+`int()` or `float()` in the scorer. There is no implicit scalar coercion.
 
 Views expose instruments/monthLabels tuples, cutoffMs, `months(instrumentId)`
 immutable mappings and, with needsBars, lazy `bars(instrumentId)`. Each view owns
@@ -5002,6 +5004,10 @@ checks source hashes before normalizing/scoring and rechecks contracts and outpu
 A comment-only source edit changes implementation attribution, not specification
 identity. Behavioral changes require a new explicit scorer version. Absent
 experimental code is labelled storedOutputsOnly; supplied mismatching code fails.
+The entire normalized contract (lookbackMonths, ordered keyNames, needsBars)
+must be identical across evaluation months of each selectorId. Different selectors
+may have different contracts. Generation and offline validation check this before
+portfolio recalculation, without importing absent scorer code.
 
 ### Ledger, eligibility, capital and controls
 
@@ -5088,7 +5094,10 @@ startMs/endMs, stepMs, rows and sliced timestamp/value hashes. Portfolio month
 rows retain pool, ranking, availability/reasons, selected/allEligible/random
 membership and capital/PnL/fees/trades/rejections/forced exits, tie evidence,
 curve references and common/method exclusions. Random rows have replicateIndex.
-Reconstruction checks the whole closed derived structure, not only final PnL.
+Reconstruction checks the closed derived numeric/summary structure, not only
+final PnL. HTML member hashes are checked, but a coherently resealed HTML edit is
+not independently authenticated by loading. Rebuild regenerates HTML; arithmetic
+and summary consistency checks do not imply HTML authenticity.
 
 Specification identity excludes notes and paths. Data-input identity binds exact
 parent pins, allocation, ledger, full native monthly path contributions and native
@@ -5115,12 +5124,59 @@ members. Bounds: 10,000 sealed members, 16 MiB per JSON, 256 MiB per file/expand
 array archive, 1 GiB total sealed payload. These are resource refusals, never silent
 reductions in declared K or replicate counts. Receipts stay outside sealed runs.
 
+### Run capacity planning
+
+`selection.capacity.results_capacity(normalizedRequest, roster)` returns an
+internal inspectable planning assessment. Run admission uses the exact parent
+roster before ledger extraction, scoring, arithmetic, random draws or output
+creation. This policy is not applied to old artifacts during load/import/rebuild/
+deep verification and adds no economic request field or schema/identity change.
+There is no universal replicate cap.
+
+Let S be selector count, M evaluation months, Q the number of K values, R the
+replicate count, N roster size, and L the sum of the UTF-8 byte lengths of each
+identifier serialized with ASCII-escaped JSON (including quotes). For each K,
+take the min(K,N) longest encoded identifiers; their lengths plus one comma each,
+plus two array brackets, give A(K). The planning formula is:
+
+```text
+randomBytes = S * M * R * sum(768 + A(K) for each K)
+replicateTotalsBytes = S * Q * R * 2 * 33
+reservedBytes = 262144 + S * Q * 2048 + S * Q * M * (4096 + 8*L + 256*N)
+estimatedBytes = reservedBytes + ceil(1.25 * (randomBytes + replicateTotalsBytes))
+supported = estimatedBytes <= 16777216
+```
+
+The 768-byte row allowance covers ordinary keys, numeric fields/counts and
+forced-exit objects; 33 budgets a 32-byte number plus comma in both retained
+full/partial replicate-total arrays. The non-random reserve covers ordinary
+comparison/month metadata, pools, rankings, exclusions and selected/all-eligible
+rows; 25% adds margin to random evidence. Computation uses integer arithmetic,
+roster-length sorting and dimensions, never an R-sized trial list. These are
+conservative supported-workload allowances, not proven bounds for arbitrary
+legal numbers, experimental explanations or metadata. Some physically fitting
+requests may be refused. Errors disclose dimensions, estimated/reserved bytes
+and the JSON limit, suggesting fewer replicates or separately declared K/selector
+comparisons without changing the research plan.
+
+For 44 IDs `BYBIT_TICKER00USDT` through `BYBIT_TICKER43USDT`, 12 evaluation
+months, three selectors, K=6/8/10 and 100 replicates, the estimate is 15,437,026
+bytes and fits. Longer IDs, more comparisons/months or larger R increase it.
+Parent history preparation is separate. Every new selection JSON payload is
+also checked against the actual 16 MiB UTF-8 byte limit before writing, including
+its native-platform final newline (CRLF on Windows). Unexpected oversize during
+generation leaves failed status without completion. Other file bounds, extreme
+metadata and filesystem errors retain ordinary checked refusal behavior.
+
 The report embeds summary/score facts and bounded display paths only. Each curve
 preserves monthly endpoints and earliest extrema, with deterministic remaining
 index buckets; cap max(2,000, 4*declared evaluation months+1) points. Python computes
 metrics from full paths; JS only selects/displays. The light report shows selector/K,
 capital/utilization, coverage, exclusions/ties, native diagnostics, attribution and
 explicit unavailable wording. Node state checks do not certify appearance/focus.
+The monthly financial table displays saved planned/funded capital and net PnL
+in USDT, utilization, return and idle slots for selected and all-eligible. Known
+capital remains visible when PnL is unavailable; unknown observations are not cash.
 
 ```text
 python -m tools.pattern_lab selection --request request.json --parent-root PARENT --output-root NEW_RUN

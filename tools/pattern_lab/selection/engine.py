@@ -60,13 +60,16 @@ def validate_scores_saved(doc,ledger,roster,batches):
     expected=[(s['selectorId'],m) for s in doc['selectors'] for m in doc['evaluationMonths']]
     require([(b.get('selectorId'),b.get('month')) for b in batches] == expected, 'score batch keys/order')
     selectors={s['selectorId']:s for s in doc['selectors']};months=[w['month'] for w in doc['monthWindows']]
-    registered=registry()
+    registered=registry();contracts={}
     for b in batches:
         closed(b,('selectorId','month','cutoffMs','historyMonths','contract','commonPool','commonExclusions','barDependencies','rows'))
         c=b['contract'];closed(c,('lookbackMonths','keyNames','needsBars'))
         integer(c['lookbackMonths'],'lookback',1);require(c['lookbackMonths']<=doc['pool']['historyMonths'],'saved lookback')
         require(type(c['needsBars']) is bool and type(c['keyNames']) is list and c['keyNames'] and len(set(c['keyNames']))==len(c['keyNames']),'saved contract')
         for name in c['keyNames']:identifier(name)
+        signature=json_text(c)
+        require(contracts.setdefault(b['selectorId'],signature)==signature,
+            'saved contract changes across months for selector '+b['selectorId'])
         index=months.index(b['month']);history=months[index-doc['pool']['historyMonths']:index]
         eligible,excluded=history_pool(ledger,roster,history,doc['pool']['minObservedBarsPct'])
         seen=months[index-c['lookbackMonths']:index];cutoff=month_bounds(b['month'])[0]
