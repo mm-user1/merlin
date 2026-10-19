@@ -30,6 +30,7 @@ class AccountRecord:
     result: c.AccountResult
     labels: dict
     preparationFacts: dict | None = None
+    auxiliaryEvidence: dict | None = None
 
 
 def preparation_facts(p):

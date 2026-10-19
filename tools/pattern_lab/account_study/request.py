@@ -52,17 +52,24 @@ def warmup_requirements(doc, allocation):
         intrinsic = p['length']-1 if f['featureId'] == 'atr' else (
             p['confirmationBars']-1 if f['featureId'] == 'candleDirection' else 0)
         required[f['inputId']] = max(required.get(f['inputId'], 0), f['priorBars'], intrinsic)
-    recipe, policy = allocation['provider']['recipe'], allocation['policy']
-    required['target'] = max(required['target'], recipe['entryRunLength']-1,
+    scalar = allocation['provider']['providerId'] == 'scalarCondition'
+    recipe, policy = (allocation['provider']['stop'] if scalar else allocation['provider']['recipe']), allocation['policy']
+    if scalar:
+        required['target'] = max(required['target'],recipe['swingBars']-1)
+    else:
+        required['target'] = max(required['target'], recipe['entryRunLength']-1,
         recipe['exitRunLength']-1 if policy['mode'] == 'signalManaged' else 0,
         1 if recipe['stopProvider'] == 'haSwing2' else
-        recipe['swingBars']-1 if recipe['stopProvider'] == 'realSwingAtr' else 0)
+            recipe['swingBars']-1 if recipe['stopProvider'] == 'realSwingAtr' else 0)
     decision = start + steps['target']
     result = {}
     for alias, count in sorted(required.items()):
         available = (start-origin)//steps[alias] if alias == 'target' else (decision-origin)//steps[alias]-1
         require(available >= count, 'insufficient declared warmup for '+allocation['allocationId']+'/'+alias)
         result[alias] = dict(requiredPriorSlots=count, availablePriorSlots=available, stepMs=steps[alias])
+    if doc['schema'] == 'pattern-lab.account-study-request.v2':
+        from ..auxiliary.request import auxiliary_warmup
+        result.update(auxiliary_warmup(doc,allocation,origin,start))
     return result
 
 
@@ -74,8 +81,10 @@ def normalize_request(value):
         path = Path(value).expanduser().resolve()
         value, base = read_json(path), path.parent
     doc = parse_json(json_text(value))  # owned copy; rejects NaN and non-JSON values
-    closed(doc, ('schema', 'studyId', 'protocol', 'preparationStartUtc', 'instruments', 'sources', 'windows', 'allocations'), ('notes',))
-    require(doc['schema'] == SCHEMA, 'account study request schema')
+    v2 = doc.get('schema') == 'pattern-lab.account-study-request.v2'
+    closed(doc, ('schema', 'studyId', 'protocol', 'preparationStartUtc', 'instruments', 'sources', 'windows', 'allocations',
+                 *(['auxiliaryInputs'] if v2 else [])), ('notes',))
+    require(doc['schema'] == SCHEMA or v2, 'account study request schema')
     identifier(doc['studyId'])
     require(doc.get('notes') is None or isinstance(doc['notes'], str), 'notes')
     protocol = doc['protocol']
@@ -115,19 +124,26 @@ def normalize_request(value):
     origin, start, end = bounds(doc)
     require(origin <= start, 'preparation origin after research start')
     validate_against_protocol(protocol, study_start_ms=start, study_end_ms=end, warmup_start_ms=origin)
-    used = set()
+    used = set(); used_auxiliary = set()
+    if v2:
+        from ..auxiliary.request import normalize_bindings, normalize_allocation
+        normalize_bindings(doc)
     for a in doc['allocations']:
-        closed(a, ('allocationId', 'timeframeMinutes', 'features', 'provider', 'entryFilter', 'policy'))
+        closed(a, ('allocationId', 'timeframeMinutes', 'features', 'provider', 'entryFilter', 'policy',
+                   *(['auxiliaryFeatures'] if v2 else [])))
         a['timeframeMinutes'] = normalize_timeframe_minutes(a['timeframeMinutes'])
         policy = native(ExecutionPolicy, a['policy']); a['policy'] = asdict(policy)
-        p = closed(a['provider'], ('providerId', 'version', 'recipe'))
-        require((p['providerId'], p['version']) == ('haRun', '1'), 'unsupported account provider/version')
-        recipe = native(HARecipe, p['recipe'])
-        for k in ('entryRunLength', 'exitRunLength', 'swingBars'):
-            integer(getattr(recipe, k), k, 1)
-        number(recipe.atrMultiplier, 'atrMultiplier', inclusive=True)
-        require(recipe.stopProvider in ('haLast', 'haSwing2', 'realSwingAtr'), 'stop provider')
-        p['recipe'] = asdict(recipe)
+        p = a['provider']
+        scalar = v2 and p.get('providerId') == 'scalarCondition'
+        if not scalar:
+            closed(p, ('providerId', 'version', 'recipe'))
+            require((p['providerId'], p['version']) == ('haRun', '1'), 'unsupported account provider/version')
+            recipe = native(HARecipe, p['recipe'])
+            for k in ('entryRunLength', 'exitRunLength', 'swingBars'):
+                integer(getattr(recipe, k), k, 1)
+            number(recipe.atrMultiplier, 'atrMultiplier', inclusive=True)
+            require(recipe.stopProvider in ('haLast', 'haSwing2', 'realSwingAtr'), 'stop provider')
+            p['recipe'] = asdict(recipe)
         require(type(a['features']) is list and a['features'], 'features')
         features = {}
         for raw in a['features']:
@@ -136,15 +152,18 @@ def normalize_request(value):
             require(f.requestId not in features, 'duplicate feature request')
             features[f.requestId] = f
             if f.inputId != 'target': used.add(f.inputId)
-        ha = features.get(recipe.haRequestId)
-        require(ha is not None and ha.featureId == 'ha' and ha.inputId == 'target', 'HA dependency')
-        if recipe.stopProvider == 'realSwingAtr':
-            atr = features.get(recipe.atrRequestId)
-            require(atr is not None and atr.featureId == 'atr' and atr.inputId == 'target', 'ATR dependency')
-        else:
-            require(recipe.atrRequestId is None, 'unused ATR dependency')
+        if not scalar:
+            ha = features.get(recipe.haRequestId)
+            require(ha is not None and ha.featureId == 'ha' and ha.inputId == 'target', 'HA dependency')
+            if recipe.stopProvider == 'realSwingAtr':
+                atr = features.get(recipe.atrRequestId)
+                require(atr is not None and atr.featureId == 'atr' and atr.inputId == 'target', 'ATR dependency')
+            else:
+                require(recipe.atrRequestId is None, 'unused ATR dependency')
         f = a['entryFilter']
-        if f is not None:
+        if v2:
+            used_auxiliary.update(normalize_allocation(doc,a,features))
+        elif f is not None:
             closed(f, ('providerId', 'version', 'requestId'))
             require((f['providerId'], f['version']) == ('candleDirection', '1') and
                     f['requestId'] in features and features[f['requestId']].featureId == 'candleDirection',
@@ -156,6 +175,7 @@ def normalize_request(value):
         endpoints = [origin, start, end] + [to_epoch_ms(w[k], k) for w in doc['windows'] for k in ('startUtc', 'endUtc')]
         require(all(t % step == 0 for t in endpoints for step in steps), 'unaligned source/target endpoint')
     require(used == aliases, 'unused source binding')
+    if v2: require(used_auxiliary == {b['inputId'] for b in doc['auxiliaryInputs']}, 'unused auxiliary binding')
     doc['sources'].sort(key=lambda s: s['inputId'])
     return AccountStudyRequest(json_text(doc))
 

@@ -71,6 +71,29 @@ account/account-study modules, then the named preservation gate after final edit
 Preservation gates are all `tests/pattern_lab` and
 `tests/v2/test_v2_kernel_execution.py`.
 
+T03 adds `test_auxiliary_data.py` (offline recording transports, immutable typed
+snapshots, overlap/late arrivals, strict source units, causal lag/coverage/gap
+boundaries and synthetic provider/type extensions) and `test_account_auxiliary.py`
+(closed request v2, genuine filtered/scalar trades, one/six-worker and
+standard/debug parity, consumed versus parent identities, offline regeneration,
+honestly resealed command tampering, CLI and an external-process public example).
+No test reads a live API, market pack or ignored work document. Run both new
+modules plus the seven existing account/account-study/robustness modules after
+final changes, then the same full Windows preservation gate above. Tests retain
+real symlink/process permissions; use owner-approved elevation if needed, without
+changing OS policy. Keep logs/JUnit, actual case IDs, source/pin hashes and skips.
+
+The report Node harness accepts either the T02 multi-month v2 metrics HTML or
+the T03 auxiliary v3 metrics HTML. `test_node_auxiliary_report` skips only when
+`shutil.which('node')` is absent; record that Linux Node execution is pending.
+The Python example is also executable by absolute script path from outside the
+repository with PYTHONPATH unset. Generated outputs must remain external.
+Exact old T01B-1/T02 ZIP compatibility and the new Windows bundle's full Linux
+semantic check are separate delivery/review gates, not ignored-fixture dependencies
+of ordinary tests. For the new dyadic fixture, full checking must regenerate
+command/component identities exactly on Linux; metric sums still use rel_tol
+1e-9 / abs_tol 1e-8. Do not rewrite sealed inputs or weaken these gates.
+
 Pattern Lab's `test_pattern_lab_pilot.py` covers the M5 breakout loop oracle,
 warmup/gaps and future invariance, downside RMS validity/null semantics, public
 reader ownership and requested-table copy count, and synthetic study-to-analysis

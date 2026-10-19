@@ -218,10 +218,15 @@ def derive(reader):
         row = aggregate_metrics((reader.account(k) for k in keys), summaries)
         row['robustness'] = robustness.aggregate_facts(row,summaries)
         aggregate.append(row)
-    return dict(schema=VERSION, units=dict(money='quote currency USDT', returns='percent', duration='milliseconds'),
+    version = 'pattern-lab.account-metrics.v3' if reader.study['schema'] == 'pattern-lab.account-study.v2' else VERSION
+    result = dict(schema=version, units=dict(money='quote currency USDT', returns='percent', duration='milliseconds'),
         accounts=accounts, aggregates=aggregate, robustness=robustness.window_facts(reader.study['request']),
-        derivation=robustness.attribution(reader,VERSION),
+        derivation=robustness.attribution(reader,version),
         limitations=['Descriptive independent accounts, not shared margin or a validated edge.',
             'Intrabar exits use the bar open clock; exact intrabar exposure time is unknown.',
             'Passive price references exclude fees, funding, liquidation and account sizing.',
             'Continuous monthly contributions are not monthly restarts; overlapping windows are not independent.'])
+    if version.endswith('.v3'):
+        from ..auxiliary.study import summary_metadata
+        result['auxiliary'] = summary_metadata(reader)
+    return result

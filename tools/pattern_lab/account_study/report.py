@@ -28,6 +28,7 @@ def render(request, summary, identities):
     payload = json_text(model).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
     script = (Path(__file__).with_name('report.js')).read_text(encoding='utf-8')
     title = html.escape(request['studyId'])
+    auxiliary = auxiliary_section(request,summary)
     return '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Account study · '''+title+'''</title><style>
 body{font:15px system-ui,sans-serif;color:#172738;background:#f5f7fa;margin:0;padding:24px;line-height:1.5}
@@ -39,7 +40,7 @@ svg{width:100%;height:230px;background:#fafcfe}pre{white-space:pre-wrap;overflow
 #monthMatrix td{white-space:normal;min-width:300px;max-width:480px;vertical-align:top}#monthMatrix td:first-child{min-width:70px}
 @media(max-width:650px){body{padding:10px}section{padding:10px}h1{font-size:24px}}
 </style><main><h1>'''+title+'''</h1><p>Completed descriptive account study. This is not a validated trading edge or a shared-margin portfolio.</p>
-<label>Window <select id="window"></select></label><label>Compare allocations <select id="allocations" multiple></select></label>
+'''+auxiliary+'''<label>Window <select id="window"></select></label><label>Compare allocations <select id="allocations" multiple></select></label>
 <section><h2>Allocation comparison</h2><div class="scroll"><table id="comparison"></table></div></section>
 <section><h2>Aggregate cumulative return (%)</h2><svg id="aggregateCurve" role="img" aria-label="Aggregate percentage returns"></svg><p id="aggregateLegend"></p></section>
 <section><h2>Tickers</h2><p class="note">Click a numeric header: descending first, then toggle. Null values stay last. Arrow navigation follows the displayed order.</p>
@@ -69,3 +70,37 @@ svg{width:100%;height:230px;background:#fafcfe}pre{white-space:pre-wrap;overflow
 <details><summary>Explicit pair settings</summary><pre id="pairSettings"></pre></details></section>
 <details><summary>Policy, coverage, passive references, source provenance and limitations</summary><pre id="disclosures"></pre></details>
 </main><script id="account-data" type="application/json">'''+payload+'''</script><script>'''+script+'''</script></html>\n'''
+
+
+def auxiliary_section(request,summary):
+    if 'auxiliary' not in summary:return ''
+    escape=lambda value:html.escape(str(value))
+    rows=[]
+    for a in request['allocations']:
+        f=a['entryFilter'];components=[] if f is None else f.get('allOf',[f])
+        role='Auxiliary threshold-crossing entry signal' if a['provider']['providerId']=='scalarCondition' else 'HA entry signal'
+        filters='No entry filter' if not components else ('Combined all-of: ' if len(components)>1 else 'Entry filter: ')+', '.join(c['componentId'] for c in components)
+        rows.append('<tr><td>'+escape(a['allocationId'])+'</td><td>'+escape(role)+'</td><td>'+escape(filters)+'</td></tr>')
+    facts=[];seen=set()
+    for dependency in summary['auxiliary']['dependencies']:
+        for name,f in dependency['features'].items():
+            d=f['declaration'];source=next(s for s in dependency['sources'] if s['bindingId']==d['bindingId'])
+            s=source['series'];key=(name,f['identity'])
+            if key in seen:continue
+            seen.add(key)
+            unit='fractional change' if d['transform']=='auxiliaryChange' else s['units'][d['field']]
+            details=(f"{s['venue']} {s['contract']}; {d['field']}; {unit}; native multiplier {s['baseMultiplier']}. "
+                f"Assumed publication lag {d['publicationLagMs']} ms; exclusive maximum age {d['maxAgeMs']} ms. "
+                f"Known / unknown / stale research decisions: {f['knownResearchDecisions']} / {f['unknownResearchDecisions']} / {f['staleResearchDecisions']}.")
+            if s['type']['typeId']=='settledFunding':
+                spacing=', '.join(k+' ms: '+str(v) for k,v in sorted(source['inspection']['observedSpacingMs'].items(),key=lambda item:int(item[0])))
+                details+=' Observed adjacent spacing counts (not an accrual schedule): '+spacing+'.'
+            facts.append('<li><strong>'+escape(name)+'</strong>: '+escape(details)+'</li>')
+    return ('<section id="auxiliary-context"><h2>Auxiliary signals and entry filters</h2>'
+        '<p>Funding is a rate per settlement, not per hour and never an account cashflow. Raw thresholds across different settlement intervals are not economically normalized. '
+        'Historical publication times are unmeasured; lag, age and retrieval completeness are explicit assumptions. Missing data blocks entries.</p>'
+        '<div class="scroll"><table><thead><tr><th>Allocation</th><th>Signal</th><th>Filters</th></tr></thead><tbody>'+''.join(rows)+'</tbody></table></div>'
+        '<details><summary>Source units, timing assumptions and coverage</summary><ul>'+''.join(facts)+'</ul></details>'
+        '<p>Final filter timestamps describe a derived target-decision grid, not exchange observations. '
+        'The standard bundle retains native source times, unknown reasons and every component in its components/ evidence, linked by dependency-links.json. '
+        'A disabled direction is blocked; no side bypasses unknown input.</p></section>')

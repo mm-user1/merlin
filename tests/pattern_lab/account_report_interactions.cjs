@@ -61,6 +61,21 @@ if (process.argv[2]) {
   const payload=html.match(/<script id="account-data" type="application\/json">([\s\S]*?)<\/script>/);
   assert.ok(payload);
   const data=JSON.parse(payload[1]);
+  if (data.summary.schema==='pattern-lab.account-metrics.v3') {
+    assert.equal(data.summary.auxiliary.schema,'pattern-lab.account-auxiliary-metadata.v1');
+    assert.ok(data.summary.aggregates.every(a=>a.trades>0));
+    assert.equal(ui.globalView(data,'baseline').length,data.request.windows.length);
+    for(const w of data.request.windows) {
+      const pair=ui.pairView(data,w.windowId,'baseline','funding');
+      assert.equal(pair.status,'available');assert.equal(pair.tickerCounts.valid,data.request.instruments.length);
+      const order=ui.orderTickers(pair.tickers,'delta',true).map(r=>r.instrumentId);
+      assert.equal(ui.moveTicker(order,order[0],-1),order[0]);
+    }
+    assert.ok(html.includes('Auxiliary threshold-crossing entry signal'));
+    assert.ok(html.includes('Combined all-of:'));
+    assert.ok(html.includes('not exchange observations'));
+    assert.ok(!html.includes('<script src='));
+  } else {
   assert.equal(data.summary.schema,'pattern-lab.account-metrics.v2');
   assert.ok(data.summary.accounts.some(a=>a.trades>0));
   assert.equal(ui.globalView(data,'rr2').length,data.request.windows.length);
@@ -79,5 +94,6 @@ if (process.argv[2]) {
   assert.ok(ui.monthlyMatrix(data,'rr2').length>=3);
   assert.ok(html.includes('Accounting removal; no account re-execution'));
   assert.ok(!html.includes('<script src='));
+  }
 }
 console.log('Account report interaction state checks passed (no browser/focus claim).');

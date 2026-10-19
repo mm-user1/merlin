@@ -4652,9 +4652,234 @@ Known limits of these milestones:
   certified by a Linux test run.
 - Fully read-only mounted packs are unsupported, because every pack-level operation
   opens the in-root `.pack-lock`.
-- No downloader worker pool, no adaptive request scheduler, no OI or funding
-  collector, no CSV adapter and no second NPZ research reader.
+- No downloader worker pool, adaptive request scheduler, CSV adapter or second
+  NPZ research reader. Funding/OI use the separate auxiliary snapshots below.
 - Unknown source closure for the prototype NPZ pack is unchanged; only re-collected
   data carries verified closure evidence.
 - Existing Merlin CSV behavior is unchanged, and Merlin still does not import
   Pattern Lab.
+
+## Auxiliary snapshots and composable account entry filters (T03)
+
+`tools.pattern_lab.auxiliary` provides `collect_auxiliary(request, output_root=...,
+previous_root=None, client=None)`, `load_snapshot(root)`,
+`inspect_auxiliary(root, verify=False)` and `publish_snapshot(series,
+output_root=..., provenance=None)` for explicit normalized offline inputs.
+Only collection accesses HTTP. Studies, readers, verification and reports are
+offline. Bybit USDT linear perpetual Funding/OI are the initial live adapters;
+no collection is implicit in a study. Funding never changes cashflows.
+
+### Collection and snapshot contract
+
+Collection request `pattern-lab.auxiliary-collection-request.v1` is closed:
+`schema`, `provider` (`bybit`), `series` (nonempty list). Every series has exactly
+`seriesId`, `contract`, `typeId`, `interval`, `startUtc`, `endUtc`, `tailMarginMs`,
+`baseMultiplier`. Names and UTC-qualified `[startUtc,endUtc)` bounds are explicit.
+`typeId` is `settledFunding` or `openInterest`. Funding interval is null; OI
+requires `5min`, `15min`, `30min`, `1h`, `4h` or `1d`. OI observations must be epoch
+multiples of the selected interval. Live preparation sampled only 5min/1h/4h phases;
+fixtures establish the implemented convention for all six, not live certification.
+
+Example bounded collection request (execution needs a separate data assignment):
+
+```json
+{"schema":"pattern-lab.auxiliary-collection-request.v1","provider":"bybit","series":[
+  {"seriesId":"pepeFunding","contract":"1000PEPEUSDT","typeId":"settledFunding","interval":null,
+   "startUtc":"2025-07-01T00:00:00Z","endUtc":"2025-07-03T00:00:00Z","tailMarginMs":3600000,"baseMultiplier":1000},
+  {"seriesId":"pepeOI","contract":"1000PEPEUSDT","typeId":"openInterest","interval":"1h",
+   "startUtc":"2025-07-01T00:00:00Z","endUtc":"2025-07-03T00:00:00Z","tailMarginMs":3600000,"baseMultiplier":1000}
+]}
+```
+
+```text
+python -m tools.pattern_lab aux-collect --request auxiliary-request.json --output-root NEW_SNAPSHOT
+python -m tools.pattern_lab aux-collect --request extension-request.json --previous-root OLD_SNAPSHOT --output-root NEW_SNAPSHOT
+python -m tools.pattern_lab aux-inspect --snapshot-root SNAPSHOT --verify
+```
+
+The shared `exchange_data.HttpClient` provides finite timeout (20 s), default
+2 requests/s and at most five attempts, including documented business errors;
+the adapter adds no nested retry budget. Metadata and server time use existing
+Bybit methods. Explicit ends later than server time minus the declared margin
+refuse rather than shorten. Minimum margin: one OI interval or one hour for
+Funding. These are assumptions, not measured maximum publication delays.
+Funding pages descend with oldest-1; a short nonempty page is not exhaustion.
+OI uses bounded fixed ranges and progressing cursors. Each attempt records URL,
+parameters, time, response size/hash and outcome, without persistent raw responses.
+Collection is serial with 200-row pages, at most 10,000 pages/2,000,000 rows per
+series. Failures after output admission leave a small failure receipt and no seal.
+
+Snapshot schema is `pattern-lab.auxiliary-snapshot.v1`. Exact members are
+`manifest.json`, `provenance.json`, `completion.json` and each series'
+`series/<seriesId>/{series.json,rows.parquet,receipt.json}`. Tables are typed
+int64 timestamps and nullable float64 fields; synthetic event types also have
+stable string event IDs. JSON is bounded at 16 MiB and a table/member at 512 MiB.
+Readers reject unsafe/colliding names, symlinks, extra/missing members, invalid
+schema/units/values and hash/size mismatches. Parquet/NPZ never deserialize pickle.
+
+Normalized Funding rows: `observedAtMs`, `fundingRate` (signed dimensionless
+**rate per settlement**, not hourly/annualized). OI rows: `observedAtMs`,
+`singleOpenInterest` and `openInterest` (nonnegative native base-unit levels,
+respectively one-sided and two-sided). The selected feature initially uses
+`singleOpenInterest` with no half-of-other-field fallback. Null is unavailable;
+present nonfinite/malformed values refuse the page. Exact doubling is not assumed.
+Contract multipliers are explicit metadata, never applied to Funding rates or
+silently converted level units. Bybit `1000PEPEUSDT` and `SHIB1000USDT` mappings
+must be explicitly supplied; target names are not an automatic mapper.
+
+Series descriptors have closed fields `seriesId`, `provider`, `providerVersion`,
+`venue`, `contract`, `market`, `baseUnit`, `baseMultiplier`, `interval`, `type`,
+`units`. Type descriptors declare schema/version, kind, numeric fields, record
+key, economic definition, population where relevant, time/coverage semantics,
+supported transforms and nonnegative constraints. `model.TYPES` and
+`collect.PROVIDERS` are small explicit Python registrations. An alternative
+Funding adapter needs no exchange branch in execution/report code. Tests register
+a sampled ratio with an explicit population and an event stream with distinct
+same-millisecond IDs; they are not production collectors.
+
+Series semantic identity hashes canonical descriptors, sorted normalized rows
+(including null masks), and merged observation-time coverage spans. Snapshot
+content identity hashes the sorted series IDs/content hashes. Provenance identity
+hashes the exact non-seal member size/hash map. Request timing, fetch clocks,
+response hashes, page order and transport bytes do not enter semantic content.
+Identical content/coverage can therefore have new provenance but the same pin.
+
+Updates always create a new root. Each explicitly extended series re-fetches at
+least the prior end's final **prior** margin, clipped to the original start;
+wider repairs are permitted. New overlap keys are counted as late arrivals.
+Identical duplicates collapse; changed/disappearing old keys and conflicting
+duplicates refuse. Populating an old null field counts as a changed record.
+Undeclared old series copy unchanged; newly declared series need not re-fetch
+others. No-op updates may have new provenance. Coverage is unioned only from
+successful requested spans; listing gaps and missing OI slots stay visible.
+Finite margins/overlaps cannot prove that no still-later publication is missing.
+Inspection reports observed spacing as description, never a historical schedule.
+
+### Closed account-study request v2
+
+`pattern-lab.account-study-request.v2` retains every v1 root field and adds the
+required `auxiliaryInputs` list. All allocations also add `auxiliaryFeatures`
+(possibly empty). Existing native `features` remain OHLCV-only. All unknown keys
+refuse. Native policies, protocol/reserve boundaries and window semantics remain.
+
+Each auxiliary binding has `inputId`, `snapshotId`, `expectedSnapshotContentId`,
+`coveragePolicy` (`requireComplete` or `allowUnknown`), and `sources`. `sources`
+is either `{"*": source}` for one fixed source or an exact target-ID mapping
+covering every target. Each source has exactly `seriesId`, `provider`, `venue`,
+`contract`, `typeId`, `field`, `interval`, `unit`, `baseUnit`, `baseMultiplier`.
+All facts must match a verified snapshot; no guessed or missing mapping is used.
+
+Each auxiliary feature declares `featureId` (unique local name), `bindingId`,
+`transform`, `version` (`1`), `field`, `publicationLagMs`, `maxAgeMs`,
+`lookbackMinutes`. `auxiliaryLevel` requires null lookback. `auxiliaryChange`
+uses an exact positive OI lookback in minutes, divisible by sampling interval;
+the denominator must be positive and all intermediate selected samples valid.
+No nearest-neighbour lookback, interpolation or implicit zero is used.
+
+`haRun` declarations stay as in v1. New entry provider:
+
+```json
+{"providerId":"scalarCondition","version":"1","featureId":"fundingLevel",
+ "long":{"operator":"gt","threshold":0},"short":{"operator":"lt","threshold":0},
+ "stop":{"providerId":"realSwingAtr","atrRequestId":"atr","swingBars":2,"atrMultiplier":1}}
+```
+
+Scalar entries support fixedBracket only and do not require an HA feature.
+Conditions are strict gt/lt with finite thresholds; null disables that direction.
+Signals pulse only on consecutive known false-to-true target decisions, never
+first-known after a gap. Evaluation spans preparation before applying account
+windows, so a window restart cannot manufacture a pulse. ATR and real-price
+contiguous swing stops use the existing native preparation/executor.
+
+V2 `entryFilter` is null, a named component, or `{"allOf":[components...]}`.
+A candle component adds `componentId` to the v1 candleDirection declaration.
+A scalar component has `componentId`, `providerId:"scalarCondition"`, `version`,
+`featureId`, `long`, `short` (same conditions, no stop). Groups are flat/nonempty,
+with unique IDs and canonical ID order. No component short-circuit hides evidence.
+Every component must be known/fresh and allow the side. Unknown yields false
+permissions; a null side is blocked, not an unknown bypass. Absent filters remain
+unrestricted. Filters affect fresh entries only, never occupied-position exits.
+
+Call `run_account_study(..., auxiliary_roots={"aux": snapshot_path})`, or pass
+repeated `--auxiliary-root ALIAS=PATH` to `account-study`. The alias set must match
+the request exactly; locators never enter economic identities. Pin/mapping/unit/
+path/unused-binding/static warmup errors fail before output or workers. OI change
+requires lookback + sample interval + lag of declared warmup; scalar crossing
+also reserves the preceding target close. Irregular Funding needs an antecedent
+observation, whose presence cannot be guaranteed by a guessed cadence.
+`requireComplete` rejects any unknown/stale observed research decision;
+`allowUnknown` retains and blocks them. Both reject zero usable research overlap.
+These data-dependent checks occur during preparation and leave failed unsealed
+runs. Native input prep and bounded direct/AccountJob spawn dispatch are reused.
+
+### Availability, evidence and verification
+
+Availability is observation + declared nonnegative lag; expiry is observation +
+positive maxAge, exclusive, with maxAge > lag. Example OI lag is at least five
+minutes, an assumption rather than measured latency. Uncovered observation spans,
+missing expected samples, invalid fields and final coverage ends create unknown
+markers on the same shifted clock. A gap starting at g clips prior validity to
+g+lag, never raw g. Unknown wins equal availability; ending a gap cannot revive an
+older Funding state. Latest unknown/expired state never falls back to an old valid
+one. StateRows' computational envelope includes lagged markers and is distinct
+from raw coverage. Component evidence retains real source identities, timestamps,
+before-first/unknown/stale reasons and known zero/neutral states.
+
+The event helper counts/sums only fully covered `[b,b+w)` buckets. Covered-empty
+is zero; uncovered is unknown. Observation is b+w, availability b+w+lag, and
+validity ends by the next bucket availability or nominal expiry. A boundary event
+belongs to the next bucket. No event forward-fill or production event feed exists.
+
+V2 projects even one filter onto `derived-target-decision.1`: sourceIndex is the
+target ordinal, observed/available times are the decision, validity decision+step,
+reason 0 known or 2 unknown. These are **derived evaluation facts**, not exchange
+publication times. Real source facts stay in component evidence. Composition and
+consumed auxiliary input identities bind commands even when booleans do not change.
+
+V2 study/seal uses `pattern-lab.account-study.v2`, formatVersion 2. Closed
+account-record.v1/account.json remains unchanged. Required shared members include
+`dependency-links.json` (`pattern-lab.account-dependency-links.v1`, `accounts`
+keyed by account key), all native source grids, `dependencies/<sliceId>/dependency.json`
+and `components/<evidenceId>/{components.json,arrays.npz}`. Links have exactly
+`nativeGrids`, `dependencies` (binding->slice ID), `componentEvidenceId`.
+Standard and debug both retain everything required for offline provider checks.
+Rows, grids and components are shared across windows, not duplicated per account.
+
+`study.inputs` is closed `{native,auxiliary}`. Auxiliary facts include resolved
+target/allocation/binding, descriptor/unit/field, transform/availability, consumed
+slice fingerprint and parent content pin. `dataInput` hashes the complete object;
+readers reconstruct it from links. `provenance.json` separately retains checked
+parent content/provenance IDs. Consumed fingerprints exclude parent IDs and
+unrelated future rows. Recollection with identical content needs no request edit;
+a future parent append changes request/dataInput pins while earlier commands can
+stay identical. Full parent provenance is not independently authenticated from a
+slice and parent hash alone. No Merkle-proof claim is made.
+
+`verify_account_study` explicitly reconstructs native PreparedInput/features,
+auxiliary states/components/projection and all provider commands, checks exact
+regenerated identities and reports the first differing named array/metadata, then
+calls the unchanged account validator. Ordinary loading verifies integrity,
+identities, dependencies and projection without repeating full preparation.
+Old v1 reading/rebuild paths stay closed; old saved summaries are not changed.
+V1 rebuilds still produce metrics.v2. V2 produces `pattern-lab.account-metrics.v3`
+with unchanged T02 formulas and one versioned auxiliary metadata block. New v2
+implementation/derivation attribution includes the auxiliary Python closure.
+
+Runnable public example, including from an external directory with PYTHONPATH
+unset (use the required interpreter and repository's absolute script path):
+
+```text
+python /path/to/merlin/tools/pattern_lab/examples/account_auxiliary_synthetic.py --output-root NEW_EXTERNAL_ROOT --workers 6
+```
+
+It creates only deterministic integer/dyadic inputs, two targets, two overlapping
+windows and baseline/Funding/OI/combined/scalar allocations, then fully verifies
+and exports a standard bundle. It has no test/ignored-work dependency or network
+call. Exact Windows bundle identity regeneration on Linux is a required check
+for this fixture, not a universal portability claim. Metrics use the existing
+1e-9 relative / 1e-8 absolute tolerances; counts/labels/stored IDs remain exact.
+Owner visual confirmation is separate from Python/Node checks.
+
+Deferred: Funding normalization/cashflows, slippage, margin/liquidation fills,
+automatic mapping/filter search, universe selection, live services, persistent
+raw-response diagnostics, production ratio/event/OKX collectors and new statistics.

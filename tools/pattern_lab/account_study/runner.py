@@ -22,7 +22,7 @@ from .job import AccountJob, run_account_job, check_generation
 from .artifacts import SCHEMA, _load, load_account_study, write_derived, seal_directory
 
 
-def implementation():
+def implementation(*, auxiliary=False):
     """Account-owned attribution; never changes legacy source-generation lists."""
     repo = Path(__file__).resolve().parents[3]
     from ..study.extensions import CORE_MODULES
@@ -35,7 +35,7 @@ def implementation():
     from ..study.bracket import reference_core
     core = reference_core()
     names.add(Path(core.__file__).resolve().relative_to(repo).as_posix())
-    for package in ('accounts', 'account_study'):
+    for package in ('accounts', 'account_study') + (('auxiliary',) if auxiliary else ()):
         names.update(p.relative_to(repo).as_posix() for p in (repo/'tools/pattern_lab'/package).iterdir()
                      if p.suffix in ('.py', '.js'))
     # Only real consumed files belong in attribution (CORE_MODULES are import names).
@@ -44,15 +44,22 @@ def implementation():
         python=sys.version.split()[0], libraries={name: version(name) for name in ('numpy', 'pandas', 'pyarrow', 'numba')})
 
 
-def run_account_study(request, *, data_root, output_root, workers=1, retention_profile='standard'):
+def run_account_study(request, *, data_root, output_root, workers=1, retention_profile='standard', auxiliary_roots=None):
     normalized = normalize_request(request)
     integer(workers, 'workers', 1)
     require(retention_profile in ('standard', 'debug'), 'retention profile')
     doc = normalized.document
+    v2 = doc['schema'] == 'pattern-lab.account-study-request.v2'
     origin, start, end = bounds(doc)
     pack_root, output = Path(data_root).expanduser().resolve(), Path(output_root).expanduser().resolve()
     require(not output.exists() and not output.is_relative_to(pack_root) and not pack_root.is_relative_to(output), 'new disjoint output required')
-    source = implementation()
+    snapshots = None
+    if v2:
+        from ..auxiliary import study as auxiliary
+        snapshots = auxiliary.admit(doc, auxiliary_roots, output, pack_root)
+    else:
+        require(auxiliary_roots is None, 'v1 has no auxiliary roots')
+    source = implementation(auxiliary=v2)
     with data.read_session(pack_root) as session:
         report = session.inspect(verify=False)
         require(report.get('state') == 'ready', 'pack not ready')
@@ -73,7 +80,7 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
             completedAccounts=0, failedJobs=0, plannedJobs=len(doc['instruments']), completedJobs=0,
             jobs={i: 'notStarted' for i in doc['instruments']}, requestedWorkers=workers, effectiveWorkers=effective,
             maximumInFlight=0, startedUtc=datetime.now(timezone.utc).isoformat())
-        study = dict(schema=SCHEMA, formatVersion=1, request=doc, family=planned_family(doc),
+        study = dict(schema=auxiliary.SCHEMA if v2 else SCHEMA, formatVersion=2 if v2 else 1, request=doc, family=planned_family(doc),
             identities={}, inputs=[], implementation=source, retentionProfile=retention_profile,
             warmupRequirements={a['allocationId']: warmup_requirements(doc, a) for a in doc['allocations']},
             roster=[{k: entries[i][k] for k in ('instrument_id', 'venue', 'contract', 'quote_currency', 'roles')}
@@ -81,6 +88,7 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
         write_json(root/'study.json', study)
         write_json(root/'status.json', state)
         common, input_facts, physical = {}, {}, {}
+        auxiliary_facts, dependency_links, auxiliary_common = {}, {}, {}
 
         def read_base(identifier):
             base = session.load_slice(identifier, start=manifest.format_epoch_ms(start), end=manifest.format_epoch_ms(end),
@@ -125,8 +133,9 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
                     input_facts[(identifier, a['allocationId'], s['inputId'])] = fact
                 bindings[a['allocationId']] = tuple(values)
             state['jobs'][identifier] = 'running'
+            deps = auxiliary.dependencies_for(doc,identifier,snapshots,origin,end,auxiliary_common) if v2 else None
             return AccountJob(identifier, tuple(doc['allocations']), tuple(doc['windows']), bindings,
-                              rules[identifier], source['sources'])
+                              rules[identifier], source['sources'], deps)
 
         def publish(identifier, records):
             state.update(currentJob=identifier, phase='publishJob')
@@ -134,6 +143,13 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
             require(len(records) == len(doc['allocations'])*len(doc['windows']) and
                     all(r.labels['instrumentId'] == identifier for r in records), 'worker result roster')
             encode_accounts(root, records, retention_profile=retention_profile)
+            if v2:
+                for record in records:
+                    key = semantic_digest(record.labels)
+                    dependency_links[key] = auxiliary.save_evidence(root,record)
+                    for bid, dep in record.auxiliaryEvidence['dependencies'].items():
+                        fact = auxiliary.input_fact(doc,record.labels,bid,dep['content'])
+                        auxiliary_facts[(identifier,record.labels['allocationId'],bid)] = fact
             state['completedAccounts'] += len(records); state['completedJobs'] += 1
             state['jobs'][identifier] = 'complete'
             write_json(root/'status.json', state)
@@ -172,11 +188,16 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
                         pool.shutdown(abort=abort)
             state.update(phase='derive', currentJob=None)
             study['inputs'] = [input_facts[k] for k in sorted(input_facts)]
+            if v2:
+                study['inputs'] = dict(native=study['inputs'], auxiliary=[auxiliary_facts[k] for k in sorted(auxiliary_facts)])
+                write_json(root/'dependency-links.json',dict(schema='pattern-lab.account-dependency-links.v1',accounts=dependency_links))
             study['identities'] = dict(specification=normalized.identity, dataInput=semantic_digest(study['inputs']),
                                        implementation=semantic_digest(source))
             write_json(root/'study.json', study)
-            write_json(root/'provenance.json', dict(physicalInputs=physical,
-                ruleSnapshots={i: raw_entries[i]['instrument_rules'] for i in doc['instruments']}))
+            provenance = dict(physicalInputs=physical, ruleSnapshots={i: raw_entries[i]['instrument_rules'] for i in doc['instruments']})
+            if v2:
+                provenance['auxiliarySnapshots'] = {alias:dict(contentId=s.contentId,provenanceId=s.seal['provenanceId']) for alias,s in snapshots.items()}
+            write_json(root/'provenance.json', provenance)
             write_derived(_load(root, sealed=False), root)
             check_generation(source['sources'])
             state.update(state='complete', phase='complete', finishedUtc=datetime.now(timezone.utc).isoformat())

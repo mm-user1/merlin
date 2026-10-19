@@ -7,6 +7,20 @@ from .contracts import (HARecipe, SideCommands, CommandBundle, EntryFilter, requ
                         integer, number, validate_mode, validate_bundle)
 
 
+def real_swing_atr(prepared, atrRequestId, swingBars, atrMultiplier, sign):
+    """Real-price initial stop usable independently of an HA entry condition."""
+    integer(swingBars, 'swingBars', 1); number(atrMultiplier, 'atrMultiplier', inclusive=True)
+    require(sign in (1, -1), 'stop direction')
+    atr = prepared.feature(atrRequestId)
+    require(atr.request['featureId'] == 'atr' and atr.request['inputId'] == prepared.targetId, 'ATR dependency')
+    levels = prepared.target.values[:, 2 if sign == 1 else 1]
+    rolling = pd.Series(levels).rolling(swingBars, min_periods=swingBars)
+    stop = (rolling.min() if sign == 1 else rolling.max()).to_numpy()
+    stop[atr.position < swingBars-1] = np.nan
+    stop = stop - sign * atrMultiplier * atr.values
+    return stop, atr.known & (atr.position >= swingBars-1)
+
+
 def candle_filter(prepared, requestId):
     feature = prepared.feature(requestId)
     require(feature.request["featureId"] == "candleDirection", "filter needs candleDirection")

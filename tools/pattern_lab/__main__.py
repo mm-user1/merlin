@@ -226,9 +226,18 @@ def build_parser() -> argparse.ArgumentParser:
         account_command.add_argument("--" + flag, type=Path, required=True)
     account_command.add_argument("--workers", type=int, default=1)
     account_command.add_argument("--retention-profile", choices=("standard", "debug"), default="standard")
+    account_command.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
     account_report = commands.add_parser("account-report", help="Rebuild account metrics/report offline into a new directory.")
     for flag in ("run-root", "output-root"):
         account_report.add_argument("--" + flag, type=Path, required=True)
+
+    auxiliary_collect = commands.add_parser("aux-collect", help="Collect an explicit immutable auxiliary snapshot.")
+    for flag in ("request", "output-root"):
+        auxiliary_collect.add_argument("--"+flag,type=Path,required=True)
+    auxiliary_collect.add_argument("--previous-root",type=Path)
+    auxiliary_inspect = commands.add_parser("aux-inspect", help="Inspect auxiliary sources, units and coverage offline.")
+    auxiliary_inspect.add_argument("--snapshot-root",type=Path,required=True)
+    auxiliary_inspect.add_argument("--verify",action="store_true")
 
     analyzer = commands.add_parser(
         "analyze",
@@ -392,14 +401,29 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
     if args.command == "account-study":
         from .account_study import run_account_study
+        from .accounts.contracts import require
+        roots={}
+        for binding in args.auxiliary_root:
+            alias,separator,path=binding.partition('=')
+            require(separator and alias and path and alias not in roots,'auxiliary-root requires unique ALIAS=PATH')
+            roots[alias]=Path(path)
         result = run_account_study(args.request, data_root=args.data_root, output_root=args.output_root,
-            workers=args.workers, retention_profile=args.retention_profile)
+            workers=args.workers, retention_profile=args.retention_profile, auxiliary_roots=roots or None)
         _emit({"status": "complete", "runRoot": str(result.root), "accounts": len(result.accountKeys),
                "identities": result.study["identities"]})
         return EXIT_OK
     if args.command == "account-report":
         from .account_study import rebuild_account_report
         _emit(rebuild_account_report(args.run_root, output_root=args.output_root))
+        return EXIT_OK
+    if args.command == "aux-collect":
+        from .auxiliary import collect_auxiliary, inspect_auxiliary
+        result=collect_auxiliary(args.request,output_root=args.output_root,previous_root=args.previous_root)
+        _emit(inspect_auxiliary(result.root,verify=True))
+        return EXIT_OK
+    if args.command == "aux-inspect":
+        from .auxiliary import inspect_auxiliary
+        _emit(inspect_auxiliary(args.snapshot_root,verify=args.verify))
         return EXIT_OK
     if args.command == "study":
         result = pack_study.run_study(

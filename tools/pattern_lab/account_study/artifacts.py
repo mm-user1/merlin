@@ -17,13 +17,14 @@ from .request import normalize_request, planned_family, bounds, warmup_requireme
 from .codec import decode_account
 
 SCHEMA = 'pattern-lab.account-study.v1'
+SCHEMA_V2 = 'pattern-lab.account-study.v2'
 MAX_ENVELOPE_BYTES = 16*1024*1024
 DERIVED = ('derived/summary.json', 'derived/report.html')
 
 
 def envelope(value):
     closed(value, ('schema', 'formatVersion', 'members'))
-    require(value['schema'] == SCHEMA and value['formatVersion'] == 1, 'completion schema/version')
+    require((value['schema'], value['formatVersion']) in ((SCHEMA,1),(SCHEMA_V2,2)), 'completion schema/version')
     members = value['members']
     require(type(members) is dict and members and len(members) <= 100000, 'completion members')
     require('completion.json' not in members, 'manifest self-entry')
@@ -59,7 +60,8 @@ def seal_directory(root):
     require(read_json(root/'status.json')['state'] == 'complete', 'final status must precede completion')
     files = sorted(p for p in root.rglob('*') if p.is_file())
     members = {p.relative_to(root).as_posix(): dict(bytes=p.stat().st_size, sha256=file_hash(p)) for p in files}
-    value = envelope(dict(schema=SCHEMA, formatVersion=1, members=members))
+    study = read_json(root/'study.json')
+    value = envelope(dict(schema=study['schema'], formatVersion=study['formatVersion'], members=members))
     require(len(json_text(value).encode('utf-8')) <= MAX_ENVELOPE_BYTES, 'completion too large')
     write_json(root/'completion.json', value)
     verify_directory(root)
@@ -100,9 +102,12 @@ def _load(root, *, sealed=True):
     seal = verify_directory(root) if sealed else None
     study, status = read_json(root/'study.json'), read_json(root/'status.json')
     closed(study, ('schema', 'formatVersion', 'request', 'family', 'identities', 'inputs', 'implementation', 'retentionProfile', 'warmupRequirements', 'roster'))
-    require(study['schema'] == SCHEMA and study['formatVersion'] == 1, 'study schema')
+    require((study['schema'],study['formatVersion']) in ((SCHEMA,1),(SCHEMA_V2,2)), 'study schema')
+    v2 = study['schema'] == SCHEMA_V2
+    if seal: require(seal['schema'] == study['schema'] and seal['formatVersion'] == study['formatVersion'], 'study/seal version differs')
     require(study['retentionProfile'] in ('standard', 'debug'), 'saved retention profile')
     request = normalize_request(study['request'])
+    require((request.document['schema'] == 'pattern-lab.account-study-request.v2') == v2, 'study/request version differs')
     require(request.document == study['request'] and planned_family(request.document) == study['family'], 'normalized request/plan mismatch')
     require(study['identities'] == dict(specification=request.identity,
         dataInput=semantic_digest(study['inputs']), implementation=semantic_digest(study['implementation'])), 'study identities')
@@ -113,6 +118,17 @@ def _load(root, *, sealed=True):
     windows = {w['windowId']: w for w in request.document['windows']}
     from ..manifest import to_epoch_ms
     reader = AccountStudy(root, study, keys, status)
+    if v2:
+        from ..auxiliary import study as auxiliary
+        dependency_links = auxiliary.load_links(root,keys)
+        closed(study['inputs'], ('native','auxiliary'))
+        auxiliary_inputs = {}
+        provenance = read_json(root/'provenance.json')
+        require(set(provenance.get('auxiliarySnapshots',{})) == {b['snapshotId'] for b in request.document['auxiliaryInputs']}, 'snapshot provenance roster')
+        for b in request.document['auxiliaryInputs']:
+            parent = provenance['auxiliarySnapshots'][b['snapshotId']]
+            closed(parent,('contentId','provenanceId')); digest_id(parent['provenanceId'])
+            require(parent['contentId']==b['expectedSnapshotContentId'],'parent semantic pin provenance')
     expected_members = {'study.json', 'status.json', 'provenance.json', *DERIVED}
     expected_inputs = {}
     origin, start, end = bounds(request.document)
@@ -121,6 +137,10 @@ def _load(root, *, sealed=True):
         for a in request.document['allocations']}, 'warmup facts')
     for label, key in zip(study['family'], keys):
         record = reader.account(key)
+        if v2:
+            members, facts = auxiliary.check_links(root,request.document,record,dependency_links[key])
+            expected_members.update(members)
+            for fact in facts: auxiliary_inputs[(fact['instrumentId'],fact['allocationId'],fact['bindingId'])] = fact
         require(record.labels == label, 'record roster labels')
         allocation, window = allocations[label['allocationId']], windows[label['windowId']]
         require(asdict(record.result.policy) == allocation['policy'] and
@@ -161,7 +181,9 @@ def _load(root, *, sealed=True):
         # Also refuses carrying an open mark across missing target slots.
         from .metrics import synchronized
         synchronized(record)
-    require(study['inputs'] == [expected_inputs[k] for k in sorted(expected_inputs)], 'data-input facts differ from accounts')
+    actual_inputs = [expected_inputs[k] for k in sorted(expected_inputs)]
+    if v2: actual_inputs = dict(native=actual_inputs,auxiliary=[auxiliary_inputs[k] for k in sorted(auxiliary_inputs)])
+    require(study['inputs'] == actual_inputs, 'data-input facts differ from accounts')
     if sealed:
         require(status['completedAccounts'] == status['plannedAccounts'] == len(keys) and status['failedJobs'] == 0,
                 'completion counts')
@@ -181,13 +203,21 @@ def load_account_study(run_root, *, allow_partial=False):
 
 def verify_account_study(run_root):
     reader = load_account_study(run_root)
+    v2 = reader.study['schema'] == SCHEMA_V2
+    if v2:
+        from ..auxiliary.study import load_links, verify_commands
+        links = load_links(reader.root,reader.accountKeys)
     for key in reader.accountKeys:
         record = reader.account(key); r = record.result
-        validate_result(r, record.prepared, r.commands, r.policy, r.window, r.rules)
-    return dict(status='verified', accountsChecked=len(reader.accountKeys),
+        prepared = verify_commands(reader.root,reader.study['request'],record,links[key]) if v2 else record.prepared
+        validate_result(r, prepared, r.commands, r.policy, r.window, r.rules)
+    result = dict(status='verified', accountsChecked=len(reader.accountKeys),
         validator='tools.pattern_lab.accounts.validation.validate_result',
         validatorSha256=file_hash(Path(__file__).parents[1]/'accounts/validation.py'),
-        limitations='Target-only original preparation facts; no pack authentication, provider signal regeneration or first-exit search.')
+        limitations=('Retained native/auxiliary commands regenerated; parent membership cannot be proven without the parent snapshot.' if v2 else
+            'Target-only original preparation facts; no pack authentication, provider signal regeneration or first-exit search.'))
+    if v2: result['commandRegeneration'] = 'exact'
+    return result
 
 
 def write_derived(reader, destination):

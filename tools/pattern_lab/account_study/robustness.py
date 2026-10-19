@@ -22,11 +22,16 @@ def direction(value):
 
 def attribution(reader, schema):
     directory = Path(__file__).parent
-    return dict(metricSchema=schema,
+    result = dict(metricSchema=schema,
         sources={'tools/pattern_lab/account_study/'+p.name:hashlib.sha256(p.read_bytes()).hexdigest()
                  for p in sorted(directory.iterdir()) if p.suffix in ('.py','.js') and p.is_file()},
         inputStudy=dict(schema=reader.study['schema'],identities=reader.study['identities']),
         python=sys.version,libraries={n:importlib.metadata.version(n) for n in ('numpy','pandas','pyarrow','numba')})
+    if reader.study['schema'] == 'pattern-lab.account-study.v2':
+        result['sources'].update({'tools/pattern_lab/auxiliary/'+p.name:hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted((directory.parent/'auxiliary').glob('*.py'))})
+        result['sources'] = dict(sorted(result['sources'].items()))
+    return result
 
 
 def window_facts(request):
