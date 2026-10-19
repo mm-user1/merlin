@@ -94,6 +94,30 @@ of ordinary tests. For the new dyadic fixture, full checking must regenerate
 command/component identities exactly on Linux; metric sums still use rel_tol
 1e-9 / abs_tol 1e-8. Do not rewrite sealed inputs or weaken these gates.
 
+T04A adds `test_selection_math.py` and `test_selection_integration.py`, with
+independent ledger/path arithmetic, exact ties/hash vectors, past-only immutable
+views, explicit missingness/coverage masks, experimental scorer/source checks,
+real monthly v1/v2 accounts, offline seals/ZIPs/rebuild/deep verification and
+resealed semantic forgery checks. The public seven-month/six-target example is
+tested in an external subprocess with PYTHONPATH unset. No live or ignored-work
+fixtures are used. `selection_report_interactions.cjs` checks genuinely generated
+HTML through a pytest Node wrapper; only missing Node permits that wrapper's skip.
+Visual appearance/focus remains an owner check. All 20 candidate pins and 44
+protected account/study/auxiliary modules must stay byte-identical.
+
+After final T04A edits run both selection modules and the nine T03/account-study/
+account/robustness modules, then all `tests/pattern_lab` plus
+`tests/v2/test_v2_kernel_execution.py` through tools/run_tests.py and an external
+MERLIN_TEST_ROOT. Keep source/pin inventories, collected IDs, logs/JUnit and actual
+skips. Use the established owner-approved symlink-capable Windows run without
+changing OS settings. Separate delivery gates check the exact monthly Windows
+parent and selection ZIPs on Windows and Linux: deep verification, original member
+preservation and two byte-identical same-host rebuilds; cross-host numeric metrics
+use rtol=1e-9/atol=1e-8, while IDs/labels/counts/memberships stay exact. Do not replace
+the transferred parent with a freshly regenerated fixture. Linux review needs the
+selection modules, these archive gates and installed Node; protected module suites
+need no additional Linux sweep without a concrete regression reason.
+
 Pattern Lab's `test_pattern_lab_pilot.py` covers the M5 breakout loop oracle,
 warmup/gaps and future invariance, downside RMS validity/null semantics, public
 reader ownership and requested-table copy count, and synthetic study-to-analysis

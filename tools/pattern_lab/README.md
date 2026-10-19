@@ -4883,3 +4883,261 @@ Owner visual confirmation is separate from Python/Node checks.
 Deferred: Funding normalization/cashflows, slippage, margin/liquidation fills,
 automatic mapping/filter search, universe selection, live services, persistent
 raw-response diagnostics, production ratio/event/OKX collectors and new statistics.
+
+## Monthly universe selection (T04A)
+
+`tools.pattern_lab.selection` is a separate offline stage over a completed native
+v1/v2 account study. It selects instruments for one allocation using completed
+calendar-month history. It never reruns an account, changes a trading allocation,
+reads a market pack, carries capital or charges another terminal fee. Every
+monthly parent account starts flat at its original capital C; profits are
+withdrawn and losses replenished before the next month. This is a fixed-reference
+monthly-reset experiment, not a self-financing compounded portfolio.
+
+```python
+from tools.pattern_lab.selection import (
+    normalize_selection_request, run_selection, load_selection, verify_selection,
+    rebuild_selection_report, export_selection_bundle, import_selection_bundle,
+    Scorer, Score, check_deterministic, check_prefix_invariance,
+)
+selected = run_selection(request, parent_root=parent.root, output_root=new_run)
+verified = verify_selection(selected.root, parent_root=parent.root)
+rebuild_selection_report(selected.root, output_root=new_report)
+export_selection_bundle(selected.root, zip_path=new_zip)
+relocated = import_selection_bundle(new_zip, output_root=new_import)
+```
+
+Readers expose `root`, `selection`, `ledger`, `scores`, `results` and `summary`;
+document properties return independent mappings/lists. Normalization accepts a
+mapping, JSON path or immutable `SelectionRequest` with `document` and `identity`.
+Physical parent/output paths are API arguments, not request parameters. All
+destinations must be new and disjoint from their inputs, with no symlink paths.
+
+### Closed request and causal scorer interface
+
+The complete request schema is `pattern-lab.selection-request.v1`. The following
+example binds an already completed seven-month parent; hashes come from that
+exact artifact, not a regenerated equivalent. Every shown key is required except
+`notes`. `kValues` applies to every selector.
+
+```python
+from tools.pattern_lab.account_study.common import file_hash
+request = {
+    "schema": "pattern-lab.selection-request.v1", "selectionId": "monthly-review",
+    "parent": {**parent.study["identities"],
+               "completionSha256": file_hash(parent.root / "completion.json")},
+    "allocationId": "monthly",
+    "monthWindows": [{"windowId": f"m2020{m:02d}", "month": f"2020-{m:02d}"}
+                     for m in range(1, 8)],
+    "evaluationMonths": ["2020-05", "2020-06", "2020-07"],
+    "pool": {"historyMonths": 4, "minObservedBarsPct": 99.0},
+    "selectors": [
+        {"selectorId": "consistency", "scorerId": "historicalConsistency4m",
+         "version": "1", "parameters": {}},
+        {"selectorId": "mean", "scorerId": "meanMonthlyReturn",
+         "version": "1", "parameters": {"months": 2}},
+        {"selectorId": "positive", "scorerId": "positiveMonthCount",
+         "version": "1", "parameters": {"months": 4}},
+    ],
+    "kValues": [2, 8], "capitalMode": "fixedReference", "referenceCapital": 10000.0,
+    "randomControl": {"seed": 2026, "replicates": 12},
+    "notes": "Synthetic monthly reset; descriptive only.",
+}
+```
+
+`parent` has exactly specification/dataInput/implementation/completionSha256.
+`monthWindows` rows have windowId/month; UTC `YYYY-MM` labels resolve to full
+calendar boundaries, checked against the parent's exact window records. Declared
+months and evaluation months are independently contiguous and unique; normalization
+sorts them chronologically. Selectors sort by selectorId, K values numerically.
+All roster tickers are admitted. The allocation's policy, timeframe and capital
+must agree across used accounts; referenceCapital must equal native C.
+
+Reject unknown keys, duplicate equivalent selectors, booleans as integers,
+nonfinite/unsupported values and insufficient declared pre-evaluation history
+before output. History must cover every declared scorer lookback. A particular
+ticker's missing history is ineligibility, not an excuse to move the start or
+search further back. Runtime scorer failures leave diagnostic status and no seal.
+
+Built-ins, all version `1`, have descending numeric keys:
+
+| Scorer | Parameters | Ordered key |
+| --- | --- | --- |
+| historicalConsistency4m | `{}` | strictly positive count, worst monthly return, mean return over four completed months |
+| meanMonthlyReturn | positive integer `months` | arithmetic mean monthly return |
+| positiveMonthCount | positive integer `months` | strictly positive count |
+
+Keys use unrounded values and canonical month order with `math.fsum`. Exact tuple
+equality defines ties; canonical ASCII instrument ID ascending breaks every tie.
+historicalConsistency4m is not IS/OOS transfer consistency. No built-in profitability,
+minimum-trade or liquidity gate exists. Known zero returns participate normally.
+
+Experiments import their own trusted Python code and pass
+`scorers={"x.name": Scorer(...)}` to run/deep verify. A `Scorer` declares scorerId,
+version, normalizeParameters callable, lookbackMonths callable, ordered keyNames
+tuple, score callable, sourceFiles `{logicalPortableName: localPath}`, and optional
+needsBars boolean (default false). Experimental IDs must start `x.` and cannot
+override built-ins. Sources are explicit, not discovered or imported from evidence.
+The callable receives `(view, normalizedParameters)` and returns one `Score` per
+common-pool instrument. `Score` fields are instrumentId, eligible bool, finite key
+tuple (or null when ineligible), reason (nonempty only when ineligible), and finite
+strict-JSON components. Omissions, duplicates and extra instruments are errors.
+
+Views expose instruments/monthLabels tuples, cutoffMs, `months(instrumentId)`
+immutable mappings and, with needsBars, lazy `bars(instrumentId)`. Each view owns
+only its declared lookback, even when common eligibility requires more history.
+Monthly views exclude whole-run account hashes. Native bars include immutable
+bytes-backed int64 timestamps (opens), float64 OHLCV values, stepMs and coverage
+metadata; every bar close is <= cutoff and no earlier-than-lookback row is exposed.
+There is no reader/path, future backing array or auxiliary input route. Per-call
+digests detect mutated views; copies isolate later calls and the parent. This is
+trusted in-process Python, not a sandbox. `check_deterministic` and
+`check_prefix_invariance` support bounded scorer tests with supplied causal views.
+
+Experimental parameter normalization runs at admission, never on offline load,
+import or rebuild. Those operations validate stored parameters structurally as
+strict JSON. Saved contracts retain normalized lookbackMonths, keyNames and
+needsBars. Source files are LF-hashed before/after execution; matching deep verify
+checks source hashes before normalizing/scoring and rechecks contracts and outputs.
+A comment-only source edit changes implementation attribution, not specification
+identity. Behavioral changes require a new explicit scorer version. Absent
+experimental code is labelled storedOutputsOnly; supplied mismatching code fails.
+
+### Ledger, eligibility, capital and controls
+
+The ledger is keyed by allocationId/instrumentId/month. It reads full-precision
+native accounts, one at a time, retaining no full-roster collection of trade
+tables. One helper uses `netPnl = finalBalance - initialCapital` and, for observed
+accounts, `returnPct = (100.0 * netPnl) / initialCapital` in exactly that order.
+NoObservedBars has null economic return even if native cash equals C. Observed
+zero-trade and all-rejected months can be valid zero, with diagnostics retained.
+
+Common eligibility requires observed coverage in each immediately preceding
+history month. A scorer may add explicit method ineligibility; Top-K, all-eligible
+and Random-K then share that same final pool. Freeze membership, ranking and draws
+before consulting evaluation results. All three monthly portfolio results use
+one pool-wide validity mask: every pool member must be closed, have observed bars
+and satisfy `100 * observedBars >= minObservedBarsPct * expectedBars`. There is
+no extra edge-exactness veto. Head/tail/interior gaps have the same coverage rule;
+their distinct counts and native forced exits remain visible. A missing unselected
+pool member also makes Top-K unavailable. Unknown PnL never becomes idle cash,
+replacement, a smaller denominator or retrospectively changed membership.
+
+Top-K and Random-K fund min(K,N) native slots at C, retain K-min(K,N) idle slots,
+and divide `100 * sum(native netPnl)` by planned K*C. All-eligible divides by N*C
+when N>0 and displays that different capital. An empty pool is an explicit valid
+zero-return cash month for every series, including zero-funded all-eligible.
+Invested-capital returns are secondary. Fees, fills and terminal exits are used
+exactly once from the native ledger. No account scaling/reexecution is involved.
+
+`cumulativeReturnPp` is the sum of monthly return percentages, not compounding or
+annualization. All-eligible PnL cannot be divided by one arbitrary denominator
+when N varies. Full-resolution curves combine native synchronized bar-close equity
+minus C over each month's planned capital, add preceding monthly returns and
+start at zero. `maxDrawdownPp` is the maximum peak-to-trough difference of this
+curve, not ordinary capital-relative Max DD %. Only the accepted synchronizer's
+provably flat cash may fill missing price slots.
+
+Any unavailable month makes full-period totals/distributions/DD null. A separate
+matchedAvailableMonths block lists the identical valid month set for selected,
+all-eligible and every replicate, with omitted reasons and used/requested counts.
+It permits labelled subtotal distributions, never bridged drawdown. No valid
+months means null returns/quantiles/comparison counts. Display paths are separate
+monthly fragments in an incomplete period.
+
+Hash draw v1 is exactly semantic_digest(`["random-k.1", seed, replicateIndex,
+month, instrumentId]`), with integer seed/index, zero-based replicateIndex,
+UTC YYYY-MM month and canonical instrument ID. Sort lowercase digest then ID
+ascending and take min(K,N). Identical pools share order and K variants are nested.
+The request's seed/count are never silently changed. Replicates are whole schedules,
+not new seeds after outcomes. Quantiles linearly interpolate at `(n-1)*q`.
+Descriptive below/equal/above counts use
+`abs(a-b) <= max(1e-9*max(abs(a),abs(b)),1e-8)` for equality in Python and JS;
+this tolerance does not affect ranking. No p-value or independent-tests claim.
+
+A split boundary tie retains its exact key, all tied members, available slots
+and chosen IDs. tieNeutralExpectedReturnPct replaces that group's selected PnL
+with `slots/groupSize * sum(group PnL)` plus untied PnL, over K*C. It is a
+descriptive expectation, not a separate execution or risk estimate. Without a
+split tie it equals selected return; unavailable evaluation remains null.
+
+### Evidence schemas and verification
+
+Selection root/envelope schema is `pattern-lab.universe-selection.v1`, formatVersion
+1. Parent schemas, source files and seals are untouched. Required members:
+
+| Member | Closed fields / invariant |
+| --- | --- |
+| selection.json | schema, formatVersion, request, roster, allocation, identities, implementation; one sorted full roster and exact parent allocation |
+| ledger.json | ordered month/instrument rows: allocationId, instrumentId, month, windowId, accountKey, accountId, startMs, endMs, stepMs, initialCapital, finalBalance, netPnl, returnPct, trades, fees, forcedExits, sizingRejections, sizingRejectionCount, terminalStatus, available, reason, requestedStartMs, requestedEndMs, firstObservedOpenMs, lastObservedCloseMs, expectedBars, observedBars, missingBars, missingHeadSlots, missingTailSlots, missingInteriorSlots |
+| scores.json | ordered selector/month batches: selectorId, month, cutoffMs, historyMonths, contract, commonPool, commonExclusions, barDependencies, rows; complete one-row-per-common-pool score set |
+| paths/YYYY-MM.npz | int64 `times` at every scheduled target close; float64 `pnl` matrix in roster order, native equity minus C; no pickle |
+| results.json | schema selection-results.v1, comparisons; selector/K records contain month rows, fullPeriodAvailable/fullPeriod, randomFullReturnPp/randomFullDistribution, matchedAvailableMonths, underfilledMonths, emptyPoolMonths |
+| curves.npz | complete selected/all-eligible monthly time/value arrays, named by semantic_digest([selectorId,K,month,series]); unavailable arrays empty; no Random-K bar paths |
+| status.json | state complete, ledgerRows, scoreBatches, comparisons, all checked against evidence |
+| provenance.json | parentRoot physical locator only; not an economic ID |
+| derived/summary.json, report.html | sealed original summary and standalone report; rebuilt only into new directories |
+| completion.json | schema, formatVersion, members (bytes/sha256); published last, excludes itself |
+
+ForcedExits has gapBoundary/terminal count/netPnl. Sizing reasons are exactly
+zeroQuantity, belowMinQuantity, belowMinNotional, leverageCapExceeded,
+leverageUndefined, nonpositiveCapital and invalidRiskDistance. Missing interior
+slots equal missingBars-head-tail; when empty-account edge counts overlap the
+derived interior count is null. Score barDependencies retain instrumentId,
+startMs/endMs, stepMs, rows and sliced timestamp/value hashes. Portfolio month
+rows retain pool, ranking, availability/reasons, selected/allEligible/random
+membership and capital/PnL/fees/trades/rejections/forced exits, tie evidence,
+curve references and common/method exclusions. Random rows have replicateIndex.
+Reconstruction checks the whole closed derived structure, not only final PnL.
+
+Specification identity excludes notes and paths. Data-input identity binds exact
+parent pins, allocation, ledger, full native monthly path contributions and native
+bar dependencies. Implementation attribution records all selection Python/JS,
+consumed existing helper source closure, Python/library versions and separately
+declared experimental hashes. Original parent identities remain exact. Extending
+a parent changes its dependency identity; causal-prefix checks compare earlier
+scores/exclusions/schedules rather than whole-run identity.
+
+Load checks exact members, hashes/sizes, schemas, IDs, relationships, ledger/path
+shape and coverage, saved score contracts, built-in score recomputation, schedules,
+controls/arithmetic, full curve arrays and summary consistency. It imports no
+experimental code and reads no parent/market data. Rebuild reconstructs from the
+same retained evidence and writes fresh derived files, labelling experimental
+logic as stored outputs. Deep verify requires the exact parent, calls the accepted
+full account validator, rederives ledger/paths/built-ins and optional matching
+experimental scorers, and checks every resulting fact. Retained outputs alone
+cannot prove arbitrary external scorer logic or authenticate a forged parent.
+
+ZIP import/export uses the identical sealed member set and directory validator,
+checked fresh staging, streamed extraction and SHA/CRC/size checks. Reject traversal,
+duplicates, case/NFC aliases, file-directory collisions, symlinks and non-file
+members. Bounds: 10,000 sealed members, 16 MiB per JSON, 256 MiB per file/expanded
+array archive, 1 GiB total sealed payload. These are resource refusals, never silent
+reductions in declared K or replicate counts. Receipts stay outside sealed runs.
+
+The report embeds summary/score facts and bounded display paths only. Each curve
+preserves monthly endpoints and earliest extrema, with deterministic remaining
+index buckets; cap max(2,000, 4*declared evaluation months+1) points. Python computes
+metrics from full paths; JS only selects/displays. The light report shows selector/K,
+capital/utilization, coverage, exclusions/ties, native diagnostics, attribution and
+explicit unavailable wording. Node state checks do not certify appearance/focus.
+
+```text
+python -m tools.pattern_lab selection --request request.json --parent-root PARENT --output-root NEW_RUN
+python -m tools.pattern_lab selection-report --run-root RUN --output-root NEW_REPORT
+python /absolute/path/to/merlin/tools/pattern_lab/examples/selection_synthetic.py --output-root NEW_EXTERNAL_ROOT --workers 6
+```
+
+Use the required interpreter and external temporary storage. The public example
+works with PYTHONPATH unset from outside the repo, builds six deterministic native
+targets over seven calendar months, all three scorers, K=2/8 and 12 declared random
+schedules, then deep-verifies and exports both parent and selection bundles.
+It imports no tests/ignored work and calls no network. Linux review uses the exact
+transferred Windows ZIPs, preserving IDs/counts/labels/memberships exactly and
+comparing numeric metrics at rtol=1e-9/atol=1e-8. Fresh cross-host generated parents
+need not share IDs. Owner visual confirmation is separate.
+
+Deferred to T04B or later: carried capital, scorer auxiliary inputs, new trading
+execution, production trend/volatility/Funding scorers, optimization and statistical
+claims. A fixed parent roster can introduce survivor/coverage bias; selection
+software does not reconstruct historical exchange membership or establish an edge.

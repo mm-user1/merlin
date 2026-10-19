@@ -48,7 +48,7 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # structured JSON status; the older data commands keep their existing behavior
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report")
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report")
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -230,6 +230,13 @@ def build_parser() -> argparse.ArgumentParser:
     account_report = commands.add_parser("account-report", help="Rebuild account metrics/report offline into a new directory.")
     for flag in ("run-root", "output-root"):
         account_report.add_argument("--" + flag, type=Path, required=True)
+
+    selection_command = commands.add_parser("selection", help="Select monthly universes from a completed native account study.")
+    for flag in ("request", "parent-root", "output-root"):
+        selection_command.add_argument("--"+flag,type=Path,required=True)
+    selection_report = commands.add_parser("selection-report", help="Rebuild a selection report offline.")
+    for flag in ("run-root", "output-root"):
+        selection_report.add_argument("--"+flag,type=Path,required=True)
 
     auxiliary_collect = commands.add_parser("aux-collect", help="Collect an explicit immutable auxiliary snapshot.")
     for flag in ("request", "output-root"):
@@ -415,6 +422,15 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "account-report":
         from .account_study import rebuild_account_report
         _emit(rebuild_account_report(args.run_root, output_root=args.output_root))
+        return EXIT_OK
+    if args.command == "selection":
+        from .selection import run_selection
+        result=run_selection(args.request,parent_root=args.parent_root,output_root=args.output_root)
+        _emit({"status":"complete","runRoot":str(result.root),"identities":result.selection["identities"]})
+        return EXIT_OK
+    if args.command == "selection-report":
+        from .selection import rebuild_selection_report
+        _emit(rebuild_selection_report(args.run_root,output_root=args.output_root))
         return EXIT_OK
     if args.command == "aux-collect":
         from .auxiliary import collect_auxiliary, inspect_auxiliary
