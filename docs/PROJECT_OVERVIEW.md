@@ -17,8 +17,8 @@ src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
 tools/strategy_lab/   local V2-only research pipeline
 tools/pattern_lab/    local research-only market-data pack, collector,
-                      descriptive event studies, matched comparisons, and
-                      sequential bracket probes via the generic V2 reference
+                      event studies, matched comparisons, reusable accounts,
+                      auxiliary data, robustness views and universe selection
 tests/                core/server, V2, JavaScript, Strategy Lab, and
                       Pattern Lab suites
 ```
@@ -203,6 +203,33 @@ contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
 ## Pattern Lab integration
 
+The T01-T04 update cycle is accepted through `5473271`, including its follow-up
+patches and final integrated review. No material defect was found in the
+documented research scope. Its current module responsibilities are:
+
+| Package under `tools/pattern_lab/` | Responsibility |
+| --- | --- |
+| `accounts/` | Prepared features and commands, entry filters, fixed-bracket or signal-managed account execution, stop updates and semantic validation; reuses V2 reference execution helpers |
+| `account_study/` | Declared windows/allocations, account jobs, saved evidence, offline verification, metrics, descriptive robustness views and reports |
+| `auxiliary/` | Explicit collection and immutable typed snapshots; causal Funding/OI features for signals, filters and selection scorers; extensible provider/type contracts |
+| `selection/` | Monthly history views, eligibility/ranking and controls, fixed-reference arithmetic or exact replay at carried slot capital, saved results and reports |
+
+Signals generate trading commands; entry filters permit or deny entries;
+universe selectors choose the monthly trading set. Auxiliary data can supply
+features to any of these roles. Shadow months start flat and close at their
+boundaries. Carried selection reuses the account executor at actual slot capital
+rather than scaling shadow profits. These are independent slot accounts, not a
+shared-margin portfolio engine. Funding payments and slippage are intentionally
+outside the account model.
+
+The [current guide](../tools/pattern_lab/README.md#current-capabilities-and-acceptance)
+owns the APIs and limits, including
+[incomplete core-source attribution for carried selections](../tools/pattern_lab/README.md#carried-execution-attribution-limit).
+Tool acceptance does not establish real-provider data coverage or profitability;
+collection and market experiments are separate operational tasks.
+
+Earlier milestones remain available with their historical contracts:
+
 M5 integrated research workflow is accepted at `d423016` within its documented
 scope and the identity-portability limits of that generation; resume remains deferred.
 Post-M5 prospective policy-2 identities and verified frozen extension relocation
@@ -227,15 +254,20 @@ comparisons with calibrated inference**, which analyses a completed study
 offline into its own sealed artifact. It uses the existing Merlin project
 dependencies, including `pyarrow==22.0.0` and, for ordinary v2 monthly inference,
 `scipy==1.16.3`, as pinned in root `requirements.txt`. These are not a standalone
-two-package installation. It reaches the network only inside an explicit
-collect, update or recover operation.
+two-package installation. It reaches the network only inside explicit market
+collect/update/recover or auxiliary collection operations.
 
-`workers` accepts any positive integer: `workers=1` runs each instrument job
-directly and a larger count runs the same job under an explicit spawn pool
+For event studies, `workers` accepts any positive integer: `workers=1` runs each
+instrument job directly and a larger count runs the same job under an explicit spawn pool
 bounded by the selected instrument count, with coordinator-only pack reads and
 publication and canonical evidence identical to the direct run. Event studies
 themselves remain descriptive, with no p-value, confidence interval, matched
 control or edge verdict.
+
+Native account studies use the shared bounded spawn dispatch. Selection owns
+its funded-execution spawn pool with `workers` restricted to 1..6; scoring and
+capital coordination stay in the coordinator. Worker count is not a universal
+option for offline analysis or report rebuilding.
 
 M3a adds matched control populations, event-weighted point estimates and one
 declared Holm family over a completed study's saved evidence. Request v2 uses

@@ -51,7 +51,7 @@ tracked repository.
 | --- | --- |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
-| [Pattern Lab data foundation, studies, comparisons and bracket probes](../tools/pattern_lab/README.md) | Research-only pack, collector, evidence, identity, extensions and workers; M3a inference; M3b context and frozen validation; M4 sequential ATR bracket accounts, quantity rules, checked saved tables and offline descriptive reports (accepted at `c26334e` for the documented scope) |
+| [Pattern Lab research guide](../tools/pattern_lab/README.md) | Market and auxiliary data, event studies and inference, reusable accounts and entry filters, robustness views, monthly universe selection, evidence, identity and offline reports |
 | [Test guide](../tests/README.md) | Test tiers, isolation rules, and suite selection |
 
 Pattern Lab M5 integrated research workflow is accepted at `d423016` within its
@@ -63,6 +63,15 @@ Post-M5 coordinator performance and report corrections are accepted at `4dcfb9e`
 including the owner's manual HTML check. Core development is complete for the
 documented research scope; further work can focus on experiments and demonstrated
 needs. The Pattern Lab guide owns the remaining limits and generation rules.
+
+The subsequent T01-T04 update cycle, including follow-up patches, is accepted
+through `5473271`. Final integrated review found no material defect within the
+documented research scope. Start with the guide's
+[current capabilities and acceptance](../tools/pattern_lab/README.md#current-capabilities-and-acceptance)
+for the new account, robustness, auxiliary-data and selection routes. Read its
+[carried execution attribution limit](../tools/pattern_lab/README.md#carried-execution-attribution-limit)
+when comparing implementations across code revisions. Readiness of the tools
+does not imply that a real dataset has been collected or a trading edge validated.
 
 ## Baseline evidence
 
@@ -101,6 +110,7 @@ are evidence records; current architecture and procedure documents do not.
 - V2 core or Grid change: read [V2 architecture](engine_v2/ARCHITECTURE.md),
   then certification and performance evidence if parity or speed is affected.
 - Strategy Lab work: read its [full guide](../tools/strategy_lab/README.md).
-- Pattern Lab data, collector, update, event-study, matched-comparison or report
-  work: read its [guide](../tools/pattern_lab/README.md).
+- Pattern Lab market/auxiliary data, event studies, account execution, filters,
+  robustness, universe selection or report work: read its
+  [guide](../tools/pattern_lab/README.md).
 - Test planning: read the [test guide](../tests/README.md).

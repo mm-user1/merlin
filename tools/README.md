@@ -119,6 +119,39 @@ schema, resume, scope-unlock, analysis, allocation, and certification contracts.
 
 ## Pattern Lab
 
+The T01-T04 updates are accepted through `5473271`, including the final
+integrated review. The [research guide](pattern_lab/README.md#current-capabilities-and-acceptance)
+maps the current workflows:
+
+- [Native account studies](pattern_lab/README.md#native-account-studies-t01b):
+  reusable execution, entry filters, explicit windows, saved evidence and offline reports.
+- [Robustness views](pattern_lab/README.md#descriptive-account-robustness-t02):
+  comparisons and diagnostics derived from completed account studies.
+- [Auxiliary data](pattern_lab/README.md#auxiliary-snapshots-and-composable-account-entry-filters-t03):
+  explicit Funding/OI collection and causal features, with extensible data contracts.
+- [Monthly selection](pattern_lab/README.md#monthly-universe-selection-v1-t04a)
+  and [carried capital](pattern_lab/README.md#monthly-selection-v2-carried-capital-and-auxiliary-scorer-inputs-t04b):
+  ticker ranking, controls and both capital modes.
+
+Current CLI entry points (uppercase paths are placeholders; outputs must be new):
+
+```bash
+python -m tools.pattern_lab account-study --request REQUEST.json --data-root PACK --output-root NEW_RUN --workers 6
+python -m tools.pattern_lab account-report --run-root RUN --output-root NEW_REPORT
+python -m tools.pattern_lab aux-collect --request COLLECTION.json --output-root NEW_SNAPSHOT
+python -m tools.pattern_lab aux-inspect --snapshot-root SNAPSHOT --verify
+python -m tools.pattern_lab selection --request SELECTION.json --parent-root MONTHLY_RUN --output-root NEW_SELECTION --workers 6
+python -m tools.pattern_lab selection-report --run-root SELECTION --output-root NEW_REPORT
+```
+
+Requests that bind auxiliary snapshots also need their explicit
+`--auxiliary-root ALIAS=PATH` arguments. Experimental selector implementations
+are supplied through the Python API. Network collection is explicit; no study
+downloads missing data. Real data acquisition and experiments require separate
+assignments. Engineering acceptance is not evidence of a trading edge.
+
+The earlier workflows below remain supported:
+
 Pattern Lab is local, research-only tooling for testing hypotheses before a
 strategy exists. Its implemented milestones are the data foundation (a stable
 Parquet market-data pack, an explicit manifest, a one-way importer for the

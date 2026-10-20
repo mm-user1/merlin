@@ -1,4 +1,44 @@
-# Pattern Lab data foundation, event studies, comparisons and bracket probes
+# Pattern Lab research guide
+
+Pattern Lab is local, research-only tooling for evaluating signals, entry
+filters and ticker-selection methods before developing a strategy in Merlin.
+Merlin and Strategy Lab do not import it.
+
+## Current capabilities and acceptance
+
+The four-update cycle is complete through `5473271` (2026-10-20), including
+follow-up patches and owner report acceptance. Final integrated review of all
+11 commits from `46f7298` through `5473271` (exclusive base `27542f0`) found no
+fundamental or material defect within the documented scope. Its independent
+synthetic checks covered causal feature timing, future-only perturbations,
+fixed and signal-managed execution, monthly selection, capital carry, drawdowns
+and offline reconstruction; 240 focused tests passed. These are engineering
+checks, not proof of real-market data quality or a profitable trading edge.
+
+| Area | Implemented capability and detailed contract | Accepted through |
+| --- | --- | --- |
+| T01A | [Reusable account API](#reusable-account-python-api-t01a): preparation, commands, filters, fixed brackets, signal-managed exits and stop updates | `41b1f34` |
+| T01B | [Native account studies](#native-account-studies-t01b): explicit windows/allocations, workers, compact evidence, validation and reports | `29574bb` |
+| T02 | [Descriptive robustness](#descriptive-account-robustness-t02): window/month comparisons, passive context, concentration, side attribution and allocation pairs | `a22584b` |
+| T03 | [Auxiliary data and composed filters](#auxiliary-snapshots-and-composable-account-entry-filters-t03): initially Funding/OI, extensible providers/types and causal features | `0d5a534` |
+| T04A | [Monthly universe selection](#monthly-universe-selection-v1-t04a): extensible scorers, Top-K and controls with fixed reference capital | `abbd3a3` |
+| T04B | [Carried capital and auxiliary scoring](#monthly-selection-v2-carried-capital-and-auxiliary-scorer-inputs-t04b): exact account replay at slot capital, Funding/OI scorer access | `5473271` |
+
+A trading signal generates commands; an entry filter gates new entries; a
+universe selector chooses the monthly trading set. Auxiliary features can
+inform all three. Start a new native account experiment with `account-study`;
+use `selection` on a completed parent with one window per calendar month.
+The earlier event-study, comparison and frozen-candidate routes below retain
+their own contracts; native account studies do not enter those inference routes.
+
+Funding remains a feature, not a payment in account equity, and slippage is
+deliberately omitted. Robustness views are descriptive, not automatic parameter
+optimization. Collector implementation does not mean real Funding/OI snapshots
+or older market history have already been acquired. Collection, measured sizing
+of large raw-OI workloads and real experiments are separate operational work.
+See also the [carried execution attribution limit](#carried-execution-attribution-limit).
+
+## Earlier milestones
 
 Pattern Lab is local, research-only tooling. These milestones are implemented:
 
@@ -48,8 +88,9 @@ Neither method certifies a validated edge or production acceptance. See
 Merlin may not import Pattern Lab. Pattern Lab reads market data and writes only
 to an explicit output directory; it never touches Merlin databases, Queue state,
 Presets, baselines or Strategy Lab artifacts. Network access happens **only**
-inside an explicit `collect`, `update` or `recover` operation, never on import,
-`--help`, `inspect`, `slice`, `study` or `report`. Only unauthenticated public REST endpoints are
+inside an explicit `collect`, `update`, `recover` or `aux-collect` operation,
+never on import, help, inspection, studies, selection, verification or report
+rebuilding. Only unauthenticated public REST endpoints are
 used: there are no credentials, websockets, orders, proxy rotation and no silent
 fallback to another venue.
 
@@ -5413,3 +5454,21 @@ not ordinary test dependencies. Linux must import those exact bytes for replay;
 regenerated parents are not substitutes. Node interaction checks and owner visual/
 focus acceptance are separate gates. No new production scorer, optimizer,
 statistical claim, market experiment or generic storage framework is introduced.
+
+### Carried execution attribution limit
+
+At `5473271`, selection implementation attribution hashes the Pattern Lab
+modules and experimental scorer sources but omits the Merlin core execution
+files that carried funded accounts use. The parent account study records those
+core files; selection does not record their current hashes at its own execution
+time. If the core changes between creating the parent and generating a carried
+selection, the selection's implementation identity alone does not reveal that
+change. Fixed-reference selections do not execute funded accounts.
+
+This is a known provenance limitation, not a demonstrated numerical defect at
+the accepted baseline. Exact-parent verification re-executes funded accounts
+and catches changes that alter the saved facts or retained paths; it does not
+prove that every source file is unchanged. Record the repository revision used
+for parent and selection runs when comparing generations. Adding the account
+study's core source list to new selection attribution is an optional future
+maintenance change. Existing sealed artifacts must remain readable unchanged.

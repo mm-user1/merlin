@@ -84,9 +84,17 @@ baselines, or mutate external systems unless explicitly authorized.
   accepted at `9db9402` for their documented scope. Historical artifacts and M5
   acceptance are unchanged; cross-host numerical equality is fixture-specific.
   Post-M5 bounded coordinator performance and report corrections are accepted
-  at `4dcfb9e`, including owner-confirmed HTML appearance. The agreed core
-  development is complete for the documented research scope; proceed with
-  experiments rather than reopening accepted milestones without new evidence.
+  at `4dcfb9e`, including owner-confirmed HTML appearance.
+  The subsequent T01-T04 cycle is accepted through `5473271`: reusable account
+  execution and studies, descriptive robustness views, auxiliary Funding/OI
+  data with composable entry filters, and monthly universe selection with fixed
+  or carried capital. Final integrated review found no material defect in the
+  documented research scope. The Pattern Lab guide owns current APIs, versioned
+  behavior and the known carried-execution source-attribution limit.
+  Funding is a feature, not an account cashflow; slippage is intentionally omitted.
+  Data acquisition and market experiments remain separately authorized work.
+  Proceed with experiments rather than reopening accepted milestones without
+  new evidence.
   Do not present any Pattern Lab result — an M2 summary or an M3a nominal
   rejection — as a validated edge or an executable strategy.
 
@@ -119,7 +127,7 @@ Read the destination for the surface being changed before editing it.
 | Benchmark protocol and historical timing results | [docs/engine_v2/PERFORMANCE.md](docs/engine_v2/PERFORMANCE.md) |
 | Tool catalog | [tools/README.md](tools/README.md) |
 | Strategy Lab usage, schemas, safety, analysis, and allocation | [tools/strategy_lab/README.md](tools/strategy_lab/README.md) |
-| Pattern Lab data pack, collector, event studies, evidence, identity, matched comparisons and inference | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
+| Pattern Lab data/auxiliary collection, studies, account execution, filters, robustness, universe selection, evidence and inference | [tools/pattern_lab/README.md](tools/pattern_lab/README.md) |
 | Test tiers, isolation, and command selection | [tests/README.md](tests/README.md) |
 | Baseline provenance and interpretation | [data/baseline/README.md](data/baseline/README.md) and the [V2 baseline index](docs/README.md#baseline-evidence) |
 
