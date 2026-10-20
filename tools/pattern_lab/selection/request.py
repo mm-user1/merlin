@@ -55,6 +55,9 @@ class SelectionRequest:
 def normalize_selection_request(value, *, scorers=None, stored=False):
     if isinstance(value, SelectionRequest): value = value.document
     if isinstance(value, (str, Path)): value = read_json(value)
+    if isinstance(value, dict) and value.get('schema') == 'pattern-lab.selection-request.v2':
+        from .request_v2 import normalize_v2
+        return normalize_v2(value,scorers=scorers,stored=stored)
     strict_json(value)
     doc = parse_json(json_text(value))
     closed(doc, ('schema','selectionId','parent','allocationId','monthWindows','evaluationMonths',

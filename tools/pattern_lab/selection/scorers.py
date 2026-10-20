@@ -29,6 +29,7 @@ class Scorer:
     score: Callable
     sourceFiles: Mapping[str, Path] | None = None
     needsBars: bool = False
+    auxiliaryUses: Callable | None = None
 
 
 def no_parameters(p): closed(p, ()); return {}

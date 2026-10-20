@@ -4884,9 +4884,9 @@ Deferred: Funding normalization/cashflows, slippage, margin/liquidation fills,
 automatic mapping/filter search, universe selection, live services, persistent
 raw-response diagnostics, production ratio/event/OKX collectors and new statistics.
 
-## Monthly universe selection (T04A)
+## Monthly universe selection v1 (T04A)
 
-`tools.pattern_lab.selection` is a separate offline stage over a completed native
+The v1 route in `tools.pattern_lab.selection` is a separate offline stage over a completed native
 v1/v2 account study. It selects instruments for one allocation using completed
 calendar-month history. It never reruns an account, changes a trading allocation,
 reads a market pack, carries capital or charges another terminal fee. Every
@@ -5193,7 +5193,174 @@ transferred Windows ZIPs, preserving IDs/counts/labels/memberships exactly and
 comparing numeric metrics at rtol=1e-9/atol=1e-8. Fresh cross-host generated parents
 need not share IDs. Owner visual confirmation is separate.
 
-Deferred to T04B or later: carried capital, scorer auxiliary inputs, new trading
+For v2 carried capital and scorer auxiliary inputs, see the section below. Deferred: new trading
 execution, production trend/volatility/Funding scorers, optimization and statistical
 claims. A fixed parent roster can introduce survivor/coverage bias; selection
 software does not reconstruct historical exchange membership or establish an edge.
+
+## Monthly selection v2: carried capital and auxiliary scorer inputs (T04B)
+
+Explicit request `pattern-lab.selection-request.v2` adds required `initialCapital`
+and `auxiliaryInputs` to the v1 fields. `capitalMode` is `fixedReference` (initial
+capital must be null) or `carried` (positive finite T0). `referenceCapital` remains
+the parent's fixed shadow capital C in either mode. Existing v1 normalization,
+arithmetic, saved results and summary contracts remain on the v1 dispatch.
+
+```python
+selected = run_selection(request_v2, parent_root=parent.root, output_root=new_run,
+                         auxiliary_roots={"aux": snapshot.root},
+                         scorers={scorer.scorerId: scorer}, workers=6)
+verified = verify_selection(selected.root, parent_root=parent.root,
+                            auxiliary_roots={"aux": snapshot.root},
+                            scorers={scorer.scorerId: scorer}, workers=6,
+                            require_scorers=True)
+```
+
+Workers default to 1 and must be integers in 1..6. The selection CLI accepts
+`--workers` and repeated `--auxiliary-root ALIAS=PATH`; experimental scorer code
+is supplied by the caller through the Python API, never imported from an artifact.
+Run the public synthetic example by absolute path, with PYTHONPATH unset:
+
+```text
+python /path/to/merlin/tools/pattern_lab/examples/selection_carried_synthetic.py --output-root NEW_EXTERNAL_ROOT --workers 6
+```
+
+It builds six targets, seven months, a pinned synthetic Funding/OI snapshot,
+two selectors, K=2/8 and four random replicates in both modes. The experimental
+scorer source is `examples/selection_auxiliary_scorer.py`: dimensionless OI change
+illustrates the interface without claiming predictive usefulness. Funding rows
+remain rates per settlement; there is no Funding PnL or assumed eight-hour rate.
+
+### Carried arithmetic and retained paths
+
+Top-K, every Random-K replicate and all-eligible start at the same total T0 for
+every K. Each month Top/Random slots receive Tm/K, and all-eligible slots Tm/N.
+Underfilled slots remain cash. The original decoded preparation/commands,
+window, rules and policy are executed at exact slot capital with only
+`initialCapital` replaced. Native lot floors, minimums, fees and rejections apply;
+shadow PnL is never scaled to approximate these executions. Rankings, ties,
+pools and the versioned random hash schedule use shadow history only.
+
+Closing capital is exactly `Tm + math.fsum(finalBalance-slotCapital)`; this saved
+float is next month's opening. Cash is `Tm-math.fsum(slotCapitals)`, including a
+possible tiny negative residual. Cash plus final balances and native aggregate
+endpoints reconcile at rtol=1e-9/atol=1e-8; these alternative expressions never
+replace authoritative closing capital. A failed evaluation-coverage member of
+the frozen method pool, even unselected, stops all K/controls for that selector.
+Later rows retain schedules but have `priorCapitalUnknown`, with no executions
+or false zero returns. Full-period metrics are null; only the contiguous common
+prefix is reported. Other selectors can continue. A nonpositive balance stays
+signed, with later zero PnL/no execution/null monthly return; missingness still wins.
+
+Carried return is percent of T0; drawdown is percent of the running equity peak,
+including T0, native intramonth equity and authoritative boundaries. DD may exceed
+100%. Display endpoints use authoritative balances; bounded display samples do
+not determine financial metrics. Fixed-reference metrics remain additive pp.
+Random controls provide scalar returns/distributions only, without random curves
+or DD. Native account paths are retained once if Top-K/all-eligible use an execution;
+Random-only execution records have null `pathRef`.
+
+Funded tasks are grouped by parent accountKey within a month. Each task decodes
+once and executes sorted unique exact capitals with a path-retention flag. The
+selection-owned spawn pool submits at most twice the worker count; errors cancel
+pending tasks, shut down, and propagate without retry. Scoring, ranking, masks and
+capital chains stay in the coordinator. Workers/physical roots occur only in
+`provenance.json`; economic and derived members match across one/six workers.
+
+### Causal auxiliary contract
+
+Bindings use the accepted T03 closed `auxiliaryInputs` schema: inputId,
+snapshotId, expectedSnapshotContentId, coveragePolicy, and one `*` or complete
+per-target sources with explicit provider/venue/contract/type/field/interval/unit/
+baseUnit/baseMultiplier. Exact runtime aliases and content pins are required;
+unused bindings, mismatches and output/input overlap fail. Snapshots remain
+external dependencies, not copies inside selection artifacts.
+
+`Scorer.auxiliaryUses` is an optional callable of normalized parameters, default
+empty. It returns closed uses `{useId,bindingId,access,publicationLagMs,antecedentMs}`
+plus `feature` only for `access="feature"`. The feature is the exact T03 declaration;
+its binding, field and lag must match. IDs are unique; the entire normalized
+contract is constant across months. Both raw and feature access need separate uses.
+
+At cutoff D and scorer history start H, raw observations are restricted to
+`[H-antecedentMs,D-publicationLagMs+1)`. Features use only
+`[D-(maxAgeMs+lookbackMs+sourceStepMs+lag+antecedentMs),D-lag+1)` and T03 decisions
+`[D]`. Event source step is 1 ms. Required envelopes must fit the parent's
+admitted preparation origin/study end; warmup is never silently clipped. The
+right coverage boundary becomes available at D+1. Equality at publication
+cutoff is included, and T03 unknown-wins/expiry/exact sampled lookback rules apply.
+
+The immutable view adds `auxiliaryRaw(ticker,useId)` and
+`auxiliaryFeature(ticker,useId)` to `months`/`bars`. Raw views contain owned rows,
+source units and clipped coverage; feature views contain value, known/reason,
+sourceIndex, observed/available/validUntil clocks and identity. Neither exposes a
+root, snapshot reader, whole-snapshot pin, future coverage end or future buffer.
+Per-cell diagnostics outside the view retain resolved source metadata, bounds,
+cutoff, lag, coverage, completeness, availability/reason, slice fingerprint and
+feature state. Future snapshot extensions may change the run pin but not an
+earlier causal view or score.
+
+Required cells cover each selector/month/common-history-pool ticker, before
+method exclusions. `requireComplete` requires the entire envelope's coverage,
+every sampled grid row and nonnull required field; covered-empty irregular events
+are valid. Feature access additionally needs a known state at D. `allowUnknown`
+retains reasons and the coordinator excludes unavailable tickers regardless of
+the scorer's eligibility output. Price-history-excluded tickers require no time
+cells, while binding/source identity checks still cover the declared roster.
+
+### V2 artifact layout, budgets and verification
+
+Seal schema remains `pattern-lab.universe-selection.v1` with explicit
+`formatVersion:2`. Exact members are `selection.json`, `ledger.json`, `scores.json`,
+`results.json`, `account-links.json`, `parts.json`, `status.json`, `provenance.json`,
+`completion.json`, `derived/{summary.json,report.html}`, shadow
+`paths/YYYY-MM.npz`, and the monthly parts listed in `parts.json`:
+
+- `funded/YYYY-MM/part-NNNNN.parquet`: at most 10,000 rows, sorted accountKey/capital.
+  Closed `FUNDED` Arrow schema in `selection/storage_v2.py`: nonnull string execution/
+  account/instrument/preparation/command IDs and canonical policy/rules/window JSON;
+  float64 capital/finalBalance/fees; int64 trade/attempt/proposal/exit/unknown counts;
+  nonnull typed rejection and forced-exit structs; nullable string pathRef.
+- `portfolios/YYYY-MM/part-NNNNN.parquet`: at most 10,000 rows, sorted selector/K/
+  portfolio/replicate. `PORTFOLIOS` uses nonnull IDs, status, int64 slot counts,
+  typed member/slot lists, nullable reason and float64 capital/cash/return/fee facts,
+  nullable int64 trades and typed rejection/forced-exit structs. Fixed mode uses
+  the closed `FIXED` schema: the accepted fixed-reference portfolio fields plus
+  selector/K/portfolio/replicate/month keys. All fields and nested nullability are
+  authoritative in these three executable Arrow schemas.
+- `funded-paths/YYYY-MM/part-NNNNN.npz`: shared int64 `times` and float64 equity
+  vectors keyed by executionKey, sorted and greedily partitioned below 256 MiB
+  expanded. No pickle/object arrays. Empty months produce no part files.
+
+Account links bind parent preparation/commands/rules/window and reconstruct the
+shadow accountId. Funded records bind those links and the exact replaced policy,
+with coverage/status linked to the parent ledger and checked by replay. Results
+contain Top-K/all-eligible summaries and replicate totals, without random monthly
+or per-slot JSON expansion. Aggregate curves are reconstructed rather than cached.
+
+Pre-run `selection-capacity.2` uses frozen pools/masks, worst-case unique scalar
+executions, retained path samples, scalar/membership budgets and part counts;
+it does not allocate trial random workloads. It budgets uncompressed data rather
+than hoped-for compression. Exact writers still enforce 16 MiB JSON, 256 MiB
+members/expanded arrays and 1 GiB total, plus 10,000 seal members. Capacity is a
+conservative supported-workload policy, not an exemption from exact byte guards.
+No new capacity limit is applied to historical v1 artifacts at load/rebuild.
+
+Load/import/rebuild verify seals, closed structure, ordering, IDs/links, scores,
+contracts, schedules, exact saved capital chains, native endpoints, DD and summary.
+They require no parent/snapshot, executor, network or experimental import. This
+cannot prove an individually forged but internally coherent funded result.
+Exact-parent verification replays every unique execution at its SAVED capital;
+it never feeds replayed balances into later replay inputs. Account IDs, scalar
+facts and retained paths must match exactly, on every host. First mismatch reports
+the execution key and field; no platform remapping or tolerance-based replay pass.
+With supplied matching code/snapshots it also recomputes scorer outputs and
+dependencies; missing optional inputs are `storedOutputsOnly`. Set
+`require_scorers=True` to refuse missing recomputation dependencies. Offline
+report rebuilds never silently raise their verification claim.
+
+Windows review packages and original v1 bundles are explicit handoff evidence,
+not ordinary test dependencies. Linux must import those exact bytes for replay;
+regenerated parents are not substitutes. Node interaction checks and owner visual/
+focus acceptance are separate gates. No new production scorer, optimizer,
+statistical claim, market experiment or generic storage framework is introduced.

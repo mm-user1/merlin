@@ -56,7 +56,7 @@ def bounded_json(path):
 
 def envelope(doc):
     closed(doc,('schema','formatVersion','members'))
-    require(doc['schema']==SCHEMA and type(doc['formatVersion']) is int and doc['formatVersion']==1,'selection seal schema')
+    require(doc['schema']==SCHEMA and type(doc['formatVersion']) is int and doc['formatVersion'] in (1,2),'selection seal schema')
     members=doc['members'];require(type(members) is dict and 0<len(members)<=10000 and 'completion.json' not in members,'seal members')
     member_names([*members,'completion.json'])
     for name,row in members.items():
@@ -78,10 +78,10 @@ def verify_directory(root):
     return seal
 
 
-def seal_directory(root):
+def seal_directory(root,format_version=1):
     members={p.relative_to(root).as_posix():dict(bytes=p.stat().st_size,sha256=file_hash(p))
         for p in sorted(root.rglob('*')) if p.is_file() and p.name!='completion.json'}
-    write_json(root/'completion.json',envelope(dict(schema=SCHEMA,formatVersion=1,members=members)))
+    write_json(root/'completion.json',envelope(dict(schema=SCHEMA,formatVersion=format_version,members=members)))
     verify_directory(root)
 
 
@@ -124,6 +124,9 @@ def assert_equal(actual,expected,label):
 
 def load_selection(run_root):
     root=safe_path(run_root);seal=verify_directory(root)
+    if seal['formatVersion']==2:
+        from .artifacts_v2 import load
+        return load(root,seal)
     meta=bounded_json(root/'selection.json')
     closed(meta,('schema','formatVersion','request','roster','allocation','identities','implementation'))
     require(meta['schema']==SCHEMA and type(meta['formatVersion']) is int and meta['formatVersion']==1,'selection schema')
@@ -171,14 +174,29 @@ def load_selection(run_root):
 
 
 def write_derived(reader,destination):
+    if reader.selection['formatVersion']==2:
+        from .report_v2 import summary,render
+        value=summary(reader);write_json(destination/DERIVED[0],value)
+        (destination/DERIVED[1]).parent.mkdir(parents=True,exist_ok=True)
+        payload=render(value).encode('utf-8');require(len(payload)<=MAX_FILE,'HTML size bound')
+        (destination/DERIVED[1]).write_bytes(payload)
+        return
     from .report import summary,render
     value=summary(reader);write_json(destination/DERIVED[0],value)
     (destination/DERIVED[1]).write_text(render(value),encoding='utf-8')
 
 
-def run_selection(request, *, parent_root, output_root, scorers=None):
+def run_selection(request, *, parent_root, output_root, scorers=None, auxiliary_roots=None, workers=1):
+    integer(workers,'workers',1);require(workers<=6,'workers must be 1..6')
+    normalized=normalize_selection_request(request,scorers=scorers)
+    if normalized.document['schema']=='pattern-lab.selection-request.v2':
+        from .artifacts_v2 import run
+        return run(normalized,parent_root=parent_root,output_root=output_root,scorers=scorers,auxiliary_roots=auxiliary_roots,workers=workers)
+    require(not auxiliary_roots,'v1 has no auxiliary inputs')
+    for s in registry(scorers).values():
+        require(s.auxiliaryUses is None,'auxiliary declarations require v2')
     registered=registry(scorers);before=source_hashes(registered)
-    normalized=normalize_selection_request(request,scorers=scorers);doc=normalized.document
+    doc=normalized.document
     used={s['scorerId'] for s in doc['selectors'] if s['scorerId'].startswith('x.')}
     before={k:v for k,v in before.items() if k in used}
     parent_root=safe_path(parent_root);target=new_destination(output_root,parent_root)
@@ -209,8 +227,12 @@ def run_selection(request, *, parent_root, output_root, scorers=None):
         raise
 
 
-def verify_selection(run_root, *, parent_root, scorers=None):
+def verify_selection(run_root, *, parent_root, scorers=None, auxiliary_roots=None, workers=1, require_scorers=False):
     reader=load_selection(run_root);meta=reader.selection;doc=meta['request']
+    if meta['formatVersion']==2:
+        from .artifacts_v2 import verify
+        return verify(reader,parent_root=parent_root,scorers=scorers,auxiliary_roots=auxiliary_roots,workers=workers,require_scorers=require_scorers)
+    require(not auxiliary_roots,'v1 has no auxiliary inputs')
     parent=admit_parent(doc,safe_path(parent_root));parent_result=verify_account_study(parent.root)
     require(meta['allocation']==next(a for a in parent.study['request']['allocations'] if a['allocationId']==doc['allocationId']),'parent allocation metadata differs')
     registered=registry(scorers);provided=source_hashes(registered)

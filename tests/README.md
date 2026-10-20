@@ -26,6 +26,23 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+T04B adds `test_selection_carried.py`, `test_selection_auxiliary.py` and
+`test_selection_storage_v2.py`: native lot-floor execution, exact capital carry,
+missing-month stops/depletion, scalar-only random retention, one/six spawn byte
+parity, exact-parent replay and coherent forgery detection, causal auxiliary
+coverage/lag/ownership, partition guards, bounded failure cleanup and the public
+example outside the repository. `selection_carried_report.cjs` accepts generated
+v2 HTML and checks both capital modes and selector/K interactions; its pytest
+wrapper skips only when Node is absent. Owner visual/focus review is separate.
+Run all `test_selection*.py` plus the nine accepted account/account-study/
+robustness/auxiliary modules, then all `tests/pattern_lab` and
+`tests/v2/test_v2_kernel_execution.py`. Windows symlink tests require a capable
+token; use only the task-specific owner-approved UAC procedure, with no security
+settings changes. Exact Windows archive compatibility/replay helpers live with
+the explicit task handoff and are not discovery dependencies. Linux replay uses
+saved exact capitals and requires exact facts/IDs/paths, never tolerance or ID
+remapping. Same-host offline rebuilds must match byte-for-byte.
+
 Pattern Lab's `test_accounts_preparation.py`, `test_accounts_execution.py` and
 `test_accounts_verification.py` cover the T01A library account API: native 5m
 preparation bindings, independent timeframe features, causal state expiry,

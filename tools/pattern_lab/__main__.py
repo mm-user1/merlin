@@ -234,6 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
     selection_command = commands.add_parser("selection", help="Select monthly universes from a completed native account study.")
     for flag in ("request", "parent-root", "output-root"):
         selection_command.add_argument("--"+flag,type=Path,required=True)
+    selection_command.add_argument('--workers',type=int,choices=range(1,7),default=1)
+    selection_command.add_argument('--auxiliary-root',action='append',default=[],metavar='ALIAS=PATH')
     selection_report = commands.add_parser("selection-report", help="Rebuild a selection report offline.")
     for flag in ("run-root", "output-root"):
         selection_report.add_argument("--"+flag,type=Path,required=True)
@@ -425,7 +427,13 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
     if args.command == "selection":
         from .selection import run_selection
-        result=run_selection(args.request,parent_root=args.parent_root,output_root=args.output_root)
+        from .accounts.contracts import require
+        roots={}
+        for binding in args.auxiliary_root:
+            alias,separator,path=binding.partition('=')
+            require(separator and alias and path and alias not in roots,'auxiliary-root requires unique ALIAS=PATH')
+            roots[alias]=Path(path)
+        result=run_selection(args.request,parent_root=args.parent_root,output_root=args.output_root,workers=args.workers,auxiliary_roots=roots or None)
         _emit({"status":"complete","runRoot":str(result.root),"identities":result.selection["identities"]})
         return EXIT_OK
     if args.command == "selection-report":
