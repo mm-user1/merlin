@@ -546,6 +546,28 @@ coverage reports external too if requesting HTML/XML output.
 
 ## Evidence and external certification
 
+The T04B-1 selection follow-up uses all `tests/pattern_lab/test_selection*.py`
+through `tools/run_tests.py` with an external `MERLIN_TEST_ROOT`. Auxiliary tests
+cover per-cell parsing, immutable ownership/native-price checks, batch release
+in generation and deep recomputation, early envelope/resource refusal, late
+required-coverage refusal before any scorer, corrected known-but-incomplete
+features, explicit `.2`/`.3` dispatch, and honest auxiliary recomputation for
+empty/no-input/stored-only/mixed selectors. New runs emit `monthly-selection.3`;
+old `.2` artifacts retain original availability rules without migration. The
+Node harness checks rendered dependency pins/roles and the unselected-member
+chain-stop explanation separately from owner visual acceptance.
+
+Explicit review helpers and genuine baseline/new F2 archives live in the
+task's ignored review inputs; they are not ordinary tracked-test dependencies.
+The corrected original-bundle helper uses `math.fsum` without changing expected
+fees or exact account/path comparisons. Bounded synthetic 2/4/8-ticker raw 5m OI
+probes (four-month history and sequential months) retain parse counts, elapsed
+time and Python allocation peaks against isolated baseline code. They have no
+CI timing thresholds and do not claim a 44-target runtime or hard RAM bound.
+This scoped follow-up requires no full preservation/UAC rerun absent a concrete
+regression; protected engine inputs stay immutable. Node and exact archived
+Linux replay are separate required review gates when pending locally.
+
 Tracked baselines under `data/baseline/` and `data/baseline_v2/` are immutable
 oracles. A mismatch requires review, not baseline regeneration. Preserve numerical
 tolerances, candidate order, fingerprints, trades, and meaningful negative cases.

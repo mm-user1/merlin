@@ -265,7 +265,11 @@ def export_selection_bundle(run_root, *, zip_path):
     target.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(target,'x',zipfile.ZIP_DEFLATED) as archive:
         for name in sorted([*seal['members'],'completion.json']):archive.write(reader.root/name,name)
-    return dict(path=str(target),bytes=target.stat().st_size,sha256=file_hash(target))
+    result=dict(path=str(target),bytes=target.stat().st_size,sha256=file_hash(target))
+    if reader.selection['formatVersion']==2:
+        from .dependencies_v2 import description
+        result['dependencies']=description(reader.selection)
+    return result
 
 
 def import_selection_bundle(zip_path, *, output_root):

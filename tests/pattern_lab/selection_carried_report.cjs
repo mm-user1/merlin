@@ -4,6 +4,15 @@ const html=fs.readFileSync(process.argv[2],'utf8');
 const payload=html.match(/<script id="selection-data" type="application\/json">([\s\S]*?)<\/script>/)[1];
 const data=JSON.parse(payload),script=html.match(/<\/script><script>([\s\S]*?)<\/script>/)[1];
 assert.equal(data.schema,'pattern-lab.selection-summary.v2');assert(data.coverage.some(r=>r.trades>0));
+// Inspect rendered HTML, excluding all script source and embedded data.
+const visible=html.replace(/<script[\s\S]*?<\/script>/g,'').replace(/<[^>]*>/g,' ');
+assert(visible.includes('Even one unselected member of the eligible pool'));
+assert(visible.includes('across every K and all controls'));
+assert(visible.includes('need only the sealed selection bundle'));
+assert(visible.includes('not included by selection export'));
+for(const pin of Object.values(data.request.parent))assert(visible.includes(pin));
+for(const binding of data.request.auxiliaryInputs)assert(visible.includes(binding.expectedSnapshotContentId));
+for(const sources of Object.values(data.implementation.experimental))for(const hash of Object.values(sources))assert(visible.includes(hash));
 class Element {
   constructor(tag='div'){this.tag=tag;this.children=[];this.textContent='';this.value='';this.listeners={};this.attributes={};}
   append(...nodes){this.children.push(...nodes);if(this.tag==='select'&&!this.value&&nodes.length)this.value=String(nodes[0].value);}

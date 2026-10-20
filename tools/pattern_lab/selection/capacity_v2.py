@@ -5,6 +5,46 @@ from .carried import schedules
 from .request import month_bounds
 
 
+def auxiliary_plan(doc,contracts,ledger,roster,snapshots,parent_bounds,active):
+    """Cheap envelope/dimension admission, before slicing; not a hard RAM limit."""
+    from .auxiliary import envelope
+    from .ledger import history_pool
+    from ..auxiliary.study import source_for
+    from ..auxiliary.model import INTERVALS
+    from ..account_study.common import read_json
+    months=[w['month'] for w in doc['monthWindows']];bindings={b['inputId']:b for b in doc['auxiliaryInputs']}
+    cells=largest_rows=largest_cells=0
+    for sid in sorted(active):
+        contract=contracts[sid]
+        require(contract['lookbackMonths']<=doc['pool']['historyMonths'],'scorer history contract')
+        for month in doc['evaluationMonths']:
+            index=months.index(month);history=months[index-contract['lookbackMonths']:index]
+            pool,_=history_pool(ledger,roster,months[index-doc['pool']['historyMonths']:index],doc['pool']['minObservedBarsPct'])
+            batch_rows=batch_cells=0
+            for ticker in pool:
+                for use in contract['auxiliaryUses']:
+                    b=bindings[use['bindingId']];source=source_for(b,ticker)
+                    start,end=envelope(use,source,history,month_bounds(month)[0],parent_bounds)
+                    batch_cells+=1
+                    if use['access']=='raw':
+                        if source['interval'] is not None:
+                            step=INTERVALS[source['interval']];rows=(end-start+step-1)//step
+                        else:
+                            # Sealed metadata only, never rows or a whole-snapshot series read.
+                            rows=read_json(snapshots[b['snapshotId']].root/'series'/source['seriesId']/'series.json')['inspection']['records']
+                        batch_rows+=rows
+            cells+=batch_cells;largest_rows=max(largest_rows,batch_rows);largest_cells=max(largest_cells,batch_cells)
+    # Necessary lower bounds, not the final eligible-pool capacity assessment.
+    # Even empty diagnostics require these bytes. Shadow vectors are always retained.
+    score_min=cells*128
+    shadow=sum((len(roster)+1)*(month_bounds(w['month'])[1]-month_bounds(w['month'])[0])//ledger[0]['stepMs']*8 for w in doc['monthWindows'])
+    require(score_min<=16*1024*1024 and shadow<=1024*1024*1024,'early selection dimensions exceed artifact bounds')
+    return dict(requiredCells=cells,largestBatchCells=largest_cells,rawObservationsUpperEstimate=largest_rows,
+        serializedBytesEstimate=largest_rows*192+largest_cells*4096,
+        liveBatchBytesEstimate=largest_rows*(512+192+512)+largest_cells*8192,
+        explanation='One owned raw batch, serialized cells and decoded/frozen copies; excludes snapshot admission, price views and scorer allocations. Estimate, not a hard RAM guarantee.')
+
+
 def assessment(doc,ledger,roster,scores):
     plan=schedules(doc,ledger,scores);stopped=set();jobs=funded=retained=path_bytes=portfolio_rows=0
     r=doc['randomControl']['replicates'];step=ledger[0]['stepMs'];carried=doc['capitalMode']=='carried'

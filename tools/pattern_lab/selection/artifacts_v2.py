@@ -13,7 +13,7 @@ from .request import normalize_selection_request
 from .ledger import admit_parent,extract_ledger
 from .engine import validate_ledger,path_identity,data_identity,source_hashes,implementation
 from .scorers import registry
-from .auxiliary import admit_snapshots
+from .auxiliary import admit_snapshots,ALGORITHMS
 from . import scores_v2
 from .facts_v2 import account_links,validate_links,validate_records
 from .capacity_v2 import admit,assessment
@@ -42,7 +42,8 @@ def run(normalized,*,parent_root,output_root,scorers,auxiliary_roots,workers):
     parent=admit_parent(doc,parent_root);parent_bounds=list(bounds(parent.study['request']))
     snapshots=admit_snapshots(doc,auxiliary_roots,target,parent)
     ledger,paths,roster=extract_ledger(parent,doc);validate_ledger(doc,roster,ledger,paths)
-    scores=scores_v2.build(parent,doc,ledger,roster,registered,snapshots,parent_bounds)
+    algorithm='monthly-selection.3'
+    scores=scores_v2.build(parent,doc,ledger,roster,registered,snapshots,parent_bounds,algorithm=algorithm)
     budget=admit(doc,ledger,roster,scores)
     allocation=next(a for a in parent.study['request']['allocations'] if a['allocationId']==doc['allocationId'])
     links=account_links(parent,ledger);validate_links(links,ledger,allocation)
@@ -59,7 +60,7 @@ def run(normalized,*,parent_root,output_root,scorers,auxiliary_roots,workers):
             results,portfolios,curves=fixed_calculation(doc,ledger,paths,roster,scores)
             funded={m:[] for m in doc['evaluationMonths']};funded_paths={m:{} for m in funded}
         require(before=={k:v for k,v in source_hashes(registered).items() if k in used},'experimental source changed during run')
-        attribution=implementation(before);attribution['algorithm']='monthly-selection.2'
+        attribution=implementation(before);attribution['algorithm']=algorithm
         meta=dict(schema=base.SCHEMA,formatVersion=2,request=doc,roster=roster,allocation=allocation,parentBounds=parent_bounds,
             capacity=budget,implementation=attribution,identities=dict(specification=normalized.identity,
                 dataInput=data_id(doc,ledger,paths,scores,allocation,links,parent_bounds),implementation=semantic_digest(attribution)))
@@ -104,12 +105,13 @@ def load(root,seal):
     require(all(set(p)=={'times','pnl'} for p in paths.values()),'shadow path members')
     validate_ledger(doc,meta['roster'],ledger,paths);validate_links(links,ledger,allocation)
     require(all(r['stepMs']==allocation['timeframeMinutes']*60000 and pb[1]<=r['startMs']<r['endMs']<=pb[2] for r in ledger),'allocation timeframe/parent bounds')
-    scores_v2.validate(doc,ledger,meta['roster'],scores,pb)
+    require(meta['implementation']['algorithm'] in ALGORITHMS,'unknown selection algorithm')
+    scores_v2.validate(doc,ledger,meta['roster'],scores,pb,algorithm=meta['implementation']['algorithm'])
     closed(meta['identities'],('specification','dataInput','implementation'))
     require(meta['identities']==dict(specification=normalized.identity,dataInput=data_id(doc,ledger,paths,scores,allocation,links,pb),
         implementation=semantic_digest(meta['implementation'])),'v2 identities')
     impl=meta['implementation'];closed(impl,('algorithm','sources','experimental','python','libraries'))
-    require(impl['algorithm']=='monthly-selection.2' and type(impl['python']) is str and type(impl['experimental']) is dict,'implementation metadata')
+    require(impl['algorithm'] in ALGORITHMS and type(impl['python']) is str and type(impl['experimental']) is dict,'implementation metadata')
     closed(impl['libraries'],('numpy','pandas','pyarrow','numba'))
     require(all(type(v) is str and v for v in impl['libraries'].values()),'library metadata')
     for hashes in [impl['sources'],*impl['experimental'].values()]:
@@ -193,8 +195,8 @@ def verify(reader,*,parent_root,scorers,auxiliary_roots,workers,require_scorers)
     levels={s['selectorId']:'recomputed' if s['scorerId'] in registered and (not saved_contracts[s['selectorId']]['auxiliaryUses'] or snapshots is not None)
         else 'storedOutputsOnly' for s in doc['selectors']}
     require(not require_scorers or all(v=='recomputed' for v in levels.values()),'required scorer recomputation dependencies missing')
-    scores=scores_v2.build(parent,doc,ledger,roster,registered,snapshots,meta['parentBounds'],stored=reader.scores)
+    scores=scores_v2.build(parent,doc,ledger,roster,registered,snapshots,meta['parentBounds'],stored=reader.scores,algorithm=meta['implementation']['algorithm'])
     base.assert_equal(scores,reader.scores,'deep score outputs/contracts/dependencies')
     require(provided==source_hashes(registered),'experimental source changed during verification')
     return dict(status='verified',level='exactParent',parent=parent_result,fundedExecutions=replayed,scorers=levels,
-        auxiliaryRecomputed=snapshots is not None)
+        auxiliaryRecomputed=any(levels[b['selectorId']]=='recomputed' and b['auxiliaryDependencies'] for b in scores))

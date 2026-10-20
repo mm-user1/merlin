@@ -6,6 +6,7 @@ import numpy as np
 from .request import month_bounds
 from .carried import portfolio_id
 from .report import display_paths
+from .dependencies_v2 import description
 
 
 def carried_display(c,curves,kind,initial):
@@ -48,6 +49,11 @@ def summary(reader):
 
 
 def render(value):
+    dependencies=description(value)
+    explanation=''.join('<p>'+html.escape(dependencies[k])+'</p>' for k in ('supply','verification'))
+    explanation+='<p>Ordinary load, import and report rebuild need only the sealed selection bundle.</p>'
+    explanation+='<p>Exact funded execution verification needs this exact pinned monthly parent:</p><pre>'+html.escape(json.dumps(dependencies['exactParent']['pins'],indent=2))+'</pre>'
+    explanation+='<p>Auxiliary scorer recomputation additionally needs these exact snapshot content IDs and explicitly supplied matching experimental scorer source hashes, where used:</p><pre>'+html.escape(json.dumps(dependencies['auxiliaryRecomputation'],indent=2))+'</pre>'
     payload=json.dumps(value,ensure_ascii=True,separators=(',',':'),allow_nan=False).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
     title=html.escape(value['request']['selectionId'])
     script=Path(__file__).with_name('report_v2.js').read_text(encoding='utf-8')
@@ -59,11 +65,12 @@ th,td{padding:8px;text-align:left;vertical-align:top;border-bottom:1px solid #dd
 <main><h1>Monthly universe selection: '''+title+'''</h1><section id="overview"></section>
 <section><label>Selector <select id="selector"></select></label><label>K <select id="k"></select></label></section><div id="results"></div>
 <section><h2>Interpretation</h2><p>Ranking uses fixed-capital shadow history only. Every monthly account starts flat and closes through native terminal logic including fees; positions and pending orders do not carry between months.</p>
-<p>Carried portfolios start with equal total capital T0, rebalance each month, and keep underfilled slots in cash. Sizing uses the native executor at actual slot capital. A pool-wide missing month stops the matched chain; later schedules remain visible, with priorCapitalUnknown. A depleted balance stays signed and stops trading. Full-period metrics are unavailable for an incomplete chain; the common prefix is labelled separately.</p>
+<p>Carried portfolios start with equal total capital T0, rebalance each month, and keep underfilled slots in cash. Sizing uses the native executor at actual slot capital. Even one unselected member of the eligible pool with insufficient evaluation-month data stops all later carried comparisons for that selector, across every K and all controls. Later schedules remain visible, with priorCapitalUnknown. A depleted balance stays signed and stops trading. Full-period metrics are unavailable for an incomplete chain; the common prefix is labelled separately.</p>
 <p>Fixed-reference slots reset to C monthly; profits are withdrawn and losses replenished. Cumulative returns and drawdown are percentage points (pp), not compounded percentages. Its all-eligible control can fund a different total capital.</p>
 <p>Carried drawdown uses native equity and authoritative capital boundaries, includes T0 in the running peak, and may exceed 100%. Display sampling preserves monthly boundaries and extrema; plotted endpoints use authoritative closing capital. The sampled plot does not calculate drawdown. Random controls supply return distributions only, without equity curves or drawdown.</p>
 <p>Underfill and different scorer pools confound ranking lift. A fixed roster can introduce survivor and coverage bias. Random schedules, K variants and months are dependent; distributions are not p-values. Historical consistency is not IS/OOS transfer. No automatic best-method verdict or profitability claim is supplied.</p>
 <p>Funding is a rate per settlement; no eight-hour normalization or Funding PnL is applied. OI units and base multipliers remain explicit; raw differently scaled contracts are not comparable. Auxiliary values obey declared publication lags, coverage and staleness; unknown required inputs exclude the ticker.</p></section>
+<section id="dependencies"><h2>Verification dependencies</h2>'''+explanation+'''</section>
 <details><summary>Scores, auxiliary diagnostics and coverage</summary><pre id="diagnostics"></pre></details>
 <details><summary>Identity, source attribution and verification</summary><pre id="attribution"></pre></details></main>
 <script id="selection-data" type="application/json">'''+payload+'''</script><script>'''+script+'''</script></html>'''

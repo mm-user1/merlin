@@ -7,10 +7,11 @@ from .request_v2 import scorer_contract,normalize_uses
 from .ledger import history_pool,score_view
 from .scorers import evaluate
 from .engine import validate_scores_saved
-from .auxiliary import AuxiliaryView,prepare_cells,envelope
+from .auxiliary import AuxiliaryView,prepare_batch,envelope,availability
+from .capacity_v2 import auxiliary_plan
 
 
-def build(parent,doc,ledger,roster,registered,snapshots,parent_bounds,stored=None):
+def build(parent,doc,ledger,roster,registered,snapshots,parent_bounds,stored=None,*,algorithm):
     saved={(b['selectorId'],b['month']):b for b in stored or []}
     contracts={s['selectorId']:scorer_contract(registered[s['scorerId']],s['parameters'],doc)
         if s['scorerId'] in registered else saved[s['selectorId'],doc['evaluationMonths'][0]]['contract'] for s in doc['selectors']}
@@ -18,30 +19,43 @@ def build(parent,doc,ledger,roster,registered,snapshots,parent_bounds,stored=Non
     if stored is not None:
         for sid in active:
             require(contracts[sid]==saved[sid,doc['evaluationMonths'][0]]['contract'],'supplied scorer contract differs')
-    cells=prepare_cells(doc,contracts,ledger,roster,snapshots,parent_bounds) if snapshots is not None else None
     batches=[];months=[w['month'] for w in doc['monthWindows']]
+    bindings={b['inputId']:b for b in doc['auxiliaryInputs']}
+    require({u['bindingId'] for c in contracts.values() for u in c['auxiliaryUses']}==set(bindings),'unused auxiliary bindings')
+    recomputed={sid for sid in active if not contracts[sid]['auxiliaryUses'] or snapshots is not None}
+    auxiliary_plan(doc,contracts,ledger,roster,snapshots,parent_bounds,recomputed)
+    # Refuse ANY required bad cell before the first scorer call. Discard each
+    # validation batch; never retain all raw months to save a second slice read.
+    for sid in sorted(recomputed):
+        c=contracts[sid];required=dict(c,auxiliaryUses=[u for u in c['auxiliaryUses'] if bindings[u['bindingId']]['coveragePolicy']=='requireComplete'])
+        if not required['auxiliaryUses']:continue
+        for month in doc['evaluationMonths']:
+            index=months.index(month);history=months[index-c['lookbackMonths']:index]
+            pool,_=history_pool(ledger,roster,months[index-doc['pool']['historyMonths']:index],doc['pool']['minObservedBarsPct'])
+            prepare_batch(doc,required,pool,history,month_bounds(month)[0],snapshots,parent_bounds,algorithm=algorithm)
     for s in doc['selectors']:
         sid=s['selectorId'];c=contracts[sid]
         require(c['lookbackMonths']<=doc['pool']['historyMonths'],'scorer history contract')
         for month in doc['evaluationMonths']:
-            if sid not in active or (c['auxiliaryUses'] and cells is None):
+            if sid not in recomputed:
                 batches.append(saved[sid,month]);continue
             require(scorer_contract(registered[s['scorerId']],s['parameters'],doc)==c,'scorer contract changed across months')
             index=months.index(month);seen=months[index-c['lookbackMonths']:index];cutoff=month_bounds(month)[0]
             eligible,excluded=history_pool(ledger,roster,months[index-doc['pool']['historyMonths']:index],doc['pool']['minObservedBarsPct'])
             price,deps=score_view(parent,doc,ledger,eligible,seen,cutoff,c['needsBars'])
-            diagnostics,values=cells[sid,month] if cells is not None else ([],{})
+            diagnostics,values=prepare_batch(doc,c,eligible,seen,cutoff,snapshots,parent_bounds,algorithm=algorithm)
             rows=evaluate(registered[s['scorerId']],AuxiliaryView(price,values),s['parameters'])
+            del values,price
             unknown={d['instrumentId'] for d in diagnostics if not d['available']}
             for r in rows:
                 if r['instrumentId'] in unknown:r.update(eligible=False,key=None,reason='auxiliaryUnavailable')
             batches.append(dict(selectorId=sid,month=month,cutoffMs=cutoff,historyMonths=seen,contract=c,
                 commonPool=eligible,commonExclusions=excluded,barDependencies=deps,auxiliaryDependencies=diagnostics,rows=rows))
-    validate(doc,ledger,roster,batches,parent_bounds)
+    validate(doc,ledger,roster,batches,parent_bounds,algorithm=algorithm)
     return batches
 
 
-def validate(doc,ledger,roster,batches,parent_bounds):
+def validate(doc,ledger,roster,batches,parent_bounds,*,algorithm):
     projected=parse_json(json_text(batches));contracts={};bindings={b['inputId']:b for b in doc['auxiliaryInputs']};used=set()
     for b,p in zip(batches,projected):
         require(type(b) is dict and 'auxiliaryDependencies' in b,'auxiliary dependencies required')
@@ -75,8 +89,8 @@ def validate(doc,ledger,roster,batches,parent_bounds):
                         start<=state['observedAtMs']<end and state['availableAtMs']==state['observedAtMs']+use['publicationLagMs'] and
                         state['availableAtMs']<=b['cutoffMs']<state['validUntilMs'],'known feature clock/value')
                 else:require(state['value'] is None and type(state['reason']) is str and state['reason'],'unknown feature reason')
-            available=d['complete'] and (state is None or state['known'])
-            require(d['available']==available and d['reason']==(None if available else 'incompleteCoverage' if not d['complete'] else state['reason']),'auxiliary availability')
+            available,reason=availability(d['complete'],state,binding['coveragePolicy'],algorithm)
+            require(d['available']==available and d['reason']==reason,'auxiliary availability')
             require(binding['coveragePolicy']!='requireComplete' or available,'required saved auxiliary unavailable')
             if not available:
                 row=next(r for r in b['rows'] if r['instrumentId']==d['instrumentId'])

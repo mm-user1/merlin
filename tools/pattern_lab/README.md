@@ -5300,6 +5300,13 @@ cutoff, lag, coverage, completeness, availability/reason, slice fingerprint and
 feature state. Future snapshot extensions may change the run pin but not an
 earlier causal view or score.
 
+Auxiliary content is owned as immutable text per `(instrumentId,useId)`; reads
+decode only that cell, and internal fingerprints hash texts without parsing raw
+observations. Price/native-bar mutation checks still run. Generation and deep
+scorer verification construct and release one selector-month batch at a time;
+only compact diagnostics and score outputs survive. Stored-only selectors do
+not materialize unused cells. Shared-source reuse ends with the current batch.
+
 Required cells cover each selector/month/common-history-pool ticker, before
 method exclusions. `requireComplete` requires the entire envelope's coverage,
 every sampled grid row and nonnull required field; covered-empty irregular events
@@ -5307,6 +5314,17 @@ are valid. Feature access additionally needs a known state at D. `allowUnknown`
 retains reasons and the coordinator excludes unavailable tickers regardless of
 the scorer's eligibility output. Price-history-excluded tickers require no time
 cells, while binding/source identity checks still cover the declared roster.
+
+New runs emit `implementation.algorithm="monthly-selection.3"`. For feature
+uses under `allowUnknown`, availability means the T03 state at cutoff is known,
+even if unrelated older envelope coverage is incomplete. Completeness remains
+in diagnostics; an available feature has a null reason, and an unknown feature
+retains its actual state reason. Raw uses still require a complete envelope.
+`requireComplete` still requires complete coverage and, for features, a known
+state. Saved `monthly-selection.2` uses its original complete-and-known rule
+for both feature policies during load and scorer replay. Dispatch is explicit;
+unknown algorithms are refused. Request/format versions, v1 behavior and saved
+summary shapes are unchanged; old artifacts need no reseal or migration.
 
 ### V2 artifact layout, budgets and verification
 
@@ -5346,6 +5364,21 @@ members/expanded arrays and 1 GiB total, plus 10,000 seal members. Capacity is a
 conservative supported-workload policy, not an exemption from exact byte guards.
 No new capacity limit is applied to historical v1 artifacts at load/rebuild.
 
+Before raw materialization, `capacity_v2.auxiliary_plan` checks envelopes from
+calendar/roster dimensions and estimates the largest live selector-month batch.
+Sampled raw rows use envelope duration/sample interval; irregular event rows use
+sealed snapshot record counts. The estimate allows 512 bytes per owned raw row,
+192 serialized bytes and another 512 for decoded/frozen copies, plus cell
+overhead. It excludes snapshot admission, price views and arbitrary scorer
+allocations: it is neither retained artifact size nor a hard RAM guarantee.
+No new raw-data RAM cap truncates or disables the four-month 5m OI route.
+Necessary score-JSON/shadow-array lower bounds refuse obviously unsupported
+dimensions before slicing. A bounded validation pass then checks all required
+cells before any scorer runs; each batch is discarded. Scoring reads those
+slices again. The existing final eligible-pool capacity admission still runs
+after scoring and before output creation/funded work, with unchanged exact
+artifact guards and historical-load capacity calculations.
+
 Load/import/rebuild verify seals, closed structure, ordering, IDs/links, scores,
 contracts, schedules, exact saved capital chains, native endpoints, DD and summary.
 They require no parent/snapshot, executor, network or experimental import. This
@@ -5358,6 +5391,22 @@ With supplied matching code/snapshots it also recomputes scorer outputs and
 dependencies; missing optional inputs are `storedOutputsOnly`. Set
 `require_scorers=True` to refuse missing recomputation dependencies. Offline
 report rebuilds never silently raise their verification claim.
+
+`auxiliaryRecomputed` is true only after a selector with declared auxiliary uses
+and nonempty required cells was actually recomputed and compared successfully.
+It is false for no uses, empty common pools, missing relevant scorer code, or
+merely supplying roots. True means some auxiliary recomputation; per-selector
+levels remain authoritative for completeness, including mixed stored/recomputed
+selectors. Supplied mismatching roots/code still fail.
+
+V2 export responses and HTML derive one dependency description from existing
+metadata, without adding fields to stored summaries or changing exported members.
+Ordinary reading/rebuilding needs only the sealed selection bundle. Exact funded
+replay needs the pinned monthly parent; auxiliary scorer recomputation additionally
+needs the snapshot content IDs and explicitly supplied matching experimental
+source hashes shown in that description. The caller supplies roots and code;
+there is no network fallback or recorded-code auto-import. Export does not include
+those dependencies or perform deep/scorer verification. V1 export is unchanged.
 
 Windows review packages and original v1 bundles are explicit handoff evidence,
 not ordinary test dependencies. Linux must import those exact bytes for replay;
