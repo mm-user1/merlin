@@ -2652,9 +2652,11 @@ Readers do not extract inner members. Each reader/pass retains bounded immutable
 central-directory metadata for interleaved ticker access, without retaining
 payloads or open handles. Local headers, non-overlapping extents, ZIP64 sizes and
 full member CRCs are checked. Parquet reads use one bounded member buffer; returned
-tables/arrays own their data. Standalone root/key calls, including a funded job,
-parse only the relevant ticker directory once; all capital variants reuse that
-account. Physical SHA-256 sealing and exact logical member admission are separate.
+tables/arrays own their data. Standalone root/key calls, including each funded job,
+re-read study/completion metadata and, for format 3, the index and relevant ticker
+directory. All capital variants within that job reuse the decoded account.
+Reader-scoped reuse does not provide a shared cross-job parent metadata cache.
+Physical SHA-256 sealing and exact logical member admission are separate.
 JSON envelopes, index and account JSON are limited to 16 MiB. The 100,000 logical
 member ceiling expands the ZIP members and excludes the new index; a planned
 six-member-per-account lower bound is checked before execution. Legitimate binary

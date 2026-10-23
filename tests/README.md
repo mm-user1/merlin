@@ -36,6 +36,19 @@ selection with exact spawned replay and original-parent pin refusal. Genuine
 pre-edit Windows archives and historical bundles are explicit handoff gates;
 ordinary pytest never depends on ignored development evidence.
 
+T05-1 adds explicit ordinary, sentinel and redundant local ZIP64-size fixtures
+on every host, plus a coherently resealed format-3 economic forgery that loads
+structurally but fails full validation. `account_report_generic.cjs` checks actual
+embedded models and real UI view/selection helpers for arbitrary native reports;
+`test_account_report_generic.py` covers a plain generated report and broken models.
+The strict `account_report_interactions.cjs` fixture assertions remain unchanged.
+Node execution/assertion failures fail their gates; missing Node is explicitly
+pending until Linux review. The scoped T05-1 gate runs container, study evidence,
+study integration, auxiliary, robustness, generic report and selection
+integration/carried/auxiliary/storage-v2 modules, plus five corrected explicit
+archive cases. This narrow follow-up does not require a new full preservation or
+UAC run; the retained T05 preservation receipt certifies its original sources.
+
 T05 preservation requires all `tests/pattern_lab` and
 `tests/v2/test_v2_kernel_execution.py` through this launcher, external temporary
 roots and real Windows symlink capability. Linux reviews must retain subprocess

@@ -141,6 +141,16 @@ class Container:
                         tag, length = struct.unpack_from('<HH', extra, cursor); cursor += 4
                         require(cursor + length <= len(extra) and tag not in extras, 'container local extra')
                         extras[tag] = extra[cursor:cursor+length]; cursor += length
+                    if 1 in extras:
+                        values = extras[1]
+                        required = (size == 0xffffffff, packed == 0xffffffff)
+                        require(len(values) == 16 or (sum(required) == 1 and len(values) == 8),
+                                'container ZIP64 local size')
+                        expected_sizes = (info.file_size, info.compress_size)
+                        if len(values) == 8:
+                            expected_sizes = tuple(v for v, needed in zip(expected_sizes, required) if needed)
+                        require(struct.unpack('<' + 'Q' * len(expected_sizes), values) == expected_sizes,
+                                'container local header CRC/size')
                     if size == 0xffffffff or packed == 0xffffffff:
                         values = extras.get(1, b''); cursor = 0
                         if size == 0xffffffff:

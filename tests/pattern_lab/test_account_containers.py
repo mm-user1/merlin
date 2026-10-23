@@ -1,5 +1,6 @@
 """Physical/logical container admission, streaming failures and bounded metadata reuse."""
 from pathlib import Path
+import json
 import struct
 import zipfile
 from copy import deepcopy
@@ -80,6 +81,28 @@ def test_export_stores_inner_bytes_and_import_keeps_layout(retained, tmp_path):
     assert verify_account_study(restored.root)['status'] == 'verified'
 
 
+def test_container_full_validation_distinct_from_structural_load(retained):
+    assert verify_account_study(retained.root)['status'] == 'verified'
+    key = retained.accountKeys[0]
+    path = retained.root / retained._locator.paths[key]
+    member = 'accounts/' + key + '/account.json'
+    original_balance = retained.account(key).result.finalBalance
+    def mutate(items):
+        for name, value in items:
+            if name == member:
+                meta = json.loads(value)
+                meta['result']['finalBalance'] += 123
+                value = json.dumps(meta).encode('utf-8')
+            yield name, value
+    rewrite(path, mutate)
+    reseal(retained.root)
+    loaded = load_account_study(retained.root)
+    assert loaded.study['formatVersion'] == 3 and loaded.accountKeys == retained.accountKeys
+    assert loaded.account(key).result.finalBalance == original_balance + 123
+    with pytest.raises(Error, match='accumulated money mismatch'):
+        verify_account_study(retained.root)
+
+
 @pytest.mark.parametrize('case, message', [('missingIndex','account-index'), ('wrongTicker','index differs'),
     ('wrongKeys','index differs'), ('missingContainer','member set differs'), ('swapped','logical member set'),
     ('extra','member count'), ('missing','member count'), ('unsafe','unsafe member path'),
@@ -148,6 +171,73 @@ def test_local_headers_and_crc(case,message,tmp_path):
     with pytest.raises(Error,match=message):
         c=storage.Container.inspect(path,[key])
         with c.read(storage.names_for([key])[0]):pass
+
+
+def local_size_fixture(path, form, values=None, ordinary_delta=0, duplicate=False):
+    """Explicit header forms, independent of the host's force_zip64 behavior."""
+    key = '0' * 64
+    size = 7
+    defaults = dict(ordinary=b'', redundant=struct.pack('<QQ', size, size),
+                    sentinels=struct.pack('<QQ', size, size),
+                    sizeOnly=struct.pack('<Q', size), packedOnly=struct.pack('<Q', size))
+    extra = defaults[form] if values is None else values
+    with zipfile.ZipFile(path, 'w') as archive:
+        for index, name in enumerate(storage.names_for([key])):
+            info = storage.zip_info(name)
+            if form != 'ordinary' or values is not None:
+                info.extra = struct.pack('<HH', 1, len(extra)) + extra
+                if duplicate and index == 0: info.extra *= 2
+            archive.writestr(info, b'payload')
+    raw = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as archive:
+        offsets = [info.header_offset for info in archive.infolist()]
+    for offset in offsets:
+        struct.pack_into('<L', raw, offset + 18, 0xffffffff if form in ('sentinels', 'packedOnly') else size + ordinary_delta)
+        struct.pack_into('<L', raw, offset + 22, 0xffffffff if form in ('sentinels', 'sizeOnly') else size)
+    path.write_bytes(raw)
+    return key
+
+
+@pytest.mark.parametrize('form', ['ordinary', 'sentinels', 'redundant', 'sizeOnly', 'packedOnly'])
+def test_explicit_local_size_forms(tmp_path, form):
+    path = tmp_path / 'sizes.zip'
+    key = local_size_fixture(path, form)
+    container = storage.Container.inspect(path, [key])
+    with container.read(storage.names_for([key])[0]) as stream:
+        assert stream.read() == b'payload'
+
+
+@pytest.mark.parametrize('form', ['sentinels', 'redundant'])
+@pytest.mark.parametrize('field', ['uncompressed', 'compressed'])
+def test_explicit_zip64_mismatch(tmp_path, form, field):
+    path = tmp_path / 'sizes.zip'
+    values = (8, 7) if field == 'uncompressed' else (7, 8)
+    key = local_size_fixture(path, form, struct.pack('<QQ', *values))
+    with pytest.raises(Error, match='local header CRC/size'):
+        storage.Container.inspect(path, [key])
+
+
+@pytest.mark.parametrize('form,values', [('sentinels', b''), ('sentinels', b'\0' * 8),
+    ('sentinels', b'\0' * 15), ('sizeOnly', b''), ('packedOnly', b'\0' * 7),
+    ('redundant', b'\0' * 8), ('redundant', b'\0' * 15)])
+def test_missing_or_truncated_zip64_sizes(tmp_path, form, values):
+    path = tmp_path / 'sizes.zip'
+    key = local_size_fixture(path, form, values)
+    with pytest.raises(Error, match='ZIP64 local size'):
+        storage.Container.inspect(path, [key])
+
+
+@pytest.mark.parametrize('case', ['missingTag', 'duplicateTag', 'ordinarySize', 'redundantOrdinarySize'])
+def test_zip64_tag_and_ordinary_size_consistency(tmp_path, case):
+    path = tmp_path / 'sizes.zip'
+    key = local_size_fixture(path, 'redundant' if case in ('duplicateTag', 'redundantOrdinarySize') else 'ordinary',
+                             ordinary_delta=int(case in ('ordinarySize', 'redundantOrdinarySize')),
+                             duplicate=case == 'duplicateTag')
+    if case == 'missingTag':
+        raw = bytearray(path.read_bytes()); struct.pack_into('<L', raw, 22, 0xffffffff); path.write_bytes(raw)
+    message = 'local extra' if case == 'duplicateTag' else 'ZIP64 local size' if case == 'missingTag' else 'CRC/size'
+    with pytest.raises(Error, match=message):
+        storage.Container.inspect(path, [key])
 
 
 @pytest.mark.parametrize('phase', ['write','roundtrip','seal'])
