@@ -15,6 +15,7 @@ from .common import (closed, read_json, write_json, parse_json, json_text, file_
                      member_names, fresh_directory, digest_id)
 from .request import normalize_request, planned_family, bounds, warmup_requirements
 from .codec import decode_account
+from .containers import Locator, PAIRS, MAX_MEMBERS, version
 
 SCHEMA = 'pattern-lab.account-study.v1'
 SCHEMA_V2 = 'pattern-lab.account-study.v2'
@@ -24,7 +25,7 @@ DERIVED = ('derived/summary.json', 'derived/report.html')
 
 def envelope(value):
     closed(value, ('schema', 'formatVersion', 'members'))
-    require((value['schema'], value['formatVersion']) in ((SCHEMA,1),(SCHEMA_V2,2)), 'completion schema/version')
+    require(type(value['formatVersion']) is int and (value['schema'], value['formatVersion']) in PAIRS, 'completion schema/version')
     members = value['members']
     require(type(members) is dict and members and len(members) <= 100000, 'completion members')
     require('completion.json' not in members, 'manifest self-entry')
@@ -61,6 +62,8 @@ def seal_directory(root):
     files = sorted(p for p in root.rglob('*') if p.is_file())
     members = {p.relative_to(root).as_posix(): dict(bytes=p.stat().st_size, sha256=file_hash(p)) for p in files}
     study = read_json(root/'study.json')
+    locator = Locator.admitted(root, study)
+    require(locator.logical_count(len(members)) <= MAX_MEMBERS, 'logical member limit')
     value = envelope(dict(schema=study['schema'], formatVersion=study['formatVersion'], members=members))
     require(len(json_text(value).encode('utf-8')) <= MAX_ENVELOPE_BYTES, 'completion too large')
     write_json(root/'completion.json', value)
@@ -69,10 +72,12 @@ def seal_directory(root):
 
 class AccountStudy:
     """Checked, lazy reader. Each account access decodes owned arrays/tables anew."""
-    def __init__(self, root, study, keys, status, partial=False):
+    def __init__(self, root, study, keys, status, partial=False, *, locator=None):
         self.root = Path(root)
         self._study = json_text(study)
         self.accountKeys = tuple(keys)
+        self._keys = frozenset(keys)
+        self._locator = locator
         self._status = json_text(status)
         self.partial = partial
 
@@ -84,12 +89,12 @@ class AccountStudy:
 
     def key_for(self, instrumentId, allocationId, windowId):
         key = semantic_digest(dict(instrumentId=instrumentId, allocationId=allocationId, windowId=windowId))
-        require(key in self.accountKeys, 'unknown account')
+        require(key in self._keys, 'unknown account')
         return key
 
     def account(self, key):
-        require(key in self.accountKeys, 'unknown account key')
-        return decode_account(self.root, key)
+        require(key in self._keys, 'unknown account key')
+        return decode_account(self.root, key, _locator=self._locator)
 
     @property
     def summary(self):
@@ -102,7 +107,7 @@ def _load(root, *, sealed=True):
     seal = verify_directory(root) if sealed else None
     study, status = read_json(root/'study.json'), read_json(root/'status.json')
     closed(study, ('schema', 'formatVersion', 'request', 'family', 'identities', 'inputs', 'implementation', 'retentionProfile', 'warmupRequirements', 'roster'))
-    require((study['schema'],study['formatVersion']) in ((SCHEMA,1),(SCHEMA_V2,2)), 'study schema')
+    layout = version(study)
     v2 = study['schema'] == SCHEMA_V2
     if seal: require(seal['schema'] == study['schema'] and seal['formatVersion'] == study['formatVersion'], 'study/seal version differs')
     require(study['retentionProfile'] in ('standard', 'debug'), 'saved retention profile')
@@ -113,11 +118,13 @@ def _load(root, *, sealed=True):
         dataInput=semantic_digest(study['inputs']), implementation=semantic_digest(study['implementation'])), 'study identities')
     keys = [semantic_digest(label) for label in study['family']]
     require(status['state'] == 'complete' if sealed else status['state'] in ('running', 'complete'), 'incomplete study status')
-    require(set(p.name for p in (root/'accounts').iterdir()) == set(keys), 'account roster differs')
+    locator = Locator.admitted(root, study)
+    expected_accounts = {Path(p).name for p in locator.groups} if layout == 3 else set(keys)
+    require(set(p.name for p in (root/'accounts').iterdir()) == expected_accounts, 'account roster differs')
     allocations = {a['allocationId']: a for a in request.document['allocations']}
     windows = {w['windowId']: w for w in request.document['windows']}
     from ..manifest import to_epoch_ms
-    reader = AccountStudy(root, study, keys, status)
+    reader = AccountStudy(root, study, keys, status, locator=locator)
     if v2:
         from ..auxiliary import study as auxiliary
         dependency_links = auxiliary.load_links(root,keys)
@@ -130,6 +137,7 @@ def _load(root, *, sealed=True):
             closed(parent,('contentId','provenanceId')); digest_id(parent['provenanceId'])
             require(parent['contentId']==b['expectedSnapshotContentId'],'parent semantic pin provenance')
     expected_members = {'study.json', 'status.json', 'provenance.json', *DERIVED}
+    expected_members.update(locator.physical())
     expected_inputs = {}
     origin, start, end = bounds(request.document)
     sources = {s['inputId']: s for s in request.document['sources']}
@@ -163,9 +171,7 @@ def _load(root, *, sealed=True):
                 instrumentId=label['instrumentId'], allocationId=label['allocationId'], declared=declaration,
                 resolvedInstrumentId=resolved, header=h, inputFingerprint=item['inputFingerprint'],
                 rules=asdict(record.result.rules) if alias == 'target' else None)
-        meta = read_json(root/'accounts'/key/'account.json')
-        expected_members.update('accounts/'+key+'/'+n for n in ('account.json', 'attempts.parquet',
-            'trades.parquet', 'proposals.parquet', 'exitCommands.parquet', 'path.parquet'))
+        meta = locator.metadata(key)
         expected_members.update('commands/'+record.result.commandId+'/'+n for n in ('commands.json', 'arrays.npz'))
         grid_ids = [meta['gridId']]
         if study['retentionProfile'] == 'debug':
@@ -184,6 +190,7 @@ def _load(root, *, sealed=True):
     actual_inputs = [expected_inputs[k] for k in sorted(expected_inputs)]
     if v2: actual_inputs = dict(native=actual_inputs,auxiliary=[auxiliary_inputs[k] for k in sorted(auxiliary_inputs)])
     require(study['inputs'] == actual_inputs, 'data-input facts differ from accounts')
+    require(locator.logical_count(len(expected_members)) <= MAX_MEMBERS, 'logical member limit')
     if sealed:
         require(status['completedAccounts'] == status['plannedAccounts'] == len(keys) and status['failedJobs'] == 0,
                 'completion counts')
@@ -244,7 +251,9 @@ def export_account_bundle(run_root, *, zip_path):
     require(not target.exists() and not target.is_relative_to(reader.root.resolve()), 'ZIP output must be new and outside run')
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted([*seal['members'], 'completion.json']): archive.write(reader.root/name, name)
+        for name in sorted([*seal['members'], 'completion.json']):
+            stored = reader.study['formatVersion'] == 3 and name in reader._locator.groups
+            archive.write(reader.root/name, name, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED)
     return dict(path=str(target), bytes=target.stat().st_size, sha256=file_hash(target))
 
 

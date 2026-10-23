@@ -2,6 +2,9 @@
 from dataclasses import dataclass, fields, asdict
 from pathlib import Path
 import json
+import os
+import tempfile
+import zipfile
 
 import numpy as np
 import pyarrow as pa
@@ -14,7 +17,8 @@ from ..accounts.preparation import PreparedAccount, bind, Feature, AlignedState,
 from ..accounts.execution import validate_inputs, account_identity, window_indices, coverage
 from ..study.bracket_rules import ExecutionRules
 from ..study.contracts import semantic_digest, canonical_json
-from .common import read_json, write_json, closed, digest_id
+from .common import read_json, write_json, closed, digest_id, json_text
+from .containers import Locator, FILES, MAX_JSON, container_path, zip_info
 
 FORMAT = 'pattern-lab.account-record.v1'
 TABLES = dict(attempts=e.ATTEMPTS, trades=e.TRADES, proposals=e.PROPOSALS, exitCommands=e.EXITS, path=e.PATH)
@@ -148,41 +152,91 @@ def check_table(table, schema):
             c.require(pc.all(pc.fill_null(pc.is_finite(col), True)).as_py() is not False, 'nonfinite table value')
 
 
+def _metadata(root, record, retention_profile):
+    p, r = record.prepared, record.result
+    facts = record.preparationFacts or preparation_facts(p)
+    c.require(semantic_digest(facts) == p.identity, 'original preparation facts')
+    grid = save_input(root, p.target)
+    save_commands(root, r.commands)
+    if retention_profile == 'debug': save_debug(root, p)
+    meta = {f.name: getattr(r, f.name) for f in fields(r) if f.name not in TABLES and f.name != 'commands'}
+    for name in ('policy', 'window', 'rules', 'coverage'): meta[name] = asdict(meta[name])
+    return dict(format=FORMAT, labels=record.labels, gridId=grid, preparationFacts=facts, result=meta)
+
+
+def _disk_table(record, name):
+    table = getattr(record.result, name)
+    if name == 'attempts': return disk_attempts(table, record.result.commands.entryFilter is not None)
+    if name == 'path': return table.select(DISK_PATH.names)
+    return table
+
+
 def encode_accounts(directory, records, *, retention_profile='standard'):
     root = Path(directory)
     c.require(retention_profile in ('standard', 'debug'), 'retention profile')
     published = []
     for record in records:
-        p, r = record.prepared, record.result
-        facts = record.preparationFacts or preparation_facts(p)
-        c.require(semantic_digest(facts) == p.identity, 'original preparation facts')
-        grid = save_input(root, p.target)
-        save_commands(root, r.commands)
+        meta = _metadata(root, record, retention_profile)
         key = semantic_digest(record.labels)
         folder = root/'accounts'/key
         c.require(not folder.exists(), 'duplicate account record')
         folder.mkdir(parents=True)
-        meta = {f.name: getattr(r, f.name) for f in fields(r) if f.name not in TABLES and f.name != 'commands'}
-        for name in ('policy', 'window', 'rules', 'coverage'): meta[name] = asdict(meta[name])
-        write_json(folder/'account.json', dict(format=FORMAT, labels=record.labels, gridId=grid,
-            preparationFacts=facts, result=meta))
+        write_json(folder/'account.json', meta)
         for name in TABLES:
-            table = getattr(r, name)
-            if name == 'attempts': table = disk_attempts(table, r.commands.entryFilter is not None)
-            if name == 'path': table = table.select(DISK_PATH.names)
-            pq.write_table(table, folder/(name+'.parquet'), compression='zstd', version='2.6')
-        if retention_profile == 'debug':
-            save_debug(root, p)
-        decoded = decode_account(root, key)
+            pq.write_table(_disk_table(record, name), folder/(name+'.parquet'), compression='zstd', version='2.6')
+        decoded = decode_account(root, key, _locator=Locator(root, [key]))
         c.require(equal_records(record, decoded), 'codec publication round-trip mismatch')
         published.append(key)
     return published
 
 
-def decode_account(root, key):
+def encode_container(directory, records, *, retention_profile='standard'):
+    root = Path(directory)
+    c.require(retention_profile in ('standard', 'debug'), 'retention profile')
+    c.require(records, 'empty account container')
+    instrument = records[0].labels['instrumentId']
+    ordered = sorted((semantic_digest(r.labels), r) for r in records)
+    keys = [k for k, r in ordered]
+    c.require(len(set(keys)) == len(keys) and all(r.labels['instrumentId'] == instrument for k, r in ordered),
+              'container account roster')
+    destination = root/container_path(instrument)
+    c.require(not destination.exists(), 'account container destination exists')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Only metadata is retained in addition to the existing worker batch.
+    metadata = {key: _metadata(root, record, retention_profile) for key, record in ordered}
+    fd, name = tempfile.mkstemp(prefix='.account-', suffix='.tmp', dir=destination.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'w+b') as output:
+            with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+                for key, record in ordered:
+                    for filename in FILES:
+                        info = zip_info('accounts/'+key+'/'+filename)
+                        with archive.open(info, 'w', force_zip64=True) as stream:
+                            if filename == 'account.json':
+                                raw = (json_text(metadata[key]) + os.linesep).encode('utf-8')
+                                c.require(len(raw) <= MAX_JSON, 'account JSON exceeds bound')
+                                stream.write(raw)
+                            else:
+                                pq.write_table(_disk_table(record, filename[:-8]), stream, compression='zstd', version='2.6')
+        path = temporary.relative_to(root).as_posix()
+        locator = Locator(root, keys, [dict(path=path, accountKeys=keys)])
+        for key, record in ordered:
+            c.require(equal_records(record, decode_account(root, key, _locator=locator)),
+                      'codec publication round-trip mismatch')
+        c.require(not destination.exists(), 'account container destination appeared before publication')
+        temporary.rename(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return keys
+
+
+def decode_account(root, key, *, _locator=None):
     digest_id(key)
     root = Path(root)
-    meta = read_json(root/'accounts'/key/'account.json')
+    locator = _locator if _locator is not None else Locator.from_root(root)
+    locator.check(root, key)
+    meta = locator.metadata(key)
     closed(meta, ('format', 'labels', 'gridId', 'preparationFacts', 'result'))
     c.require(meta['format'] == FORMAT and semantic_digest(meta['labels']) == key, 'account record identity')
     facts, raw = meta['preparationFacts'], meta['result']
@@ -212,7 +266,7 @@ def decode_account(root, key):
     commands = load_commands(root, raw['commandId'])
     tables = {}
     for name, schema in TABLES.items():
-        t = pq.read_table(root/'accounts'/key/(name+'.parquet'))
+        t = locator.table(key, name)
         if name == 'attempts': t = native_attempts(t, commands.entryFilter is not None)
         if name == 'path':
             check_table(t, DISK_PATH)
@@ -265,7 +319,9 @@ def check_links(r, p):
 
 def decode_accounts(directory):
     root = Path(directory)
-    return [decode_account(root, p.name) for p in sorted((root/'accounts').iterdir())]
+    keys = [p.name for p in sorted((root/'accounts').iterdir())]
+    locator = Locator(root, keys)  # Explicit low-level directory codec; no format inference.
+    return [decode_account(root, key, _locator=locator) for key in keys]
 
 
 def equal_records(a, b):

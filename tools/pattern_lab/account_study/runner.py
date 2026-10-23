@@ -17,7 +17,9 @@ from ..study.bracket_rules import normalize_rules
 from ..study.contracts import semantic_digest
 from .request import normalize_request, bounds, planned_family, warmup_requirements
 from .common import fresh_directory, file_hash, write_json
-from .codec import encode_accounts
+from .codec import encode_accounts, encode_container
+from .containers import index_for, MAX_JSON
+from .common import json_text
 from .job import AccountJob, run_account_job, check_generation
 from .artifacts import SCHEMA, _load, load_account_study, write_derived, seal_directory
 
@@ -44,11 +46,15 @@ def implementation(*, auxiliary=False):
         python=sys.version.split()[0], libraries={name: version(name) for name in ('numpy', 'pandas', 'pyarrow', 'numba')})
 
 
-def run_account_study(request, *, data_root, output_root, workers=1, retention_profile='standard', auxiliary_roots=None):
+def run_account_study(request, *, data_root, output_root, workers=1, retention_profile='standard', auxiliary_roots=None,
+                      _legacy_directory=False):
     normalized = normalize_request(request)
     integer(workers, 'workers', 1)
     require(retention_profile in ('standard', 'debug'), 'retention profile')
+    require(type(_legacy_directory) is bool, 'legacy directory hook must be bool')
     doc = normalized.document
+    index = index_for(planned_family(doc))  # Lower bound before execution/output creation.
+    require(len(json_text(index).encode('utf-8')) + 2 <= MAX_JSON, 'account index exceeds bound')
     v2 = doc['schema'] == 'pattern-lab.account-study-request.v2'
     origin, start, end = bounds(doc)
     pack_root, output = Path(data_root).expanduser().resolve(), Path(output_root).expanduser().resolve()
@@ -80,7 +86,7 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
             completedAccounts=0, failedJobs=0, plannedJobs=len(doc['instruments']), completedJobs=0,
             jobs={i: 'notStarted' for i in doc['instruments']}, requestedWorkers=workers, effectiveWorkers=effective,
             maximumInFlight=0, startedUtc=datetime.now(timezone.utc).isoformat())
-        study = dict(schema=auxiliary.SCHEMA if v2 else SCHEMA, formatVersion=2 if v2 else 1, request=doc, family=planned_family(doc),
+        study = dict(schema=auxiliary.SCHEMA if v2 else SCHEMA, formatVersion=(2 if v2 else 1) if _legacy_directory else 3, request=doc, family=planned_family(doc),
             identities={}, inputs=[], implementation=source, retentionProfile=retention_profile,
             warmupRequirements={a['allocationId']: warmup_requirements(doc, a) for a in doc['allocations']},
             roster=[{k: entries[i][k] for k in ('instrument_id', 'venue', 'contract', 'quote_currency', 'roles')}
@@ -142,7 +148,8 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
             check_generation(source['sources'])
             require(len(records) == len(doc['allocations'])*len(doc['windows']) and
                     all(r.labels['instrumentId'] == identifier for r in records), 'worker result roster')
-            encode_accounts(root, records, retention_profile=retention_profile)
+            writer = encode_accounts if _legacy_directory else encode_container
+            writer(root, records, retention_profile=retention_profile)
             if v2:
                 for record in records:
                     key = semantic_digest(record.labels)
@@ -187,6 +194,7 @@ def run_account_study(request, *, data_root, output_root, workers=1, retention_p
                     finally:
                         pool.shutdown(abort=abort)
             state.update(phase='derive', currentJob=None)
+            if not _legacy_directory: write_json(root/'account-index.json', index)
             study['inputs'] = [input_facts[k] for k in sorted(input_facts)]
             if v2:
                 study['inputs'] = dict(native=study['inputs'], auxiliary=[auxiliary_facts[k] for k in sorted(auxiliary_facts)])

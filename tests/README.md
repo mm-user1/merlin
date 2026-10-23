@@ -26,6 +26,27 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+T05 `test_account_containers.py` covers direct streamed STORED/ZIP64 records,
+physical versus logical admission, local headers/CRC/extents, immutable metadata
+reuse across interleaved tickers, failed publication and handle release, transport
+byte preservation and explicit schema/version dispatch. Native/auxiliary tests
+retain full directory routes through the private writer hook alongside the new
+format-3 default, including debug, offline verify/rebuild and fixed/carried
+selection with exact spawned replay and original-parent pin refusal. Genuine
+pre-edit Windows archives and historical bundles are explicit handoff gates;
+ordinary pytest never depends on ignored development evidence.
+
+T05 preservation requires all `tests/pattern_lab` and
+`tests/v2/test_v2_kernel_execution.py` through this launcher, external temporary
+roots and real Windows symlink capability. Linux reviews must retain subprocess
+exit statuses as well as numerical output. The reviewed Python 3.11.0rc1 /
+PyArrow 22 host has an independently observed non-path Parquet shutdown abort;
+a recurring failure is an unresolved host/CLI gate, not a pass. Preserve and
+isolate it with the supplied probe. Do not use tracemalloc around non-path
+Parquet reads or add sleeps, GC workarounds, dependency installs or security
+changes. Node and owner browser/focus checks remain separate gates.
+
+
 T04B adds `test_selection_carried.py`, `test_selection_auxiliary.py` and
 `test_selection_storage_v2.py`: native lot-floor execution, exact capital carry,
 missing-month stops/depletion, scalar-only random retention, one/six spawn byte

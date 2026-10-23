@@ -48,7 +48,7 @@ def test_generic_codec_no_provider_import_and_reversible_filter_projection(tmp_p
 @pytest.fixture
 def retained(tmp_path):
     pack=tmp_path/'pack';ids=build_pack(pack,count=1)
-    return run_account_study(request(ids,filtered=False,multiple=False),data_root=pack,output_root=tmp_path/'run')
+    return run_account_study(request(ids,filtered=False,multiple=False),data_root=pack,output_root=tmp_path/'run',_legacy_directory=True)
 
 
 @pytest.mark.parametrize('member',['derived/report.html','derived/summary.json','status.json'])

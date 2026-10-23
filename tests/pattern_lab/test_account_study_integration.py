@@ -15,14 +15,15 @@ from tools.pattern_lab.accounts import build_commands, HARecipe, candle_filter, 
 from ._account_study_helpers import build_pack, request, assert_filtered_trades
 
 
-def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch):
+@pytest.mark.parametrize('legacy',[False,True])
+def test_native_roundtrip_windows_debug_and_offline(tmp_path, monkeypatch, legacy):
     pack = tmp_path/'pack'; ids=build_pack(pack,count=6,gaps=True)
     raw=request(ids)
     path=tmp_path/'request.json'; path.write_text(json.dumps(raw))
     normalized=normalize_request(path)
     assert normalized == normalize_request(normalized) == normalize_request(raw)
-    standard=run_account_study(normalized,data_root=pack,output_root=tmp_path/'standard')
-    debug=run_account_study(path,data_root=pack,output_root=tmp_path/'debug',retention_profile='debug')
+    standard=run_account_study(normalized,data_root=pack,output_root=tmp_path/'standard',_legacy_directory=legacy)
+    debug=run_account_study(path,data_root=pack,output_root=tmp_path/'debug',retention_profile='debug',_legacy_directory=legacy)
     assert standard.study['identities'] == debug.study['identities']
     assert standard.summary == debug.summary
     assert assert_filtered_trades(standard) == assert_filtered_trades(debug)
@@ -68,6 +69,8 @@ def test_six_workers_same_evidence_and_bounded_payload(tmp_path):
     direct=run_account_study(raw,data_root=pack,output_root=tmp_path/'direct')
     pooled=run_account_study(raw,data_root=pack,output_root=tmp_path/'pooled',workers=6)
     assert {k:os.environ.get(k) for k in THREAD_ENVIRONMENT}==before
+    for name in ['account-index.json', *direct._locator.groups]:
+        assert (direct.root/name).read_bytes()==(pooled.root/name).read_bytes()
     assert pooled.status['effectiveWorkers']==6 and pooled.status['maximumInFlight']<=6
     assert len(pooled.status['workerPids'])==6
     assert direct.study['identities']==pooled.study['identities']

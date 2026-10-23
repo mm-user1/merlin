@@ -60,10 +60,11 @@ def assert_contents(reader):
         recoveredOiLookbacks=recovered,knownZeroFunding=zero_funding,observedFundingIntervalsMs=sorted(spacing),missingOiSamples=missing_oi)
 
 
-def test_v2_roundtrip_and_full_offline_validation(tmp_path,monkeypatch):
+@pytest.mark.parametrize('legacy',[False,True])
+def test_v2_roundtrip_and_full_offline_validation(tmp_path,monkeypatch,legacy):
     raw=build_inputs(tmp_path/'pack',tmp_path/'aux')
     assert normalize_request(raw)==normalize_request(normalize_request(raw))
-    reader=run_account_study(raw,data_root=tmp_path/'pack',auxiliary_roots={'aux':tmp_path/'aux'},output_root=tmp_path/'study')
+    reader=run_account_study(raw,data_root=tmp_path/'pack',auxiliary_roots={'aux':tmp_path/'aux'},output_root=tmp_path/'study',_legacy_directory=legacy)
     counts=assert_contents(reader)
     assert len(reader.accountKeys)==20
     before=(reader.root/'completion.json').read_bytes()
@@ -178,7 +179,7 @@ def test_full_check_detects_resealed_provider_command_tamper(tmp_path):
     from tools.pattern_lab.accounts.execution import account_identity
     from tools.pattern_lab.account_study.artifacts import seal_directory
     raw=build_inputs(tmp_path/'pack',tmp_path/'aux',targets=1)
-    reader=run_account_study(raw,data_root=tmp_path/'pack',auxiliary_roots={'aux':tmp_path/'aux'},output_root=tmp_path/'run')
+    reader=run_account_study(raw,data_root=tmp_path/'pack',auxiliary_roots={'aux':tmp_path/'aux'},output_root=tmp_path/'run',_legacy_directory=True)
     first=reader.account(reader.accountKeys[0]);old=first.result.commands
     entry=old.long.entry.copy();entry[0]=not entry[0]
     forged=replace(old,long=replace(old.long,entry=entry));save_commands(reader.root,forged)

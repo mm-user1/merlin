@@ -2619,12 +2619,55 @@ success claim. Default readers reject incomplete runs.
 
 ### Retained formats and verification levels
 
-Root schema: `pattern-lab.account-study.v1`, format version 1. Record schema:
+New account studies use formatVersion 3 with the existing semantic root schema.
+Explicit supported pairs are v1/1 and v2/2 (retained account directories), and
+v1/3 and v2/3 (per-ticker containers), where v1/v2 abbreviate
+`pattern-lab.account-study.v1`/`pattern-lab.account-study.v2`. Study and completion
+must agree; missing index/container files never select an older layout. Record schema:
 `pattern-lab.account-record.v1`. Separate specification, data-input and
 implementation identities retain native preparation/command/account IDs.
 Paths, workers, clocks and implementation byte digests never enter those native
 economic IDs. Exact source digests and library versions are implementation
 attribution; physical pack/rule snapshots remain separate provenance.
+
+Format 3 seals `account-index.json` with schema
+`pattern-lab.account-container-index.v1` and sorted `containers` records:
+`instrumentId`, `path`, sorted unique `accountKeys`. Each path is
+`accounts/<semantic_digest(["account-container.1", instrumentId])>.zip`.
+Each STORED ZIP contains exactly `accounts/<key>/account.json` and
+`attempts.parquet`, `trades.parquet`, `proposals.parquet`, `exitCommands.parquet`,
+`path.parquet` per key, ordered by key then filename. Timestamps/platform fields
+are fixed, ZIP64 is supported, and there are no directory entries or inner
+manifest. Shared grids, commands, debug and auxiliary evidence retain their
+existing layouts and deduplication.
+
+The coordinator streams each existing worker batch directly into a temporary
+ZIP, closes it, checks exact round trips, then renames it only to an absent
+final destination. The index is written once after all tickers succeed.
+Completion remains last. Failed writes never publish their temporary ZIP.
+No whole-container buffer, per-account staging tree, new worker pool or resume
+mechanism is involved; publication does not promise power-loss durability.
+
+Readers do not extract inner members. Each reader/pass retains bounded immutable
+central-directory metadata for interleaved ticker access, without retaining
+payloads or open handles. Local headers, non-overlapping extents, ZIP64 sizes and
+full member CRCs are checked. Parquet reads use one bounded member buffer; returned
+tables/arrays own their data. Standalone root/key calls, including a funded job,
+parse only the relevant ticker directory once; all capital variants reuse that
+account. Physical SHA-256 sealing and exact logical member admission are separate.
+JSON envelopes, index and account JSON are limited to 16 MiB. The 100,000 logical
+member ceiling expands the ZIP members and excludes the new index; a planned
+six-member-per-account lower bound is checked before execution. Legitimate binary
+tables have no new arbitrary small size cap.
+
+Outer exports store inner ZIPs without recompression; imports preserve their
+bytes. Old directories and seals remain readable and are never converted.
+The private strict-bool `_legacy_directory` runner keyword exists only for
+runtime compatibility tests and storage measurements; it is not a request/CLI
+option. The public default and examples always produce format 3. Selection
+requests still pin exact parent identities and completion SHA-256. Rebinding a
+new physical parent changes selection specification and data-input identities;
+native preparation, command and account economics remain unchanged.
 
 Standard retains exact float64 target OHLCV (including quote volume), timestamps,
 research/segment masks and coverage once per distinct grid; complete commands
@@ -4877,7 +4920,8 @@ reason 0 known or 2 unknown. These are **derived evaluation facts**, not exchang
 publication times. Real source facts stay in component evidence. Composition and
 consumed auxiliary input identities bind commands even when booleans do not change.
 
-V2 study/seal uses `pattern-lab.account-study.v2`, formatVersion 2. Closed
+V2 study/seal uses `pattern-lab.account-study.v2`: formatVersion 3 for new
+containers and formatVersion 2 for retained directories. Closed
 account-record.v1/account.json remains unchanged. Required shared members include
 `dependency-links.json` (`pattern-lab.account-dependency-links.v1`, `accounts`
 keyed by account key), all native source grids, `dependencies/<sliceId>/dependency.json`
