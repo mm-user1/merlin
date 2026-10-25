@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Mapping, Sequence
 
-from . import PatternLabDataError
+from .errors import DataError
 
 SCHEMA_VERSION = 1
 BASE_TIMEFRAME_MINUTES = 5
@@ -81,14 +81,14 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 def normalize_id_part(value: Any, field: str) -> str:
     """Normalize one venue or contract component to a safe uppercase ASCII ID."""
     if isinstance(value, bool) or not isinstance(value, str):
-        raise PatternLabDataError(f"{field}: expected a string, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected a string, got {type(value).__name__}.")
     if not value.isascii():
-        raise PatternLabDataError(f"{field}: must be ASCII, got {value!r}.")
+        raise DataError(f"{field}: must be ASCII, got {value!r}.")
     if "_" in value:
-        raise PatternLabDataError(f"{field}: underscore is reserved for the instrument-ID delimiter, got {value!r}.")
+        raise DataError(f"{field}: underscore is reserved for the instrument-ID delimiter, got {value!r}.")
     normalized = value.upper()
     if not _ID_PART_RE.fullmatch(normalized):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: must match ^[A-Z0-9][A-Z0-9.-]*$ after uppercasing, got {value!r}."
         )
     return normalized
@@ -102,9 +102,9 @@ def build_instrument_id(venue: Any, contract: Any, *, where: str = "instrument")
 def normalize_instrument_id(value: Any, field: str = "instrument_id") -> str:
     """Validate a complete instrument identifier and return its normalized form."""
     if isinstance(value, bool) or not isinstance(value, str):
-        raise PatternLabDataError(f"{field}: expected a string, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected a string, got {type(value).__name__}.")
     if value.count("_") != 1:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected exactly one '_' delimiter in <VENUE>_<CONTRACT>, got {value!r}."
         )
     venue, contract = value.split("_", 1)
@@ -124,18 +124,18 @@ def instrument_relative_file(instrument_id: str) -> str:
 def validate_relative_file(value: Any, field: str = "file") -> str:
     """Validate a manifest-relative POSIX path under ``ohlcv/``."""
     if isinstance(value, bool) or not isinstance(value, str):
-        raise PatternLabDataError(f"{field}: expected a string, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected a string, got {type(value).__name__}.")
     if not value or value != value.strip():
-        raise PatternLabDataError(f"{field}: must be a nonblank path without surrounding whitespace, got {value!r}.")
+        raise DataError(f"{field}: must be a nonblank path without surrounding whitespace, got {value!r}.")
     if "\\" in value:
-        raise PatternLabDataError(f"{field}: backslashes are not valid in a POSIX pack path, got {value!r}.")
+        raise DataError(f"{field}: backslashes are not valid in a POSIX pack path, got {value!r}.")
     if value.startswith("/") or ":" in value:
-        raise PatternLabDataError(f"{field}: must be a relative path, got {value!r}.")
+        raise DataError(f"{field}: must be a relative path, got {value!r}.")
     parts = PurePosixPath(value).parts
     if len(parts) != 2 or parts[0] != OHLCV_DIR:
-        raise PatternLabDataError(f"{field}: must be '{OHLCV_DIR}/<name>.parquet', got {value!r}.")
+        raise DataError(f"{field}: must be '{OHLCV_DIR}/<name>.parquet', got {value!r}.")
     if not _FILE_NAME_RE.fullmatch(parts[1]):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: file name must match ^[A-Z0-9][A-Za-z0-9._-]*\\.parquet$, got {parts[1]!r}."
         )
     return value
@@ -147,7 +147,7 @@ def resolve_pack_path(data_root: Path, relative: str, field: str = "file") -> Pa
     root = Path(data_root).resolve()
     target = (root / relative).resolve()
     if target != root and not target.is_relative_to(root):
-        raise PatternLabDataError(f"{field}: {relative!r} resolves outside the data root {root}.")
+        raise DataError(f"{field}: {relative!r} resolves outside the data root {root}.")
     return target
 
 
@@ -167,22 +167,22 @@ def file_sha256(path: Path) -> str:
 def require_int(value: Any, field: str, *, minimum: int | None = None) -> int:
     """Return an exact integer; booleans and floats are rejected."""
     if isinstance(value, bool) or not isinstance(value, int):
-        raise PatternLabDataError(f"{field}: expected an integer, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected an integer, got {type(value).__name__}.")
     if minimum is not None and value < minimum:
-        raise PatternLabDataError(f"{field}: must be >= {minimum}, got {value}.")
+        raise DataError(f"{field}: must be >= {minimum}, got {value}.")
     return value
 
 
 def require_text(value: Any, field: str) -> str:
     """Return a nonblank string."""
     if isinstance(value, bool) or not isinstance(value, str) or not value.strip():
-        raise PatternLabDataError(f"{field}: expected a nonblank string, got {value!r}.")
+        raise DataError(f"{field}: expected a nonblank string, got {value!r}.")
     return value
 
 
 def require_bool(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
-        raise PatternLabDataError(f"{field}: expected a boolean, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected a boolean, got {type(value).__name__}.")
     return value
 
 
@@ -193,39 +193,39 @@ def require_optional_text(value: Any, field: str) -> str | None:
 def require_currency(value: Any, field: str) -> str:
     text = require_text(value, field)
     if not _CURRENCY_RE.fullmatch(text):
-        raise PatternLabDataError(f"{field}: expected an uppercase ASCII currency code, got {value!r}.")
+        raise DataError(f"{field}: expected an uppercase ASCII currency code, got {value!r}.")
     return text
 
 
 def require_sha256(value: Any, field: str) -> str:
     text = require_text(value, field)
     if not _SHA256_RE.fullmatch(text):
-        raise PatternLabDataError(f"{field}: expected 64 lowercase hex characters, got {value!r}.")
+        raise DataError(f"{field}: expected 64 lowercase hex characters, got {value!r}.")
     return text
 
 
 def parse_utc(value: Any, field: str) -> datetime:
     """Normalize an aware datetime or explicit-offset ISO string to UTC."""
     if isinstance(value, bool) or isinstance(value, (int, float)):
-        raise PatternLabDataError(f"{field}: expected an ISO-8601 string or datetime with an explicit offset.")
+        raise DataError(f"{field}: expected an ISO-8601 string or datetime with an explicit offset.")
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            raise PatternLabDataError(f"{field}: expected a nonblank timestamp.")
+            raise DataError(f"{field}: expected a nonblank timestamp.")
         try:
             parsed = datetime.fromisoformat(text)
         except ValueError as exc:
-            raise PatternLabDataError(f"{field}: not an ISO-8601 timestamp ({value!r}): {exc}") from exc
+            raise DataError(f"{field}: not an ISO-8601 timestamp ({value!r}): {exc}") from exc
     elif isinstance(value, datetime):
         parsed = value
     else:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected an ISO-8601 string or datetime, got {type(value).__name__}."
         )
     if parsed != parsed:  # pandas NaT and any other not-a-time value
-        raise PatternLabDataError(f"{field}: not-a-time values are not accepted.")
+        raise DataError(f"{field}: not-a-time values are not accepted.")
     if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
-        raise PatternLabDataError(f"{field}: naive timestamps are rejected; supply an explicit UTC offset.")
+        raise DataError(f"{field}: naive timestamps are rejected; supply an explicit UTC offset.")
     return parsed.astimezone(timezone.utc)
 
 
@@ -233,7 +233,7 @@ def format_utc(value: Any, field: str = "timestamp") -> str:
     """Render a UTC timestamp canonically, with milliseconds only when needed."""
     moment = parse_utc(value, field)
     if moment.microsecond % 1000:
-        raise PatternLabDataError(f"{field}: sub-millisecond precision is not supported.")
+        raise DataError(f"{field}: sub-millisecond precision is not supported.")
     if moment.microsecond:
         return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -246,7 +246,7 @@ def to_epoch_ms(value: Any, field: str = "timestamp") -> int:
     """Return exact UTC epoch milliseconds without float rounding."""
     moment = parse_utc(value, field)
     if moment.microsecond % 1000:
-        raise PatternLabDataError(f"{field}: sub-millisecond precision is not supported.")
+        raise DataError(f"{field}: sub-millisecond precision is not supported.")
     return (moment - _EPOCH) // timedelta(milliseconds=1)
 
 
@@ -269,7 +269,7 @@ def listing_instant_utc(value: Any, field: str = "listed_at_utc") -> str | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (str, int)):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected a millisecond timestamp string, got {type(value).__name__}."
         )
     text = str(value).strip()
@@ -278,7 +278,7 @@ def listing_instant_utc(value: Any, field: str = "listed_at_utc") -> str | None:
     try:
         stamp = int(text)
     except ValueError as exc:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: {value!r} is not an integer millisecond timestamp."
         ) from exc
     if stamp <= 0:
@@ -316,7 +316,7 @@ def normalize_timeframe_minutes(value: Any, field: str = "timeframe_minutes") ->
     """Accept positive integer multiples of the 5-minute base timeframe."""
     minutes = require_int(value, field, minimum=1)
     if minutes % BASE_TIMEFRAME_MINUTES:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: must be a positive multiple of {BASE_TIMEFRAME_MINUTES} minutes, got {minutes}."
         )
     return minutes
@@ -324,7 +324,7 @@ def normalize_timeframe_minutes(value: Any, field: str = "timeframe_minutes") ->
 
 def require_aligned(epoch_ms: int, step_ms: int, field: str) -> int:
     if epoch_ms % step_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: {format_epoch_ms(epoch_ms)} is not aligned to the {step_ms // 60_000}m UTC epoch grid."
         )
     return epoch_ms
@@ -333,18 +333,18 @@ def require_aligned(epoch_ms: int, step_ms: int, field: str) -> int:
 def normalize_roles(value: Any, field: str = "roles") -> list[str]:
     """Validate a role set against the legal combinations and return it sorted."""
     if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
-        raise PatternLabDataError(f"{field}: expected a list of roles, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected a list of roles, got {type(value).__name__}.")
     roles: list[str] = []
     for index, role in enumerate(value):
         text = require_text(role, f"{field}[{index}]")
         if text not in KNOWN_ROLES:
-            raise PatternLabDataError(f"{field}[{index}]: unknown role {text!r}; known roles are {list(KNOWN_ROLES)}.")
+            raise DataError(f"{field}[{index}]: unknown role {text!r}; known roles are {list(KNOWN_ROLES)}.")
         if text in roles:
-            raise PatternLabDataError(f"{field}: duplicate role {text!r}.")
+            raise DataError(f"{field}: duplicate role {text!r}.")
         roles.append(text)
     if frozenset(roles) not in LEGAL_ROLE_SETS:
         legal = ", ".join("{" + ", ".join(sorted(item)) + "}" for item in LEGAL_ROLE_SETS)
-        raise PatternLabDataError(f"{field}: illegal role set {sorted(roles)}; legal sets are {legal}.")
+        raise DataError(f"{field}: illegal role set {sorted(roles)}; legal sets are {legal}.")
     return sorted(roles)
 
 
@@ -356,23 +356,23 @@ def _reject_duplicate_keys(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, item in pairs:
         if key in result:
-            raise PatternLabDataError(f"duplicate JSON key {key!r}.")
+            raise DataError(f"duplicate JSON key {key!r}.")
         result[key] = item
     return result
 
 
 def _reject_constant(name: str) -> Any:
-    raise PatternLabDataError(f"{name} is not valid strict JSON.")
+    raise DataError(f"{name} is not valid strict JSON.")
 
 
 def loads_strict(text: str, *, source: str) -> Any:
     """Parse strict JSON, rejecting duplicate keys and NaN/Infinity constants."""
     try:
         return json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant)
-    except PatternLabDataError as exc:
-        raise PatternLabDataError(f"{source}: {exc}") from exc
+    except DataError as exc:
+        raise DataError(f"{source}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise PatternLabDataError(f"{source}: invalid JSON ({exc}).") from exc
+        raise DataError(f"{source}: invalid JSON ({exc}).") from exc
 
 
 def read_json_file(path: Path, *, source: str | None = None) -> Any:
@@ -381,9 +381,9 @@ def read_json_file(path: Path, *, source: str | None = None) -> Any:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        raise PatternLabDataError(f"{label}: file not found.") from exc
+        raise DataError(f"{label}: file not found.") from exc
     except UnicodeDecodeError as exc:
-        raise PatternLabDataError(f"{label}: file is not valid UTF-8 ({exc}).") from exc
+        raise DataError(f"{label}: file is not valid UTF-8 ({exc}).") from exc
     return loads_strict(text, source=label)
 
 
@@ -449,11 +449,11 @@ def build_universe(
 ) -> dict[str, Any]:
     """Build the universe provenance block; an unknown selection date stays null."""
     if historical_membership not in MEMBERSHIP_STATES:
-        raise PatternLabDataError(
+        raise DataError(
             f"universe.historical_membership: expected one of {list(MEMBERSHIP_STATES)}, got {historical_membership!r}."
         )
     if selection_date is not None and selection_source is None:
-        raise PatternLabDataError(
+        raise DataError(
             "universe.selection_date: a selection date requires a selection source; do not fabricate one."
         )
     return {
@@ -509,7 +509,7 @@ def build_verification(
     }
     if closed_before_utc is None:
         if closure_evidence is not None or closure_source is not None or retained_closure is not None:
-            raise PatternLabDataError(
+            raise DataError(
                 "verification: closure evidence requires a non-null closed_before_utc."
             )
         return payload
@@ -563,7 +563,7 @@ def build_instrument_entry(
     }
     if instrument_rules is not None:
         if not isinstance(instrument_rules, Mapping):
-            raise PatternLabDataError("instrument_rules: expected a metadata object.")
+            raise DataError("instrument_rules: expected a metadata object.")
         entry["instrument_rules"] = dict(instrument_rules)
     return entry
 
@@ -605,7 +605,7 @@ def build_manifest(
 
 def _require_mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
-        raise PatternLabDataError(f"{field}: expected an object, got {type(value).__name__}.")
+        raise DataError(f"{field}: expected an object, got {type(value).__name__}.")
     return dict(value)
 
 
@@ -613,13 +613,13 @@ def _validate_universe(raw: Any) -> dict[str, Any]:
     universe = _require_mapping(raw, "universe")
     membership = universe.get("historical_membership")
     if membership not in MEMBERSHIP_STATES:
-        raise PatternLabDataError(
+        raise DataError(
             f"universe.historical_membership: expected one of {list(MEMBERSHIP_STATES)}, got {membership!r}."
         )
     selection_source = require_optional_text(universe.get("selection_source"), "universe.selection_source")
     selection_date = require_optional_text(universe.get("selection_date"), "universe.selection_date")
     if selection_date is not None and selection_source is None:
-        raise PatternLabDataError("universe.selection_date: recorded without a selection source.")
+        raise DataError("universe.selection_date: recorded without a selection source.")
     universe["selection_source"] = selection_source
     universe["selection_date"] = selection_date
     universe["notes"] = require_optional_text(universe.get("notes"), "universe.notes")
@@ -647,7 +647,7 @@ def _validate_verification(raw: Any, where: str) -> dict[str, Any]:
     origin = verification.get("closure_source")
     if cutoff is None:
         if evidence is not None or origin is not None:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{where}: closure evidence is recorded without a closed_before_utc cutoff."
             )
     else:
@@ -675,7 +675,7 @@ def validate_retained_closure(raw: Any, where: str, *, closed_before_utc: str) -
     missing = sorted(set(RETAINED_CLOSURE_KEYS) - set(record))
     extra = sorted(set(record) - set(RETAINED_CLOSURE_KEYS))
     if missing or extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: the retained closure record is closed; missing keys {missing}, "
             f"unexpected keys {extra}."
         )
@@ -690,7 +690,7 @@ def validate_retained_closure(raw: Any, where: str, *, closed_before_utc: str) -
         "closure_source": require_text(record["closure_source"], f"{where}.closure_source"),
     }
     if validated["closed_before_utc"] != closed_before_utc:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.closed_before_utc: {validated['closed_before_utc']} is not the published "
             f"cutoff {closed_before_utc} it is supposed to justify."
         )
@@ -706,7 +706,7 @@ def require_published_verification(raw: Any, where: str) -> dict[str, Any]:
     """
     verification = _validate_verification(raw, where)
     if verification["volume_quote_verified"] is not True:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.volume_quote_verified: publication requires verified quote-volume units; "
             "unproven units are rejected rather than published."
         )
@@ -723,11 +723,11 @@ def require_decimal_text(value: Any, field: str, *, allow_zero: bool = False) ->
     try:
         number = Decimal(text)
     except (InvalidOperation, ValueError) as exc:
-        raise PatternLabDataError(f"{field}: expected a decimal number, got {value!r}.") from exc
+        raise DataError(f"{field}: expected a decimal number, got {value!r}.") from exc
     if not number.is_finite():
-        raise PatternLabDataError(f"{field}: expected a finite decimal number, got {value!r}.")
+        raise DataError(f"{field}: expected a finite decimal number, got {value!r}.")
     if number < 0 or (number == 0 and not allow_zero):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected a {'nonnegative' if allow_zero else 'positive'} decimal, got {value!r}."
         )
     return text
@@ -736,9 +736,9 @@ def require_decimal_text(value: Any, field: str, *, allow_zero: bool = False) ->
 def validate_roster_entries(raw: Any, where: str = "collector.roster") -> list[dict[str, Any]]:
     """Validate the closed six-key roster entries and return them canonically sorted."""
     if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple)):
-        raise PatternLabDataError(f"{where}: expected a list of roster entries, got {type(raw).__name__}.")
+        raise DataError(f"{where}: expected a list of roster entries, got {type(raw).__name__}.")
     if not raw:
-        raise PatternLabDataError(f"{where}: at least one roster entry is required.")
+        raise DataError(f"{where}: at least one roster entry is required.")
     entries: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(raw):
@@ -747,23 +747,23 @@ def validate_roster_entries(raw: Any, where: str = "collector.roster") -> list[d
         missing = sorted(set(ROSTER_KEYS) - set(entry))
         extra = sorted(set(entry) - set(ROSTER_KEYS))
         if missing or extra:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{position}: the roster entry is closed; missing keys {missing}, unexpected keys {extra}."
             )
         venue = normalize_id_part(entry["venue"], f"{position}.venue")
         contract = normalize_id_part(entry["contract"], f"{position}.contract")
         instrument_id = normalize_instrument_id(entry["instrument_id"], f"{position}.instrument_id")
         if instrument_id != f"{venue}_{contract}":
-            raise PatternLabDataError(
+            raise DataError(
                 f"{position}.instrument_id: {instrument_id!r} does not match venue/contract "
                 f"{venue}_{contract}."
             )
         if instrument_id in seen:
-            raise PatternLabDataError(f"{where}: duplicate instrument {instrument_id!r}.")
+            raise DataError(f"{where}: duplicate instrument {instrument_id!r}.")
         seen.add(instrument_id)
         symbol = require_text(entry["symbol"], f"{position}.symbol")
         if not symbol.isascii() or symbol != symbol.strip() or any(ch.isspace() for ch in symbol):
-            raise PatternLabDataError(
+            raise DataError(
                 f"{position}.symbol: expected ASCII text without whitespace, got {symbol!r}."
             )
         entries.append(
@@ -778,7 +778,7 @@ def validate_roster_entries(raw: Any, where: str = "collector.roster") -> list[d
         )
     ordered = sorted(entries, key=lambda item: item["instrument_id"])
     if [item["instrument_id"] for item in entries] != [item["instrument_id"] for item in ordered]:
-        raise PatternLabDataError(f"{where}: entries must be sorted by instrument_id.")
+        raise DataError(f"{where}: entries must be sorted by instrument_id.")
     return ordered
 
 
@@ -808,7 +808,7 @@ def _raw_field(raw_fields: Mapping[str, Any], key: str, where: str) -> str:
 
 def _require_raw_agreement(actual: Any, expected: Any, field: str, subject: str) -> None:
     if actual != expected:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: the source value {actual!r} does not agree with the normalized "
             f"{subject} {expected!r}."
         )
@@ -825,7 +825,7 @@ def _require_decimal_agreement(
     field = f"{where}.raw_contract_fields.{key}"
     text = require_decimal_text(_raw_field(raw_fields, key, where), field)
     if Decimal(text) != Decimal(normalized):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: the source value {text!r} does not agree numerically with the normalized "
             f"{subject} {normalized!r}."
         )
@@ -837,7 +837,7 @@ def _require_listing_agreement(
     field = f"{where}.raw_contract_fields.{key}"
     expected = listing_instant_utc(raw_fields.get(key), field)
     if expected != normalized:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.listed_at_utc: {normalized!r} does not agree with the source {key} "
             f"{raw_fields.get(key)!r}, which means {expected!r}."
         )
@@ -866,12 +866,12 @@ def _validate_okx_rules(rules: Mapping[str, Any], raw_fields: Mapping[str, Any],
     _require_decimal_agreement(raw_fields, "tickSz", rules["price_tick"], where, "price tick")
     _require_listing_agreement(raw_fields, "listTime", rules["listed_at_utc"], where)
     if rules["quantity_unit"] != "contracts":
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.quantity_unit: an OKX SWAP is sized in 'contracts', got "
             f"{rules['quantity_unit']!r}."
         )
     if rules["minimum_notional"] is not None:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.minimum_notional: these OKX instrument fields publish no minimum notional, "
             f"so it must be null, got {rules['minimum_notional']!r}."
         )
@@ -907,19 +907,19 @@ def _validate_bybit_rules(rules: Mapping[str, Any], raw_fields: Mapping[str, Any
     field = f"{where}.raw_contract_fields.minNotionalValue"
     if notional is None:
         if rules["minimum_notional"] is not None:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{where}.minimum_notional: {rules['minimum_notional']!r} was normalized although "
                 "the source published no minimum notional."
             )
     else:
         text = require_decimal_text(require_text(notional, field), field, allow_zero=True)
         if rules["minimum_notional"] is None or Decimal(text) != Decimal(rules["minimum_notional"]):
-            raise PatternLabDataError(
+            raise DataError(
                 f"{field}: the source value {text!r} does not agree numerically with the normalized "
                 f"minimum notional {rules['minimum_notional']!r}."
             )
     if rules["quantity_unit"] != rules["base_currency"]:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.quantity_unit: a Bybit linear perpetual is sized in its base currency "
             f"{rules['base_currency']!r}, got {rules['quantity_unit']!r}."
         )
@@ -938,21 +938,21 @@ def validate_instrument_rules(raw: Any, where: str, *, venue: str) -> dict[str, 
     """
     venue_spec = MANAGED_VENUES.get(venue)
     if venue_spec is None:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: a collector-managed entry must come from one of {sorted(MANAGED_VENUES)}, "
             f"got venue {venue!r}."
         )
     rules = _require_mapping(raw, where)
     version = require_int(rules.get("schema_version"), f"{where}.schema_version")
     if version != INSTRUMENT_RULES_SCHEMA_VERSION:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.schema_version: unsupported version {version}; this build writes "
             f"{INSTRUMENT_RULES_SCHEMA_VERSION}."
         )
     raw_fields = _require_mapping(rules.get("raw_contract_fields"), f"{where}.raw_contract_fields")
     for key, value in raw_fields.items():
         if value is not None and not isinstance(value, str):
-            raise PatternLabDataError(
+            raise DataError(
                 f"{where}.raw_contract_fields.{key}: source fields are retained as strings or "
                 f"explicit nulls, got {type(value).__name__}."
             )
@@ -960,18 +960,18 @@ def validate_instrument_rules(raw: Any, where: str, *, venue: str) -> dict[str, 
     missing = sorted(expected_keys - set(raw_fields))
     unexpected = sorted(set(raw_fields) - expected_keys)
     if missing or unexpected:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.raw_contract_fields: the {venue} v1 object is closed; missing keys {missing}, "
             f"unexpected keys {unexpected}."
         )
     contract_type = rules.get("contract_type")
     if contract_type not in CONTRACT_TYPES:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.contract_type: expected one of {list(CONTRACT_TYPES)}, got {contract_type!r}."
         )
     status = rules.get("trading_status")
     if status != venue_spec["trading_status"]:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.trading_status: expected the original {venue} source status "
             f"{venue_spec['trading_status']!r}, got {status!r}."
         )
@@ -979,13 +979,13 @@ def validate_instrument_rules(raw: Any, where: str, *, venue: str) -> dict[str, 
     quote = require_currency(rules.get("quote_currency"), f"{where}.quote_currency")
     settlement = require_currency(rules.get("settlement_currency"), f"{where}.settlement_currency")
     if quote != "USDT" or settlement != "USDT":
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: v1 stores only USDT-quoted, USDT-settled linear contracts; got quote "
             f"{quote!r} and settlement {settlement!r}."
         )
     unit = require_text(rules.get("quantity_unit"), f"{where}.quantity_unit")
     if unit not in ("contracts", base):
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.quantity_unit: expected 'contracts' or the base currency {base!r}, got {unit!r}."
         )
     notional = rules.get("minimum_notional")
@@ -1011,7 +1011,7 @@ def validate_instrument_rules(raw: Any, where: str, *, venue: str) -> dict[str, 
     }
     extra = sorted(set(rules) - set(validated))
     if extra:
-        raise PatternLabDataError(f"{where}: the v1 rule object is closed; unexpected keys {extra}.")
+        raise DataError(f"{where}: the v1 rule object is closed; unexpected keys {extra}.")
     _VENUE_RULE_CHECKS[venue](validated, raw_fields, where)
     return validated
 
@@ -1023,7 +1023,7 @@ def validate_collector(
     collector = _require_mapping(raw, where)
     version = require_int(collector.get("schema_version"), f"{where}.schema_version")
     if version != COLLECTOR_SCHEMA_VERSION:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.schema_version: unsupported collector version {version}; this build writes "
             f"{COLLECTOR_SCHEMA_VERSION}."
         )
@@ -1031,7 +1031,7 @@ def validate_collector(
     digest = require_sha256(collector.get("roster_sha256"), f"{where}.roster_sha256")
     expected = roster_sha256(roster)
     if digest != expected:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.roster_sha256: {digest} does not match the canonical roster digest {expected}."
         )
     declared = {entry["instrument_id"]: entry for entry in roster}
@@ -1039,14 +1039,14 @@ def validate_collector(
         entry["instrument_id"]: {key: entry[key] for key in ROSTER_KEYS} for entry in instruments
     }
     if sorted(declared) != sorted(published):
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.roster: the roster must match the published instrument identities and roles "
             f"exactly; roster {sorted(declared)} versus manifest {sorted(published)}."
         )
     for instrument_id, entry in sorted(declared.items()):
         if entry != published[instrument_id]:
             differing = sorted(key for key in ROSTER_KEYS if entry[key] != published[instrument_id][key])
-            raise PatternLabDataError(
+            raise DataError(
                 f"{where}.roster: {instrument_id} disagrees with its published entry on {differing}; "
                 "all six roster fields must match the manifest exactly."
             )
@@ -1058,7 +1058,7 @@ def validate_collector(
     for entry in instruments:
         first_ms = to_epoch_ms(entry["first_open_utc"], f"{entry['instrument_id']}.first_open_utc")
         if first_ms != managed_start:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{where}.managed_start_utc: {format_epoch_ms(managed_start)} must equal every "
                 f"instrument's first stored row, but {entry['instrument_id']} starts at "
                 f"{entry['first_open_utc']}."
@@ -1066,7 +1066,7 @@ def validate_collector(
     request = _require_mapping(collector.get("last_request"), f"{where}.last_request")
     request_extra = sorted(set(request) - {"start_utc", "end_utc"})
     if request_extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.last_request: the object is closed; unexpected keys {request_extra}."
         )
     start_ms = require_aligned(
@@ -1080,12 +1080,12 @@ def validate_collector(
         f"{where}.last_request.end_utc",
     )
     if start_ms >= end_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.last_request: requires start_utc < end_utc, got "
             f"{format_epoch_ms(start_ms)} >= {format_epoch_ms(end_ms)}."
         )
     if start_ms != managed_start:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.last_request.start_utc: must equal managed_start_utc "
             f"{format_epoch_ms(managed_start)}, got {format_epoch_ms(start_ms)}."
         )
@@ -1099,7 +1099,7 @@ def validate_collector(
     }
     extra = sorted(set(collector) - set(validated))
     if extra:
-        raise PatternLabDataError(f"{where}: the v1 collector object is closed; unexpected keys {extra}.")
+        raise DataError(f"{where}: the v1 collector object is closed; unexpected keys {extra}.")
     return validated
 
 
@@ -1129,13 +1129,13 @@ def _require_certified_coverage(entry: Mapping[str, Any], where: str) -> None:
     verification = entry["verification"]
     cutoff = verification["closed_before_utc"]
     if cutoff is None:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.verification.closed_before_utc: a collector-managed entry must record the "
             "closure cutoff that certifies its stored rows."
         )
     shortfall = certification_shortfall_bars(entry)
     if shortfall:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.verification.closed_before_utc: {cutoff} does not certify the stored coverage "
             f"end {entry['coverage_end_utc']} ({shortfall} uncertified 5m row(s)). Publishing would "
             "make already-readable rows unreadable; preserve the maximum justified cutoff instead."
@@ -1156,12 +1156,12 @@ def validate_instrument_entry(
     contract = normalize_id_part(entry.get("contract"), f"{where}.contract")
     instrument_id = normalize_instrument_id(entry.get("instrument_id"), f"{where}.instrument_id")
     if instrument_id != f"{venue}_{contract}":
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.instrument_id: {instrument_id!r} does not match venue/contract {venue}_{contract}."
         )
     symbol = require_text(entry.get("symbol"), f"{where}.symbol")
     if not symbol.isascii() or symbol != symbol.strip() or any(ch.isspace() for ch in symbol):
-        raise PatternLabDataError(f"{where}.symbol: expected ASCII text without whitespace, got {symbol!r}.")
+        raise DataError(f"{where}.symbol: expected ASCII text without whitespace, got {symbol!r}.")
 
     first_ms = require_aligned(
         to_epoch_ms(entry.get("first_open_utc"), f"{where}.first_open_utc"), BASE_STEP_MS, f"{where}.first_open_utc"
@@ -1175,9 +1175,9 @@ def validate_instrument_entry(
         f"{where}.coverage_end_utc",
     )
     if last_ms < first_ms:
-        raise PatternLabDataError(f"{where}: last_open_utc precedes first_open_utc.")
+        raise DataError(f"{where}: last_open_utc precedes first_open_utc.")
     if coverage_end_ms != last_ms + BASE_STEP_MS:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.coverage_end_utc: must be last_open_utc plus {BASE_TIMEFRAME_MINUTES}m (exclusive end)."
         )
 
@@ -1185,7 +1185,7 @@ def validate_instrument_entry(
     missing = require_int(entry.get("missing_bar_count"), f"{where}.missing_bar_count", minimum=0)
     span = (last_ms - first_ms) // BASE_STEP_MS + 1
     if row_count + missing != span:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: row_count {row_count} plus missing_bar_count {missing} does not match the "
             f"{span}-slot coverage span."
         )
@@ -1235,30 +1235,30 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     manifest = _require_mapping(raw, "manifest")
     version = manifest.get("schema_version")
     if isinstance(version, bool) or not isinstance(version, int):
-        raise PatternLabDataError("manifest.schema_version: expected an integer.")
+        raise DataError("manifest.schema_version: expected an integer.")
     if version != SCHEMA_VERSION:
-        raise PatternLabDataError(
+        raise DataError(
             f"manifest.schema_version: unsupported version {version}; this build reads version {SCHEMA_VERSION}."
         )
     manifest["revision"] = require_int(manifest.get("revision"), "manifest.revision", minimum=1)
     state = manifest.get("state")
     if state not in PACK_STATES:
-        raise PatternLabDataError(f"manifest.state: expected one of {list(PACK_STATES)}, got {state!r}.")
+        raise DataError(f"manifest.state: expected one of {list(PACK_STATES)}, got {state!r}.")
     manifest["generated_utc"] = format_utc(manifest.get("generated_utc"), "manifest.generated_utc")
     base = require_int(manifest.get("base_timeframe_minutes"), "manifest.base_timeframe_minutes")
     if base != BASE_TIMEFRAME_MINUTES:
-        raise PatternLabDataError(
+        raise DataError(
             f"manifest.base_timeframe_minutes: only {BASE_TIMEFRAME_MINUTES} is stored in schema v1, got {base!r}."
         )
     manifest["base_timeframe_minutes"] = base
     unit = manifest.get("volume_unit")
     if unit != VOLUME_UNIT:
-        raise PatternLabDataError(f"manifest.volume_unit: expected {VOLUME_UNIT!r}, got {unit!r}.")
+        raise DataError(f"manifest.volume_unit: expected {VOLUME_UNIT!r}, got {unit!r}.")
     manifest["universe"] = _validate_universe(manifest.get("universe"))
 
     instruments = manifest.get("instruments")
     if not isinstance(instruments, list) or not instruments:
-        raise PatternLabDataError("manifest.instruments: expected a nonempty list.")
+        raise DataError("manifest.instruments: expected a nonempty list.")
     managed = manifest.get("collector") is not None
     validated: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -1266,9 +1266,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     for index, entry in enumerate(instruments):
         item = _validate_instrument(entry, index, managed=managed)
         if item["instrument_id"] in seen_ids:
-            raise PatternLabDataError(f"manifest.instruments: duplicate instrument_id {item['instrument_id']!r}.")
+            raise DataError(f"manifest.instruments: duplicate instrument_id {item['instrument_id']!r}.")
         if item["file"] in seen_files:
-            raise PatternLabDataError(f"manifest.instruments: duplicate file {item['file']!r}.")
+            raise DataError(f"manifest.instruments: duplicate file {item['file']!r}.")
         seen_ids.add(item["instrument_id"])
         seen_files.add(item["file"])
         validated.append(item)
@@ -1285,7 +1285,7 @@ def find_instrument(manifest: Mapping[str, Any], instrument_id: str) -> dict[str
         if entry["instrument_id"] == wanted:
             return entry
     available = ", ".join(entry["instrument_id"] for entry in manifest["instruments"])
-    raise PatternLabDataError(f"instrument {wanted!r} is not declared in the manifest; available: {available}.")
+    raise DataError(f"instrument {wanted!r} is not declared in the manifest; available: {available}.")
 
 
 # --------------------------------------------------------------------------
@@ -1304,7 +1304,7 @@ def read_manifest(data_root: Path) -> dict[str, Any]:
     """Read and validate the manifest of an existing pack."""
     path = manifest_path(data_root)
     if not path.is_file():
-        raise PatternLabDataError(
+        raise DataError(
             f"{path}: no readable pack manifest; the pack is missing or its publication did not complete."
         )
     return validate_manifest(read_json_file(path, source=str(path)))

@@ -69,7 +69,7 @@ def test_v2_roundtrip_and_full_offline_validation(tmp_path,monkeypatch,legacy):
     assert len(reader.accountKeys)==20
     before=(reader.root/'completion.json').read_bytes()
     def denied(*a,**kw):raise AssertionError('offline pack/snapshot/executor access')
-    monkeypatch.setattr('tools.pattern_lab.data.read_session',denied)
+    monkeypatch.setattr('data_provider.data.read_session',denied)
     monkeypatch.setattr('tools.pattern_lab.auxiliary.storage.load_snapshot',denied)
     monkeypatch.setattr('tools.pattern_lab.accounts.execute_account',denied)
     assert verify_account_study(reader.root)['commandRegeneration']=='exact'

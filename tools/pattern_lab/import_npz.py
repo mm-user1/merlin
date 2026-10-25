@@ -18,8 +18,8 @@ import numpy as np
 
 from . import PatternLabDataError
 from . import manifest as pack_manifest
-from .data import InstrumentSource, _publish_pack_unlocked, new_pack_guard
-from .manifest import (
+from data_provider.data import InstrumentSource, _publish_pack_unlocked, new_pack_guard
+from data_provider.manifest import (
     BASE_STEP_MS,
     build_instrument_id,
     build_source_metadata,

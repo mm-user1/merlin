@@ -5,6 +5,8 @@ import importlib.metadata
 import math
 import sys
 
+from data_provider import READER_MODULES
+
 import numpy as np
 
 from ..accounts.contracts import require, integer, identifier
@@ -30,9 +32,13 @@ def implementation(experimental):
     files=[]
     for folder in ('selection','account_study','accounts','auxiliary','study'):
         files.extend(p for p in (root/folder).iterdir() if p.suffix in ('.py','.js'))
-    files.extend(root/name for name in ('data.py','manifest.py'))
-    return dict(algorithm='fixed-reference.1',sources={p.relative_to(root).as_posix():
-        hashlib.sha256(p.read_bytes().replace(b'\r\n',b'\n')).hexdigest() for p in sorted(files)},
+    sources = {p.relative_to(root).as_posix(): p for p in files}
+    repo = root.parents[1]
+    for name in READER_MODULES:
+        key = 'src/data_provider/__init__.py' if name == 'data_provider' else 'src/' + name.replace('.', '/') + '.py'
+        sources[key] = repo / key
+    return dict(algorithm='fixed-reference.1',sources={key:
+        hashlib.sha256(p.read_bytes().replace(b'\r\n',b'\n')).hexdigest() for key,p in sorted(sources.items())},
         experimental=experimental,python=sys.version.split()[0],
         libraries={n:importlib.metadata.version(n) for n in ('numpy','pandas','pyarrow','numba')})
 

@@ -21,7 +21,7 @@ def inspection(value, request):
     facts['requestedBounds']=None
     facts['uncoveredIntervals']=[]
     if request is not None:
-        from ..manifest import to_epoch_ms
+        from data_provider.manifest import to_epoch_ms
         start,end=(to_epoch_ms(request[k],k) for k in ('startUtc','endUtc'))
         facts['requestedBounds']=[start,end];cursor=start
         for a,b in value['coverage']:

@@ -49,6 +49,7 @@ tracked repository.
 
 | Document | Authority |
 | --- | --- |
+| [Shared data provider](../src/data_provider/README.md) | Shared pack/collector ownership, imports, explicit roots/rosters, errors and unchanged storage/locking |
 | [Tool catalog](../tools/README.md) | Maintained tool entry points and outputs |
 | [Strategy Lab](../tools/strategy_lab/README.md) | V2-only research workflows, schemas, safety, generation, certification, analysis, and allocation |
 | [Pattern Lab research guide](../tools/pattern_lab/README.md) | Market and auxiliary data, event studies and inference, reusable accounts and entry filters, robustness views, monthly universe selection, evidence, identity and offline reports |

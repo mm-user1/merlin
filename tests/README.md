@@ -26,6 +26,22 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+A1 shared-provider changes use `tests/pattern_lab/test_data_provider.py` for
+standalone imports, canonical module/error identity, foreign-provider refusal,
+explicit roster admission, exact attribution and candidate policy 2. Existing
+candidate, storage/collector/recovery/lock, auxiliary and account/selection tests
+remain preservation coverage. Final A1 preservation runs all `tests/pattern_lab`
+and `tests/v2/test_v2_kernel_execution.py` through this launcher with retained
+logs and external storage. Genuine pre-edit Windows artifacts are separate
+review inputs for historical policy-1 freezing/loading/refusal and exact-parent
+fixed/carried replay; ordinary tests do not depend on ignored evidence.
+
+The scoped LF and autocrlf tests include shared provider root/nested Python paths,
+including new untracked files before commit. They do not stage product files or
+change repository/global Git configuration. Guards patch canonical `data_provider`
+modules; supported Pattern Lab attributes are those same objects. Old direct
+`tools.pattern_lab.data` submodule imports are no longer supported.
+
 T05 `test_account_containers.py` covers direct streamed STORED/ZIP64 records,
 physical versus logical admission, local headers/CRC/extents, immutable metadata
 reuse across interleaved tickers, failed publication and handle release, transport

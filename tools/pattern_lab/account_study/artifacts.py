@@ -123,7 +123,7 @@ def _load(root, *, sealed=True):
     require(set(p.name for p in (root/'accounts').iterdir()) == expected_accounts, 'account roster differs')
     allocations = {a['allocationId']: a for a in request.document['allocations']}
     windows = {w['windowId']: w for w in request.document['windows']}
-    from ..manifest import to_epoch_ms
+    from data_provider.manifest import to_epoch_ms
     reader = AccountStudy(root, study, keys, status, locator=locator)
     if v2:
         from ..auxiliary import study as auxiliary

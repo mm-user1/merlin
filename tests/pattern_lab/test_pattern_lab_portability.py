@@ -321,6 +321,8 @@ else: raise AssertionError('changed helper accepted')
 
 def scoped_sources():
     paths = subprocess.check_output(["git", "ls-files", "tools/pattern_lab/*.py"], cwd=h.REPO_ROOT, text=True).splitlines()
+    paths = [name for name in paths if (h.REPO_ROOT / name).is_file()]
+    paths += [p.relative_to(h.REPO_ROOT).as_posix() for p in (h.REPO_ROOT / "src/data_provider").rglob("*.py")]
     return paths + [name for name in extensions.bracket_source_digests() if name.startswith("src/")]
 
 
@@ -334,7 +336,7 @@ def test_lf_checkout_scope_with_autocrlf(tmp_path):
     git("init", "-q")
     git("config", "core.autocrlf", "true")
     shutil.copyfile(h.REPO_ROOT / ".gitattributes", tmp_path / ".gitattributes")
-    scope = ["tools/pattern_lab/root.py", "tools/pattern_lab/nested/deep/module.py"] + [s for s in scoped_sources() if s.startswith("src/")]
+    scope = ["tools/pattern_lab/root.py", "tools/pattern_lab/nested/deep/module.py", "src/data_provider/nested/deep/module.py"] + [s for s in scoped_sources() if s.startswith("src/")]
     paths = scope + ["outside.py", "data/raw/fixture.csv", "data/baseline_v2/fixture.csv"]
     for name in paths:
         path = tmp_path / name

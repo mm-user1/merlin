@@ -21,7 +21,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 
 from .. import PatternLabDataError
-from ..manifest import require_int, require_text
+from data_provider.manifest import require_int, require_text
 
 INSTRUMENT_SCOPE = "instrument"
 SUPPORTED_SCOPES = (INSTRUMENT_SCOPE,)

@@ -11,7 +11,7 @@ from tools.pattern_lab.examples import pilot_extension as pilot
 from tools.pattern_lab.study import evidence, report
 from ._bracket_helpers import build
 from ._helpers import ANCHOR_MS
-from tools.pattern_lab.manifest import format_epoch_ms
+from data_provider.manifest import format_epoch_ms
 from . import _helpers as h
 from tools.pattern_lab.study import validation
 

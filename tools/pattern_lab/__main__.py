@@ -18,6 +18,7 @@ import sys
 from typing import Sequence
 
 from . import (
+    DEFAULT_ROSTER_PATH,
     PatternLabBusyError,
     PatternLabDependencyError,
     PatternLabDataError,
@@ -32,6 +33,11 @@ from . import exchange_data
 from . import manifest as pack_manifest
 from . import study as pack_study
 from .import_npz import import_npz_pack, load_source_metadata
+
+def stderr_progress(message: str) -> None:
+    """Keep CLI progress on stderr while stdout carries structured JSON."""
+    print(f"pattern-lab: {message}", file=sys.stderr, flush=True)
+
 
 EXIT_OK = 0
 EXIT_VERIFICATION_PROBLEMS = 1
@@ -113,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="JSON",
-        help=f"Roster configuration; the tracked default is {pack_collect.DEFAULT_ROSTER_PATH}.",
+        help=f"Roster configuration; the tracked default is {DEFAULT_ROSTER_PATH}.",
     )
     collector.add_argument("--data-root", type=Path, required=True, metavar="NEW_PATH")
     collector.add_argument("--start", required=True, metavar="UTC")
@@ -352,7 +358,7 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
     # Every data command needs the pinned reader; report the dependency once, up front.
     pack_data.require_pyarrow()
-    progress = pack_collect.stderr_progress
+    progress = stderr_progress
     if args.command == "collect":
         result = pack_collect.collect_pack(
             args.data_root,

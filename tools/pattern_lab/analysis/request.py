@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .. import PatternLabDataError
-from ..manifest import read_json_file, require_int, require_text
+from data_provider.manifest import read_json_file, require_int, require_text
 from ..study import contracts
 
 ANALYSIS_REQUEST_SCHEMA_VERSION = 1

@@ -24,7 +24,7 @@ import urllib.request
 
 import numpy as np
 
-from . import PatternLabDataError
+from .errors import DataError
 from .manifest import (
     BASE_STEP_MS,
     format_epoch_ms,
@@ -103,9 +103,9 @@ PROGRESS_PAGE_INTERVAL = 25
 OPTION_KEYS = ("bybit_rps", "max_attempts", "okx_rps", "timeout_seconds")
 
 
-def source_error(message: str, *, error_code: str = "source_failure") -> PatternLabDataError:
+def source_error(message: str, *, error_code: str = "source_failure") -> DataError:
     """Return the error used for every source, protocol or transport failure."""
-    return PatternLabDataError(message, error_code=error_code)
+    return DataError(message, error_code=error_code)
 
 
 # --------------------------------------------------------------------------
@@ -199,12 +199,12 @@ class SystemClock:
 def normalize_rps(value: Any, field_name: str) -> float:
     """Validate one venue's requests-per-second pacing option."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PatternLabDataError(f"{field_name}: expected a number, got {type(value).__name__}.")
+        raise DataError(f"{field_name}: expected a number, got {type(value).__name__}.")
     rate = float(value)
     if not math.isfinite(rate) or rate <= 0.0:
-        raise PatternLabDataError(f"{field_name}: must be a positive finite number, got {value!r}.")
+        raise DataError(f"{field_name}: must be a positive finite number, got {value!r}.")
     if rate > MAX_REQUESTS_PER_SECOND:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field_name}: {rate} exceeds the conservative ceiling of "
             f"{MAX_REQUESTS_PER_SECOND} requests/second for these public endpoints."
         )
@@ -214,10 +214,10 @@ def normalize_rps(value: Any, field_name: str) -> float:
 def normalize_timeout(value: Any, field_name: str = "timeout_seconds") -> float:
     """Validate one finite positive per-request timeout in seconds."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PatternLabDataError(f"{field_name}: expected a number, got {type(value).__name__}.")
+        raise DataError(f"{field_name}: expected a number, got {type(value).__name__}.")
     timeout = float(value)
     if not math.isfinite(timeout) or timeout <= 0.0:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field_name}: must be a positive finite number, got {value!r}."
         )
     return timeout
@@ -230,9 +230,9 @@ def normalize_max_attempts(value: Any, field_name: str = "max_attempts") -> int:
     rejected request instead of a silently different retry budget.
     """
     if isinstance(value, bool) or not isinstance(value, int):
-        raise PatternLabDataError(f"{field_name}: expected an integer, got {type(value).__name__}.")
+        raise DataError(f"{field_name}: expected an integer, got {type(value).__name__}.")
     if not 1 <= value <= MAX_ATTEMPTS:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field_name}: must be an integer in [1, {MAX_ATTEMPTS}], got {value}."
         )
     return value
@@ -241,11 +241,11 @@ def normalize_max_attempts(value: Any, field_name: str = "max_attempts") -> int:
 def validate_http_options(raw: Any, *, where: str = "options") -> dict[str, Any]:
     """Validate the closed per-operation HTTP options frozen in the journal."""
     if not isinstance(raw, Mapping):
-        raise PatternLabDataError(f"{where}: expected an object, got {type(raw).__name__}.")
+        raise DataError(f"{where}: expected an object, got {type(raw).__name__}.")
     missing = sorted(set(OPTION_KEYS) - set(raw))
     extra = sorted(set(raw) - set(OPTION_KEYS))
     if missing or extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: the options object is closed; missing keys {missing}, unexpected keys {extra}."
         )
     return {
@@ -908,7 +908,7 @@ def adapter_for(venue: str):
     try:
         return ADAPTERS[venue]
     except KeyError as exc:
-        raise PatternLabDataError(
+        raise DataError(
             f"venue {venue!r} is not supported; v1 collects from {sorted(ADAPTERS)}.",
             error_code="unsupported_venue",
         ) from exc

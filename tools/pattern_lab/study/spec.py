@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .. import PatternLabDataError
-from ..manifest import (
+from data_provider.manifest import (
     BASE_TIMEFRAME_MINUTES,
     format_epoch_ms,
     normalize_timeframe_minutes,

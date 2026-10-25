@@ -215,7 +215,7 @@ class InstrumentReader:
 
     def _checked_sequential(self):
         from . import sequential
-        from ..manifest import to_epoch_ms
+        from data_provider.manifest import to_epoch_ms
         tables = {}
         for name in sequential.SCHEMAS:
             raw = "sequential_"+name
@@ -258,7 +258,7 @@ class InstrumentReader:
     def sequential_coverage(self, *, timeframe_minutes, variant_id, model_instance_id, case_id):
         """Derived requested-end coverage; raw terminal flags mean last observed."""
         from . import sequential
-        from ..manifest import to_epoch_ms
+        from data_provider.manifest import to_epoch_ms
         key = self._account_key(timeframe_minutes,variant_id,model_instance_id,case_id)
         return sequential.coverage(self._sequential_grouped["path"][key], self._sequential_grouped["trades"][key],
                                    timeframe_minutes,to_epoch_ms(self._results.request["study"]["end_utc"]))
@@ -508,7 +508,7 @@ def _load(run_root: Any, *, mode: str) -> StudyResults:
     )
     if sequential_models:
         from . import bracket
-        from ..manifest import to_epoch_ms
+        from data_provider.manifest import to_epoch_ms
         if request["schema_version"] != 2:
             raise PatternLabDataError("Sequential evidence requires study version 2")
         if family["models"] != request["models"]:

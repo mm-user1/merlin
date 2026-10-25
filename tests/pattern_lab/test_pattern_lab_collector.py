@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from tools.pattern_lab import PatternLabDataError, PatternLabPendingError
+from tools.pattern_lab import DEFAULT_ROSTER_PATH
 from tools.pattern_lab import collect as pack_collect
 from tools.pattern_lab import data as pack_data
 from tools.pattern_lab import exchange_data
@@ -50,7 +51,7 @@ def roster(tmp_path):
 
 class TestRosterConfiguration:
     def test_the_tracked_roster_preserves_the_supplied_counts_and_roles(self):
-        loaded = pack_collect.load_roster()
+        loaded = pack_collect.load_roster(DEFAULT_ROSTER_PATH)
         assert len(loaded["roster"]) == 54
         roles = [tuple(entry["roles"]) for entry in loaded["roster"]]
         assert roles.count(("trading",)) == 44
@@ -61,7 +62,7 @@ class TestRosterConfiguration:
         assert loaded["universe"]["selection_date"] is None
 
     def test_the_tracked_roster_file_is_the_supplied_configuration(self):
-        raw = json.loads(pack_collect.DEFAULT_ROSTER_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(DEFAULT_ROSTER_PATH.read_text(encoding="utf-8"))
         assert sorted(raw) == ["instruments", "schema_version", "universe"]
         assert len(raw["instruments"]) == 54
         assert {entry["venue"] for entry in raw["instruments"]} == {"OKX", "BYBIT"}

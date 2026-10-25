@@ -5,7 +5,7 @@ from pathlib import Path
 from ..accounts import (prepare_inputs, build_commands, candle_filter, execute_account,
                         AccountFeatureRequest, HARecipe, ExecutionPolicy, AccountWindow)
 from ..accounts.contracts import require
-from ..manifest import to_epoch_ms
+from data_provider.manifest import to_epoch_ms
 from ..study.contracts import semantic_digest
 from .codec import AccountRecord
 from .common import file_hash

@@ -31,7 +31,7 @@ from .. import PatternLabDataError, PatternLabPendingError, PatternLabStudyError
 from .. import data as pack_data
 from .. import manifest as pack_manifest
 from .. import update_transaction
-from ..manifest import format_epoch_ms, to_epoch_ms
+from data_provider.manifest import format_epoch_ms, to_epoch_ms
 from . import contracts, evidence, extensions as study_extensions, report as study_report
 from . import results as study_results
 from . import spec as study_spec

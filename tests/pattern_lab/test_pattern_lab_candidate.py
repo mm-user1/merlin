@@ -219,7 +219,7 @@ def test_missing_attribution_and_shared_mismatch(frozen_generation):
     root, frozen, _ = frozen_generation
     source = admit_source(root/"study", model_instances=["fh"])
     analyzed = artifacts.load_analysis(root/"analysis")
-    source.results.source["core_source"].pop("tools.pattern_lab.data")
+    source.results.source["core_source"].pop("data_provider.data")
     with pytest.raises(PatternLabDataError, match="fresh development"):
         candidate._generation(source, analyzed, frozen["recipe"])
     source = admit_source(root/"study", model_instances=["fh"])

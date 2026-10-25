@@ -13,7 +13,7 @@ from tools.pattern_lab.auxiliary import publish_snapshot, load_snapshot, collect
 from tools.pattern_lab.auxiliary.model import TYPES, TypeDescriptor, content, fingerprint, normalize_rows
 from tools.pattern_lab.auxiliary.features import build_feature, event_buckets, transition_pulse, condition
 from tools.pattern_lab.accounts.preparation import align_states
-from tools.pattern_lab.manifest import format_epoch_ms
+from data_provider.manifest import format_epoch_ms
 
 STEP=300000
 

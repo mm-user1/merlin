@@ -3,7 +3,7 @@ from dataclasses import replace
 from copy import deepcopy
 import numpy as np
 
-from tools.pattern_lab.manifest import format_epoch_ms
+from data_provider.manifest import format_epoch_ms
 from tools.pattern_lab.accounts import execute_account, AccountWindow
 from tools.pattern_lab.account_study.common import write_json, file_hash
 from ._helpers import ANCHOR_MS, instrument_source, publish

@@ -9,7 +9,7 @@ import re
 from .. import exchange_data as ex
 from ..accounts.contracts import require, identifier, integer
 from ..account_study.common import closed, read_json, write_json, json_text, parse_json
-from ..manifest import to_epoch_ms, format_epoch_ms
+from data_provider.manifest import to_epoch_ms, format_epoch_ms
 from .model import TYPES, INTERVALS, normalize_rows, content, spans, covered
 from .storage import new_root, load_snapshot, write_series, finish_snapshot
 

@@ -32,7 +32,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
-from . import PatternLabDataError
+from .errors import DataError
 from . import exchange_data
 from . import manifest as pack_manifest
 from .manifest import (
@@ -129,14 +129,14 @@ def staging_dir(data_root: Path, operation_id: str) -> Path:
 
 def _mapping(value: Any, where: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: expected an object, got {type(value).__name__}.", error_code="invalid_journal"
         )
     return dict(value)
 
 
-def _journal_error(message: str) -> PatternLabDataError:
-    return PatternLabDataError(message, error_code="invalid_journal")
+def _journal_error(message: str) -> DataError:
+    return DataError(message, error_code="invalid_journal")
 
 
 def _relative_staged_path(value: Any, operation_id: str, where: str) -> str:
@@ -174,7 +174,7 @@ def _validate_fetch_ranges(items: Sequence[Any], where: str, *, start_ms: int, e
         try:
             low = require_aligned_utc(record["start_utc"], f"{position}.start_utc")
             high = require_aligned_utc(record["end_utc"], f"{position}.end_utc")
-        except PatternLabDataError as exc:
+        except DataError as exc:
             raise _journal_error(str(exc)) from exc
         if low >= high:
             raise _journal_error(
@@ -224,7 +224,7 @@ def _validate_gap_ranges(
             low = require_aligned_utc(record["from_utc"], f"{position}.from_utc")
             high = require_aligned_utc(record["to_utc"], f"{position}.to_utc")
             bars = require_int(record["missing_bars"], f"{position}.missing_bars", minimum=1)
-        except PatternLabDataError as exc:
+        except DataError as exc:
             raise _journal_error(str(exc)) from exc
         if low >= high:
             raise _journal_error(
@@ -286,8 +286,8 @@ def _validate_facts(
             require_text(facts[key], f"{where}.{key}")
         for key in FACT_LIST_KEYS:
             if not isinstance(facts[key], list):
-                raise PatternLabDataError(f"{where}.{key}: expected a list.")
-    except PatternLabDataError as exc:
+                raise DataError(f"{where}.{key}: expected a list.")
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     for key in ("row_count", "first_open_utc", "last_open_utc", "coverage_end_utc", "missing_bar_count"):
         if facts[key] != entry[key]:
@@ -372,7 +372,7 @@ def _validate_staged_record(
         entry = pack_manifest.validate_instrument_entry(
             record.get("entry"), f"{where}.entry", managed=True
         )
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     validated = {
         "instrument_id": instrument_id,
@@ -467,7 +467,7 @@ def _validate_request(raw: Any, where: str) -> dict[str, Any]:
             None if requested_start is None else require_aligned_utc(requested_start, f"{where}.requested_start_utc")
         )
         note = require_optional_text(request["note"], f"{where}.note")
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     if start_ms >= end_ms:
         raise _journal_error(
@@ -533,7 +533,7 @@ def _validate_closure(
             f"{where}.resolved_end_ms",
         )
         observed = format_utc(closure["observed_utc"], f"{where}.observed_utc")
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     expected_venues = sorted(set(venues))
     if sorted(times) != expected_venues:
@@ -601,7 +601,7 @@ def _validate_probe(raw: Any, where: str, *, start_ms: int) -> dict[str, Any]:
         checked = require_bool(probe["checked"], f"{where}.checked")
         slot_ms = require_aligned_utc(probe["slot_utc"], f"{where}.slot_utc")
         reason = require_text(probe["reason"], f"{where}.reason")
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     if slot_ms != start_ms:
         raise _journal_error(
@@ -687,7 +687,7 @@ def _validate_preflight(
                 "listing_known": require_bool(item["listing_known"], f"{position}.listing_known"),
                 "listed_at_utc": None if listed is None else format_utc(listed, f"{position}.listed_at_utc"),
             }
-        except PatternLabDataError as exc:
+        except DataError as exc:
             raise _journal_error(str(exc)) from exc
         if record["listing_known"] != (record["listed_at_utc"] is not None):
             raise _journal_error(
@@ -847,7 +847,7 @@ def validate_journal(raw: Any, *, where: str = "journal") -> dict[str, Any]:
 
     try:
         options = exchange_data.validate_http_options(journal.get("options"), where=f"{where}.options")
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(str(exc)) from exc
     validated = {
         "journal_version": version,
@@ -921,7 +921,7 @@ def pending_state(data_root: Path) -> dict[str, Any] | None:
             continue
         try:
             journal = _read_journal_file(path)
-        except PatternLabDataError as exc:
+        except DataError as exc:
             return {"source": source, "path": str(path), "valid": False, "problem": str(exc), "journal": None}
         return {"source": source, "path": str(path), "valid": True, "problem": None, "journal": journal}
     return None
@@ -978,7 +978,7 @@ def pending_problem(state: Mapping[str, Any]) -> str:
 def ensure_staging_dir(data_root: Path, operation_id: str) -> Path:
     path = staging_dir(data_root, operation_id)
     if path.is_symlink():
-        raise PatternLabDataError(
+        raise DataError(
             f"{path}: the staging directory must not be a symlink.", error_code="unsafe_path"
         )
     path.mkdir(exist_ok=True)
@@ -994,7 +994,7 @@ def resolve_staged(data_root: Path, relative: str, operation_id: str, where: str
     if not target.is_relative_to(root / staging_dir_name(operation_id)):
         raise _journal_error(f"{where}: {relative!r} resolves outside this operation's staging directory.")
     if Path(root / relative).is_symlink():
-        raise PatternLabDataError(f"{where}: {relative!r} is a symlink.", error_code="unsafe_path")
+        raise DataError(f"{where}: {relative!r} is a symlink.", error_code="unsafe_path")
     return Path(root / relative)
 
 
@@ -1017,8 +1017,8 @@ def digest_or_none(path: Path) -> str | None:
 # applying: forward-only publication and recovery
 # --------------------------------------------------------------------------
 
-def _unrecoverable(message: str) -> PatternLabDataError:
-    return PatternLabDataError(
+def _unrecoverable(message: str) -> DataError:
+    return DataError(
         message
         + " Restore the exact missing staged artifact from an available copy, or collect a separate "
         "new root. Preserve this root and its journal; never clear the marker to make a partially "
@@ -1057,7 +1057,7 @@ def _plan_replacement(
     if current == new_sha256:
         return None
     if current != old_sha256:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: {destination} has SHA-256 {current} but the journal recorded "
             f"{old_sha256} before the replacement and {new_sha256} after it. The file was modified "
             "outside this operation; recovery stops rather than guessing.",
@@ -1070,7 +1070,7 @@ def _plan_replacement(
         raise _unrecoverable(f"{where}: the staged artifact {staged} is missing.")
     actual = file_sha256(staged)
     if actual != new_sha256:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: the staged artifact {staged} has SHA-256 {actual}, not the recorded "
             f"{new_sha256}.",
             error_code="unexpected_target_state",
@@ -1105,7 +1105,7 @@ def _validate_target_manifest(data_root: Path, journal: Mapping[str, Any]) -> No
         manifest = pack_manifest.validate_manifest(
             pack_manifest.loads_strict(text, source="targets.manifest")
         )
-    except PatternLabDataError as exc:
+    except DataError as exc:
         raise _journal_error(f"targets.manifest: the frozen manifest is invalid ({exc}).") from exc
     collector = manifest.get("collector")
     if collector is None:
@@ -1160,7 +1160,7 @@ def build_apply_plan(data_root: Path, journal: Mapping[str, Any]) -> list[_Repla
         if not record["changed"]:
             actual = digest_or_none(destination)
             if actual != record["new_sha256"]:
-                raise PatternLabDataError(
+                raise DataError(
                     f"{where}: the unchanged file {destination} has SHA-256 {actual}, not the "
                     f"recorded {record['new_sha256']}.",
                     error_code="unexpected_target_state",
@@ -1235,7 +1235,7 @@ def _verify_targets(data_root: Path, journal: Mapping[str, Any]) -> None:
         )
         actual = digest_or_none(destination)
         if actual != record["new_sha256"]:
-            raise PatternLabDataError(
+            raise DataError(
                 f"staged[{instrument_id}]: published {destination} has SHA-256 {actual}, not the "
                 f"target {record['new_sha256']}.",
                 error_code="unexpected_target_state",
@@ -1245,7 +1245,7 @@ def _verify_targets(data_root: Path, journal: Mapping[str, Any]) -> None:
         path = root / target["final_name"]
         actual = digest_or_none(path)
         if actual != target["new_sha256"]:
-            raise PatternLabDataError(
+            raise DataError(
                 f"targets.{key}: published {path} has SHA-256 {actual}, not the target "
                 f"{target['new_sha256']}.",
                 error_code="unexpected_target_state",
@@ -1290,7 +1290,7 @@ def cleanup_operation(data_root: Path, journal: Mapping[str, Any]) -> list[str]:
     root = Path(data_root)
     directory = staging_dir(root, journal["operation_id"])
     if directory.is_symlink():
-        raise PatternLabDataError(
+        raise DataError(
             f"{directory}: the staging directory must not be a symlink.", error_code="unsafe_path"
         )
     removed: list[str] = []
@@ -1306,7 +1306,7 @@ def cleanup_operation(data_root: Path, journal: Mapping[str, Any]) -> list[str]:
         child.unlink()
         removed.append(child.name)
     if unexpected:
-        raise PatternLabDataError(
+        raise DataError(
             f"{directory}: unexpected artifacts {unexpected} are present in this operation's staging "
             "directory. They are not part of the recorded plan, so they are preserved and reported "
             "rather than deleted; the operation journal is retained. Inspect them, move them "
@@ -1330,7 +1330,7 @@ def abort_operation(data_root: Path, journal: Mapping[str, Any]) -> dict[str, An
     """Abort a staging operation, leaving the base pack byte-for-byte unchanged."""
     root = Path(data_root)
     if journal["phase"] != "staging":
-        raise PatternLabDataError(
+        raise DataError(
             f"operation {journal['operation_id']} has already entered the applying phase and cannot be "
             "aborted; finish it forward with 'recover'.",
             error_code="abort_after_applying",
@@ -1352,7 +1352,7 @@ def verify_base_intact(data_root: Path, journal: Mapping[str, Any]) -> None:
     ):
         actual = digest_or_none(root / name)
         if actual != digest:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root / name}: has SHA-256 {actual} but the operation recorded {digest} as its base; "
                 "the live pack changed outside this operation.",
                 error_code="unexpected_target_state",
@@ -1361,7 +1361,7 @@ def verify_base_intact(data_root: Path, journal: Mapping[str, Any]) -> None:
         path = root / pack_manifest.instrument_relative_file(instrument_id)
         actual = digest_or_none(path)
         if actual != digest:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{path}: has SHA-256 {actual} but the operation recorded {digest} as its base; the "
                 "live pack changed outside this operation.",
                 error_code="unexpected_target_state",

@@ -12,6 +12,7 @@ src/core/             V1/V2 execution, optimization, Grid, WFA, metrics,
                       persistence, analytics, post-processing, and exports
 src/core/engine_v2/   generic validated V2 reference and compiled execution
 src/strategies/       discoverable strategy packages and config metadata
+src/data_provider/    shared pack reader, validation, locks, collector and recovery
 src/indicators/       shared technical indicators
 src/ui/               Flask routes/services and the three-page frontend
 data/                 market inputs and tracked baseline evidence
@@ -202,6 +203,13 @@ The complete usage, identity, schema, resume, analysis, allocation, and safety
 contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
 ## Pattern Lab integration
+
+Pack storage and collection are owned by [data_provider](../src/data_provider/README.md),
+which neither imports Pattern Lab nor Merlin execution/UI. Pattern Lab consumes
+this shared implementation; application integration is separate work. Tools use
+independently managed physical roots with unchanged exclusive per-root locks.
+A1 changes prospective source generations while retaining historical saved-evidence
+reads; the Pattern Lab guide specifies candidate policies and replay compatibility.
 
 The T01-T04 update cycle is accepted through `5473271`, including its follow-up
 patches and final integrated review. No material defect was found in the

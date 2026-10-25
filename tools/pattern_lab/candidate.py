@@ -14,19 +14,22 @@ import re
 from typing import Any, Mapping
 
 from . import PatternLabDataError
+from data_provider import READER_MODULES
 from . import data, manifest, update_transaction
 from .study import contracts, evidence, extensions, spec, validation
 from .analysis import artifacts, family as analysis_family, request as analysis_request
 
 CANDIDATE_SCHEMA_VERSION = 1
-REQUIRED_CODE_POLICY_VERSION = 1
-REQUIRED_CORE_MODULES = tuple("tools.pattern_lab." + name for name in (
+REQUIRED_CODE_POLICY_VERSION = 2
+LEGACY_REQUIRED_CORE_MODULES = tuple("tools.pattern_lab." + name for name in (
     "data", "manifest", "study.contracts", "study.builtins", "study.spec",
     "study.validation", "study.extensions", "study.observations", "study.job",
     "study.runner", "study.results", "analysis.request", "analysis.family",
     "analysis.estimator", "analysis.monthly", "analysis.source", "analysis.runner",
     "analysis.artifacts",
 ))
+REQUIRED_CORE_MODULES = (*READER_MODULES, *LEGACY_REQUIRED_CORE_MODULES[2:])
+REQUIRED_MODULES_BY_POLICY = {1: LEGACY_REQUIRED_CORE_MODULES, 2: REQUIRED_CORE_MODULES}
 CONTEXT_CORE_MODULES = ("tools.pattern_lab.study.context",)
 PRIOR_USE = (
     "Freezing is not proof of historical preregistration or unseen data.",
@@ -121,21 +124,37 @@ def _split(recipe, start, end, warmup_start):
             "end_utc": manifest.format_epoch_ms(end_ms), "warmup_start_utc": manifest.format_epoch_ms(warmup_ms)}}
 
 
-def _required_names(recipe):
-    return (*REQUIRED_CORE_MODULES, *(CONTEXT_CORE_MODULES if recipe["study_semantic"]["context"] else ()))
+def _required_names(recipe, policy=REQUIRED_CODE_POLICY_VERSION):
+    return (*REQUIRED_MODULES_BY_POLICY[policy], *(CONTEXT_CORE_MODULES if recipe["study_semantic"]["context"] else ()))
+
+
+def _generation_policy(study_hashes, analysis_hashes):
+    """Select from saved attribution only; incomplete new evidence never falls back."""
+    shared = set(READER_MODULES)
+    legacy = {"tools.pattern_lab." + name for name in ("data", "manifest", "pack_lock", "update_transaction")}
+    all_names = set(study_hashes) | set(analysis_hashes)
+    if all_names & shared:
+        if all_names & legacy or not shared <= set(study_hashes):
+            raise PatternLabDataError("candidate generation: incomplete or mixed provider attribution; produce a fresh development generation.")
+        return 2
+    if not set(LEGACY_REQUIRED_CORE_MODULES[:2]) <= set(study_hashes):
+        raise PatternLabDataError("candidate generation: historical attribution lacks legacy reader sources; produce a fresh development generation.")
+    return 1
 
 
 def _generation(source, analyzed, recipe):
     study_hashes = source.results.source["core_source"]
     analysis_hashes = analyzed.provenance["implementation"]["modules"]
-    shared = set(study_hashes) & set(analysis_hashes) & set(_required_names(recipe))
+    policy = _generation_policy(study_hashes, analysis_hashes)
+    names = _required_names(recipe, policy)
+    shared = set(study_hashes) & set(analysis_hashes) & set(names)
     if any(study_hashes[key] != analysis_hashes[key] for key in shared):
         raise PatternLabDataError("candidate generation: shared study/analysis module hashes disagree.")
     merged = {**study_hashes, **analysis_hashes}
-    missing = sorted(set(_required_names(recipe)) - set(merged))
+    missing = sorted(set(names) - set(merged))
     if missing:
         raise PatternLabDataError(f"candidate generation: historical attribution lacks {missing}; produce a fresh development generation.")
-    return {"core": {key: merged[key] for key in _required_names(recipe)},
+    return {"core": {key: merged[key] for key in names},
             "extensions": [{"module": item["module"], "files": item["files"]}
                            for item in source.results.source["extensions"]]}
 
@@ -165,8 +184,8 @@ def load_candidate(candidate: Any) -> dict[str, Any]:
     raw = manifest.read_json_file(Path(candidate)) if isinstance(candidate, (str, Path)) else candidate
     try:
         document = copy.deepcopy(dict(_object(raw, _KEYS, "candidate")))
-        for key in ("schema_version", "required_code_policy_version"):
-            if type(document[key]) is not int or document[key] != 1:
+        for key, supported in (("schema_version", (1,)), ("required_code_policy_version", (1, 2))):
+            if type(document[key]) is not int or document[key] not in supported:
                 raise PatternLabDataError(f"candidate.{key}: unsupported version.")
         recipe = _object(document["recipe"], ("study", "study_semantic", "study_family", "context_admission",
                          "analysis_request", "analysis_family"), "candidate.recipe")
@@ -221,7 +240,7 @@ def load_candidate(candidate: Any) -> dict[str, Any]:
         if split != _split(recipe, period["start_utc"], period["end_utc"], period["warmup_start_utc"]):
             raise PatternLabDataError("candidate split: inconsistent classification.")
         code = _object(document["required_code"], ("core", "extensions"), "candidate.required_code")
-        if set(code["core"]) != set(_required_names(recipe)):
+        if set(code["core"]) != set(_required_names(recipe, document["required_code_policy_version"])):
             raise PatternLabDataError("candidate required-code policy: incorrect module membership.")
         for key, value in code["core"].items():
             _digest(value, key)
@@ -285,7 +304,8 @@ def freeze_candidate(*, study_root, analysis_root, start, end, warmup_start, out
     if _resolved_analysis(recipe) != analyzed.family:
         raise PatternLabDataError("candidate analysis family differs from its complete declared recipe.")
     _refuse_sequential_recipe(recipe)
-    document = {"schema_version": 1, "required_code_policy_version": 1, "candidate_id": "",
+    policy = _generation_policy(source.results.source["core_source"], analyzed.provenance["implementation"]["modules"])
+    document = {"schema_version": 1, "required_code_policy_version": policy, "candidate_id": "",
                 "recipe": recipe, "split": _split(recipe, start, end, warmup_start),
                 "discovery": {"binding": binding, "study_completion_sha256": manifest.file_sha256(source.run_root/evidence.COMPLETION_FILE),
                     "analysis_completion_sha256": manifest.file_sha256(analyzed.analysis_root/artifacts.COMPLETION_FILE),
@@ -319,8 +339,13 @@ def validate_execution(document):
 
 def verify_current_generation(candidate, *, actual_extensions=None):
     """Required source bytes only: report/transport/provenance drift is permitted."""
+    if candidate["required_code_policy_version"] == 1:
+        raise PatternLabDataError("candidate required generation changed: policy 1 predates data_provider; use the original reviewed code for exact execution, or produce a fresh development generation.")
     for name, digest in candidate["required_code"]["core"].items():
-        module = importlib.util.find_spec(name)
+        try:
+            module = importlib.util.find_spec(name)
+        except (ImportError, ValueError, AttributeError):
+            module = None
         if module is None or not module.origin or extensions.file_digest(Path(module.origin)) != digest:
             raise PatternLabDataError(f"candidate required generation changed: {name}; produce a fresh development generation.")
     if actual_extensions is None:

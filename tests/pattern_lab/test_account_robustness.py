@@ -163,7 +163,7 @@ def test_nonvacuous_months_coverage_removal_and_attribution(multi_month):
 def test_multi_month_offline_rebuild(multi_month,tmp_path,monkeypatch):
     before={p.relative_to(multi_month.root).as_posix():file_hash(p) for p in multi_month.root.rglob('*') if p.is_file()}
     def denied(*a,**kw):raise AssertionError('offline pack access')
-    monkeypatch.setattr('tools.pattern_lab.data.read_session',denied)
+    monkeypatch.setattr('data_provider.data.read_session',denied)
     assert verify_account_study(multi_month.root)['accountsChecked']==len(multi_month.accountKeys)
     for name in ('one','two'):rebuild_account_report(multi_month.root,output_root=tmp_path/name)
     for name in ('summary.json','report.html'):

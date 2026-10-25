@@ -8,10 +8,10 @@ from tools.pattern_lab import analysis, candidate, study
 from . import _helpers as h
 
 
-def frozen_generation(root):
+def frozen_generation(root, *, module_prefix="portable"):
     sources = root / "sources"
     sources.mkdir(parents=True)
-    for module in ("portable_signal", "portable_unused"):
+    for module in (module_prefix + "_signal", module_prefix + "_unused"):
         (sources / (module + "_helper.py")).write_bytes(b"PERIOD = 3\n")
         (sources / (module + ".py")).write_bytes((
             f"from {module}_helper import PERIOD\nimport numpy as np\n"
@@ -31,10 +31,10 @@ def frozen_generation(root):
     protocol["reserved"] = {"start_utc": h.utc(end), "end_utc": h.utc(coverage)}
     request = h.study_request(protocol=protocol, start_ms=start, end_ms=discovery_end,
         warmup_ms=h.study_group_ms(0, 60), timeframes=[60],
-        hypotheses=[{"id": "portable", "hypothesis": "portable_signal", "parameters": {}, "occurrence": "every_qualifying_bar"}],
+        hypotheses=[{"id": "portable", "hypothesis": module_prefix + "_signal", "parameters": {}, "occurrence": "every_qualifying_bar"}],
         models=[h.fixed_horizon_model(60, [60, 120, 240, 480], primary=240)],
         extensions=[{"module": name, "source_root": str(sources), "helpers": [name + "_helper.py"]}
-                    for name in ("portable_signal", "portable_unused")])
+                    for name in (module_prefix + "_signal", module_prefix + "_unused")])
     request.update(schema_version=2, context={}, execution={"kind": "development"})
     study.run_study(request=request, data_root=root / "pack", output_root=root / "study")
     analysis_request = h.analysis_request_document(schema_version=2, pairwise=[])

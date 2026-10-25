@@ -116,8 +116,9 @@ def module_digests() -> dict[str, str]:
         if origin is None:
             specification = importlib.util.find_spec(name)
             origin = None if specification is None else specification.origin
-        if origin and Path(origin).is_file():
-            digests[name] = study_extensions.file_digest(Path(origin))
+        if not origin or not Path(origin).is_file():
+            raise PatternLabDataError(f"Missing required analysis implementation source: {name}.")
+        digests[name] = study_extensions.file_digest(Path(origin))
     return digests
 
 

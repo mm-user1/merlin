@@ -382,7 +382,7 @@ def publish_job(
     check_table_coverage(family["models"], tables, where=instrument_id)
     if sequential_instances:
         from . import sequential
-        from ..manifest import to_epoch_ms
+        from data_provider.manifest import to_epoch_ms
         request = read_json(run_root / REQUEST_FILE)
         admitted = read_json(admitted_path(run_root, instrument_id))
         sequential.validate({name:tables["sequential_"+name] for name in sequential.SCHEMAS},

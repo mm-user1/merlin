@@ -33,7 +33,7 @@ def build_multi_month(root):
     from copy import deepcopy
     from dataclasses import replace
     import numpy as np
-    from tools.pattern_lab.manifest import to_epoch_ms
+    from data_provider.manifest import to_epoch_ms
     from ._helpers import instrument_source, publish
     from ._bracket_helpers import rule_entry
     from ._account_study_helpers import request

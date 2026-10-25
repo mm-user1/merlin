@@ -18,15 +18,14 @@ import copy
 from datetime import datetime
 from pathlib import Path
 import re
-import sys
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from . import (
-    PatternLabDataError,
-    PatternLabError,
-    PatternLabPendingError,
+from .errors import (
+    DataError,
+    DataProviderError,
+    PendingError,
 )
 from . import data as pack_data
 from . import exchange_data
@@ -36,7 +35,6 @@ from . import update_transaction
 from .manifest import BASE_STEP_MS, format_epoch_ms, to_epoch_ms
 
 ROSTER_SCHEMA_VERSION = 1
-DEFAULT_ROSTER_PATH = Path(__file__).resolve().parent / "configs" / "universe.json"
 LATEST_CLOSED = exchange_data.LATEST_CLOSED
 
 # One hour of base bars re-fetched on both sides of existing coverage so an
@@ -57,11 +55,6 @@ _SUPPORTED_PRODUCTS = {
 }
 
 
-def stderr_progress(message: str) -> None:
-    """Default diagnostics sink: stderr, so stdout stays structured JSON."""
-    print(f"pattern-lab: {message}", file=sys.stderr, flush=True)
-
-
 def _note(progress: Callable[[str], None] | None, message: str) -> None:
     if progress is not None:
         progress(message)
@@ -78,30 +71,30 @@ def validate_roster_config(raw: Any, *, source: str) -> dict[str, Any]:
     HTTP options, and membership is never inferred from directory contents.
     """
     if not isinstance(raw, Mapping):
-        raise PatternLabDataError(
+        raise DataError(
             f"{source}: expected a roster object, got {type(raw).__name__}.",
             error_code="invalid_roster",
         )
     missing = sorted(set(ROSTER_TOP_LEVEL_KEYS) - set(raw))
     extra = sorted(set(raw) - set(ROSTER_TOP_LEVEL_KEYS))
     if missing or extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{source}: the roster document is closed; missing keys {missing}, unexpected keys {extra}.",
             error_code="invalid_roster",
         )
     version = pack_manifest.require_int(raw["schema_version"], f"{source}.schema_version")
     if version != ROSTER_SCHEMA_VERSION:
-        raise PatternLabDataError(
+        raise DataError(
             f"{source}.schema_version: unsupported roster version {version}; this build reads "
             f"{ROSTER_SCHEMA_VERSION}.",
             error_code="invalid_roster",
         )
     universe_raw = raw["universe"]
     if not isinstance(universe_raw, Mapping):
-        raise PatternLabDataError(f"{source}.universe: expected an object.", error_code="invalid_roster")
+        raise DataError(f"{source}.universe: expected an object.", error_code="invalid_roster")
     universe_extra = sorted(set(universe_raw) - set(UNIVERSE_KEYS))
     if universe_extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{source}.universe: unexpected keys {universe_extra}.", error_code="invalid_roster"
         )
     universe = pack_manifest.build_universe(
@@ -114,13 +107,13 @@ def validate_roster_config(raw: Any, *, source: str) -> dict[str, Any]:
     for entry in roster:
         pattern, description = _SUPPORTED_PRODUCTS.get(entry["venue"], (None, None))
         if pattern is None:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{source}: venue {entry['venue']!r} is not supported; v1 collects from "
                 f"{sorted(_SUPPORTED_PRODUCTS)}.",
                 error_code="unsupported_venue",
             )
         if not pattern.fullmatch(entry["contract"]) or entry["quote_currency"] != "USDT":
-            raise PatternLabDataError(
+            raise DataError(
                 f"{source}: {entry['instrument_id']} is not supported; v1 allows only {description} "
                 f"quoted in USDT.",
                 error_code="unsupported_product",
@@ -134,8 +127,10 @@ def validate_roster_config(raw: Any, *, source: str) -> dict[str, Any]:
 
 
 def load_roster(path: Path | None = None) -> dict[str, Any]:
-    """Load the tracked roster configuration, or an explicit custom one."""
-    target = Path(path) if path is not None else DEFAULT_ROSTER_PATH
+    """Load an explicitly supplied roster configuration."""
+    if path is None:
+        raise DataError("An explicit roster path or roster configuration is required.", error_code="invalid_roster")
+    target = Path(path)
     return validate_roster_config(
         pack_manifest.read_json_file(target, source=str(target)), source=str(target)
     )
@@ -163,7 +158,7 @@ def _resolve_end(
     else:
         end_ms = pack_manifest.require_aligned_utc(end, field)
         if end_ms > cutoff:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{field}: {format_epoch_ms(end_ms)} is beyond the safe closed cutoff "
                 f"{format_epoch_ms(cutoff)} derived from the venue server clocks; a requested end is "
                 "never silently shortened.",
@@ -300,7 +295,7 @@ def gap_report(stamps: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _conflict_error(instrument_id: str, merged: Mapping[str, Any]) -> PatternLabDataError:
+def _conflict_error(instrument_id: str, merged: Mapping[str, Any]) -> DataError:
     lines = [
         f"{instrument_id}: the source returned {merged['conflict_count']} historical value(s) that "
         "differ from the stored pack; no live file was changed.",
@@ -315,7 +310,7 @@ def _conflict_error(instrument_id: str, merged: Mapping[str, Any]) -> PatternLab
         "an explicitly reviewed repair operation. There is no force or overwrite-history switch: never "
         "delete the marker or change the overlap merely to conceal the conflict."
     )
-    return PatternLabDataError("\n".join(lines), error_code="historical_conflict")
+    return DataError("\n".join(lines), error_code="historical_conflict")
 
 
 # --------------------------------------------------------------------------
@@ -330,7 +325,7 @@ def _source_metadata(adapter, entry: Mapping[str, Any], *, observed_utc: str, op
         volume_unit_evidence=adapter.quote_volume_evidence,
         extra={
             "venue": adapter.venue,
-            "collector": "tools.pattern_lab.collect",
+            "collector": "data_provider.collect",
             "operation_id": operation_id,
             "observed_utc": observed_utc,
             "evidence_source": adapter.candle_reference,
@@ -464,15 +459,15 @@ def _require_no_pending(data_root: Path, action: str) -> None:
     if state is None:
         return
     if not state["valid"]:
-        raise PatternLabDataError(
+        raise DataError(
             update_transaction.pending_problem(state), error_code="invalid_journal"
         )
-    raise PatternLabPendingError(
+    raise PendingError(
         f"{action} is refused: " + update_transaction.pending_problem(state)
     )
 
 
-def _explain_pending(data_root: Path, exc: PatternLabError) -> PatternLabError:
+def _explain_pending(data_root: Path, exc: DataProviderError) -> DataProviderError:
     """Return ``exc`` extended with the recovery guidance a journalled failure needs.
 
     A failure before the journal exists leaves nothing pending and is reported
@@ -503,7 +498,7 @@ def _explain_pending(data_root: Path, exc: PatternLabError) -> PatternLabError:
 def _guard_identity(guard: pack_lock.PackGuard, journal: Mapping[str, Any]) -> None:
     """Refuse to write into a pending root that was moved away from its journal."""
     if journal["root"] != guard.identity:
-        raise PatternLabDataError(
+        raise DataError(
             f"{guard.root}: this pending operation was journalled for {journal['root']!r} but the root "
             f"now resolves to {guard.identity!r}. Restore its original location to recover, or preserve "
             "it and collect into a new root; never edit the journal's recorded path.",
@@ -524,7 +519,7 @@ def _require_supported_columns(data_root: Path, entry: Mapping[str, Any]) -> Pat
         name for name in pack_data.parquet_column_names(path) if name not in pack_data.PARQUET_COLUMNS
     ]
     if unknown:
-        raise PatternLabDataError(
+        raise DataError(
             f"{path}: the stored file carries extra columns {unknown}. The six-column writer would "
             "silently discard them, so an update of this file is refused; reading it remains supported.",
             error_code="unsupported_extra_columns",
@@ -541,7 +536,7 @@ def _verify_base_pack(data_root: Path, manifest: Mapping[str, Any]) -> None:
     """Verify every declared file's integrity before staging an update."""
     problems = pack_data.verify_instrument_files(data_root, manifest)
     if problems:
-        raise PatternLabDataError(
+        raise DataError(
             "the existing pack failed verification, so it is not a safe base for an update:\n  "
             + "\n  ".join(problems),
             error_code="base_integrity",
@@ -579,7 +574,7 @@ def _preflight(
         _note(progress, f"preflight metadata {instrument_id}")
         try:
             rules = adapter.instrument_metadata(client, entry["contract"])
-        except PatternLabDataError as exc:
+        except DataError as exc:
             failures.append(f"{instrument_id}: {exc}")
             continue
         start_ms = starts_ms[instrument_id]
@@ -613,7 +608,7 @@ def _preflight(
         _note(progress, f"preflight start probe {instrument_id}")
         try:
             available = exchange_data.probe_first_slot(adapter, client, entry["contract"], start_ms)
-        except PatternLabDataError as exc:
+        except DataError as exc:
             failures.append(f"{instrument_id}: start-boundary probe failed: {exc}")
             evidence.pop(instrument_id)
             continue
@@ -633,7 +628,7 @@ def _preflight(
             )
             evidence.pop(instrument_id)
     if failures:
-        raise PatternLabDataError(
+        raise DataError(
             "preflight rejected the request before any bulk download; no instrument may be silently "
             "omitted or substituted:\n  " + "\n  ".join(failures),
             error_code="preflight_failed",
@@ -720,7 +715,7 @@ def _collect_instrument(
     stamps, values = merged["stamps"], merged["values"]
     if stamps.size == 0 or int(stamps[0]) != effective_start_ms:
         observed = "an empty series" if stamps.size == 0 else format_epoch_ms(int(stamps[0]))
-        raise PatternLabDataError(
+        raise DataError(
             f"{instrument_id}: the requested first slot {format_epoch_ms(effective_start_ms)} is absent "
             f"after merging (the merged series starts at {observed}). The venue may have no candle for "
             "that exact slot, its retention may not reach back that far, or the contract may have been "
@@ -855,7 +850,7 @@ def _require_probed_prefix(
         if not preflight[instrument_id]["probe"]["checked"]
     )
     if unchecked:
-        raise PatternLabDataError(
+        raise DataError(
             f"the recorded preflight reports {unchecked} as already covered, but the stored pack "
             "starts after this operation's effective start, so their prefix was never probed at the "
             "source. The restored evidence is inconsistent with the base manifest; abort this "
@@ -1189,13 +1184,13 @@ def _require_collect_destination(data_root: Path) -> None:
     if not root.exists():
         return
     if not root.is_dir():
-        raise PatternLabDataError(
+        raise DataError(
             f"{root}: the destination exists and is not a directory.", error_code="destination_not_empty"
         )
     _require_no_pending(root, "collect")
     unexpected = update_transaction.unexpected_root_artifacts(root, [pack_lock.LOCK_NAME])
     if unexpected:
-        raise PatternLabDataError(
+        raise DataError(
             f"{root}: a new collect needs an absent, empty or lock-only destination, but it contains "
             f"{unexpected}. Use 'update' for an existing collector-managed pack, 'recover' for a pending "
             "operation, or choose another root.",
@@ -1233,7 +1228,7 @@ def collect_pack(
         closure = _resolve_end(client, venues, end)
         start_ms = pack_manifest.require_aligned_utc(start, "start")
         if start_ms >= closure["resolved_end_ms"]:
-            raise PatternLabDataError(
+            raise DataError(
                 f"start: requires start < end, got {format_epoch_ms(start_ms)} >= "
                 f"{format_epoch_ms(closure['resolved_end_ms'])}.",
                 error_code="invalid_interval",
@@ -1265,7 +1260,7 @@ def collect_pack(
             return _execute(
                 root, guard, journal, client=client, progress=progress, base_manifest=None
             )
-        except PatternLabError as exc:
+        except DataProviderError as exc:
             raise _explain_pending(root, exc) from exc
 
 
@@ -1289,13 +1284,13 @@ def update_pack(
         _require_no_pending(root, "update")
         manifest = pack_manifest.read_manifest(root)
         if manifest["state"] != "ready":
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root}: manifest state is {manifest['state']!r}; only a ready pack can be updated.",
                 error_code="pack_not_ready",
             )
         collector = manifest.get("collector")
         if collector is None:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root}: this pack has no collector provenance, so it is an archival pack (for example "
                 "an NPZ import) rather than a collector-managed one. It is never silently adopted as a "
                 "collector transaction; collect a separate managed root instead.",
@@ -1322,7 +1317,7 @@ def update_pack(
             else min(managed_start_ms, requested_start_ms)
         )
         if effective_start_ms >= end_ms:
-            raise PatternLabDataError(
+            raise DataError(
                 f"start: requires the effective start {format_epoch_ms(effective_start_ms)} to precede "
                 f"the requested end {format_epoch_ms(end_ms)}.",
                 error_code="invalid_interval",
@@ -1355,7 +1350,7 @@ def update_pack(
             return _execute(
                 root, guard, journal, client=client, progress=progress, base_manifest=manifest
             )
-        except PatternLabError as exc:
+        except DataProviderError as exc:
             raise _explain_pending(root, exc) from exc
 
 
@@ -1378,7 +1373,7 @@ def _promote_initial_journal(
             if (root / name).is_dir() and any((root / name).iterdir())
         ]
         if unexpected or occupied:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root}: the initial journal temporary cannot be promoted because the destination is "
                 f"not lock-only (unexpected {unexpected}, non-empty {occupied}). Inspect it manually.",
                 error_code="invalid_journal",
@@ -1407,7 +1402,7 @@ def recover_pack(
                 "pending_operation": None,
             }
         if not state["valid"]:
-            raise PatternLabDataError(
+            raise DataError(
                 update_transaction.pending_problem(state), error_code="invalid_journal"
             )
         journal = state["journal"]
@@ -1432,7 +1427,7 @@ def recover_pack(
             result = _execute(
                 root, guard, journal, client=client, progress=progress, base_manifest=base_manifest
             )
-        except PatternLabError as exc:
+        except DataProviderError as exc:
             raise _explain_pending(root, exc) from exc
         result["status"] = "recovered" if result["status"] == "completed" else result["status"]
         return result
@@ -1446,12 +1441,12 @@ def abort_update(
     with pack_lock.pack_guard(root) as guard:
         state = update_transaction.pending_state(root)
         if state is None:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root}: there is no pending operation to abort.",
                 error_code="no_pending_operation",
             )
         if not state["valid"]:
-            raise PatternLabDataError(
+            raise DataError(
                 update_transaction.pending_problem(state), error_code="invalid_journal"
             )
         journal = state["journal"]

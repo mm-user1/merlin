@@ -185,7 +185,7 @@ def score(view,p):
     source.unlink()  # task-owned module deliberately absent from offline reconstruction
     def denied(*a,**kw):raise AssertionError('offline rebuild touched parent/market/network/execution')
     for name in ('tools.pattern_lab.selection.ledger.load_account_study','tools.pattern_lab.selection.artifacts.verify_account_study',
-        'tools.pattern_lab.data.read_session','tools.pattern_lab.exchange_data.HttpClient.get_json','tools.pattern_lab.account_study.job.execute_account'):
+        'data_provider.data.read_session','data_provider.exchange_data.HttpClient.get_json','tools.pattern_lab.account_study.job.execute_account'):
         monkeypatch.setattr(name,denied)
     imported=import_selection_bundle(bundle,output_root=tmp_path/'imported')
     rebuild_selection_report(imported.root,output_root=tmp_path/'rebuilt')

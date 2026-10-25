@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .. import PatternLabDataError
-from ..manifest import format_epoch_ms, to_epoch_ms
+from data_provider.manifest import format_epoch_ms, to_epoch_ms
 from ..study import builtins as study_builtins
 from ..study import contracts, evidence
 from ..study import results as study_results

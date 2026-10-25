@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .. import PatternLabDataError
-from ..manifest import require_int, require_text
+from data_provider.manifest import require_int, require_text
 from . import contracts
 from .contracts import (
     Anchors,

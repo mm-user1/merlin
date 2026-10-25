@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Iterator
 
-from . import PatternLabBusyError, PatternLabDataError
+from .errors import BusyError, DataError
 
 LOCK_NAME = ".pack-lock"
 # Windows locks a byte range rather than the whole file: use one fixed byte at a
@@ -47,7 +47,7 @@ def resolve_root_identity(data_root: Path) -> str:
         try:
             resolved = parent.resolve(strict=True) / path.name
         except (FileNotFoundError, OSError) as exc:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{parent}: the parent directory of the data root does not exist; create it first.",
                 error_code="missing_parent_directory",
             ) from exc
@@ -56,14 +56,14 @@ def resolve_root_identity(data_root: Path) -> str:
 
 def _reject_symlink(path: Path, kind: str) -> None:
     if path.is_symlink():
-        raise PatternLabDataError(
+        raise DataError(
             f"{path}: the {kind} must not be a symlink.", error_code="unsafe_path"
         )
 
 
 def _acquire(fd: int, path: Path) -> None:
     """Take the exclusive OS guard without blocking, or report the root as busy."""
-    busy = PatternLabBusyError(
+    busy = BusyError(
         f"{path}: another process holds the Pattern Lab pack lock for this data root. "
         "Wait for that operation or read session to finish; there is no wait option and no "
         "lock stealing."
@@ -117,14 +117,14 @@ class PackGuard:
         try:
             current = os.stat(path)
         except OSError as exc:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{self.root}: the locked data root disappeared during the operation; restore it "
                 "at its original location before recovering.",
                 error_code="root_moved",
             ) from exc
         held = os.fstat(self._fd)
         if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
-            raise PatternLabDataError(
+            raise DataError(
                 f"{self.root}: the locked data root was replaced during the operation; restore the "
                 "original directory before recovering.",
                 error_code="root_moved",
@@ -146,11 +146,11 @@ def pack_guard(data_root: Path, *, create_root: bool = False) -> Iterator[PackGu
         try:
             root.mkdir(exist_ok=True)
         except OSError as exc:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{root}: cannot create the data root ({exc}).", error_code="unwritable_root"
             ) from exc
     if not root.is_dir():
-        raise PatternLabDataError(
+        raise DataError(
             f"{root}: data root is not an existing directory.", error_code="missing_data_root"
         )
 
@@ -162,7 +162,7 @@ def pack_guard(data_root: Path, *, create_root: bool = False) -> Iterator[PackGu
     try:
         fd = os.open(path, flags, 0o644)
     except OSError as exc:
-        raise PatternLabDataError(
+        raise DataError(
             f"{path}: cannot open or create the Pattern Lab pack lock ({exc}). Every pack-level "
             "operation, including a read, needs write permission inside the data root; fully "
             "read-only mounted packs are unsupported by this cooperative API.",

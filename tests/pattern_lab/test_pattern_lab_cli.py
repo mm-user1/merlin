@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -68,7 +69,7 @@ ISOLATION_CHILD = textwrap.dedent(
     from tools.pattern_lab.__main__ import build_parser
     data.require_pyarrow()
     build_parser()
-    collect.load_roster()
+    collect.load_roster(tools.pattern_lab.DEFAULT_ROSTER_PATH)
     exchange_data.adapter_for("OKX")
     exchange_data.adapter_for("BYBIT")
     data.input_fingerprint(
@@ -287,7 +288,7 @@ class TestImportIsolation:
         assert json.loads(result.stdout)["pattern_lab"] == []
 
     def test_pyarrow_is_referenced_only_by_pattern_lab_sources(self):
-        owned = (REPO_ROOT / "tools" / "pattern_lab", REPO_ROOT / "tests" / "pattern_lab")
+        owned = (REPO_ROOT / "tools" / "pattern_lab", REPO_ROOT / "tests" / "pattern_lab", REPO_ROOT / "src" / "data_provider")
         offenders = []
         for path in list((REPO_ROOT / "src").rglob("*.py")) + list((REPO_ROOT / "tools").rglob("*.py")) + list(
             (REPO_ROOT / "tests").rglob("*.py")
@@ -298,6 +299,15 @@ class TestImportIsolation:
             if "pyarrow" in text or "pattern_lab" in text:
                 offenders.append(str(path.relative_to(REPO_ROOT)))
         assert offenders == []
+        for path in (REPO_ROOT / "src" / "data_provider").rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                else:
+                    continue
+                assert not any(name.startswith(("tools.pattern_lab", "flask", "core", "strategies", "ui")) for name in names), path
 
     def test_missing_pyarrow_is_actionable_nonzero_and_installs_nothing(self, tmp_path):
         root = tmp_path / "pack"

@@ -30,15 +30,13 @@ from types import ModuleType
 from typing import Any, Sequence
 
 from .. import PatternLabDataError
+from data_provider import READER_MODULES
 
 # The core modules a study actually consumes.  This is an explicit list, not a
 # crawler over the repository or the environment.
 CORE_MODULES = (
-    "tools.pattern_lab.data",
+    *READER_MODULES,
     "tools.pattern_lab.candidate",
-    "tools.pattern_lab.manifest",
-    "tools.pattern_lab.pack_lock",
-    "tools.pattern_lab.update_transaction",
     "tools.pattern_lab.study.contracts",
     "tools.pattern_lab.study.context",
     "tools.pattern_lab.study.builtins",
@@ -527,8 +525,9 @@ def core_source_digests() -> dict[str, str]:
         if origin is None:
             specification = importlib.util.find_spec(name)
             origin = None if specification is None else specification.origin
-        if origin and Path(origin).is_file():
-            digests[name] = file_digest(Path(origin))
+        if not origin or not Path(origin).is_file():
+            raise PatternLabDataError(f"Missing required study implementation source: {name}.")
+        digests[name] = file_digest(Path(origin))
     return digests
 
 

@@ -11,7 +11,7 @@ import re
 import numpy as np
 
 from .. import PatternLabDataError
-from ..data import PreparedSeries
+from data_provider.data import PreparedSeries
 from ..study.contracts import canonical_json, semantic_digest
 
 if TYPE_CHECKING:

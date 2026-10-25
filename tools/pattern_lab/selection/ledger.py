@@ -9,7 +9,7 @@ from ..accounts.contracts import require, array
 from ..account_study import load_account_study
 from ..account_study.metrics import synchronized
 from ..account_study.common import file_hash, json_text, parse_json, closed
-from ..manifest import to_epoch_ms
+from data_provider.manifest import to_epoch_ms
 from ..study.contracts import semantic_digest
 from .request import month_bounds
 

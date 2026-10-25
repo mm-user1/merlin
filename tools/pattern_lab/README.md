@@ -4,6 +4,67 @@ Pattern Lab is local, research-only tooling for evaluating signals, entry
 filters and ticker-selection methods before developing a strategy in Merlin.
 Merlin and Strategy Lab do not import it.
 
+## Shared data provider (A1)
+
+The pack reader, manifest validation, locking, update transactions, exchange
+adapters and collector now live in `src/data_provider/`. See the
+[shared-package reference](../../src/data_provider/README.md). Merlin can consume
+this package without importing Pattern Lab. Research orchestration, NPZ import,
+auxiliary data and reports remain here. Use independently managed physical roots;
+there is no automatic copying or synchronization, and same-root exclusive locking
+is unchanged.
+
+With `src` on the Python import path, use `from data_provider import data`.
+Pattern Lab bootstraps this checkout for its CLI, examples and spawned workers;
+`from tools.pattern_lab import data` (and the other five moved module attributes)
+returns the actual canonical provider module. Direct old submodule imports such
+as `from tools.pattern_lab.data import X` are unsupported. Update active callers;
+retain the original reviewed checkout for exact historical script reproduction.
+Never mix `src.data_provider` and `data_provider` identities. A foreign provider
+already loaded in the interpreter is refused.
+
+The shared collector requires an explicit roster path or configuration. The named
+`DEFAULT_ROSTER_PATH` belongs to `tools.pattern_lab`, and CLI `collect --universe`
+remains required. CLI progress presentation belongs to `__main__`; Python callers
+supply their own callback. Existing Pattern Lab exception exports alias neutral
+provider types, retaining base catches, messages, error codes and overrides.
+Diagnostic class names in `cause.type`/`errorType` may now be `DataError`,
+`DependencyError`, `BusyError`, `PendingError` or `DataProviderError`.
+
+Pack schemas, bounded reads, gap handling, fingerprints, numerical execution and
+recovery remain unchanged. Newly acquired source metadata names
+`data_provider.collect`; historical producer metadata, persisted history kind,
+README branding and user agent remain unchanged. A no-op rewrites no bytes.
+
+New reader attribution includes exactly `data_provider`, `.errors`, `.data`,
+`.manifest`, `.pack_lock`, `.update_transaction` and `.exchange_data`; acquisition
+code is not reader execution. Required study/analysis sources must resolve.
+Account source paths resolve beneath `src/data_provider`; selection retains old
+research-relative keys and uses explicit `src/data_provider/*.py` keys for the
+shared sources. The existing carried core-attribution limit below is unchanged.
+
+Candidate schema stays 1. Required-code policy 2 replaces policy 1's legacy
+reader pair with that seven-module closure, preserving other required members and
+the context-dependent member. Loading dispatches strictly on policy 1/2.
+Freezing coherent old discovery evidence retains policy 1 and the original ID;
+policy follows complete saved source attribution, never current hashes. Mixed or
+incomplete generations fail. Old candidates and completed validation/analysis
+artifacts remain readable offline. Policy-1 execution under relocated code fails
+before publication with an actionable generation diagnostic; use the original
+reviewed source for exact execution or create a fresh discovery generation.
+Historical account validation and exact-parent fixed/carried selection replay
+remain supported; no new generation pin applies to them.
+Native-account report rebuilds retain truthful current derivation source hashes;
+these can differ from the sealed original after relocation. Economic content is
+preserved and repeated same-host rebuilds are byte-identical. Event/analysis
+reports retain their existing render-time display; event reports also show the
+current run locator. Exact HTML comparisons must control those presentation inputs.
+
+Fresh runs have new implementation identities. Data-only fingerprints and decoded
+numerical evidence remain unchanged; fresh selection specification/data identities
+also change when their parent pins change. Saved historical identities are never
+rewritten. These engineering contracts make no trading-edge claim.
+
 ## Current capabilities and acceptance
 
 The four-update cycle is complete through `5473271` (2026-10-20), including
@@ -471,7 +532,7 @@ pack_collect.collect_pack(
     data_root, start="2025-06-01T00:00:00Z", end="latest-closed",
     roster_path="tools/pattern_lab/configs/universe.json",
     options={"okx_rps": 2, "bybit_rps": 2, "timeout_seconds": 20},
-    progress=pack_collect.stderr_progress,
+    progress=print,
 )
 pack_collect.update_pack(data_root, end="2026-10-01T00:00:00Z")
 pack_collect.update_pack(data_root, end="latest-closed", start="2025-01-01T00:00:00Z")
@@ -1169,7 +1230,7 @@ python - <<'SMOKE'
 import json
 import numpy as np
 from tools.pattern_lab import exchange_data as ex
-from tools.pattern_lab.manifest import BASE_STEP_MS, format_epoch_ms
+from data_provider.manifest import BASE_STEP_MS, format_epoch_ms
 
 BARS = 1100
 
@@ -1615,7 +1676,8 @@ version; library versions are recorded separately and are not hashed there.
 Candidate required-code admission checks source bytes, not environment versions.
 
 Exact-byte integrity is unchanged. Scoped `.gitattributes` rules require LF for
-tracked Pattern Lab Python and the seven attributed V2 sources. They do not
+tracked Pattern Lab Python, shared `src/data_provider/**/*.py` (including root
+modules), and the seven attributed V2 sources. They do not
 normalize external extensions, historical snapshots or runtime hashes. LF and
 CRLF extension copies have different implementation identities and fail a frozen
 generation's byte check. Transfer main modules and every declared helper without
@@ -4105,7 +4167,7 @@ method or a claim of unseen data. No collector runs implicitly.
 | Protocol | v1, with original development/reserved/warmup dates |
 | Source binding | Schema 1 for v1 studies; schema 2 for v2 studies |
 | Analysis request/artifact | v1 bootstrap; v2 monthly jackknife, unchanged gates |
-| Candidate / required-code policy | 1 / 1 |
+| Candidate / required-code policy | schema 1; required-code policy 1 (historical) or 2 (post-A1) |
 
 The old `REQUEST_SCHEMA_VERSION` and `RUN_SCHEMA_VERSION` aliases remain 1.
 For study summaries, the historical `SUMMARY_SCHEMA_VERSION` alias remains 1
@@ -4342,7 +4404,7 @@ setting dictionaries are retained in full, even when a key resembles a label.
 The snapshot contains discovery facts, never a future validation seal or a
 validation request embedding itself. Loading rechecks shape, consistency and ID.
 
-Required-code policy 1 lists `data`, `manifest`; `study.contracts`, `builtins`,
+Historical required-code policy 1 lists `data`, `manifest`; `study.contracts`, `builtins`,
 `spec`, `validation`, `extensions`, `observations`, `job`, `runner`, `results`;
 `analysis.request`, `family`, `estimator`, `monthly`, `source`, `runner`,
 `artifacts`; `study.context` when used; declared extension modules/helpers.

@@ -21,7 +21,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
-from . import PatternLabDataError, PatternLabDependencyError, PatternLabPendingError
+from .errors import DataError, DependencyError, PendingError
 from . import manifest as pack_manifest
 from . import pack_lock
 from . import update_transaction
@@ -64,7 +64,7 @@ def require_pyarrow():
         import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover - exercised in a child process
-        raise PatternLabDependencyError(_MISSING_PYARROW) from exc
+        raise DependencyError(_MISSING_PYARROW) from exc
     return pa, pq
 
 
@@ -82,18 +82,18 @@ def canonicalize_timestamps(values: Any, field: str = "timestamps") -> np.ndarra
         values = values.to_numpy()
     array = np.asarray(values)
     if array.ndim != 1:
-        raise PatternLabDataError(f"{field}: expected a one-dimensional array, got shape {array.shape}.")
+        raise DataError(f"{field}: expected a one-dimensional array, got shape {array.shape}.")
     if array.dtype.kind == "M":
         milliseconds = array.astype("datetime64[ms]")
         if not np.array_equal(milliseconds.astype(array.dtype), array):
-            raise PatternLabDataError(f"{field}: sub-millisecond timestamps are not supported.")
+            raise DataError(f"{field}: sub-millisecond timestamps are not supported.")
         return np.ascontiguousarray(milliseconds.astype(np.int64), dtype=np.int64)
     if array.dtype.kind in "iu":
         converted = array.astype(np.int64)
         if not np.array_equal(converted, array):
-            raise PatternLabDataError(f"{field}: values do not fit in int64 epoch milliseconds.")
+            raise DataError(f"{field}: values do not fit in int64 epoch milliseconds.")
         return np.ascontiguousarray(converted, dtype=np.int64)
-    raise PatternLabDataError(
+    raise DataError(
         f"{field}: expected integer epoch milliseconds or datetime64 values, got dtype {array.dtype}."
     )
 
@@ -107,13 +107,13 @@ def canonicalize_ohlcv(values: Any, field: str = "ohlcv") -> np.ndarray:
     if isinstance(values, pd.DataFrame):
         missing = [name for name in OHLCV_COLUMNS if name not in values.columns]
         if missing:
-            raise PatternLabDataError(f"{field}: DataFrame is missing columns {missing}.")
+            raise DataError(f"{field}: DataFrame is missing columns {missing}.")
         values = values.loc[:, list(OHLCV_COLUMNS)].to_numpy()
     array = np.asarray(values)
     if array.dtype.kind not in "fiu":
-        raise PatternLabDataError(f"{field}: expected real numeric values, got dtype {array.dtype}.")
+        raise DataError(f"{field}: expected real numeric values, got dtype {array.dtype}.")
     if array.ndim != 2 or array.shape[1] != len(OHLCV_COLUMNS):
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected a (N, {len(OHLCV_COLUMNS)}) array in open/high/low/close/volume_quote order, "
             f"got shape {array.shape}."
         )
@@ -134,7 +134,7 @@ def _canonical_arrays(timestamps: Any, ohlcv: Any, where: str) -> tuple[np.ndarr
     stamps = canonicalize_timestamps(timestamps, f"{where}.timestamps")
     values = canonicalize_ohlcv(ohlcv, f"{where}.ohlcv")
     if stamps.size != values.shape[0]:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: {stamps.size} timestamps do not match {values.shape[0]} OHLCV rows."
         )
     return stamps, values
@@ -149,7 +149,7 @@ def validate_series(timestamps: Any, ohlcv: Any, *, where: str = "series") -> tu
     """
     stamps, values = _canonical_arrays(timestamps, ohlcv, where)
     if stamps.size == 0:
-        raise PatternLabDataError(f"{where}: empty instruments are rejected; coverage must be defined.")
+        raise DataError(f"{where}: empty instruments are rejected; coverage must be defined.")
     return _validate_rows(stamps, values, where)
 
 
@@ -169,34 +169,34 @@ def _validate_rows(stamps: np.ndarray, values: np.ndarray, where: str) -> tuple[
     """Enforce the 5m series contract on a nonempty canonical pair of arrays."""
     steps = np.diff(stamps)
     if steps.size and (steps == 0).any():
-        raise PatternLabDataError(f"{where}: duplicate timestamps are rejected.")
+        raise DataError(f"{where}: duplicate timestamps are rejected.")
     if steps.size and (steps < 0).any():
-        raise PatternLabDataError(f"{where}: timestamps must be strictly increasing.")
+        raise DataError(f"{where}: timestamps must be strictly increasing.")
     if (stamps % BASE_STEP_MS != 0).any():
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: every timestamp must sit on the {BASE_TIMEFRAME_MINUTES}m UTC epoch grid."
         )
     prices = values[:, :4]
     if not np.isfinite(prices).all():
-        raise PatternLabDataError(f"{where}: OHLC prices must be finite.")
+        raise DataError(f"{where}: OHLC prices must be finite.")
     if (prices <= 0.0).any():
-        raise PatternLabDataError(f"{where}: OHLC prices must be positive.")
+        raise DataError(f"{where}: OHLC prices must be positive.")
     body_low = np.minimum(values[:, 0], values[:, 3])
     body_high = np.maximum(values[:, 0], values[:, 3])
     if (values[:, 2] > body_low).any() or (body_high > values[:, 1]).any():
-        raise PatternLabDataError(f"{where}: requires low <= min(open, close) <= max(open, close) <= high.")
+        raise DataError(f"{where}: requires low <= min(open, close) <= max(open, close) <= high.")
     volume = values[:, 4]
     if not np.isfinite(volume).all():
-        raise PatternLabDataError(f"{where}: volume_quote must be finite.")
+        raise DataError(f"{where}: volume_quote must be finite.")
     if (volume < 0.0).any():
-        raise PatternLabDataError(f"{where}: volume_quote must be nonnegative.")
+        raise DataError(f"{where}: volume_quote must be nonnegative.")
     return stamps, _normalize_volume_signed_zero(values)
 
 
 def series_from_frame(frame: pd.DataFrame, *, timestamp_column: str = "timestamp", where: str = "frame"):
     """Validate a caller-created DataFrame and return canonical 5m arrays."""
     if not isinstance(frame, pd.DataFrame):
-        raise PatternLabDataError(f"{where}: expected a pandas DataFrame, got {type(frame).__name__}.")
+        raise DataError(f"{where}: expected a pandas DataFrame, got {type(frame).__name__}.")
     if timestamp_column in frame.columns:
         stamps = frame[timestamp_column]
     else:
@@ -230,14 +230,14 @@ def _validate_parquet_schema(pa, schema, path: Path) -> None:
     names = set(schema.names)
     missing = [name for name in PARQUET_COLUMNS if name not in names]
     if missing:
-        raise PatternLabDataError(f"{path}: Parquet file is missing required columns {missing}.")
+        raise DataError(f"{path}: Parquet file is missing required columns {missing}.")
     stamp = schema.field("timestamp").type
     if not pa.types.is_timestamp(stamp) or stamp.unit != "ms" or stamp.tz not in ("UTC", "+00:00"):
-        raise PatternLabDataError(f"{path}: column 'timestamp' must be timestamp[ms, UTC], got {stamp}.")
+        raise DataError(f"{path}: column 'timestamp' must be timestamp[ms, UTC], got {stamp}.")
     for name in OHLCV_COLUMNS:
         column = schema.field(name).type
         if not pa.types.is_float64(column):
-            raise PatternLabDataError(f"{path}: column {name!r} must be double, got {column}.")
+            raise DataError(f"{path}: column {name!r} must be double, got {column}.")
 
 
 @dataclass(frozen=True)
@@ -271,12 +271,12 @@ def write_ohlcv_file(
     target = Path(target)
     if target.exists() or target.is_symlink():
         if not replace_existing:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{target}: refusing to replace an existing file; pass replace_existing=True only for a "
                 "caller-owned target."
             )
     if not target.parent.is_dir():
-        raise PatternLabDataError(f"{target.parent}: destination directory does not exist.")
+        raise DataError(f"{target.parent}: destination directory does not exist.")
 
     schema = parquet_schema(pa)
     table = pa.Table.from_arrays(
@@ -297,7 +297,7 @@ def write_ohlcv_file(
         )
         read_stamps, read_values = read_ohlcv_rows(temporary)
         if not np.array_equal(read_stamps, stamps) or not np.array_equal(read_values, values):
-            raise PatternLabDataError(f"{target}: readback of the written file did not reproduce the input values.")
+            raise DataError(f"{target}: readback of the written file did not reproduce the input values.")
         digest = pack_manifest.file_sha256(temporary)
         # Flush the completed temporary before the replace; the containing
         # directory is flushed after it, so a crash leaves either the old file or
@@ -323,7 +323,7 @@ def parquet_column_names(path: Path) -> list[str]:
     pa, pq = require_pyarrow()
     path = Path(path)
     if not path.is_file():
-        raise PatternLabDataError(f"{path}: Parquet file is missing.")
+        raise DataError(f"{path}: Parquet file is missing.")
     schema = pq.read_schema(path)
     _validate_parquet_schema(pa, schema, path)
     return list(schema.names)
@@ -345,7 +345,7 @@ def read_ohlcv_rows(
     pa, pq = require_pyarrow()
     path = Path(path)
     if not path.is_file():
-        raise PatternLabDataError(f"{path}: Parquet file is missing.")
+        raise DataError(f"{path}: Parquet file is missing.")
     _validate_parquet_schema(pa, pq.read_schema(path), path)
 
     filters = []
@@ -356,7 +356,7 @@ def read_ohlcv_rows(
     table = pq.read_table(path, columns=list(PARQUET_COLUMNS), filters=filters or None)
     for name in PARQUET_COLUMNS:
         if table.column(name).null_count:
-            raise PatternLabDataError(f"{path}: column {name!r} contains null values.")
+            raise DataError(f"{path}: column {name!r} contains null values.")
 
     stamps = table.column("timestamp").cast(pa.int64()).combine_chunks().to_numpy(zero_copy_only=False)
     stamps = np.ascontiguousarray(stamps, dtype=np.int64)
@@ -381,7 +381,7 @@ def read_ohlcv_rows(
     if stamps.size == 0:
         if allow_empty:
             return stamps, values.reshape(0, len(OHLCV_COLUMNS))
-        raise PatternLabDataError(f"{path}: contains no rows.")
+        raise DataError(f"{path}: contains no rows.")
     return validate_series(stamps, values, where=str(path))
 
 
@@ -416,7 +416,7 @@ def _require_disjoint(output_root: Path, source_root: Path | None) -> None:
     destination = _resolved_target(output_root)
     origin = Path(source_root).resolve()
     if destination == origin or destination.is_relative_to(origin) or origin.is_relative_to(destination):
-        raise PatternLabDataError(
+        raise DataError(
             f"output root {destination} and source root {origin} must not overlap."
         )
 
@@ -436,14 +436,14 @@ def new_pack_guard(output_root: Path, *, source_root: Path | None = None) -> Ite
     try:
         output_root.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
-        raise PatternLabDataError(
+        raise DataError(
             f"{output_root}: destination already exists; publication requires a new directory.",
             error_code="destination_not_new",
         ) from exc
     with pack_lock.pack_guard(output_root):
         unexpected = update_transaction.unexpected_root_artifacts(output_root, [pack_lock.LOCK_NAME])
         if unexpected:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{output_root}: the destination gained {unexpected} before this publication acquired "
                 "the pack lock; another operation owns it.",
                 error_code="destination_not_new",
@@ -504,12 +504,12 @@ def _publish_pack_unlocked(
     seen: set[str] = set()
     for item in instruments:
         if not isinstance(item, InstrumentSource):
-            raise PatternLabDataError(
+            raise DataError(
                 f"instruments: expected InstrumentSource records, got {type(item).__name__}."
             )
         instrument_id = pack_manifest.build_instrument_id(item.venue, item.contract)
         if instrument_id in seen:
-            raise PatternLabDataError(f"instruments: duplicate instrument {instrument_id!r}.")
+            raise DataError(f"instruments: duplicate instrument {instrument_id!r}.")
         seen.add(instrument_id)
         # T01 publishers never emit unverified quote volume: reject before writing.
         pack_manifest.require_published_verification(item.verification, instrument_id)
@@ -538,7 +538,7 @@ def _publish_pack_unlocked(
             )
         )
     if not entries:
-        raise PatternLabDataError("instruments: at least one instrument is required to publish a pack.")
+        raise DataError("instruments: at least one instrument is required to publish a pack.")
 
     moment = generated_utc or datetime.now(timezone.utc).replace(microsecond=0)
     manifest = pack_manifest.build_manifest(
@@ -591,7 +591,7 @@ def _verify_instrument(data_root: Path, entry: Mapping[str, Any]) -> list[str]:
     instrument_id = entry["instrument_id"]
     try:
         path = pack_manifest.resolve_pack_path(data_root, entry["file"], f"{instrument_id}.file")
-    except PatternLabDataError as exc:
+    except DataError as exc:
         return [str(exc)]
     if not path.is_file():
         return [f"{instrument_id}: declared file {entry['file']} is missing."]
@@ -600,7 +600,7 @@ def _verify_instrument(data_root: Path, entry: Mapping[str, Any]) -> list[str]:
         problems.append(f"{instrument_id}: SHA-256 {digest} does not match the manifest digest {entry['sha256']}.")
     try:
         stamps, _ = read_ohlcv_rows(path)
-    except PatternLabDependencyError:
+    except DependencyError:
         raise
     except Exception as exc:  # a corrupted file raises from the Parquet reader itself
         problems.append(f"{instrument_id}: {exc}")
@@ -651,7 +651,7 @@ def _inspect_pack_unlocked(data_root: Path, *, verify: bool = False) -> dict[str
     data_root = Path(data_root)
     pending = update_transaction.pending_state(data_root)
     if pending is not None and not pending["valid"]:
-        raise PatternLabDataError(
+        raise DataError(
             update_transaction.pending_problem(pending), error_code="invalid_journal"
         )
     pending_report = None if pending is None else update_transaction.pending_summary(pending)
@@ -802,7 +802,7 @@ FINGERPRINT_HEADER_KEYS = (
 
 def _require_canonical(value: Any, normalized: str, field: str) -> str:
     if value != normalized:
-        raise PatternLabDataError(
+        raise DataError(
             f"{field}: expected the canonical value {normalized!r}, got {value!r}."
         )
     return normalized
@@ -816,23 +816,23 @@ def validate_fingerprint_header(header: Any, *, where: str = "fingerprint.header
     interval are all enforced before any bytes are hashed.
     """
     if not isinstance(header, Mapping):
-        raise PatternLabDataError(f"{where}: expected a mapping, got {type(header).__name__}.")
+        raise DataError(f"{where}: expected a mapping, got {type(header).__name__}.")
     missing = sorted(set(FINGERPRINT_HEADER_KEYS) - set(header))
     extra = sorted(set(header) - set(FINGERPRINT_HEADER_KEYS))
     if missing or extra:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: the v1 header is closed; missing keys {missing}, unexpected keys {extra}."
         )
 
     version = require_int(header["fingerprint_version"], f"{where}.fingerprint_version")
     if version != FINGERPRINT_VERSION:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.fingerprint_version: unsupported version {version}; this build writes "
             f"{FINGERPRINT_VERSION}."
         )
     base = require_int(header["base_timeframe_minutes"], f"{where}.base_timeframe_minutes")
     if base != BASE_TIMEFRAME_MINUTES:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.base_timeframe_minutes: must be {BASE_TIMEFRAME_MINUTES}, got {base}."
         )
     for field, expected in (
@@ -841,7 +841,7 @@ def validate_fingerprint_header(header: Any, *, where: str = "fingerprint.header
         ("missing_bar_policy", MISSING_BAR_POLICY),
     ):
         if header[field] != expected:
-            raise PatternLabDataError(f"{where}.{field}: must be {expected!r}, got {header[field]!r}.")
+            raise DataError(f"{where}.{field}: must be {expected!r}, got {header[field]!r}.")
 
     venue = _require_canonical(
         header["venue"], normalize_id_part(header["venue"], f"{where}.venue"), f"{where}.venue"
@@ -855,7 +855,7 @@ def validate_fingerprint_header(header: Any, *, where: str = "fingerprint.header
         f"{where}.instrument_id",
     )
     if instrument_id != f"{venue}_{contract}":
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}.instrument_id: {instrument_id!r} does not match venue/contract {venue}_{contract}."
         )
     currency = require_currency(header["quote_currency"], f"{where}.quote_currency")
@@ -872,7 +872,7 @@ def validate_fingerprint_header(header: Any, *, where: str = "fingerprint.header
         require_int(header["end_ms"], f"{where}.end_ms"), step_ms, f"{where}.end_ms"
     )
     if not warmup_ms <= start_ms < end_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{where}: requires warmup_start_ms <= start_ms < end_ms, got "
             f"{warmup_ms} / {start_ms} / {end_ms}."
         )
@@ -948,7 +948,7 @@ def input_fingerprint(
     canonical = validate_fingerprint_header(header)
     stamps, values = validate_consumed_rows(timestamps, ohlcv, where="fingerprint")
     if stamps.size and (stamps[0] < canonical["warmup_start_ms"] or stamps[-1] >= canonical["end_ms"]):
-        raise PatternLabDataError(
+        raise DataError(
             "fingerprint: consumed rows must lie in "
             f"[{format_epoch_ms(canonical['warmup_start_ms'])}, {format_epoch_ms(canonical['end_ms'])}); "
             f"got [{format_epoch_ms(int(stamps[0]))}, {format_epoch_ms(int(stamps[-1]))}]."
@@ -1031,7 +1031,7 @@ def prepare_series(
     bar_stamps, bar_values, omitted = resample_complete_groups(stamps, values, minutes)
     research = bar_stamps >= start_ms
     if not research.any():
-        raise PatternLabDataError(
+        raise DataError(
             f"{instrument_id}: no complete {minutes}m research bar remains in "
             f"[{format_epoch_ms(start_ms)}, {format_epoch_ms(end_ms)}); "
             f"{int(stamps.size)} base rows were consumed with {omitted} incomplete groups."
@@ -1101,8 +1101,8 @@ def _require_no_pending_generation(data_root: Path, *, where: str) -> None:
         return
     problem = f"{data_root}: {where} " + update_transaction.pending_problem(pending)
     if not pending["valid"]:
-        raise PatternLabDataError(problem, error_code="invalid_journal")
-    raise PatternLabPendingError(problem)
+        raise DataError(problem, error_code="invalid_journal")
+    raise PendingError(problem)
 
 
 def load_slice(
@@ -1184,7 +1184,7 @@ class _ReadSession:
 
     def _require_held(self) -> Path:
         if not self._active:
-            raise PatternLabDataError(
+            raise DataError(
                 f"{self._guard.root}: this read session ended when its context exited, so it no "
                 "longer holds the pack lock. Open a new read_session(...) for further reads instead "
                 "of reusing a released one.",
@@ -1227,13 +1227,13 @@ def _load_slice_unlocked(
     """Read a slice from a pack whose lock the caller already owns."""
     data_root = Path(data_root)
     if not data_root.is_dir():
-        raise PatternLabDataError(f"{data_root}: data root is not an existing directory.")
+        raise DataError(f"{data_root}: data root is not an existing directory.")
     _require_no_pending_generation(
         data_root, where="a pending collector operation is present, so the pack is being updated."
     )
     manifest_before = pack_manifest.read_manifest(data_root)
     if manifest_before["state"] != "ready":
-        raise PatternLabDataError(
+        raise DataError(
             f"{data_root}: manifest state is {manifest_before['state']!r}; only a ready pack can be read."
         )
     entry = pack_manifest.find_instrument(manifest_before, instrument_id)
@@ -1247,37 +1247,37 @@ def _load_slice_unlocked(
         to_epoch_ms(warmup_start, "warmup_start"), step_ms, "warmup_start"
     )
     if start_ms >= end_ms:
-        raise PatternLabDataError(f"{resolved_id}: requires start < end, got {format_epoch_ms(start_ms)} >= {format_epoch_ms(end_ms)}.")
+        raise DataError(f"{resolved_id}: requires start < end, got {format_epoch_ms(start_ms)} >= {format_epoch_ms(end_ms)}.")
     if warmup_ms > start_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: requires warmup_start <= start, got {format_epoch_ms(warmup_ms)} > {format_epoch_ms(start_ms)}."
         )
 
     first_ms = to_epoch_ms(entry["first_open_utc"], f"{resolved_id}.first_open_utc")
     coverage_end_ms = to_epoch_ms(entry["coverage_end_utc"], f"{resolved_id}.coverage_end_utc")
     if warmup_ms < first_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: coverage starts at {format_epoch_ms(first_ms)}; the requested consumed interval "
             f"starts at {format_epoch_ms(warmup_ms)}."
         )
     if end_ms > coverage_end_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: coverage ends at {format_epoch_ms(coverage_end_ms)}; the requested end is "
             f"{format_epoch_ms(end_ms)}."
         )
 
     verification = entry["verification"]
     if verification["volume_quote_verified"] is not True:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: quote-volume units are not verified; research reads of unverified rows are refused."
         )
     if verification["closed_before_utc"] is None:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: final-candle closure is unknown; the consumed interval cannot be certified."
         )
     closure_ms = to_epoch_ms(verification["closed_before_utc"], f"{resolved_id}.closed_before_utc")
     if closure_ms < end_ms:
-        raise PatternLabDataError(
+        raise DataError(
             f"{resolved_id}: closure cutoff {format_epoch_ms(closure_ms)} is earlier than the requested end "
             f"{format_epoch_ms(end_ms)}; the consumed interval is not certified closed."
         )
@@ -1292,7 +1292,7 @@ def _load_slice_unlocked(
     )
     manifest_after = pack_manifest.read_manifest(data_root)
     if (manifest_after["revision"], manifest_after["state"]) != (manifest_before["revision"], manifest_before["state"]):
-        raise PatternLabDataError(
+        raise DataError(
             f"{data_root}: the pack changed during the read "
             f"(revision {manifest_before['revision']}/{manifest_before['state']} -> "
             f"{manifest_after['revision']}/{manifest_after['state']}); no mixed result is returned."

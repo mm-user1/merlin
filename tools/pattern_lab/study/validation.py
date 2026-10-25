@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .. import PatternLabDataError
-from ..manifest import format_epoch_ms
+from data_provider.manifest import format_epoch_ms
 from . import contracts
 from . import spec as study_spec
 from .spec import StudyRequest
@@ -46,7 +46,7 @@ def validate_saved_execution(document: Mapping[str, Any], *, source="saved study
     if version == 2:
         from .context import normalize_aliases
         normalize_aliases(document.get("context"))
-    from ..manifest import to_epoch_ms
+    from data_provider.manifest import to_epoch_ms
     study = contracts.require_mapping(document.get("study"), source + ".study")
     start, end, warmup = [to_epoch_ms(study.get(key), source + ".study." + key) for key in
                          ("start_utc", "end_utc", "warmup_start_utc")]

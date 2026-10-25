@@ -28,7 +28,9 @@ def implementation(*, auxiliary=False):
     """Account-owned attribution; never changes legacy source-generation lists."""
     repo = Path(__file__).resolve().parents[3]
     from ..study.extensions import CORE_MODULES
-    names = {name.replace('.', '/')+'.py' for name in CORE_MODULES}
+    names = {('src/data_provider/__init__.py' if name == 'data_provider' else
+              ('src/' if name.startswith('data_provider.') else '') + name.replace('.', '/') + '.py')
+             for name in CORE_MODULES}
     names.update(('tools/pattern_lab/study/workers.py', 'tools/pattern_lab/study/bracket.py',
                   'tools/pattern_lab/study/bracket_rules.py', 'src/core/engine_v2/sizing.py',
                   'src/core/engine_v2/contracts.py', 'src/core/engine_v2/price_rounding.py',

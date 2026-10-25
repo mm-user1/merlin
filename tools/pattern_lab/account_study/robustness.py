@@ -9,7 +9,7 @@ import sys
 import numpy as np
 
 from ..accounts.contracts import require
-from ..manifest import to_epoch_ms
+from data_provider.manifest import to_epoch_ms
 
 
 def close(a, b):

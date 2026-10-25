@@ -5,7 +5,7 @@ from pathlib import Path
 from ..accounts import AccountFeatureRequest, HARecipe, ExecutionPolicy
 from ..accounts.contracts import require, identifier, integer, number
 from ..accounts.preparation import validate_request
-from ..manifest import normalize_timeframe_minutes, to_epoch_ms, format_epoch_ms
+from data_provider.manifest import normalize_timeframe_minutes, to_epoch_ms, format_epoch_ms
 from ..study.spec import normalize_protocol, protocol_document, validate_against_protocol
 from ..study.contracts import semantic_digest
 from .common import closed, read_json, parse_json, json_text

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .. import PatternLabDataError
-from ..manifest import format_epoch_ms, require_text, VOLUME_UNIT
+from data_provider.manifest import format_epoch_ms, require_text, VOLUME_UNIT
 from . import contracts
 from .contracts import BarSeries, FeatureValue, FeatureRequest
 
