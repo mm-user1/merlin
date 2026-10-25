@@ -30,6 +30,11 @@ For V1 Optuna and Fast Grid contracts see [V1 optimizers](OPTIMIZERS.md).
 
 ## Core ownership
 
+`data_input.py` integrates shared provider packs with Merlin: strict contiguous
+quote-volume admission, per-root local read serialization, prepared frames and
+versioned replay facts. [Parquet inputs](PARQUET_INPUTS.md) owns these application
+contracts. Shared `data_provider` pack algorithms remain independent of Merlin.
+
 `backtest_engine.py` owns V1 data preparation, trade/result structures, and
 single-strategy execution support. `optuna_engine.py` owns the legacy-supported
 V1 Optuna implementation and common optimization result/config structures.
@@ -114,6 +119,8 @@ The Flask application is split by responsibility:
 - `server_routes_data.py` owns pages, studies/tests/trades, strategies,
   Presets, databases, CSV browsing, Queue, and export-facing data routes.
 - `server_routes_analytics.py` owns Analytics summary/equity/set routes.
+- `server_data_input.py` owns Parquet source admission, pack browsing, relocation
+  and stored trial/test equity reconstruction.
 
 These modules are the exact route authority; documentation intentionally does
 not maintain a duplicate endpoint list.
@@ -137,6 +144,12 @@ blocks direct launches while the selected config is loading or invalid;
 persisted Queue execution remains independent of editable-form readiness.
 
 ## Persistence and compatibility
+
+Parquet studies add `config_json.data_input`; manual tests keep their own envelope
+in `results_json.config`. CSV path/name fields remain empty for these records.
+Strict reconstruction verifies consumed inputs; stored tables, stitched equity and
+Analytics remain available offline. No schema migration or historical-row rewrite
+is introduced. Source-aware labels include venue and timeframe.
 
 SQLite stores study metadata, optimization trials, WFA windows/module trials,
 manual/forward/OOS results, study sets, and analytics caches. Multiple database

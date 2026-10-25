@@ -264,6 +264,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const clearSelectedCsvBtnEl = document.getElementById('clearSelectedCsvBtn');
   if (clearSelectedCsvBtnEl && typeof setSelectedCsvPaths === 'function') {
     clearSelectedCsvBtnEl.addEventListener('click', () => {
+      if (window.ParquetInput?.active()) { window.ParquetInput.clear(); return; }
       setSelectedCsvPaths([]);
     });
   }

@@ -3673,3 +3673,16 @@
   color: #c62828;
   padding: 4px 0;
 }
+.parquet-grid { max-height: 48vh; overflow: auto; }
+.parquet-table { width: 100%; border-collapse: collapse; }
+.parquet-table th { position: sticky; top: 0; background: #f5f7fa; z-index: 1; }
+.parquet-table th, .parquet-table td { padding: 6px; border-bottom: 1px solid #dde2e8; }
+.parquet-table td:not(:first-child) { text-align: center; }
+.parquet-table tr[tabindex] { cursor: pointer; user-select: none; }
+.selected-files-list .parquet-source-remove { background: transparent; border: 0; color: #666; font-size: 18px; line-height: 1; padding: 0 5px; margin-left: 6px; cursor: pointer; }
+.selected-files-list .parquet-source-remove:hover { color: #c62828; }
+.parquet-table tr.selected { background: #e1edff; }
+.parquet-table tr:focus { outline: 2px solid #4476c3; outline-offset: -2px; }
+.parquet-table input.parquet-timeframe { width: 52px; margin: 0 0 0 5px; padding: 3px; display: inline-block; border: 1px solid transparent; background: transparent; }
+.parquet-timeframe:focus { border-color: #4476c3; background: white; }
+.parquet-timeframe[aria-invalid="true"] { border-color: #c13232; background: #fff1f1; }

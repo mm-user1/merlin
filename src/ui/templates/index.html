@@ -100,7 +100,10 @@
                 <div id="datasetPreview" class="dataset-preview"></div>
 
                 <div class="form-group vertical">
-                  <label for="csvDirectory">CSV data directory</label>
+                  <div style="display:flex; align-items:center; gap:16px">
+                    <label for="csvDirectory">CSV data directory</label>
+                    <label><input type="checkbox" id="useParquet" /> Use Parquet</label>
+                  </div>
                   <div class="csv-directory-row">
                     <input
                       type="text"
@@ -110,7 +113,7 @@
                     />
                     <button type="button" id="chooseCsvBtn" class="btn-secondary">Choose Files</button>
                   </div>
-                  <div class="csv-directory-note">
+                  <div class="csv-directory-note" id="dataDirectoryHelp">
                     Select files from the directory browser. Use Ctrl/Shift-click for multi-select.
                   </div>
                   <div id="selectedFilesWrapper" class="selected-files">
@@ -123,6 +126,10 @@
                     </div>
                     <ul id="selectedFilesList" class="selected-files-list"></ul>
                   </div>
+                  <details id="parquetCoverageDetails" class="csv-directory-note" hidden>
+                    <summary>Coverage and warmup (UTC)</summary>
+                    <div id="parquetSelectedCoverage" style="white-space:pre-line"></div>
+                  </details>
                 </div>
 
                 <div class="form-group">
@@ -1299,13 +1306,15 @@
             <button type="button" class="btn-secondary" id="csvBrowserOpenBtn">Open Folder</button>
             <button type="button" class="btn-secondary" id="csvBrowserRefreshBtn">Refresh</button>
           </div>
-          <div class="modal-note">
+          <div class="modal-note" id="csvBrowserHelp">
             Double-click folder to open. Select CSV files with Ctrl/Shift-click, then Add Selected.
           </div>
         </div>
 
         <div class="modal-section">
           <select id="csvBrowserList" class="csv-browser-list" multiple size="24"></select>
+          <div id="parquetGrid" class="parquet-grid" hidden></div>
+          <div id="parquetCoverage" class="modal-note" style="white-space:pre-line" hidden></div>
         </div>
         <div id="csvBrowserError" class="csv-browser-error" style="display: none;"></div>
       </div>
@@ -1321,6 +1330,7 @@
   <script src="/static/js/strategy-config.js"></script>
   <script src="/static/js/optuna-ui.js"></script>
   <script src="/static/js/ui-handlers.js"></script>
+  <script src="/static/js/parquet-input.js"></script>
   <script src="/static/js/presets.js"></script>
   <script src="/static/js/post-process-ui.js"></script>
   <script src="/static/js/oos-test-ui.js"></script>

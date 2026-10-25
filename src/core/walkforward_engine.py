@@ -531,11 +531,15 @@ class WalkForwardEngine:
         base_config_template: Dict[str, Any],
         optuna_settings: Dict[str, Any],
         csv_file_path: Optional[str] = None,
+        prepared_input=None,
     ):
         self.config = config
         self.base_config_template = deepcopy(base_config_template)
         self.optuna_settings = deepcopy(optuna_settings)
         self.csv_file_path = csv_file_path
+        self.prepared_input = prepared_input
+        if prepared_input is not None:
+            self.base_config_template["data_input"] = deepcopy(prepared_input.facts)
         self._grid_v2_plan_cache = None
 
         from strategies import get_strategy, get_strategy_config
@@ -969,7 +973,7 @@ class WalkForwardEngine:
         )
 
         study_id = None
-        if self.csv_file_path:
+        if self.csv_file_path or self.prepared_input is not None:
             study_id = save_wfa_study_to_db(
                 wf_result=wf_result,
                 config=self.base_config_template,
@@ -1085,7 +1089,7 @@ class WalkForwardEngine:
             }
             is_days = (is_end - is_start).days
             ft_days = int(ft_config.ft_period_days)
-            if ft_days > 0 and ft_days < is_days and self.csv_file_path:
+            if ft_days > 0 and ft_days < is_days and (self.csv_file_path or self.prepared_input is not None):
                 training_end = is_end - pd.Timedelta(days=ft_days)
                 if training_end > is_start:
                     optimization_end = training_end
@@ -1241,6 +1245,7 @@ class WalkForwardEngine:
                 ft_start_date=training_end.strftime("%Y-%m-%d"),
                 ft_end_date=is_end.strftime("%Y-%m-%d"),
                 n_workers=worker_count,
+                **({"prepared_frame": self.prepared_input.frame} if self.prepared_input is not None else {}),
             )
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
@@ -1308,6 +1313,7 @@ class WalkForwardEngine:
                         fixed_params=fixed_params,
                         config_json=strategy_config_json,
                         n_workers=worker_count,
+                        **({"prepared_frame": self.prepared_input.frame} if self.prepared_input is not None else {}),
                     )
                     module_status["stress_test"]["ran"] = True
                 except Exception as exc:
@@ -2611,7 +2617,7 @@ class WalkForwardEngine:
         )
 
         study_id = None
-        if self.csv_file_path:
+        if self.csv_file_path or self.prepared_input is not None:
             study_id = save_wfa_study_to_db(
                 wf_result=wf_result,
                 config=self.base_config_template,
@@ -3101,7 +3107,7 @@ class WalkForwardEngine:
         self, df: pd.DataFrame, start_time: pd.Timestamp, end_time: pd.Timestamp
     ) -> Tuple[List[Any], List[Any]]:
         """Run the configured optimizer for a single WFA window."""
-        csv_buffer = self._dataframe_to_csv_buffer(df)
+        csv_buffer = self._dataframe_to_csv_buffer(df) if self.prepared_input is None else ""
 
         fixed_params = self._window_execution_params(
             self.base_config_template.get("fixed_params", {}),
@@ -3194,6 +3200,7 @@ class WalkForwardEngine:
                 base_config,
                 save_study=False,
                 grid_v2_plan_cache=grid_v2_plan_cache,
+                **({"prepared_frame": df} if self.prepared_input is not None else {}),
             )
             all_results = list(getattr(base_config, "optuna_all_results", []))
             self._last_grid_summary = getattr(base_config, "grid_summary", None)

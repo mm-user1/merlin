@@ -252,6 +252,13 @@ def _is_absolute_filesystem_path(raw_path: Any) -> bool:
 
 
 def _normalize_queue_source(raw_source: Any) -> Optional[Dict[str, str]]:
+    if isinstance(raw_source, dict) and "type" in raw_source and raw_source["type"] != "path":
+        from core.data_input import normalize_source, DataInputError
+        try:
+            return normalize_source(raw_source)
+        except DataInputError:
+            # Unknown and malformed typed items retain their cursor position.
+            return deepcopy(raw_source)
     if isinstance(raw_source, str):
         path = raw_source
     elif isinstance(raw_source, dict):
@@ -345,6 +352,8 @@ def _normalize_queue_item(raw_item: Any, fallback_index: int) -> Optional[Dict[s
     except (TypeError, ValueError):
         failure_count = 0
     item["failureCount"] = max(0, failure_count)
+    if "lastError" in item:
+        item["lastError"] = str(item.get("lastError") or "")[:1000]
 
     label = str(item.get("label") or "").strip()
     if not label:
@@ -573,28 +582,45 @@ def _execute_backtest_request(
             pass
         opened_file = None
 
-    if not csv_path_raw:
-        return None, ("CSV path is required.", HTTPStatus.BAD_REQUEST)
+    if __package__:
+        from .server_data_input import prepare_request, replay_config
+    else:
+        from server_data_input import prepare_request, replay_config
+    prepared = None
+    try:
+        if "dataInput" in request.form:
+            if not strategy_context.is_v2:
+                raise ValueError("Parquet inputs require Backtester V2.")
+            prepared = replay_config({"data_input": json.loads(request.form["dataInput"])})
+        else:
+            prepared = prepare_request(request.form, strategy_context, payload, warmup_bars)
+        if request.path.endswith("/trades") and prepared is not None and "dataInput" not in request.form:
+            raise ValueError("Download requires the dataInput returned by the displayed backtest.")
+    except (ValueError, OSError) as exc:
+        return None, (str(exc), HTTPStatus.BAD_REQUEST)
+    if prepared is None:
+        if not csv_path_raw:
+            return None, ("CSV path is required.", HTTPStatus.BAD_REQUEST)
 
-    try:
-        resolved_path = _resolve_csv_path(csv_path_raw)
-    except FileNotFoundError:
-        return None, ("CSV file not found.", HTTPStatus.BAD_REQUEST)
-    except IsADirectoryError:
-        return None, ("CSV path must point to a file.", HTTPStatus.BAD_REQUEST)
-    except PermissionError as exc:
-        return None, (str(exc), HTTPStatus.FORBIDDEN)
-    except ValueError as exc:
-        message = str(exc).strip() or "CSV path is required."
-        return None, (message, HTTPStatus.BAD_REQUEST)
-    except OSError:
-        return None, ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
-    try:
-        opened_file = resolved_path.open("rb")
-    except OSError:
-        return None, ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
-    data_source = opened_file
-    csv_name = resolved_path.name
+        try:
+            resolved_path = _resolve_csv_path(csv_path_raw)
+        except FileNotFoundError:
+            return None, ("CSV file not found.", HTTPStatus.BAD_REQUEST)
+        except IsADirectoryError:
+            return None, ("CSV path must point to a file.", HTTPStatus.BAD_REQUEST)
+        except PermissionError as exc:
+            return None, (str(exc), HTTPStatus.FORBIDDEN)
+        except ValueError as exc:
+            message = str(exc).strip() or "CSV path is required."
+            return None, (message, HTTPStatus.BAD_REQUEST)
+        except OSError:
+            return None, ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
+        try:
+            opened_file = resolved_path.open("rb")
+        except OSError:
+            return None, ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
+        data_source = opened_file
+        csv_name = resolved_path.name
 
     from strategies import get_strategy
 
@@ -605,7 +631,7 @@ def _execute_backtest_request(
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
 
     try:
-        df = load_data(data_source)
+        df = load_data(data_source) if prepared is None else prepared.frame
     except ValueError as exc:
         _close_opened_file()
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
@@ -616,8 +642,8 @@ def _execute_backtest_request(
     finally:
         _close_opened_file()
 
-    trade_start_idx = 0
-    if use_date_filter and (start_raw is not None or end_raw is not None):
+    trade_start_idx = 0 if prepared is None else prepared.trade_start_idx
+    if prepared is None and use_date_filter and (start_raw is not None or end_raw is not None):
         start, end = align_date_bounds(df.index, start_raw, end_raw)
         if start_raw not in (None, "") and start is None:
             return None, ("Invalid start date.", HTTPStatus.BAD_REQUEST)
@@ -649,6 +675,7 @@ def _execute_backtest_request(
         "payload": payload,
         "csv_name": csv_name,
         "warmup_bars": warmup_bars,
+        "data_input": prepared.facts if prepared is not None else None,
     }, None
 
 
@@ -658,6 +685,7 @@ def _run_trade_export(
     csv_path: str,
     params: Dict[str, Any],
     warmup_bars: int,
+    prepared_frame=None,
 ) -> Tuple[Optional[List[Any]], Optional[str]]:
     from strategies import get_strategy
 
@@ -667,7 +695,7 @@ def _run_trade_export(
         return None, str(exc)
 
     try:
-        df = load_data(csv_path)
+        df = load_data(csv_path) if prepared_frame is None else prepared_frame
     except Exception as exc:
         return None, str(exc)
 
@@ -704,6 +732,7 @@ def _run_equity_export(
     csv_path: str,
     params: Dict[str, Any],
     warmup_bars: int,
+    prepared_frame=None,
 ) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
     from strategies import get_strategy
 
@@ -713,7 +742,7 @@ def _run_equity_export(
         return None, None, str(exc)
 
     try:
-        df = load_data(csv_path)
+        df = load_data(csv_path) if prepared_frame is None else prepared_frame
     except Exception as exc:
         return None, None, str(exc)
 
@@ -770,6 +799,10 @@ def _send_trades_csv(
     else:
         csv_name = study.get("csv_file_name") or ""
     symbol = _extract_symbol_from_csv_filename(csv_name)
+    config = study.get("config_json") or {}
+    if "data_input" in config:
+        from core.data_input import stored_identity
+        symbol = stored_identity(config)[0] or "UNKNOWN:UNKNOWN"
     csv_content = export_trades_csv(trades, symbol=symbol)
     buffer = io.BytesIO(csv_content.encode("utf-8"))
     buffer.seek(0)
@@ -1087,6 +1120,10 @@ def _resolve_stored_execution_context(
         )
 
     runtime_values = dict(resolution.values)
+    if "data_input" in config:
+        from core.data_input import validate_pin
+        validate_pin(config["data_input"])
+        runtime_values.update({key: base_params.get(key) for key in ("dateFilter", "start", "end")})
     if explicit_runtime is not None:
         if not isinstance(explicit_runtime, dict):
             raise _validation_error(

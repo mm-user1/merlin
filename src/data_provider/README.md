@@ -1,5 +1,11 @@
 # Shared data provider
 
+Merlin's [Parquet integration](../../docs/PARQUET_INPUTS.md) consumes this API with
+strict target continuity in `core.data_input`, explicit prepared-frame transport
+and application replay pins. That integration does not change shared reader bytes,
+pack schemas, fingerprints, collector behavior or research attribution generations.
+Keep separate physical packs for independent Merlin and Pattern Lab operation.
+
 This package owns Parquet market-data packs: validation, bounded reads,
 resampling and fingerprints (`data`, `manifest`), exclusive process locks
 (`pack_lock`), recoverable publication (`update_transaction`), public exchange

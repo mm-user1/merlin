@@ -355,6 +355,14 @@ Non-delayed stitched output is unchanged.
 
 ## Persistence and historical compatibility
 
+V2 Parquet integration uses the [application input contract](../PARQUET_INPUTS.md).
+The route prepares one coherent consumed union and passes its frame separately
+from JSON configuration through Grid, Slow, WFA and post-processing workers.
+WFA keeps its existing window preparation origins; CSV still uses its historical
+buffer round trip. Source pins are additive JSON facts, not strategy parameters or
+Grid axes. Reconstruction validates the saved interval and fingerprint before
+execution. This does not change V2 execution semantics or enable V2 DSR.
+
 New V2 Grid/WFA studies persist one request-level `config_json.v2_runtime`
 envelope with schema `v2_runtime_metadata_v1`. The envelope separately records
 contract version `v2_runtime_contract_v1` and contains the complete ordered

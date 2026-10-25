@@ -84,15 +84,22 @@ function setActiveOptimizationRunId(runId) {
 
 function buildSourceDisplayLabel(source, fallbackIndex = 0) {
   if (!source || typeof source !== 'object') return 'source_' + (fallbackIndex + 1);
+  if (source.type === 'parquet') {
+    if (window.ParquetInput?.validSource(source)) return window.ParquetInput.sourceLabel(source);
+    return `${source.instrument_id || 'Invalid instrument'}, ${source.timeframe_minutes || '?'}m`;
+  }
+  if (source.type && source.type !== 'path') return `Unsupported source: ${source.type}`;
   return getPathFileName(source.path) || String(source.path || '').trim() || ('source_' + (fallbackIndex + 1));
 }
 
 function buildSourceModeLabel(source) {
-  void source;
-  return 'PATH';
+  return source?.type === 'parquet' ? 'PARQUET' : 'PATH';
 }
 
 function normalizeQueueSource(rawSource, fallbackIndex) {
+  if (rawSource && typeof rawSource === 'object' && Object.prototype.hasOwnProperty.call(rawSource, 'type') && rawSource.type !== 'path') {
+    return JSON.parse(JSON.stringify(rawSource));
+  }
   let path = '';
   if (typeof rawSource === 'string') {
     path = rawSource;
@@ -127,12 +134,7 @@ function cloneSourcesForStorage(sources) {
   return (Array.isArray(sources) ? sources : [])
     .map((source, index) => normalizeQueueSource(source, index))
     .filter(Boolean)
-    .map((source) => {
-      return {
-        type: 'path',
-        path: source.path
-      };
-    });
+    .map(source => JSON.parse(JSON.stringify(source)));
 }
 
 function normalizeQueueFinalState(rawFinalState) {
@@ -1080,6 +1082,7 @@ function bindQueueUiEventsOnce() {
 }
 
 function collectQueueSources() {
+  if (window.ParquetInput?.active()) return window.ParquetInput.sources();
   const paths = typeof getSelectedCsvPaths === 'function'
     ? getSelectedCsvPaths()
     : (window.selectedCsvPath ? [window.selectedCsvPath] : []);
@@ -1746,6 +1749,12 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
     throw new Error('Queue item not found.');
   }
 
+  if (window.ParquetInput) {
+    const restored = getQueueSources(item);
+    if (!restored.every(s => s.type === 'path') && !restored.every(window.ParquetInput.validSource)) {
+      throw new Error('Mixed or invalid sources cannot be edited in Start. Queue source positions are preserved.');
+    }
+  }
   await ensureQueueItemStrategyLoaded(item);
   if (!isCurrentRequest()) return false;
 
@@ -1753,26 +1762,30 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
     setInputValue('warmupBars', item.warmupBars);
   }
 
-  const sourcePaths = getQueueSources(item).map((source) => String(source.path || '').trim()).filter(Boolean);
-  if (typeof setSelectedCsvPaths === 'function') {
-    setSelectedCsvPaths(sourcePaths);
-  } else {
-    window.selectedCsvPaths = sourcePaths;
-    window.selectedCsvPath = sourcePaths[0] || '';
-    renderSelectedFiles([]);
-  }
-
-  const firstSourcePath = sourcePaths[0] || '';
-  const csvDirectory = document.getElementById('csvDirectory');
-  if (csvDirectory && firstSourcePath) {
-    const parent = getPathParentDirectory(firstSourcePath);
-    if (parent) {
-      csvDirectory.value = parent;
+  if (getQueueSources(item).every(source => source.type === 'path')) {
+    const sourcePaths = getQueueSources(item).map((source) => String(source.path || '').trim()).filter(Boolean);
+    if (typeof setSelectedCsvPaths === 'function') {
+      setSelectedCsvPaths(sourcePaths);
+    } else {
+      window.selectedCsvPaths = sourcePaths;
+      window.selectedCsvPath = sourcePaths[0] || '';
+      renderSelectedFiles([]);
     }
+
+    const firstSourcePath = sourcePaths[0] || '';
+    const csvDirectory = document.getElementById('csvDirectory');
+    if (csvDirectory && firstSourcePath) {
+      const parent = getPathParentDirectory(firstSourcePath);
+      if (parent) {
+        csvDirectory.value = parent;
+      }
+    }
+
   }
 
   applyQueueConfigFallback(item);
   applyQueueUiSnapshot(item.uiSnapshot);
+  if (window.ParquetInput) window.ParquetInput.restore(getQueueSources(item));
   if (typeof applyQueueParameterTies === 'function') applyQueueParameterTies(item);
 
   await applyQueueDatabaseTarget(item.dbTarget);
@@ -2052,8 +2065,8 @@ function collectQueueItem() {
 
   if (!sources.length) {
     showQueueError(
-      'Please select at least one CSV file before adding to queue.\n\n'
-      + 'Set CSV Directory and use Choose Files to add data sources.'
+      'Please select at least one data source before adding to queue.\n\n'
+      + 'Set the data directory and use Choose Files to add sources.'
     );
     return null;
   }
@@ -2284,6 +2297,7 @@ async function clearQueue() {
 
 function buildQueueTooltip(item) {
   const lines = [];
+  if (item.lastError) lines.push('Last error: ' + item.lastError);
   const finalState = normalizeQueueFinalState(item?.finalState);
   if (finalState === 'completed') {
     lines.push('Status: Completed');
@@ -2298,7 +2312,7 @@ function buildQueueTooltip(item) {
   lines.push('Strategy: ' + strategyName + (strategyVersion ? (' v' + strategyVersion) : ''));
 
   const sources = getQueueSources(item);
-  lines.push('CSV Sources: ' + sources.length + ' path(s)');
+  lines.push('Sources: ' + sources.length);
   const maxShow = 5;
   sources.slice(0, maxShow).forEach((source, index) => {
     const fileName = buildSourceDisplayLabel(source, index);
@@ -2786,6 +2800,7 @@ async function runQueue() {
       lastStrategyId = item.strategyId || '';
       updateOptimizationState(buildStateForItem(item, 'running'));
       setQueueItemState(item.id, 'running');
+      await persistItemProgress(item.id, { lastError: '' });
 
       const sources = getQueueSources(item);
       const totalSources = sources.length;
@@ -2864,17 +2879,12 @@ async function runQueue() {
         }
 
         const csvPath = String(source.path || '').trim();
-        if (!isAbsoluteFilesystemPath(csvPath)) {
-          itemFailure += 1;
-          processedCursor = sourceIndex + 1;
-          await persistItemProgress(item.id, {
-            sourceCursor: processedCursor,
-            successCount: itemSuccess,
-            failureCount: itemFailure
-          });
-          continue;
+        if (source.type === 'path' && isAbsoluteFilesystemPath(csvPath)) {
+          formData.append('csvPath', csvPath);
+        } else {
+          // Typed failures go to the server and count at this exact cursor position.
+          formData.append('source', JSON.stringify(source));
         }
-        formData.append('csvPath', csvPath);
         inFlightRunId = generateOptimizationRunId('queue');
         formData.append('runId', inFlightRunId);
         setActiveOptimizationRunId(inFlightRunId);
@@ -2919,6 +2929,7 @@ async function runQueue() {
             break;
           }
           itemFailure += 1;
+          await persistItemProgress(item.id, { lastError: (sourceName + ': ' + error.message).slice(0, 1000) });
           console.error('Queue source failed: ' + sourceName, error);
           inFlightRunId = '';
           setActiveOptimizationRunId('');

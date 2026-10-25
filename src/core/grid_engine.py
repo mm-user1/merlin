@@ -1426,8 +1426,8 @@ def _refresh_selected_metrics(
     return refreshed
 
 
-def _prepare_grid_dataframe(config: OptimizationConfig) -> Tuple[pd.DataFrame, int, Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    df = load_data(config.csv_file)
+def _prepare_grid_dataframe(config: OptimizationConfig, prepared_frame=None) -> Tuple[pd.DataFrame, int, Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    df = load_data(config.csv_file) if prepared_frame is None else prepared_frame
     fixed = config.fixed_params or {}
     use_date_filter = bool(fixed.get("dateFilter", False))
     start_ts, end_ts = align_date_bounds(df.index, fixed.get("start"), fixed.get("end"))
@@ -1443,6 +1443,8 @@ def _prepare_grid_dataframe(config: OptimizationConfig) -> Tuple[pd.DataFrame, i
 
 
 def _resolve_csv_path_for_storage(csv_file: Any) -> str:
+    if not csv_file:
+        return ""
     if isinstance(csv_file, (str, Path)):
         try:
             return str(Path(csv_file).resolve())
@@ -1710,6 +1712,7 @@ def _run_grid_v2_optimization(
     *,
     save_study: bool,
     grid_v2_plan_cache: Any | None = None,
+    prepared_frame=None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
     if bool(getattr(config, "grid_needs_dsr", False)):
         raise ValueError("V2 Grid DSR is unavailable in Phase 2.5; disable DSR for engine='v2'.")
@@ -1794,7 +1797,7 @@ def _run_grid_v2_optimization(
     timings["candidate_generation_seconds"] = time.time() - plan_started
 
     data_started = time.time()
-    df, trade_start_idx, start_ts, end_ts = _prepare_grid_dataframe(config)
+    df, trade_start_idx, start_ts, end_ts = _prepare_grid_dataframe(config, prepared_frame)
     timings["data_prepare_seconds"] = time.time() - data_started
 
     eval_started = time.time()
@@ -2141,6 +2144,7 @@ def run_grid_optimization(
     *,
     save_study: bool = True,
     grid_v2_plan_cache: Any | None = None,
+    prepared_frame=None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
     if supports_grid_v2(config.strategy_id):
         selection = resolve_grid_selection_config(config)
@@ -2149,7 +2153,11 @@ def run_grid_optimization(
             config,
             save_study=save_study,
             grid_v2_plan_cache=grid_v2_plan_cache,
+            **({"prepared_frame": prepared_frame} if prepared_frame is not None else {}),
         )
+
+    if prepared_frame is not None:
+        raise ValueError("Prepared Parquet inputs require Backtester V2.")
 
     validate_grid_config(config)
     backend = _load_backend(config.strategy_id)

@@ -26,6 +26,19 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+For Merlin Parquet input changes, add `tests/test_data_input.py`,
+`tests/test_data_input_workers.py`, `tests/server/test_data_input_routes.py`,
+`tests/server/test_data_input_timings.py` and `tests/test_js_parquet_input.py` to
+the applicable server/Grid/WFA/storage/export and shared provider slice/lock gates.
+Fixtures use public provider APIs and external task-owned storage. Exact CSV/Parquet
+frame parity precedes adapter trade/metric comparisons. Worker checks use actual
+spawn processes while a separate process holds the pack lock. Diagnostic Grid/WFA
+timings have no speed threshold; CSV parsing/window buffers remain unchanged.
+Node harnesses require an actual Node pass; a missing executable is a pending gate.
+Owner browser layout/focus/selection checks remain separate from JS model tests.
+Shared-reader preservation guidance below still applies; application integration
+alone does not authorize regenerating historical research artifacts.
+
 A1 shared-provider changes use `tests/pattern_lab/test_data_provider.py` for
 standalone imports, canonical module/error identity, foreign-provider refusal,
 explicit roster admission, exact attribution and candidate policy 2. Existing

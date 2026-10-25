@@ -2170,11 +2170,16 @@ def generate_study_name(
     start_date,
     end_date,
     mode: str,
+    data_input=None,
 ) -> str:
     match = re.match(r"s(\d+)_", strategy_id)
     prefix = f"S{match.group(1).zfill(2)}" if match else strategy_id.upper()[:3]
 
-    ticker_tf = _extract_file_prefix(csv_filename or "")
+    if data_input is not None:
+        from .data_input import source_label
+        ticker_tf = source_label(data_input["source"])
+    else:
+        ticker_tf = _extract_file_prefix(csv_filename or "")
 
     if hasattr(start_date, "strftime"):
         start_str = start_date.strftime("%Y.%m.%d")
@@ -2222,6 +2227,9 @@ def _extract_file_prefix(csv_filename: str) -> str:
 
 
 def _get_csv_display_name(config: Any, csv_file_path: str) -> str:
+    pin = config.get("data_input") if isinstance(config, dict) else getattr(config, "data_input", None)
+    if pin is not None:
+        return ""
     if isinstance(config, dict):
         return (csv_basename(config.get("csv_original_name"))
                 or csv_basename(config.get("csv_file_name"))
@@ -2617,6 +2625,7 @@ def save_grid_study_to_db(
         start_date=start_date,
         end_date=end_date,
         mode="grid",
+        data_input=config_payload.get("data_input"),
     )
 
     strategy_version = None
@@ -2861,6 +2870,7 @@ def save_wfa_study_to_db(
         start_date=wf_result.trading_start_date,
         end_date=wf_result.trading_end_date,
         mode="wfa",
+        data_input=config_payload.get("data_input"),
     )
 
     strategy_version = None
@@ -3915,6 +3925,9 @@ def get_study_trial(study_id: str, trial_number: int) -> Optional[Dict]:
 
 def update_csv_path(study_id: str, new_path: str) -> bool:
     with get_db_connection() as conn:
+        row = conn.execute("SELECT config_json FROM studies WHERE study_id = ?", (study_id,)).fetchone()
+        if row and "data_input" in json.loads(row[0] or "{}"):
+            raise ValueError("Parquet studies require verified pack relocation.")
         cursor = conn.execute(
             """
             UPDATE studies
@@ -4552,6 +4565,13 @@ def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
     """Serialize and validate optional V2 runtime metadata before DB work."""
 
     payload = _safe_dict(config)
+    # Optional dataclass default is absent for CSV; persisted key presence is
+    # authoritative and must never be erased from a supplied saved mapping.
+    if not isinstance(config, dict) and payload.get("data_input") is None:
+        payload.pop("data_input", None)
+    if "data_input" in payload:
+        from .data_input import validate_pin
+        validate_pin(payload["data_input"])
     if "v2_runtime" not in payload:
         return payload
     raw_metadata = payload.get("v2_runtime")

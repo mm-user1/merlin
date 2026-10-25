@@ -64,6 +64,10 @@ resolve from `src/`; for an actual run, pass an explicit path such as
 
 ## UI workflow
 
+V2 can use **Use Parquet** to select prepared packs, instruments and editable
+timeframes. See [Parquet inputs](docs/PARQUET_INPUTS.md) for coverage, warmup,
+Queue, pinned replay, relocation and explicit collection. CSV remains supported.
+
 - **Start** — select market data and a strategy, configure parameters,
   preview/run optimization or WFA, and manage queued runs. V1 exposes
   Optuna/Grid; V2 is Grid-only.

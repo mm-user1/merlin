@@ -785,6 +785,9 @@ def register_routes(app):
             strategy_values.add(strategy_label)
 
             symbol, tf = _parse_csv_filename(row_dict.get("csv_file_name"))
+            if "data_input" in config_payload:
+                from core.data_input import stored_identity
+                symbol, tf = stored_identity(config_payload)
             if symbol:
                 symbol_values.add(symbol)
             if tf:

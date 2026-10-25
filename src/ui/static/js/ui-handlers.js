@@ -212,6 +212,17 @@ function getSelectedCsvPaths() {
   return fallback ? [fallback] : [];
 }
 
+function getSelectedDataSources() {
+  if (window.ParquetInput?.active()) return window.ParquetInput.sources();
+  return getSelectedCsvPaths().map(path => ({ type: 'path', path }));
+}
+
+function appendDataSource(formData, source) {
+  if (source.type === 'parquet') formData.append('source', JSON.stringify(source));
+  else if (!source.type || source.type === 'path') formData.append('csvPath', source.path);
+  else throw new Error('Unsupported source type.');
+}
+
 function setSelectedCsvPaths(paths) {
   const normalized = normalizeSelectedCsvPaths(paths);
   window.selectedCsvPaths = normalized;
@@ -277,11 +288,14 @@ function renderCsvBrowserEntries(entries) {
 }
 
 async function loadCsvBrowserDirectory(path) {
+  if (window.ParquetInput?.active()) return window.ParquetInput.load(path);
+  const sequence = window.ParquetInput ? ++window.ParquetInput.state.sequence : null;
   const { pathInput } = csvBrowserElements();
   const targetPath = String(path || '').trim();
   showCsvBrowserError('');
   try {
     const payload = await browseCsvDirectoryRequest(targetPath);
+    if (window.ParquetInput && (sequence !== window.ParquetInput.state.sequence || window.ParquetInput.active())) return;
     csvBrowserState.currentPath = payload.current_path || '';
     csvBrowserState.entries = Array.isArray(payload.entries) ? payload.entries : [];
     if (pathInput) {
@@ -289,11 +303,13 @@ async function loadCsvBrowserDirectory(path) {
     }
     renderCsvBrowserEntries(csvBrowserState.entries);
   } catch (error) {
+    if (window.ParquetInput && sequence !== window.ParquetInput.state.sequence) return;
     showCsvBrowserError(error.message || 'Failed to load directory.');
   }
 }
 
 function closeCsvBrowserModal() {
+  window.ParquetInput?.close();
   const { modal } = csvBrowserElements();
   if (!modal) return;
   modal.classList.remove('show');
@@ -303,6 +319,16 @@ function closeCsvBrowserModal() {
 async function openCsvBrowserModal() {
   const { modal, rootInput } = csvBrowserElements();
   if (!modal) return;
+  const parquet = Boolean(window.ParquetInput?.active());
+  modal.querySelector('h3').textContent = parquet ? 'Select Parquet Instruments' : 'Select CSV Files';
+  document.getElementById('csvBrowserList').hidden = false;
+  document.getElementById('csvBrowserOpenBtn').disabled = false;
+  document.getElementById('csvBrowserAddBtn').disabled = false;
+  document.getElementById('csvBrowserHelp').textContent = parquet
+    ? 'Open a pack directory containing manifest.json. Instruments appear when the pack is opened.'
+    : 'Double-click folder to open. Select CSV files with Ctrl/Shift-click, then Add Selected.';
+  document.getElementById('parquetGrid').hidden = true;
+  document.getElementById('parquetCoverage').hidden = !parquet;
   const rootPath = String(rootInput?.value || '').trim();
   await loadCsvBrowserDirectory(rootPath);
   modal.classList.add('show');
@@ -338,6 +364,7 @@ async function moveCsvBrowserUp() {
 }
 
 function addSelectedCsvFilesFromBrowser() {
+  if (window.ParquetInput?.active()) return window.ParquetInput.add();
   const { list, rootInput } = csvBrowserElements();
   if (!list) return;
   const selected = Array.from(list.selectedOptions || []);
@@ -1924,13 +1951,13 @@ async function runWalkForward({ sources, state }) {
   for (let index = 0; index < totalSources; index += 1) {
     const source = sources[index];
     const sourcePath = String(source?.path || '').trim();
-    const sourceName = sourcePath || ('source_' + (index + 1));
+    const sourceName = source.type === 'parquet' ? window.ParquetInput.sourceLabel(source) : sourcePath || ('source_' + (index + 1));
     const sourceNumber = index + 1;
     const fileLabel = `Processing source ${sourceNumber} of ${totalSources}: ${sourceName}`;
 
     updateStatus(index, `${fileLabel} - running Walk-Forward...`);
 
-    if (!isAbsoluteFilesystemPath(sourcePath)) {
+    if (source.type !== 'parquet' && !isAbsoluteFilesystemPath(sourcePath)) {
       const message = 'CSV path must be absolute.';
       errors.push({ file: sourceName, message });
       updateStatus(index, `Error: Source ${sourceNumber} of ${totalSources} (${sourceName}) failed: ${message}`);
@@ -1940,7 +1967,7 @@ async function runWalkForward({ sources, state }) {
     const formData = new FormData();
     formData.append('strategy', window.currentStrategyId);
     formData.append('warmupBars', warmupValue);
-    formData.append('csvPath', sourcePath);
+    appendDataSource(formData, source);
 
     formData.append('config', JSON.stringify(config));
     appendWfaPeriodFields(formData, wfPeriodUnit, wfIsPeriodDays, wfOosPeriodDays);
@@ -2087,8 +2114,8 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
   errorEl.style.display = 'none';
   resultsEl.classList.remove('ready');
 
-  const selectedPaths = getSelectedCsvPaths();
-  const primaryPath = selectedPaths.length ? selectedPaths[0] : '';
+  const primarySource = getSelectedDataSources()[0];
+  const primaryPath = primarySource?.path || primarySource?.pack_root || '';
 
   if (!primaryPath) {
     errorEl.textContent = 'Please select a CSV file before running.';
@@ -2103,7 +2130,7 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
   }
 
   const state = gatherFormState();
-  if (!state.start || !state.end) {
+  if (primarySource.type !== 'parquet' && (!state.start || !state.end)) {
     errorEl.textContent = 'Please fill in start and end dates.';
     errorEl.style.display = 'block';
     return;
@@ -2138,12 +2165,15 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
     const combo = combinations[index];
     const payload = { ...state.payload, ...combo };
 
-    const formData = buildBacktestRequestFormData(primaryPath, payload);
+    const formData = buildBacktestRequestFormData(primarySource.type === 'parquet' ? '' : primaryPath, payload);
+    if (primarySource.type === 'parquet') appendDataSource(formData, primarySource);
+    let displayedInput = null;
 
     resultsEl.textContent = `Running calculation... (${index + 1}/${combinations.length})`;
 
     try {
       const data = await runBacktestRequest(formData);
+      displayedInput = data.data_input;
       aggregatedResults.push(formatResultBlock(index + 1, combinations.length, payload, data));
     } catch (err) {
       resultsEl.textContent = 'An error occurred.';
@@ -2155,9 +2185,9 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
 
     if (downloadTrades) {
       try {
-        const tradesResponse = await downloadBacktestTradesRequest(
-          buildBacktestRequestFormData(primaryPath, payload)
-        );
+        const downloadForm = buildBacktestRequestFormData(primaryPath, payload);
+        if (displayedInput) downloadForm.append('dataInput', JSON.stringify(displayedInput));
+        const tradesResponse = await downloadBacktestTradesRequest(downloadForm);
         await triggerDownloadFromResponse(
           tradesResponse,
           `backtest_trades_${Date.now()}.csv`
@@ -2558,14 +2588,14 @@ async function submitOptimization(event) {
   const optunaEta = document.getElementById('optunaEta');
 
   const selectedPaths = getSelectedCsvPaths();
-  const invalidPath = selectedPaths.find((path) => !isAbsoluteFilesystemPath(path));
+  const invalidPath = window.ParquetInput?.active() ? null : selectedPaths.find((path) => !isAbsoluteFilesystemPath(path));
   if (invalidPath) {
     optimizerResultsEl.textContent = `CSV path must be absolute: ${invalidPath}`;
     optimizerResultsEl.classList.remove('ready');
     optimizerResultsEl.style.display = 'block';
     return;
   }
-  const sources = selectedPaths.map((path) => ({ path }));
+  const sources = getSelectedDataSources();
   if (!sources.length) {
     optimizerResultsEl.textContent = 'Please select at least one CSV file before running optimization.';
     optimizerResultsEl.classList.remove('ready');
@@ -2731,7 +2761,7 @@ async function submitOptimization(event) {
   for (let index = 0; index < totalSources; index += 1) {
     const source = sources[index];
     const sourcePath = String(source?.path || '').trim();
-    const sourceName = sourcePath || ('source_' + (index + 1));
+    const sourceName = source.type === 'parquet' ? window.ParquetInput.sourceLabel(source) : sourcePath || ('source_' + (index + 1));
     const sourceNumber = index + 1;
     const fileLabel = `Processing source ${sourceNumber} of ${totalSources}: ${sourceName}`;
 
@@ -2755,13 +2785,13 @@ async function submitOptimization(event) {
     const formData = new FormData();
     formData.append('strategy', window.currentStrategyId);
     formData.append('warmupBars', warmupValue);
-    if (!isAbsoluteFilesystemPath(sourcePath)) {
+    if (source.type !== 'parquet' && !isAbsoluteFilesystemPath(sourcePath)) {
       const message = 'CSV path must be absolute.';
       errors.push({ file: sourceName, message });
       updateStatus(index, `Error: Source ${sourceNumber} of ${totalSources} (${sourceName}) failed: ${message}`);
       continue;
     }
-    formData.append('csvPath', sourcePath);
+    appendDataSource(formData, source);
     formData.append('config', JSON.stringify(config));
     inFlightRunId = generateOptimizationRunId('opt');
     formData.append('runId', inFlightRunId);

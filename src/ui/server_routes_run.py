@@ -70,6 +70,7 @@ from core.storage import (
 )
 
 try:
+    from .server_data_input import prepare_request, effective_params
     from .server_services import (
         DEFAULT_PRESET_NAME,
         _build_optimization_config,
@@ -108,6 +109,7 @@ try:
         validate_sampler_config,
     )
 except ImportError:
+    from server_data_input import prepare_request, effective_params
     from server_services import (
         DEFAULT_PRESET_NAME,
         _build_optimization_config,
@@ -454,10 +456,11 @@ def register_routes(app):
                 adaptive_mode=adaptive_mode,
             )
             if period_unit == "months":
-                resolve_calendar_wfa_anchor(
-                    config_payload.get("fixed_params"),
-                    strategy_id=strategy_id,
-                )
+                if "source" not in data:
+                    resolve_calendar_wfa_anchor(
+                        config_payload.get("fixed_params"),
+                        strategy_id=strategy_id,
+                    )
                 is_period_days = None
                 oos_period_days = None
             else:
@@ -502,25 +505,39 @@ def register_routes(app):
         data_path = ""
         original_csv_name = ""
 
-        if not csv_path_raw:
-            return jsonify({"error": "CSV path is required."}), HTTPStatus.BAD_REQUEST
-
+        prepared = None
         try:
-            resolved_path = _resolve_csv_path(csv_path_raw)
-            data_source = str(resolved_path)
-            data_path = str(resolved_path)
-            original_csv_name = Path(resolved_path).name
-        except FileNotFoundError:
-            return jsonify({"error": "CSV file not found."}), HTTPStatus.BAD_REQUEST
-        except IsADirectoryError:
-            return jsonify({"error": "CSV path must point to a file."}), HTTPStatus.BAD_REQUEST
-        except PermissionError as exc:
-            return jsonify({"error": str(exc)}), HTTPStatus.FORBIDDEN
-        except ValueError as exc:
-            message = str(exc).strip() or "CSV path is required."
-            return jsonify({"error": message}), HTTPStatus.BAD_REQUEST
-        except OSError:
-            return jsonify({"error": "Failed to access CSV file."}), HTTPStatus.BAD_REQUEST
+            if "source" in data:
+                prepared = prepare_request(data, strategy_context, config_payload.get("fixed_params") or {},
+                                           warmup_bars if strategy_context.is_v2 else 1000,
+                                           cancelled=lambda: _is_run_cancelled(run_id))
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        if prepared is not None:
+            data_source = ""
+            from core.data_input import source_label
+            original_csv_name = source_label(prepared.facts["source"])
+            config_payload["fixed_params"] = effective_params(config_payload.get("fixed_params") or {}, prepared)
+        else:
+            if not csv_path_raw:
+                return jsonify({"error": "CSV path is required."}), HTTPStatus.BAD_REQUEST
+
+            try:
+                resolved_path = _resolve_csv_path(csv_path_raw)
+                data_source = str(resolved_path)
+                data_path = str(resolved_path)
+                original_csv_name = Path(resolved_path).name
+            except FileNotFoundError:
+                return jsonify({"error": "CSV file not found."}), HTTPStatus.BAD_REQUEST
+            except IsADirectoryError:
+                return jsonify({"error": "CSV path must point to a file."}), HTTPStatus.BAD_REQUEST
+            except PermissionError as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.FORBIDDEN
+            except ValueError as exc:
+                message = str(exc).strip() or "CSV path is required."
+                return jsonify({"error": message}), HTTPStatus.BAD_REQUEST
+            except OSError:
+                return jsonify({"error": "Failed to access CSV file."}), HTTPStatus.BAD_REQUEST
 
         post_process_payload = config_payload.get("postProcess")
         if not isinstance(post_process_payload, dict):
@@ -587,7 +604,7 @@ def register_routes(app):
                 pass
 
         try:
-            df = load_data(data_source)
+            df = load_data(data_source) if prepared is None else prepared.frame
         except ValueError as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         except Exception:  # pragma: no cover - defensive
@@ -926,6 +943,7 @@ def register_routes(app):
                 base_template,
                 optuna_settings,
                 csv_file_path=data_path,
+                **({"prepared_input": prepared} if prepared is not None else {}),
             )
         except V2ValidationError as exc:
             return _validation_error_response(exc)
@@ -1099,6 +1117,7 @@ def register_routes(app):
         return jsonify({
             "metrics": result.to_dict(),
             "parameters": payload,
+            "data_input": execution.get("data_input"),
         })
 
 
@@ -1126,7 +1145,7 @@ def register_routes(app):
         return _send_trades_csv(
             trades=result.trades or [],
             csv_path=csv_name,
-            study={},
+            study={"config_json": {"data_input": execution["data_input"]}} if execution.get("data_input") else {},
             filename=filename,
         )
 
@@ -1175,25 +1194,37 @@ def register_routes(app):
         data_path = ""
         source_name = ""
 
-        if not csv_path_raw:
-            return ("CSV path is required.", HTTPStatus.BAD_REQUEST)
-
+        prepared = None
         try:
-            resolved_path = _resolve_csv_path(csv_path_raw)
-        except FileNotFoundError:
-            return ("CSV file not found.", HTTPStatus.BAD_REQUEST)
-        except IsADirectoryError:
-            return ("CSV path must point to a file.", HTTPStatus.BAD_REQUEST)
-        except PermissionError as exc:
-            return (str(exc), HTTPStatus.FORBIDDEN)
-        except ValueError as exc:
-            message = str(exc).strip() or "CSV path is required."
-            return (message, HTTPStatus.BAD_REQUEST)
-        except OSError:
-            return ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
-        data_source = str(resolved_path)
-        data_path = str(resolved_path)
-        source_name = Path(resolved_path).name
+            prepared = prepare_request(request.form, strategy_context, config_payload.get("fixed_params") or {},
+                                       warmup_bars)
+        except (ValueError, OSError) as exc:
+            return (str(exc), HTTPStatus.BAD_REQUEST)
+        if prepared is not None:
+            data_source = ""
+            from core.data_input import source_label
+            source_name = source_label(prepared.facts["source"])
+            config_payload["fixed_params"] = effective_params(config_payload.get("fixed_params") or {}, prepared)
+        else:
+            if not csv_path_raw:
+                return ("CSV path is required.", HTTPStatus.BAD_REQUEST)
+
+            try:
+                resolved_path = _resolve_csv_path(csv_path_raw)
+            except FileNotFoundError:
+                return ("CSV file not found.", HTTPStatus.BAD_REQUEST)
+            except IsADirectoryError:
+                return ("CSV path must point to a file.", HTTPStatus.BAD_REQUEST)
+            except PermissionError as exc:
+                return (str(exc), HTTPStatus.FORBIDDEN)
+            except ValueError as exc:
+                message = str(exc).strip() or "CSV path is required."
+                return (message, HTTPStatus.BAD_REQUEST)
+            except OSError:
+                return ("Failed to access CSV file.", HTTPStatus.BAD_REQUEST)
+            data_source = str(resolved_path)
+            data_path = str(resolved_path)
+            source_name = Path(resolved_path).name
 
         post_process_payload = config_payload.get("postProcess")
         if not isinstance(post_process_payload, dict):
@@ -1396,6 +1427,8 @@ def register_routes(app):
             return ("Failed to prepare optimization config.", HTTPStatus.INTERNAL_SERVER_ERROR)
 
         optimization_config.csv_original_name = source_name
+        if prepared is not None:
+            optimization_config.data_input = prepared.facts
         if v2_runtime_metadata is not None:
             optimization_config.v2_runtime = v2_runtime_metadata
         optimizer_mode = str(getattr(optimization_config, "optimization_mode", "optuna") or "optuna").lower()
@@ -1465,7 +1498,7 @@ def register_routes(app):
 
         try:
             start_time = time.time()
-            results, study_id = run_optimization(optimization_config)
+            results, study_id = run_optimization(optimization_config, **({"prepared_frame": prepared.frame} if prepared is not None else {}))
             if _is_run_cancelled(run_id):
                 return _finalize_cancelled_optuna_run(study_id)
             all_results = list(getattr(optimization_config, "optuna_all_results", []))
@@ -1646,6 +1679,7 @@ def register_routes(app):
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
+                **({"prepared_frame": prepared.frame} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 optuna_results=ft_candidates,
@@ -1714,6 +1748,7 @@ def register_routes(app):
                 st_source = "dsr"
 
             st_results, st_summary = run_stress_test(
+                **({"prepared_frame": prepared.frame} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 source_results=st_candidates,
@@ -1785,7 +1820,7 @@ def register_routes(app):
                 raise ValueError("No matching trials found for OOS Test candidates.")
 
             try:
-                df_oos = load_data(data_path)
+                df_oos = load_data(data_path) if prepared is None else prepared.frame
             except Exception as exc:
                 raise ValueError(f"Failed to load CSV for OOS Test: {exc}") from exc
 

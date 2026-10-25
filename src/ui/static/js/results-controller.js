@@ -764,11 +764,17 @@ async function applyStudyPayload(data) {
   ResultsState.mode = study.optimization_mode || ResultsState.mode;
   ResultsState.status = study.status || (study.completed_at ? 'completed' : ResultsState.status);
   ResultsState.strategyId = study.strategy_id || ResultsState.strategyId;
-  ResultsState.dataset = { label: study.csv_file_name || '' };
+  ResultsState.dataset = { label: study.data_source_label || study.csv_file_name || '' };
   ResultsState.dataPath = study.csv_file_path || ResultsState.dataPath;
   ResultsState.gridSettings = study.grid_settings || null;
 
   const config = study.config_json || {};
+  ResultsState.hasDataInput = Object.prototype.hasOwnProperty.call(config, 'data_input');
+  ResultsState.dataInput = config.data_input;
+  const locatePack = document.getElementById('locateParquetBtn');
+  if (locatePack) locatePack.hidden = !ResultsState.hasDataInput;
+  const originalSource = document.getElementById('manualDataOriginal');
+  if (originalSource) originalSource.parentElement.lastChild.textContent = ResultsState.hasDataInput ? 'Original Parquet source' : 'Original CSV';
   const postProcessConfig = config.postProcess && typeof config.postProcess === 'object'
     ? config.postProcess
     : {};
@@ -1048,7 +1054,7 @@ async function openStudy(studyId) {
     ResultsState.studyId = studyId;
     ResultsState.studyName = data.study?.study_name || ResultsState.studyName;
 
-    if (!data.csv_exists) {
+    if (!Object.prototype.hasOwnProperty.call(data.study?.config_json || {}, 'data_input') && !data.csv_exists) {
       showMissingCsvDialog(studyId, data.study?.csv_file_path || '', data.study?.csv_file_name || '');
       return;
     }
@@ -1206,6 +1212,15 @@ function bindTabs() {
 }
 
 async function fetchEquityCurve(result, options = null) {
+  if (ResultsState.studyId && ResultsState.hasDataInput) {
+    const response = await fetch(`/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${result.trial_number}/equity`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ module: ResultsState.activeTab, testId: ResultsState.activeManualTest?.id })
+    });
+    const data = await response.json();
+    if (!response.ok) { setComparisonLine(data.error || 'Pinned replay failed.'); return null; }
+    return data;
+  }
   if (!ResultsState.dataPath) {
     return null;
   }
@@ -1477,7 +1492,7 @@ async function runManualTestFromModal() {
   const startInput = document.getElementById('manualStartDate');
   const endInput = document.getElementById('manualEndDate');
 
-  const dataSource = dataOriginal && dataOriginal.checked ? 'original_csv' : 'new_csv';
+  const dataSource = dataOriginal && dataOriginal.checked ? (ResultsState.hasDataInput ? 'original_parquet' : 'original_csv') : 'new_csv';
   const startDate = startInput ? startInput.value.trim() : '';
   const endDate = endInput ? endInput.value.trim() : '';
 
@@ -1833,6 +1848,13 @@ async function hydrateFromServer() {
 }
 
 function initResultsPage() {
+  document.getElementById('locateParquetBtn')?.addEventListener('click', () => {
+    const manual = ResultsState.activeTab === 'manual_tests' ? ResultsState.activeManualTest : null;
+    const pin = manual?.config?.data_input || ResultsState.dataInput;
+    const query = new URLSearchParams({ locatePack: ResultsState.studyId, packRoot: pin?.source?.pack_root || '' });
+    if (manual) query.set('testId', manual.id);
+    window.location.href = '/?' + query.toString();
+  });
   bindCollapsibles();
   bindStudiesManager();
   bindEventHandlers();

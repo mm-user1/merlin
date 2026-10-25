@@ -80,6 +80,7 @@ class OptimizationConfig:
     warmup_bars: int = 1000
     csv_original_name: Optional[str] = None
     v2_runtime: Optional[Dict[str, Any]] = None
+    data_input: Optional[Dict[str, Any]] = None
 
     # Strategy-specific execution defaults
     contract_size: float = 1.0
@@ -3420,7 +3421,7 @@ def run_optuna_optimization(
     return results, study_id
 
 
-def run_optimization(config: OptimizationConfig) -> Tuple[List[OptimizationResult], Optional[str]]:
+def run_optimization(config: OptimizationConfig, *, prepared_frame=None) -> Tuple[List[OptimizationResult], Optional[str]]:
     """Compat wrapper that dispatches the requested optimizer mode."""
 
     if not getattr(config, "strategy_id", ""):
@@ -3430,7 +3431,9 @@ def run_optimization(config: OptimizationConfig) -> Tuple[List[OptimizationResul
     if optimizer_mode == "grid":
         from .grid_engine import run_grid_optimization
 
-        return run_grid_optimization(config)
+        return run_grid_optimization(config, **({"prepared_frame": prepared_frame} if prepared_frame is not None else {}))
+    if prepared_frame is not None:
+        raise ValueError("Prepared Parquet optimization requires Grid.")
     if optimizer_mode != "optuna":
         raise ValueError(f"Unsupported optimization mode: {optimizer_mode}")
 

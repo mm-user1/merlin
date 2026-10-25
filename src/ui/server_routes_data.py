@@ -84,6 +84,7 @@ def _unsupported_lancelot_strategy_error(strategy_id: str) -> V2ValidationError:
     )
 
 try:
+    from .server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input
     from .server_services import (
         DEFAULT_PRESET_NAME,
         DEFAULT_CSV_ROOT,
@@ -124,6 +125,7 @@ try:
         validate_sampler_config,
     )
 except ImportError:
+    from server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input
     from server_services import (
         DEFAULT_PRESET_NAME,
         DEFAULT_CSV_ROOT,
@@ -166,11 +168,14 @@ except ImportError:
 
 
 def register_routes(app):
+    register_input_routes(app)
     def _stored_execution_or_response(study: Dict[str, Any]):
         try:
             return _resolve_stored_execution_context(study), None
         except V2ValidationError as exc:
             return None, _validation_error_response(exc)
+        except ValueError as exc:
+            return None, (jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST)
 
     def _trade_time_ns(value: Any) -> int:
         if value is None:
@@ -308,6 +313,15 @@ def register_routes(app):
             return jsonify({"error": "Failed to access CSV directory."}), HTTPStatus.BAD_REQUEST
         return jsonify(payload)
 
+    @app.get("/api/parquet/browse")
+    def browse_parquet_directory() -> object:
+        try:
+            return jsonify(browse(request.args.get("path")))
+        except PermissionError as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.FORBIDDEN
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+
 
     @app.get("/api/databases")
     def list_databases() -> object:
@@ -407,6 +421,13 @@ def register_routes(app):
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
         study = study_data.get("study") or {}
+        config = study.get("config_json") or {}
+        if "data_input" in config:
+            from core.data_input import source_label
+            try:
+                study["data_source_label"] = source_label(config["data_input"]["source"])
+            except (KeyError, TypeError, ValueError):
+                study["data_source_label"] = "Unavailable Parquet input"
         try:
             grid_settings = build_grid_settings_view(study)
         except Exception:  # noqa: BLE001 - isolate optional historical enrichment
@@ -436,6 +457,9 @@ def register_routes(app):
         study_data = load_study_from_db(study_id)
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
+
+        if "data_input" in (study_data["study"].get("config_json") or {}):
+            return jsonify({"error": "Use Locate Parquet Pack for a Parquet study."}), HTTPStatus.BAD_REQUEST
 
         csv_path_raw = None
         if request.is_json:
@@ -478,7 +502,7 @@ def register_routes(app):
         source_tab = payload.get("sourceTab")
         test_name = payload.get("testName")
 
-        if data_source not in {"original_csv", "new_csv"}:
+        if data_source not in {"original_csv", "original_parquet", "new_csv"}:
             return jsonify({"error": "dataSource must be 'original_csv' or 'new_csv'."}), HTTPStatus.BAD_REQUEST
         if source_tab not in {"optuna", "forward_test", "dsr", "stress_test"}:
             return (
@@ -500,20 +524,37 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        if data_source == "original_csv":
-            csv_path = study.get("csv_file_path")
-            if not csv_path:
-                return jsonify({"error": "Original CSV path is missing."}), HTTPStatus.BAD_REQUEST
-        elif not csv_path:
-            return jsonify({"error": "csvPath is required when dataSource is 'new_csv'."}), HTTPStatus.BAD_REQUEST
+        prepared = None
+        config = study.get("config_json") or {}
+        if data_source in {"original_csv", "original_parquet"} and "data_input" in config:
+            from core.data_input import prepare_manual_input, validate_pin
+            try:
+                source = validate_pin(config["data_input"])
+                root = resolve_root(config.get("data_input_root_override", source["pack_root"]))
+                prepared = prepare_manual_input(config["data_input"], root_override=str(root),
+                    date_filter=True, start=start_date, end=end_date,
+                    warmup_bars=execution_context.warmup_bars)
+            except (ValueError, OSError) as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+            data_source = "original_parquet"
+            csv_path = ""
+        elif data_source == "original_parquet":
+            return jsonify({"error": "Original Parquet input pin is missing."}), HTTPStatus.BAD_REQUEST
+        else:
+            if data_source == "original_csv":
+                csv_path = study.get("csv_file_path")
+                if not csv_path:
+                    return jsonify({"error": "Original CSV path is missing."}), HTTPStatus.BAD_REQUEST
+            elif not csv_path:
+                return jsonify({"error": "csvPath is required when dataSource is 'new_csv'."}), HTTPStatus.BAD_REQUEST
 
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file not found.",
-            not_found_error="CSV file not found.",
-        )
-        if error_response:
-            return error_response
+            csv_path, error_response = _resolve_csv_path_for_response(
+                csv_path,
+                missing_error="CSV file not found.",
+                not_found_error="CSV file not found.",
+            )
+            if error_response:
+                return error_response
 
         start_ts = parse_timestamp_utc(start_date)
         end_ts = parse_timestamp_utc(end_date)
@@ -566,7 +607,7 @@ def register_routes(app):
                     baseline_rank_map[number] = idx
 
         try:
-            df = load_data(csv_path)
+            df = load_data(csv_path) if prepared is None else prepared.frame
         except Exception as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
@@ -640,6 +681,9 @@ def register_routes(app):
             "results": results_payload,
         }
 
+        if prepared is not None:
+            results_json["config"]["data_input"] = prepared.facts
+
         trials_tested_csv = ",".join(str(int(n)) for n in trial_numbers)
         test_id = save_manual_test_to_db(
             study_id=study_id,
@@ -709,14 +753,10 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
@@ -726,6 +766,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -759,14 +800,10 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
@@ -785,6 +822,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -818,14 +856,10 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
@@ -844,6 +878,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -879,16 +914,10 @@ def register_routes(app):
         if not test:
             return jsonify({"error": "Manual test not found."}), HTTPStatus.NOT_FOUND
 
-        csv_path = test.get("csv_path")
-        if not csv_path and test.get("data_source") == "original_csv":
-            csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this manual test.",
-            not_found_error="CSV file is missing for this manual test.",
-        )
-        if error_response:
-            return error_response
+        try:
+            csv_path, prepared = execution_input(study, test)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
@@ -915,6 +944,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -1136,6 +1166,11 @@ def register_routes(app):
         if error_response:
             return error_response
 
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+
         window = _find_wfa_window(study_data, window_number)
         if not window:
             return jsonify({"error": "WFA window not found."}), HTTPStatus.NOT_FOUND
@@ -1189,14 +1224,6 @@ def register_routes(app):
                     equity_curve.append(100.0)
                 return jsonify({"equity_curve": equity_curve, "timestamps": timestamps})
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
 
         warmup_bars = execution_context.warmup_bars
         merged_params = execution_context.params_for(
@@ -1206,6 +1233,7 @@ def register_routes(app):
         )
 
         equity_curve, timestamps, error = _run_equity_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1246,6 +1274,11 @@ def register_routes(app):
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
             return error_response
+
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         window = _find_wfa_window(study_data, window_number)
         if not window:
@@ -1292,14 +1325,6 @@ def register_routes(app):
             actual_start = window.get("trade_start_ts") or window.get("trade_start_date") or start
             actual_end = window.get("trade_end_ts") or window.get("trade_end_date") or end
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
 
         warmup_bars = execution_context.warmup_bars
         merged_params = execution_context.params_for(
@@ -1309,6 +1334,7 @@ def register_routes(app):
         )
 
         trades, error = _run_trade_export(
+            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1356,14 +1382,10 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        csv_path = study.get("csv_file_path")
-        csv_path, error_response = _resolve_csv_path_for_response(
-            csv_path,
-            missing_error="CSV file is missing for this study.",
-            not_found_error="CSV file is missing for this study.",
-        )
-        if error_response:
-            return error_response
+        try:
+            csv_path, prepared = execution_input(study)
+        except (ValueError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         windows = study_data.get("windows") or []
         if not windows:
@@ -1379,7 +1401,7 @@ def register_routes(app):
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         try:
-            df = load_data(csv_path)
+            df = load_data(csv_path) if prepared is None else prepared.frame
         except Exception as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 

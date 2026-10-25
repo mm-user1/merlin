@@ -47,6 +47,9 @@ tracked repository.
 
 ## Tools and verification
 
+- [Parquet inputs in Merlin](PARQUET_INPUTS.md) owns application selection,
+  strict preparation, persisted pins, relocation and operational collection guidance.
+
 | Document | Authority |
 | --- | --- |
 | [Shared data provider](../src/data_provider/README.md) | Shared pack/collector ownership, imports, explicit roots/rosters, errors and unchanged storage/locking |

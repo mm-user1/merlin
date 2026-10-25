@@ -120,6 +120,9 @@ vm.runInContext(
     getQueueWfaPeriodFacts,
     ensureQueueStateLoaded,
     loadQueue,
+    normalizeQueueItem,
+    normalizeQueueSource,
+    buildSourceDisplayLabel,
     reset() {
       queueState = {items: [], nextIndex: 1, runtime: {active: false, updatedAt: 0}};
       queueStateLoaded = false;
@@ -156,6 +159,18 @@ function captureFormData() {
 }
 
 async function main() {
+  const parquet = {type: 'parquet', version: 1, pack_root: '/pack', instrument_id: 'OKX_BTC-USDT-SWAP', timeframe_minutes: 4320};
+  const invalid = {type: 'parquet', version: 99, path: '/misleading.csv'};
+  const unknown = {type: 'future', path: '/other.csv'};
+  const typedItem = context.__queueTest.normalizeQueueItem({...sourceItem(),
+    sources: [parquet, invalid, unknown], sourceCursor: 1, lastError: 'Pinned source changed'}, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(typedItem.sources)), [parquet, invalid, unknown]);
+  assert.equal(typedItem.sourceCursor, 1);
+  assert.equal(typedItem.lastError, 'Pinned source changed');
+  context.window.ParquetInput = require('../../src/ui/static/js/parquet-input.js');
+  assert.equal(context.__queueTest.buildSourceDisplayLabel(parquet), 'OKX_BTC-USDT-SWAP, 3D');
+  assert.match(context.__queueTest.buildQueueTooltip(typedItem), /Pinned source changed/);
+  delete context.window.ParquetInput;
   assert.equal(typeof context.fetchQueueStateRequest, 'function');
   assert.equal(typeof context.saveQueueStateRequest, 'function');
   assert.equal(typeof context.clearQueueStateRequest, 'function');
