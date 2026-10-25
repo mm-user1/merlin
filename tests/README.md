@@ -42,6 +42,12 @@ change repository/global Git configuration. Guards patch canonical `data_provide
 modules; supported Pattern Lab attributes are those same objects. Old direct
 `tools.pattern_lab.data` submodule imports are no longer supported.
 
+The provider ownership check in `test_pattern_lab_cli.py` uses the same AST
+predicate for actual files and positive/negative fixtures. It covers direct and
+nested imports, `from tools import pattern_lab`, and literal `import_module`
+targets with ordinary importlib aliases. Documentation strings remain allowed;
+the predicate is not a general analyzer for computed dynamic imports.
+
 T05 `test_account_containers.py` covers direct streamed STORED/ZIP64 records,
 physical versus logical admission, local headers/CRC/extents, immutable metadata
 reuse across interleaved tickers, failed publication and handle release, transport

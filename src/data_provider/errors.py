@@ -1,7 +1,7 @@
 """Shared pack failures with stable historical machine error codes."""
 
 class DataProviderError(Exception):
-    """Base class for every Pattern Lab failure reported to a caller.
+    """Base class for shared data-provider failures reported to a caller.
 
     ``error_code`` is a stable machine-readable label carried into the JSON that
     the collector commands print for a failed operation.  Subclasses declare a
@@ -38,5 +38,3 @@ class PendingError(DataProviderError):
     """A valid pending operation must be recovered or aborted first."""
 
     error_code = "pending_operation"
-
-

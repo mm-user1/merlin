@@ -23,6 +23,11 @@ retain the original reviewed checkout for exact historical script reproduction.
 Never mix `src.data_provider` and `data_provider` identities. A foreign provider
 already loaded in the interpreter is refused.
 
+The bootstrap keeps this checkout's `src` on `sys.path`, including in spawned
+workers. Extension authors should account for the resulting top-level application
+module names when choosing their own module names; no application module is
+imported merely by adding that path.
+
 The shared collector requires an explicit roster path or configuration. The named
 `DEFAULT_ROSTER_PATH` belongs to `tools.pattern_lab`, and CLI `collect --universe`
 remains required. CLI progress presentation belongs to `__main__`; Python callers
@@ -2822,6 +2827,13 @@ controls keep their keys. Node state tests do not claim browser/focus coverage;
 appearance remains owner review. Same-host rebuilds are deterministic for
 `derived/summary.json` and `derived/report.html`; cross-host exactness must be
 checked on the specific fixture, not assumed.
+
+Native-account summaries use Python's floating-point `sum()` for some aggregates.
+Different Python versions can therefore rebuild slightly different `fees` or
+`grossPnl` values from identical saved evidence. For a code-preservation check,
+compare baseline and current code exactly on the same interpreter/libraries and
+record cross-host differences separately. This does not relax saved identities,
+source attribution or repeated same-host report equality.
 
 ### Descriptive account robustness (T02)
 

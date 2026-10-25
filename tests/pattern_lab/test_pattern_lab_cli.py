@@ -264,6 +264,71 @@ class TestCommandLine:
         ) == 2
 
 
+def forbidden_provider_imports(source):
+    """Find owned absolute imports and literal importlib targets, including nested code."""
+    tree = ast.parse(source)
+    prohibited = ("tools.pattern_lab", "flask", "core", "strategies", "ui")
+    functions, modules = {"import_module"}, {"importlib"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "importlib":
+            functions.update(alias.asname or alias.name for alias in node.names if alias.name == "import_module")
+        elif isinstance(node, ast.Import):
+            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "importlib")
+    offenders = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            names = [node.module or ""]
+            if node.module == "tools":
+                names += ["tools." + alias.name for alias in node.names]
+        elif isinstance(node, ast.Call):
+            function = node.func
+            direct = isinstance(function, ast.Name) and function.id in functions
+            qualified = (isinstance(function, ast.Attribute) and function.attr == "import_module"
+                         and isinstance(function.value, ast.Name) and function.value.id in modules)
+            if direct or qualified:
+                target = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "name"), None)
+                if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                    names = [target.value]
+        offenders.extend(name for name in names if name.startswith(prohibited))
+    return offenders
+
+
+@pytest.mark.parametrize("source", [
+    "import tools.pattern_lab",
+    "import tools.pattern_lab.data as data",
+    "from tools.pattern_lab.data import load_slice",
+    "from tools import pattern_lab",
+    "from tools import pattern_lab as lab",
+    "def read():\n    from tools import pattern_lab",
+    "import_module('tools.pattern_lab')",
+    "importlib.import_module('tools.pattern_lab.data')",
+    "from importlib import import_module as load\nload('tools.pattern_lab.data')",
+    "def read():\n    from importlib import import_module as load\n    return load('tools.pattern_lab')",
+    "import importlib as imports\nimports.import_module(name='tools.pattern_lab')",
+    "import flask",
+    "from core import engine_v2",
+    "import strategies.example",
+    "from ui import app",
+])
+def test_provider_boundary_rejects_owned_imports(source):
+    assert forbidden_provider_imports(source)
+
+
+@pytest.mark.parametrize("source", [
+    "from data_provider import data",
+    "from . import manifest",
+    "from .errors import DataError",
+    "import importlib\nimportlib.import_module('.manifest', 'data_provider')",
+    "from importlib import import_module\nimport_module('data_provider.data')",
+    "message = 'See tools/pattern_lab/README.md'",
+])
+def test_provider_boundary_allows_provider_imports_and_documentation(source):
+    assert forbidden_provider_imports(source) == []
+
+
 class TestImportIsolation:
     def test_clean_import_has_no_application_network_or_write_side_effects(self, tmp_path):
         result = run_child(ISOLATION_CHILD)
@@ -300,14 +365,7 @@ class TestImportIsolation:
                 offenders.append(str(path.relative_to(REPO_ROOT)))
         assert offenders == []
         for path in (REPO_ROOT / "src" / "data_provider").rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom):
-                    names = [node.module or ""]
-                else:
-                    continue
-                assert not any(name.startswith(("tools.pattern_lab", "flask", "core", "strategies", "ui")) for name in names), path
+            assert forbidden_provider_imports(path.read_text(encoding="utf-8")) == [], path
 
     def test_missing_pyarrow_is_actionable_nonzero_and_installs_nothing(self, tmp_path):
         root = tmp_path / "pack"
