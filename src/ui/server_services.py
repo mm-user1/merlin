@@ -686,6 +686,7 @@ def _run_trade_export(
     params: Dict[str, Any],
     warmup_bars: int,
     prepared_frame=None,
+    prepared_trade_start_idx=None,
 ) -> Tuple[Optional[List[Any]], Optional[str]]:
     from strategies import get_strategy
 
@@ -699,9 +700,9 @@ def _run_trade_export(
     except Exception as exc:
         return None, str(exc)
 
-    trade_start_idx = 0
+    trade_start_idx = prepared_trade_start_idx if prepared_trade_start_idx is not None else 0
     payload = dict(params or {})
-    if payload.get("dateFilter"):
+    if prepared_trade_start_idx is None and payload.get("dateFilter"):
         start_raw = payload.get("start")
         end_raw = payload.get("end")
         start, end = align_date_bounds(df.index, start_raw, end_raw)
@@ -733,6 +734,7 @@ def _run_equity_export(
     params: Dict[str, Any],
     warmup_bars: int,
     prepared_frame=None,
+    prepared_trade_start_idx=None,
 ) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
     from strategies import get_strategy
 
@@ -746,9 +748,9 @@ def _run_equity_export(
     except Exception as exc:
         return None, None, str(exc)
 
-    trade_start_idx = 0
+    trade_start_idx = prepared_trade_start_idx if prepared_trade_start_idx is not None else 0
     payload = dict(params or {})
-    if payload.get("dateFilter"):
+    if prepared_trade_start_idx is None and payload.get("dateFilter"):
         start_raw = payload.get("start")
         end_raw = payload.get("end")
         start, end = align_date_bounds(df.index, start_raw, end_raw)
@@ -3411,6 +3413,3 @@ def _build_optimization_config(
             setattr(config, key, value)
 
     return config
-
-
-

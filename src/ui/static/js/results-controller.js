@@ -1218,7 +1218,11 @@ async function fetchEquityCurve(result, options = null) {
       body: JSON.stringify({ module: ResultsState.activeTab, testId: ResultsState.activeManualTest?.id })
     });
     const data = await response.json();
-    if (!response.ok) { setComparisonLine(data.error || 'Pinned replay failed.'); return null; }
+    if (!response.ok) {
+      renderEquityChart([]);
+      setComparisonLine(data.error || 'Pinned replay failed.');
+      return null;
+    }
     return data;
   }
   if (!ResultsState.dataPath) {

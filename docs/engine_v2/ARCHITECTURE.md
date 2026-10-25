@@ -362,6 +362,13 @@ WFA keeps its existing window preparation origins; CSV still uses its historical
 buffer round trip. Source pins are additive JSON facts, not strategy parameters or
 Grid axes. Reconstruction validates the saved interval and fingerprint before
 execution. This does not change V2 execution semantics or enable V2 DSR.
+Successful Parquet Optimize OOS stages additionally persist exact timestamps,
+prepared bar bounds, trading index and warmup count in the versioned
+`config_json.parquet_oos_replay` record, atomically with OOS trial results.
+OOS reconstruction verifies those facts against the parent pin and reproduces
+the original preparation, without expanding date-only display labels. Older
+Parquet records without this metadata require a new study for OOS reconstruction;
+stored metrics and other supported views remain available. CSV replay is unchanged.
 
 New V2 Grid/WFA studies persist one request-level `config_json.v2_runtime`
 envelope with schema `v2_runtime_metadata_v1`. The envelope separately records

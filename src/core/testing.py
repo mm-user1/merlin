@@ -120,6 +120,7 @@ def run_period_test_for_trials(
     execution_params_resolver: Optional[
         Callable[[Dict[str, Any], pd.Timestamp, pd.Timestamp], Dict[str, Any]]
     ] = None,
+    preparation_facts: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         raise ValueError("Dataset is empty for period test.")
@@ -170,4 +171,14 @@ def run_period_test_for_trials(
             }
         )
 
+    if preparation_facts is not None and results_payload:
+        preparation_facts.update(
+            version=1,
+            start=start_ts.isoformat(),
+            end=end_ts.isoformat(),
+            preparation_start=df_prepared.index[0].isoformat(),
+            preparation_end=df_prepared.index[-1].isoformat(),
+            trade_start_idx=int(trade_start_idx),
+            warmup_bars=int(warmup_bars),
+        )
     return results_payload

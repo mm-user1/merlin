@@ -35,6 +35,16 @@ frame parity precedes adapter trade/metric comparisons. Worker checks use actual
 spawn processes while a separate process holds the pack lock. Diagnostic Grid/WFA
 timings have no speed threshold; CSV parsing/window buffers remain unchanged.
 Node harnesses require an actual Node pass; a missing executable is a pending gate.
+`tests/server/test_data_input_followup.py` compares exact Parquet OOS replay with
+captured original strategy executions (5m/15m, midnight/intraday/subsecond and
+metadata-origin cases), validates atomic metadata persistence and old-record
+refusal, and preserves CSV error/no-trade and WFA symbol contracts. Its Queue
+regression runs the real restore entrypoint with the Parquet controller in
+`tests/js/parquet_input.test.cjs`, including contradictory generic snapshots.
+That harness also checks that a pinned replay refusal clears the previous chart
+and date labels while retaining its error, and that a valid chart can render again.
+Existing CSV OOS-chart and IS-export period inconsistencies are separate legacy
+defects; blanket CSV/Parquet export equality is not their acceptance oracle.
 Owner browser layout/focus/selection checks remain separate from JS model tests.
 Shared-reader preservation guidance below still applies; application integration
 alone does not authorize regenerating historical research artifacts.

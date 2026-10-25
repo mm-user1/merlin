@@ -1847,6 +1847,7 @@ def register_routes(app):
                     return _build_trial_metrics(trial, prefix="ft_")
                 return _build_trial_metrics(trial)
 
+            oos_preparation = {} if prepared is not None else None
             oos_results_payload = run_period_test_for_trials(
                 df=df_oos,
                 strategy_id=strategy_id,
@@ -1858,6 +1859,7 @@ def register_routes(app):
                 baseline_period_days=int(baseline_period_days),
                 test_period_days=int(test_period_days),
                 original_metrics_resolver=resolve_original_metrics,
+                **({"preparation_facts": oos_preparation} if prepared is not None else {}),
             )
 
             for idx, item in enumerate(oos_results_payload, 1):
@@ -1874,6 +1876,7 @@ def register_routes(app):
                 oos_start_date=oos_start_ts.strftime("%Y-%m-%d"),
                 oos_end_date=oos_end_ts.strftime("%Y-%m-%d"),
                 oos_source_module=source_module,
+                **({"parquet_oos_replay": oos_preparation} if prepared is not None else {}),
             )
 
         if _is_run_cancelled(run_id):
@@ -1912,5 +1915,3 @@ def register_routes(app):
     # ============================================
     # STRATEGY MANAGEMENT ENDPOINTS
     # ============================================
-
-

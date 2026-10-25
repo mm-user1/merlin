@@ -1147,6 +1147,7 @@ function applyQueueUiSnapshot(snapshot) {
   let appliedAny = false;
   Object.entries(controls).forEach(([controlId, state]) => {
     if (!state || typeof state !== 'object') return;
+    if (controlId === 'csvDirectory' || controlId === 'useParquet') return;
     const control = document.getElementById(controlId);
     if (!control) return;
 
@@ -1762,7 +1763,9 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
     setInputValue('warmupBars', item.warmupBars);
   }
 
-  if (getQueueSources(item).every(source => source.type === 'path')) {
+  if (window.ParquetInput) {
+    window.ParquetInput.restore(getQueueSources(item));
+  } else if (getQueueSources(item).every(source => source.type === 'path')) {
     const sourcePaths = getQueueSources(item).map((source) => String(source.path || '').trim()).filter(Boolean);
     if (typeof setSelectedCsvPaths === 'function') {
       setSelectedCsvPaths(sourcePaths);
@@ -1785,7 +1788,6 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
 
   applyQueueConfigFallback(item);
   applyQueueUiSnapshot(item.uiSnapshot);
-  if (window.ParquetInput) window.ParquetInput.restore(getQueueSources(item));
   if (typeof applyQueueParameterTies === 'function') applyQueueParameterTies(item);
 
   await applyQueueDatabaseTarget(item.dbTarget);
@@ -3141,5 +3143,3 @@ async function initQueue() {
   renderQueue();
   updateRunButtonState();
 }
-
-

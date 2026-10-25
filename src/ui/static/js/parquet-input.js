@@ -261,7 +261,13 @@
     } catch (error) { showCsvBrowserError(error.message); }
   }
   function restore(sources) {
-    if (sources.every(s => s.type === 'path')) { setMode(false); setSelectedCsvPaths(sources.map(s => s.path)); return; }
+    if (sources.every(s => s.type === 'path')) {
+      setMode(false);
+      const paths = sources.map(s => s.path);
+      const parent = getPathParentDirectory(paths[0]);
+      if (parent) { state.paths.csv = parent; el('csvDirectory').value = parent; }
+      setSelectedCsvPaths(paths); persist(); return;
+    }
     if (!sources.every(validSource)) throw new Error('Mixed or invalid source selections cannot be edited in Start. Queue sources were preserved.');
     state.sources = sources.map(s => ({ ...s })); state.paths.parquet = sources[0]?.pack_root || '';
     setMode(true); el('csvDirectory').value = state.paths.parquet; persist(); renderSelected();

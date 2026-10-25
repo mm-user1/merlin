@@ -877,7 +877,10 @@ function highlightParamItem(item) {
 function renderEquityChart(equityData, windowBoundaries = null, timestamps = null, options = null) {
   const svg = document.querySelector('.chart-svg');
   const axis = document.getElementById('equityAxis');
-  if (!svg || !equityData || equityData.length === 0) return;
+  if (!svg) return;
+  svg.innerHTML = '';
+  if (axis) axis.innerHTML = '';
+  if (!equityData || equityData.length === 0) return;
 
   const width = 800;
   const height = 260;
@@ -939,11 +942,6 @@ function renderEquityChart(equityData, windowBoundaries = null, timestamps = nul
   const minValue = Math.min(...equityData, baseValue);
   const maxValue = Math.max(...equityData, baseValue);
   const valueRange = maxValue - minValue || 1;
-
-  svg.innerHTML = '';
-  if (axis) {
-    axis.innerHTML = '';
-  }
 
   const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   bg.setAttribute('width', '100%');

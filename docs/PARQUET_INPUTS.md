@@ -35,6 +35,9 @@ bars; a metadata-derived Start has zero outer warmup. Nothing silently shortens
 a requested prefix. At 1D, 1000 warmup bars require roughly 2.7 preceding years.
 Period splitting uses the resolved outer range, including enabled FT/OOS. Internal
 stages and WFA windows use their established available-prefix rules.
+Calendar-month WFA with Date Filter off anchors Start at the first complete
+certified bar from metadata. Existing engine calendar-anchor constraints still
+apply; turning the filter off does not change month scheduling.
 
 Every required 5m row and target group, including warmup, must be valid, closed
 and continuous. Required gaps, duplicates, off-grid rows, incomplete groups,
@@ -66,6 +69,23 @@ parameters and candidate axes. Parquet CSV path/name columns are empty; existing
 JSON fields suffice without a database migration. Manual tests store their own pin
 under `results_json.config.data_input`, retaining the existing results list shape.
 
+New successful Optimize OOS results also store `config_json.parquet_oos_replay`:
+`version: 1`, exact full UTC `start`/`end` timestamps (including subsecond precision),
+inclusive first/last prepared bar opens `preparation_start`/`preparation_end`, and
+nonnegative integer `trade_start_idx`/`warmup_bars`. These facts come from the actual
+OOS stage preparation and are saved atomically with its trial results. The separate
+input pin, root override and other configuration keys are preserved.
+
+OOS chart/trade reconstruction requires a saved OOS result, validates this record,
+verifies the parent pin and reproduces the recorded frame origin and trading index.
+Date-only display labels are not a replay oracle. Older Parquet studies without
+the record refuse only OOS reconstruction with an instruction to create a new study;
+null, malformed, unsupported or conflicting records also refuse it. Saved tables
+and otherwise supported IS/FT/manual/WFA views remain available. No metadata is
+backfilled on read. CSV retains its historical OOS path and period behavior.
+When pinned reconstruction is refused, Results clears the previous curve and
+date labels before showing the error; the saved result table stays visible.
+
 Reconstruction verifies the saved consumed interval, including warmup. Unused
 extension/backfill or a physical rewrite is compatible when consumed inputs and
 applied facts are identical. Changed used inputs, unsupported policy/version or
@@ -79,6 +99,8 @@ before persisting `data_input_root_override` beside the unchanged original pin.
 CSV relocation cannot overwrite Parquet records. Stored metrics/tables, WFA stitched
 equity and Analytics remain readable without the pack. Reconstructed charts and
 trade exports need matching inputs. Launch a new study to use changed data.
+Stored WFA OOS no-trade windows can return their flat curve or header-only trade
+CSV without reading the pack; windows that reconstruct trades still verify it.
 
 Display/study labels use the exact instrument ID and canonical TF, for example
 `OKX_BTC-USDT-SWAP, 1h`. Analytics and trade exports use `OKX:BTC-USDT-SWAP`.

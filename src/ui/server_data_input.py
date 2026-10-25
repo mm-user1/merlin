@@ -1,6 +1,11 @@
 """Source admission and pack browsing for Merlin routes."""
 from pathlib import Path
 import json
+import re
+
+import pandas as pd
+
+from core.backtest_engine import prepare_dataset_with_warmup
 
 from core.data_input import (
     DataInputError, normalize_source, prepare_input, replay_input, validate_pin,
@@ -97,6 +102,50 @@ def execution_input(study, manual=None):
     return str(_resolve_csv_path(path)), None
 
 
+def replay_oos_input(study, trial):
+    """Reconstruct only the recorded OOS preparation, inside the original input pin."""
+    if trial.get("oos_test_total_trades") is None or trial.get("oos_test_net_profit_pct") is None:
+        raise DataInputError("OOS result is unavailable for this trial.")
+    config = study.get("config_json") or {}
+    if "parquet_oos_replay" not in config:
+        raise DataInputError("This study predates exact OOS replay metadata; a new study is required for OOS reconstruction.")
+    facts = config["parquet_oos_replay"]
+    try:
+        if not isinstance(facts, dict) or type(facts.get("version")) is not int or facts["version"] != 1:
+            raise ValueError("unsupported or missing version")
+        dates = {}
+        for key in ("start", "end", "preparation_start", "preparation_end"):
+            value = facts[key]
+            if not isinstance(value, str) or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)", value
+            ):
+                raise ValueError(f"{key} must be a full UTC timestamp")
+            dates[key] = pd.Timestamp(value)
+        for key in ("trade_start_idx", "warmup_bars"):
+            if type(facts[key]) is not int or facts[key] < 0:
+                raise ValueError(f"{key} must be a nonnegative integer")
+        if dates["start"] > dates["end"] or dates["preparation_start"] > dates["preparation_end"]:
+            raise ValueError("timestamps are out of order")
+        validate_pin(config["data_input"])
+        bounds = config["data_input"]["bounds"]
+        if not (pd.Timestamp(bounds["evaluation_start"]) <= dates["start"] <= dates["end"]
+                <= pd.Timestamp(bounds["evaluation_end"])
+                and pd.Timestamp(bounds["warmup_start"]) <= dates["preparation_start"]
+                <= dates["preparation_end"] < pd.Timestamp(bounds["end"])):
+            raise ValueError("OOS preparation is outside the parent input pin")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataInputError(f"Invalid parquet_oos_replay: {exc}. OOS reconstruction is blocked.") from exc
+    prepared = replay_config(config)
+    frame, idx = prepare_dataset_with_warmup(
+        prepared.frame, dates["start"], dates["end"], facts["warmup_bars"]
+    )
+    if (frame.empty or idx != facts["trade_start_idx"] or not 0 <= idx < len(frame)
+            or frame.index[0] != dates["preparation_start"]
+            or frame.index[-1] != dates["preparation_end"]):
+        raise DataInputError("OOS preparation conflicts with saved parquet_oos_replay facts; reconstruction refused.")
+    return frame, idx, dates
+
+
 def browse(raw):
     root = resolve_root(raw or str(DEFAULT_PARQUET_ROOT))
     # A pack is selected through its manifest, never by descending into its files.
@@ -135,11 +184,25 @@ def register_routes(app):
         saved = storage.load_study_from_db(study_id)
         if not saved:
             return jsonify(error="Study not found."), 404
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(error="Expected a JSON object with packRoot and optional positive testId."), 400
+        test_id = body.get("testId")
+        if test_id is not None:
+            if isinstance(test_id, str) and re.fullmatch(r"[0-9]+", test_id):
+                # SQLite IDs cannot exceed a signed 64-bit integer.
+                digits = test_id.lstrip("0")
+                test_id = int(digits) if len(digits) <= 19 and digits else 0
+                if len(digits) > 19:
+                    return jsonify(error="Manual test not found."), 404
+            if type(test_id) is not int or test_id <= 0:
+                return jsonify(error="testId must be a positive integer or digit-only string."), 400
+            if test_id > 2**63 - 1:
+                return jsonify(error="Manual test not found."), 404
         config = saved["study"].get("config_json") or {}
         manual = None
-        if body.get("testId") is not None:
-            manual = storage.load_manual_test_results(study_id, body["testId"])
+        if test_id is not None:
+            manual = storage.load_manual_test_results(study_id, test_id)
             if not manual:
                 return jsonify(error="Manual test not found."), 404
             config = (manual.get("results_json") or {}).get("config") or {}
@@ -195,12 +258,21 @@ def register_routes(app):
                 start, end = manual.get("start_date"), manual.get("end_date")
             elif module not in {"optuna", "grid", "dsr", "stress_test"}:
                 raise DataInputError("Unknown result module.")
-            csv_path, prepared = execution_input(study, manual)
+            export_options = {}
+            if module == "oos_test" and "data_input" in (study.get("config_json") or {}):
+                frame, idx, dates = replay_oos_input(study, trial)
+                csv_path = ""
+                start, end = dates["start"], dates["end"]
+                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx}
+            else:
+                csv_path, prepared = execution_input(study, manual)
+                if prepared is not None:
+                    export_options = {"prepared_frame": prepared.frame}
             params = context.params_for(trial.get("params") or {}, operation_start=start, operation_end=end)
             equity, timestamps, error = _run_equity_export(
                 strategy_id=study["strategy_id"], csv_path=csv_path, params=params,
                 warmup_bars=context.warmup_bars,
-                **({"prepared_frame": prepared.frame} if prepared is not None else {}))
+                **export_options)
             if error:
                 raise DataInputError(error)
         except (ValueError, TypeError, OSError) as exc:

@@ -40,7 +40,7 @@ console.log('Parquet timeframe and selection contracts passed');
 const fs = require('node:fs');
 const vm = require('node:vm');
 class Element {
-  constructor() { this.value = ''; this.children = []; this.handlers = {}; this.style = {}; this.classList = { toggle() {} }; }
+  constructor() { this.value = ''; this.children = []; this.handlers = {}; this.style = {}; this.classList = { toggle() {}, remove() {} }; }
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.append(node); }
   replaceChildren() { this.children = []; }
@@ -63,6 +63,16 @@ async function controllerChecks() {
     fetch: url => new Promise(resolve => requests.push({ url, resolve })),
   };
   context.window = context;
+  const queueSource = fs.readFileSync(require.resolve('../../src/ui/static/js/queue.js'), 'utf8');
+  for (const [signature, next] of [
+    ['function getPathParentDirectory(', 'async function applyQueueDatabaseTarget('],
+    ['function applyQueueUiSnapshot(', 'function triggerControlEvent('],
+    ['async function loadQueueItemIntoForm(', 'function extractQueueStrategyShortLabel('],
+  ]) {
+    const start = queueSource.indexOf(signature), end = queueSource.indexOf(next, start);
+    assert(start >= 0 && end > start);
+    vm.runInNewContext(queueSource.slice(start, end), context);
+  }
   vm.runInNewContext(fs.readFileSync(require.resolve('../../src/ui/static/js/parquet-input.js'), 'utf8'), context);
   const picker = context.ParquetInput;
   get('csvDirectory').value = '/csv';
@@ -98,6 +108,99 @@ async function controllerChecks() {
   assert.equal(picker.sources()[0].timeframe_minutes, 4320);
   assert.throws(() => picker.restore([savedSource, { type: 'path', path: '/csv' }]));
   assert.equal(picker.sources().length, 1);
+  // Run the actual Queue entrypoint and source controller together; source fields
+  // in generic snapshots deliberately contradict the typed Queue selection.
+  let item;
+  Object.assign(context, {
+    ensureQueueStateLoaded: async () => {}, ensureQueueItemStrategyLoaded: async () => {},
+    loadQueue: () => ({ items: [item] }), getQueueSources: value => value.sources,
+    setSelectedCsvPaths: paths => { context.selectedCsvPaths = paths; },
+    applyQueueConfigFallback() {}, applyQueueDatabaseTarget: async () => {},
+    buildQueueStudySetState: () => ({}), syncQueueAutoCreateSetUi() {}, refreshQueueFormUiAfterApply() {},
+    queueRunning: false,
+  });
+  get('useParquet').type = 'checkbox';
+  get('csvDirectory').value = '/remembered-pack';
+  const csvSources = [{ type: 'path', path: 'C:\\restored-csv\\first.csv' }, { type: 'path', path: 'C:\\restored-csv\\second.csv' }];
+  async function restoreItem(sources, snapshotMode) {
+    item = { id: 'restore', sources, uiSnapshot: { controls: {
+      csvDirectory: { value: '/wrong-snapshot' }, useParquet: { checked: snapshotMode },
+    } } };
+    await context.loadQueueItemIntoForm('restore');
+  }
+  await restoreItem(csvSources, true);
+  assert.equal(picker.active(), false); assert.equal(get('useParquet').checked, false);
+  assert.equal(get('csvDirectory').value, 'C:\\restored-csv');
+  assert.equal(picker.state.paths.csv, 'C:\\restored-csv');
+  assert.equal(picker.state.paths.parquet, '/remembered-pack');
+  assert.deepEqual(Array.from(context.selectedCsvPaths), csvSources.map(s => s.path));
+  await restoreItem(csvSources, true); // Same mode preserves both paths too.
+  assert.equal(picker.state.paths.parquet, '/remembered-pack');
+  await restoreItem([savedSource, { ...savedSource, timeframe_minutes: 5 }], false);
+  assert.equal(picker.active(), true); assert.equal(get('useParquet').checked, true);
+  assert.equal(get('csvDirectory').value, '/new');
+  assert.equal(picker.state.paths.csv, 'C:\\restored-csv');
+  assert.equal(picker.state.paths.parquet, '/new');
+  assert.deepEqual(Array.from(picker.sources(), s => s.timeframe_minutes), [4320, 5]);
+  await restoreItem([savedSource], false); // Same-mode Parquet restore.
+  assert.equal(get('csvDirectory').value, '/new');
+  const beforeInvalid = JSON.stringify({ state: picker.state, directory: get('csvDirectory').value });
+  await assert.rejects(restoreItem([savedSource, csvSources[0]], false), /Mixed or invalid/);
+  assert.equal(JSON.stringify({ state: picker.state, directory: get('csvDirectory').value }), beforeInvalid);
+  picker.setMode(false); assert.equal(get('csvDirectory').value, 'C:\\restored-csv');
   console.log('Parquet controller mode, stale response, picker layout state and edit events passed');
+  console.log('Queue entrypoint restores both directories, mode and selected pairs despite contradictory snapshots');
 }
 controllerChecks().catch(error => { console.error(error); process.exitCode = 1; });
+
+// A rejected pinned replay must never leave the preceding result's curve/axis.
+async function replayChartChecks() {
+  class Node {
+    constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; }
+    set innerHTML(value) { assert.equal(value, ''); this.children = []; }
+    appendChild(child) { this.children.push(child); }
+    setAttribute(name, value) { this.attributes[name] = value; }
+  }
+  const svg = new Node('svg'), axis = new Node('axis'), comparison = new Node('comparison');
+  let response;
+  const context = {
+    ResultsState: { studyId: 'old-metadata', hasDataInput: true, activeTab: 'oos_test' },
+    document: {
+      querySelector: selector => selector === '.chart-svg' ? svg : null,
+      getElementById: id => ({ equityAxis: axis, comparisonLine: comparison })[id],
+      createElement: tag => new Node(tag), createElementNS: (_, tag) => new Node(tag),
+    },
+    fetch: async () => response,
+  };
+  for (const [file, signature, next] of [
+    ['results-tables.js', 'function setComparisonLine(', 'function renderManualTestControls('],
+    ['results-tables.js', 'function renderEquityChart(', 'function calculateWindowBoundaries('],
+    ['results-controller.js', 'async function fetchEquityCurve(', 'function refreshResultsView('],
+  ]) {
+    const source = fs.readFileSync(require.resolve('../../src/ui/static/js/' + file), 'utf8');
+    const start = source.indexOf(signature), end = source.indexOf(next, start);
+    assert(start >= 0 && end > start);
+    vm.runInNewContext(source.slice(start, end), context);
+  }
+  const payload = { equity: [100, 112], timestamps: ['2024-01-17T00:00:00Z', '2024-01-20T00:00:00Z'] };
+  context.renderEquityChart(payload.equity, null, payload.timestamps);
+  assert(svg.children.some(node => node.tag === 'polyline'));
+  assert.equal(axis.children.length, 2);
+  const error = 'This study predates exact OOS replay metadata; a new study is required for OOS reconstruction.';
+  response = { ok: false, json: async () => ({ error }) };
+  assert.equal(await context.fetchEquityCurve({ trial_number: 1 }), null);
+  assert.equal(svg.children.length, 0);
+  assert.equal(axis.children.length, 0);
+  assert.equal(comparison.textContent, error);
+  assert.equal(comparison.style.display, 'flex');
+  // Returning to a supported result can render a fresh curve and date labels.
+  context.setComparisonLine('');
+  response = { ok: true, json: async () => payload };
+  const replay = await context.fetchEquityCurve({ trial_number: 1 });
+  context.renderEquityChart(replay.equity, null, replay.timestamps);
+  assert(svg.children.some(node => node.tag === 'polyline'));
+  assert.equal(axis.children.length, 2);
+  assert.equal(comparison.style.display, 'none');
+  console.log('Pinned replay refusal clears the previous curve and dates; successful rendering recovers');
+}
+replayChartChecks().catch(error => { console.error(error); process.exitCode = 1; });

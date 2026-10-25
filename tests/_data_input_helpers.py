@@ -49,4 +49,3 @@ def grid_payload():
             "grid_fast_objectives": ["net_profit_pct"], "grid_top_candidates": 2,
             "grid_slow_refinement_enabled": True, "grid_slow_objectives": ["net_profit_pct"],
             "worker_processes": 2}
-
