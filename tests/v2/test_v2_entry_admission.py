@@ -87,6 +87,28 @@ def test_rules_exact_units_and_provenance():
     assert AdmissionRules.from_entry(changed).semantic() == bybit.semantic()
 
 
+@pytest.mark.parametrize("notional", ["0", "0.000", "5", None])
+def test_published_minimum_roundtrip_and_execution(notional):
+    from core.engine_v2.admission import admission_envelope, read_admission_envelope
+    from data_provider.manifest import validate_instrument_rules
+    entry = rule_entry(notional=notional)
+    validate_instrument_rules(entry["instrument_rules"], "test", venue="BYBIT")
+    rules = AdmissionRules.from_entry(entry)
+    assert rules.minimum_notional == ("0" if notional in {"0", "0.000"} else notional)
+    assert read_admission_envelope(admission_envelope(rules, 8), 8) == rules
+    slow, _ = run_pair(data(), rules=rules)
+    assert len(slow.strategy_result.trades) == 1
+    assert slow.strategy_result.trades[0].size == .2
+    assert slow.strategy_result.entry_diagnostics["leverageCapSkippedEntries"] == 0
+    assert (rules.semantic() == AdmissionRules.from_entry(rule_entry(notional=None)).semantic()) == (notional is None)
+
+
+@pytest.mark.parametrize("notional", ["-1", "NaN", "Infinity", "1e999", "1e-999", "bad"])
+def test_invalid_or_unrepresentable_notional_still_rejected(notional):
+    with pytest.raises(ValueError):
+        AdmissionRules.from_entry(rule_entry(notional=notional))
+
+
 @pytest.mark.parametrize("change", ["optimized", "role", "default", "variant", "selector", "dependency"])
 def test_cap_profile_is_fixed_and_profile_wide(change):
     config = load_config()

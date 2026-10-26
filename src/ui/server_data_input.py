@@ -9,7 +9,7 @@ from core.backtest_engine import prepare_dataset_with_warmup
 
 from core.data_input import (
     DataInputError, normalize_source, prepare_input, replay_input, validate_pin,
-    inspect_pack, is_pack_directory,
+    inspect_pack, is_pack_directory, preview_admission_rules,
 )
 
 DEFAULT_PARQUET_ROOT = Path(__file__).resolve().parents[2] / "data" / "parquet-data"
@@ -69,6 +69,18 @@ def prepare_request(values, strategy_context, params, warmup_bars, *, cancelled=
     if admission:
         execution_admission(strategy_context.profile, params, prepared.admission_rules)
     return prepared
+
+
+def preview_request_rules(values, strategy_context, params, *, cancelled=None):
+    from core.engine_v2.admission import admission_cap, execution_admission
+    admission_cap(strategy_context.profile, params)
+    source = request_source(values)
+    if source is None:
+        raise DataInputError("risk_bracket_v1 requires a Parquet source with instrument rules; CSV is unsupported.")
+    source["pack_root"] = str(resolve_root(source["pack_root"]))
+    rules = preview_admission_rules(source, cancelled=cancelled)
+    execution_admission(strategy_context.profile, params, rules)
+    return rules
 
 
 def effective_params(params, prepared):

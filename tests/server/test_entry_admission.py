@@ -28,6 +28,45 @@ def test_backtest_pin_and_fail_closed_inputs(client, tmp_path):
         assert denied.status_code == 400 and "Parquet" in denied.get_data(as_text=True)
 
 
+@pytest.mark.parametrize("notional", ["0", "5", None])
+def test_partial_cap_is_oos_storage_matches_direct_reference(client, tmp_path, notional):
+    from core.backtest_engine import align_date_bounds, prepare_dataset_with_warmup
+    from core.engine_v2.admission import run_strategy, aggregate_entries
+    from tests.fixtures.admission_strategy.strategy import AdmissionTestStrategy
+    from ui.server_data_input import replay_config, replay_oos_input
+    from ui.server_services import _resolve_stored_execution_context
+    source = publish(tmp_path / "pack", rows=4000, turn_day=6, notional=notional)
+    config = grid_payload()
+    config["fixed_params"].update(riskPerTrade=3., maxEntryLeverage=3.35,
+                                   dateFilter=True, start="2024-01-02", end="2024-01-14T21:15:00Z")
+    config["oosTest"] = dict(enabled=True, periodDays=7, topK=2)
+    with installed():
+        response = client.post("/api/optimize", data=dict(strategy=STRATEGY_ID, source=json.dumps(source),
+            config=json.dumps(config), warmupBars="100"))
+        assert response.status_code == 200, response.get_data(as_text=True)
+        saved = storage.load_study_from_db(response.get_json()["study_id"])
+        study = saved["study"]
+        context = _resolve_stored_execution_context(study)
+        prepared = replay_config(study["config_json"])
+        for trial in saved["trials"]:
+            params = context.params_for(trial["params"])
+            start, end = align_date_bounds(prepared.frame.index, params["start"], params["end"])
+            frame, idx = prepare_dataset_with_warmup(prepared.frame, start, end, context.warmup_bars)
+            oos_frame, oos_idx, dates, rules = replay_oos_input(study, trial)
+            oos_params = context.params_for(trial["params"], operation_start=dates["start"], operation_end=dates["end"])
+            for scope, bars, origin, values in (("is", frame, idx, params), ("oos_test", oos_frame, oos_idx, oos_params)):
+                direct = run_strategy(AdmissionTestStrategy, bars, values, origin, admission_rules=rules)
+                expected = {**direct.entry_diagnostics, "scope": scope}
+                assert direct.trades and expected["leverageCapSkippedEntries"] > 0
+                assert origin == 100
+                assert all(event.fill_time_ns >= bars.index[origin].value for event in direct.entry_events)
+                assert trial["entry_diagnostics"][scope] == expected
+            oos = trial["entry_diagnostics"]["oos_test"]
+            assert aggregate_entries([(trial["trial_number"], oos)] * 2, scope="oos_test") == oos
+            assert trial["entry_diagnostics"]["is"]["leverageCapSkippedEntries"] != oos["leverageCapSkippedEntries"]
+            print("partial cap", notional, trial["trial_number"], trial["entry_diagnostics"])
+
+
 def test_grid_postprocess_manual_and_offline_diagnostics(client, tmp_path):
     source = publish(tmp_path / "pack", rows=5000)
     config = grid_payload()

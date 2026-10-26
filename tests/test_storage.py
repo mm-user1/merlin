@@ -449,6 +449,80 @@ def _build_grid_storage_result(
     return result
 
 
+def test_diagnostic_updates_only_changed_content_and_clear_stale_scopes(tmp_path):
+    diag = dict(version=1, scope="is", maxEntryLeverageUsed=2., leverageCapSkippedEntries=3)
+    other = {**diag, "scope": "ft"}
+    raw = json.dumps({"ft": other, "is": diag}, indent=2)
+    with sqlite3.connect(tmp_path / "diagnostics.db") as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE trials (study_id TEXT, trial_number INTEGER, entry_diagnostics_json TEXT)")
+        conn.executemany("INSERT INTO trials VALUES (?, ?, ?)", [
+            ("s", 1, None), ("s", 2, raw), ("s", 3, json.dumps({"ft": other})),
+            ("elsewhere", 2, raw), ("s", 4, "malformed legacy JSON")])
+        updates = []
+        conn.set_trace_callback(lambda sql: updates.append(sql) if sql.startswith("UPDATE trials SET entry_diagnostics_json") else None)
+
+        def write(scope, executions):
+            updates.clear()
+            storage._write_trial_diagnostics(conn, "s", scope, executions)
+            return len(updates)
+
+        assert write("is", [(2, {**diag, "scope": "execution"})]) == 0
+        assert write("oos_test", []) == 0  # Legacy NULL and malformed fallback stay unchanged.
+        changed = {**diag, "leverageCapSkippedEntries": 4}
+        assert write("is", [(2, changed)]) == 1
+        assert "trial_number = 2" in updates[0]
+        assert write("is", [(2, changed)]) == 0
+        assert write("ft", [(2, None)]) == 2  # Explicit None and omitted trial both clear.
+        rows = dict(conn.execute("SELECT trial_number, entry_diagnostics_json FROM trials WHERE study_id='s'"))
+        assert json.loads(rows[2]) == {"is": changed} and rows[3] is None
+        assert write("is", []) == 1  # Last scope -> SQL NULL.
+        assert conn.execute("SELECT entry_diagnostics_json FROM trials WHERE study_id='s' AND trial_number=2").fetchone()[0] is None
+        assert conn.execute("SELECT entry_diagnostics_json FROM trials WHERE study_id='elsewhere'").fetchone()[0] == raw
+        assert conn.execute("SELECT entry_diagnostics_json FROM trials WHERE study_id='s' AND trial_number=4").fetchone()[0] == "malformed legacy JSON"
+
+
+def test_public_diagnostic_scope_saves_and_readback(tmp_path, monkeypatch):
+    path = tmp_path / "synthetic.csv"
+    path.write_text("time,open,high,low,close,Volume\n", encoding="utf-8")
+    result = _build_grid_storage_result(1, grid_rank=1, net_profit_pct=1., selection_sources=["objective"])
+    diag = dict(version=1, scope="is", maxEntryLeverageUsed=2., leverageCapSkippedEntries=7)
+    result.entry_diagnostics = diag
+    with _temporary_active_db("diagnostic_scopes"):
+        study_id = save_grid_study_to_db(config=_build_grid_storage_config(path),
+            grid_settings=GridSettings(requested_budget=1, top_candidates=1), grid_summary={},
+            trial_results=[result], csv_file_path=str(path), start_time=0.)
+        assert load_study_from_db(study_id)["trials"][0]["entry_diagnostics"] == {"is": diag}
+        statements = []
+        original = storage.get_db_connection
+
+        @contextmanager
+        def recorded():
+            with original() as conn:
+                conn.set_trace_callback(lambda sql: statements.append(sql) if sql.startswith("UPDATE trials SET entry_diagnostics_json") else None)
+                yield conn
+        monkeypatch.setattr(storage, "get_db_connection", recorded)
+        ft_options = dict(ft_enabled=True, ft_period_days=1, ft_top_k=1, ft_sort_metric=None,
+            ft_threshold_pct=None, ft_reject_action=None, ft_reject_cooldown_days=None,
+            ft_reject_max_attempts=None, ft_reject_min_remaining_oos_days=None,
+            ft_start_date="2024-01-02", ft_end_date="2024-01-03", is_period_days=1)
+        oos_options = dict(oos_enabled=True, oos_period_days=1, oos_top_k=1,
+            oos_start_date="2024-01-03", oos_end_date="2024-01-04", oos_source_module="optuna")
+        ft = dict(trial_number=1, ft_net_profit_pct=2., ft_total_trades=1, entry_diagnostics=diag)
+        oos = dict(trial_number=1, test_metrics=dict(net_profit_pct=3., total_trades=2), entry_diagnostics=diag)
+        for repeat in range(2):
+            statements.clear()
+            assert storage.save_forward_test_results(study_id, [ft], **ft_options)
+            assert storage.save_oos_test_results(study_id, [oos], **oos_options)
+            assert len(statements) == (2 if repeat == 0 else 0)
+        saved = load_study_from_db(study_id)["trials"][0]
+        assert saved["ft_net_profit_pct"] == 2. and saved["oos_test_net_profit_pct"] == 3.
+        assert saved["entry_diagnostics"] == {s: {**diag, "scope": s} for s in ("is", "ft", "oos_test")}
+        assert storage.save_forward_test_results(study_id, [], **ft_options)
+        assert storage.save_oos_test_results(study_id, [{**oos, "entry_diagnostics": None}], **oos_options)
+        assert load_study_from_db(study_id)["trials"][0]["entry_diagnostics"] == {"is": diag}
+
+
 def test_storage_objective_directions_cover_grid_v2_fast_objectives():
     missing = sorted(GRID_V2_SUPPORTED_FAST_OBJECTIVES - set(storage.OBJECTIVE_DIRECTIONS))
     assert missing == []

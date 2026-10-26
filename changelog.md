@@ -1,6 +1,8 @@
 ### Changelog
 All significant changes and version history are recorded in this file.
 #### Unreleased — 2026-10-26
+- Accept published zero minimum notional while keeping null distinct; avoid
+  unchanged trial diagnostic writes and candle preparation in new-mode Grid Preview.
 - Added opt-in generic V2 risk-bracket entry admission with instrument-owned sizing
   rules, fixed Max Entry Leverage, strict saved replay and selected-run diagnostics.
 - Added nullable diagnostic storage and the Max Entry Lev / Skipped card in

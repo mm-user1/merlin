@@ -129,8 +129,17 @@ use `baseStep=lotSz*ctVal`, `baseMinimum=minSz*ctVal`, with finite `ctMult=1` on
 Decimal normalization and exact rational ceiling derive minimum lots without
 binary rounding; runtime sizing retains the established IEEE expression. Rules
 must remain representable as positive finite floats and exact supported integer
-lot counts (up to 2^53). Published minimum notional may be null; null and a positive
-value are different semantics. Price tick is retained but does not round prices.
+lot counts (up to 2^53). Published minimum notional is nonnegative and finite;
+zero never refuses a positive-notional entry. Null means no published rule and
+remains semantically distinct from zero. Nonzero values that underflow to float
+zero are rejected. Price tick is retained but does not round prices.
+
+New-mode Grid Preview resolves current rules under one serialized provider session
+using validated metadata only. It checks the source, allowed root, instrument,
+timeframe, cap, pending update and metadata-known unreadable state, without candle
+reads, hashes or resampling. Preview describes parameter space; it does not certify
+file availability, continuity, date-range coverage or warmup sufficiency. Actual
+launches still prepare and fingerprint all consumed candles. No rules cache is used.
 
 Saved replay validates current schema and exact effective decimal semantics:
 instrument/venue/contract/currencies, quantity unit, base step/minimum, minimum

@@ -110,7 +110,8 @@ class AdmissionRules:
         if not 1 <= lots <= 2**53:
             raise ValueError(where + ": minimum lot count is unrepresentable.")
         notional = rules["minimum_notional"]
-        if notional is not None and (not math.isfinite(float(notional)) or float(notional) <= 0):
+        if notional is not None and (not math.isfinite(float(notional)) or float(notional) < 0
+                                     or (Decimal(notional) != 0 and float(notional) == 0)):
             raise ValueError(where + ": minimum notional is unrepresentable.")
         for key in ("instrument_id", "contract"):
             if not isinstance(entry.get(key), str) or not entry[key].strip():

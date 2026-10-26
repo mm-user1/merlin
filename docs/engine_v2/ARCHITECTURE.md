@@ -72,6 +72,12 @@ See [Parquet inputs](../PARQUET_INPUTS.md) for conversion and replay semantics.
 Direct core and both compiled packers require rules too. CSV CLI and Strategy Lab
 generation reject this mode; V2 DSR remains unsupported.
 
+Grid Preview resolves these rules from validated metadata under one local/provider
+read session, without preparing or hashing candles. Pending and metadata-known
+unreadable packs are refused; coverage, continuity and warmup checks remain at
+actual launch. Published minimum notional accepts finite zero while preserving
+null as an absent rule and rejecting unrepresentable nonzero values.
+
 Eligible signal closes plan long first, inside entry bounds and outside warmup.
 Unavailable inputs, invalid stop/risk, exhausted finite capital, invalid target
 and stop width refuse before sizing. Nonfinite account state is an error. Sizing
@@ -97,6 +103,9 @@ shared `StrategyResult` and provider code remain unchanged.
 Diagnostics, retained Adaptive aggregation and storage/UI scope are defined in
 [Metrics](../METRICS.md#entry-admission-diagnostics). This application capability
 does not replace or change the separate historical policy API below.
+Trial diagnostic saves replace only the requested scope, clearing omitted/None
+values while retaining other scopes. Equal parsed content causes no diagnostic
+UPDATE, including legacy NULL-to-NULL; JSON formatting alone is not rewritten.
 
 ### Opt-in reference admission and trace
 

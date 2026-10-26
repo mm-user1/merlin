@@ -47,6 +47,25 @@ def test_rules_replay_semantics_and_current_manual(tmp_path):
         read_admission_envelope(pin, None)
 
 
+def test_zero_minimum_strict_saved_replay(tmp_path):
+    from data_provider import manifest
+    source = publish(tmp_path / "pack", rows=100, notional="0")
+    prepared = prepare_input(source, date_filter=False, admission_params={})
+    assert replay_input(prepared.facts, entry_admission=prepared.entry_admission,
+                        admission_cap=8).admission_rules.minimum_notional == "0"
+    root = Path(source["pack_root"])
+    document = manifest.read_manifest(root)
+    rules = document["instruments"][0]["instrument_rules"]
+    rules["minimum_notional"] = rules["raw_contract_fields"]["minNotionalValue"] = "0.00"
+    manifest.write_manifest(root, document)
+    assert replay_input(prepared.facts, entry_admission=prepared.entry_admission,
+                        admission_cap=8).admission_rules == prepared.admission_rules
+    rules["minimum_notional"] = rules["raw_contract_fields"]["minNotionalValue"] = None
+    manifest.write_manifest(root, document)
+    with pytest.raises(DataInputError, match="rules changed"):
+        replay_input(prepared.facts, entry_admission=prepared.entry_admission, admission_cap=8)
+
+
 def test_actual_new_mode_spawn_while_pack_locked(tmp_path):
     from core.post_process import run_forward_test, run_perturbations_parallel, PostProcessConfig
     prepared = prepare_input(publish(tmp_path / "pack"), date_filter=False, admission_params={})

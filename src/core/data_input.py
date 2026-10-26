@@ -235,14 +235,37 @@ def _prepare(session, source, **range_options):
     return _load(session, source, resolve_range(source, entry, **range_options))
 
 
+def _admission_rules(session, instrument):
+    from .engine_v2.admission import AdmissionRules
+    entry = next((e for e in manifest.read_manifest(session.data_root)["instruments"]
+                  if e["instrument_id"] == instrument), None)
+    if entry is None:
+        raise DataInputError(f"Instrument {instrument} is absent from this pack.")
+    return AdmissionRules.from_entry(entry)
+
+
+def preview_admission_rules(source, *, cancelled=None):
+    """Resolve current rules from metadata only; actual runs still admit candles."""
+    source = normalize_source(source)
+    with pack_session(source["pack_root"], cancelled=cancelled) as session:
+        report = session.inspect(verify=False)
+        if report.get("update_in_progress"):
+            raise DataInputError("Pack has a pending collector operation; recover or abort it first.")
+        entry = next((e for e in report["instruments"] if e["instrument_id"] == source["instrument_id"]), None)
+        if entry is None:
+            raise DataInputError(f"Instrument {source['instrument_id']} is absent from this pack.")
+        if not entry["research_readable"]:
+            raise DataInputError(f"Instrument {source['instrument_id']} is unreadable: "
+                                 + "; ".join(entry["research_blockers"]))
+        return _admission_rules(session, source["instrument_id"])
+
+
 def _with_admission(session, prepared, admission_params):
     if admission_params is None:
         return prepared
-    from .engine_v2.admission import AdmissionRules, admission_envelope
+    from .engine_v2.admission import admission_envelope
     instrument = prepared.facts["source"]["instrument_id"]
-    entry = next(e for e in manifest.read_manifest(session.data_root)["instruments"]
-                 if e["instrument_id"] == instrument)
-    rules = AdmissionRules.from_entry(entry)
+    rules = _admission_rules(session, instrument)
     return replace(prepared, admission_rules=rules,
                    entry_admission=admission_envelope(rules, admission_params.get("maxEntryLeverage", 8)))
 

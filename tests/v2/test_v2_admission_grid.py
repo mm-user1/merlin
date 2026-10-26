@@ -93,3 +93,35 @@ def test_typed_packer_fixed_cap_guards_and_numerical_error(tmp_path):
     result=execute_grid_v2_candidates(plan,prepared.frame,0,GridV2StrategyHooks.from_strategy(strategy))
     assert all(row.status == "error" for row in result.rows)
     assert not result.selected
+
+
+@pytest.mark.parametrize("notional", ["0", "5", None])
+def test_partial_cap_changes_fast_selection_with_fills_and_refusals(tmp_path, notional):
+    prepared = prepare_input(publish(tmp_path / "pack", rows=4000, turn_day=6, notional=notional),
+                             date_filter=False, admission_params={})
+    config = strategy.load_config()
+    config["parameters"]["signalEvery"]["optimize"] = dict(enabled=True, min=16, max=18, step=2)
+    hooks = GridV2StrategyHooks.from_strategy(strategy)
+    settings = GridV2Settings(enabled_axes=("signalEvery",), top_n=1, compiled_workers=1,
+                              admission_rules=prepared.admission_rules)
+    selected = []
+    for cap in (8., 3.35):
+        plan = build_grid_v2_plan(config, settings, {**grid_payload()["fixed_params"],
+                                                  "riskPerTrade": 3., "maxEntryLeverage": cap})
+        table = execute_grid_v2_candidates(plan, prepared.frame, 0, hooks)
+        mapping = execute_grid_v2_candidates(replace(plan, settings=replace(settings, compiled_config_packing="mapping")), prepared.frame, 0, hooks)
+        reference = execute_grid_v2_candidates(replace(plan, settings=replace(settings, prefer_compiled=False)), prepared.frame, 0, hooks)
+        assert table.metadata["compiled_config_packing"] == "table"
+        assert mapping.metadata["compiled_config_packing"] == "mapping"
+        for a, b, c in zip(table.rows, mapping.rows, reference.rows):
+            assert a.total_trades == b.total_trades == c.total_trades > 0
+            assert a.net_profit_pct == b.net_profit_pct == pytest.approx(c.net_profit_pct, rel=1e-12, abs=1e-12)
+            assert a.guardrail_summary == b.guardrail_summary
+            for key in ("margin_reject_count", "max_required_leverage"):
+                assert a.guardrail_summary[key] == c.guardrail_summary[key]
+            assert (a.guardrail_summary["margin_reject_count"] > 0) == (cap == 3.35)
+        picked = table.selected[0]
+        assert picked.entry_diagnostics["leverageCapSkippedEntries"] == picked.row.guardrail_summary["margin_reject_count"]
+        assert picked.entry_diagnostics["maxEntryLeverageUsed"] == picked.row.guardrail_summary["max_required_leverage"]
+        selected.append(picked.row.params["signalEvery"])
+    assert selected == [16, 18]

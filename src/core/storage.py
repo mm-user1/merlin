@@ -3988,10 +3988,13 @@ def _write_trial_diagnostics(conn, study_id, scope, executions):
     values = dict(executions)
     for row in conn.execute("SELECT trial_number, entry_diagnostics_json FROM trials WHERE study_id = ?", (study_id,)).fetchall():
         current = _parse_entry_diagnostics(row["entry_diagnostics_json"], {})
+        previous = dict(current)
         current.pop(scope, None)
         value = values.get(row["trial_number"])
         if value is not None:
             current[scope] = {**value, "scope": scope}
+        if current == previous:
+            continue
         conn.execute("UPDATE trials SET entry_diagnostics_json = ? WHERE study_id = ? AND trial_number = ?",
                      (json.dumps(current, allow_nan=False) if current else None, study_id, row["trial_number"]))
 

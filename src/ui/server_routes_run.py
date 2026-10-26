@@ -70,7 +70,7 @@ from core.storage import (
 )
 
 try:
-    from .server_data_input import prepare_request, effective_params
+    from .server_data_input import prepare_request, effective_params, preview_request_rules
     from .server_services import (
         DEFAULT_PRESET_NAME,
         _build_optimization_config,
@@ -109,7 +109,7 @@ try:
         validate_sampler_config,
     )
 except ImportError:
-    from server_data_input import prepare_request, effective_params
+    from server_data_input import prepare_request, effective_params, preview_request_rules
     from server_services import (
         DEFAULT_PRESET_NAME,
         _build_optimization_config,
@@ -297,12 +297,13 @@ def register_routes(app):
                 warmup_bars,
             )
             if strategy_context.profile and strategy_context.profile.modes.get("entryAdmission"):
-                prepared = prepare_request(payload, strategy_context, optimization_config.fixed_params, warmup_bars)
-                optimization_config.admission_rules = prepared.admission_rules
+                source_values = payload if "source" in payload else request.form
+                optimization_config.admission_rules = preview_request_rules(
+                    source_values, strategy_context, optimization_config.fixed_params)
             preview = preview_grid_parameter_space(optimization_config)
         except V2ValidationError as exc:
             return _validation_error_response(exc)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         except Exception:  # pragma: no cover - defensive
             app.logger.exception("Failed to build Grid preview")

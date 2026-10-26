@@ -52,12 +52,12 @@ def installed():
             strategies._REGISTRY[STRATEGY_ID] = previous
 
 
-def publish(root, *, rows=3000, venue="BYBIT", step="0.1", minimum="0.1", turn_day=None):
+def publish(root, *, rows=3000, venue="BYBIT", step="0.1", minimum="0.1", notional="5", turn_day=None):
     import numpy as np
     import pandas as pd
     from data_provider import data, manifest
     from .strategy import rule_entry
-    entry = rule_entry(venue, step, minimum)
+    entry = rule_entry(venue, step, minimum, notional)
     slots = np.arange(rows, dtype=np.int64)
     timestamps = pd.Timestamp("2024-01-01", tz="UTC").value // 10**6 + slots * 300000
     price = 100 + slots * .05

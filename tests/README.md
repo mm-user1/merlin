@@ -36,6 +36,13 @@ an isolated preview. Its spawn wrapper registers the fixture then calls the
 production initializer with unchanged arguments; no frame/rule injection or
 mock worker execution. Collision checks protect the registry.
 
+The admission follow-up adds zero/null rule and strict replay controls, partial-cap
+Fast selection and persisted IS/OOS refusals, and actual SQLite diagnostic UPDATE
+counts. `tests/server/test_admission_preview.py` enforces metadata-only Preview,
+source/rule/lock errors and full candle admission on launch. These scoped changes
+use the admission/data-input/storage/Grid suites; unchanged shared execution and
+provider sources do not require another full Pattern Lab preservation run.
+
 The Grid test's `[1]` and `[2]` selectors require those actual Numba thread
 capacities; a one-CPU host cannot substitute for Windows two-thread evidence.
 Two-process spawn remains a distinct gate. The new JS wrapper also accepts
