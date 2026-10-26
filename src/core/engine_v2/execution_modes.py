@@ -59,6 +59,7 @@ TRAIL_MODE_FIXED_AF_SAR = 4
 _POSITION_FIELDS = frozenset(
     {
         "entryOrder",
+        "entryAdmission",
         "stop",
         "target",
         "trail",
@@ -88,6 +89,7 @@ _SIGNAL_FIELDS = frozenset(
 )
 
 _POSITION_MODE_VALUES = {
+    "entryAdmission": frozenset({"risk_bracket_v1"}),
     "entryOrder": frozenset({"market_next_open"}),
     "stop": frozenset({"atr_swing"}),
     "target": frozenset({"rr", "none"}),
@@ -293,6 +295,12 @@ def resolve_position_mode_state(modes: Mapping[str, str]) -> PositionModeState:
             f"Unsupported position/bracket execution mode priceRounding={rounding!r}.",
             field="priceRounding",
         )
+    if "entryAdmission" in modes:
+        if (modes["entryAdmission"] != "risk_bracket_v1" or not valid_target
+                or boundary != "strict_close" or rounding != "none"):
+            raise ExecutionModeValidationError(
+                "entryAdmission=risk_bracket_v1 requires a strict-close ATR/swing risk bracket, "
+                "RR target, no trailing and no price rounding.", field="entryAdmission")
     return PositionModeState(
         target_mode=target_mode,
         trail_mode=trail_mode,

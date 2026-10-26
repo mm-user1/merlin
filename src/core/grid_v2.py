@@ -159,6 +159,7 @@ class GridV2Settings:
     min_quota: float = 0.10
     manual_percents: tuple[tuple[str, float], ...] = ()
     enabled_tie_groups: tuple[str, ...] = ()
+    admission_rules: Any = None
 
     @property
     def top_candidates(self) -> int:
@@ -636,6 +637,7 @@ class GridV2CacheEstimate:
     month_id_nbytes: int = 0
     day_id_nbytes: int = 0
     mtm_sidecar_nbytes: int = 0
+    admission_config_nbytes: int = 0
     chandelier_combo_count: int = 0
     chandelier_atr_nbytes: int = 0
     chandelier_mapping_nbytes: int = 0
@@ -699,6 +701,7 @@ class GridV2SelectedResult:
     row: GridV2ResultRow
     metrics: Mapping[str, Any]
     guardrail_summary: Mapping[str, Any]
+    entry_diagnostics: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1097,6 +1100,12 @@ def _grid_v2_plan_prelude(
     defaults = _parameter_defaults(params_spec)
     fixed_params = dict(defaults)
     fixed_params.update(dict(base_params or {}))
+    if profile.modes.get("entryAdmission") == "risk_bracket_v1":
+        from .engine_v2.admission import execution_admission
+        if "maxEntryLeverage" in (settings.enabled_axes or ()) or "maxEntryLeverage_options" in supplied:
+            raise ValueError("maxEntryLeverage is fixed and cannot be a Grid axis or option subset.")
+        cap, _ = execution_admission(profile, fixed_params, settings.admission_rules)
+        fixed_params["maxEntryLeverage"] = cap
     selector_values = _selector_values_by_variant(config_copy, profile)
     selected_variants = _selected_variants(profile, settings, fixed_params)
     fixed_params = _canonicalize_globally_inactive_params(
@@ -1432,6 +1441,8 @@ def _grid_v2_plan_identity_signature(plan: GridV2Plan) -> Any:
 def _grid_v2_planning_identity_payload(prelude: _GridV2PlanPrelude) -> dict[str, Any]:
     planning = prelude.planning
     return {
+        **({"entry_admission_rules": prelude.settings.admission_rules.semantic()}
+           if prelude.profile.modes.get("entryAdmission") == "risk_bracket_v1" else {}),
         **({"grid_v2_parameter_ties_v1": {"groups": list(prelude.settings.enabled_tie_groups), "pairs": prelude.parameter_ties}} if prelude.parameter_ties else {}),
         "engine": GRID_V2_ENGINE_VERSION,
         "plan_identity_schema_version": GRID_V2_PLAN_IDENTITY_SCHEMA_VERSION,
@@ -2015,6 +2026,7 @@ def _estimate_grid_v2_cache_from_keys(
         + chandelier_mapping_nbytes
     )
     estimated_output_bytes = output_candidate_count * bytes_per_output_candidate
+    admission_config_nbytes = output_candidate_count * 24 if topology is None else 0
     month_id_nbytes = n_bars * np.dtype(np.int32).itemsize if compute_sharpe else 0
     day_id_nbytes = n_bars * np.dtype(np.int32).itemsize if compute_sharpe_daily else 0
     mtm_sidecar_nbytes = (
@@ -2028,6 +2040,7 @@ def _estimate_grid_v2_cache_from_keys(
         + estimated_dataprep_bytes
         + estimated_output_bytes
         + mtm_sidecar_nbytes
+        + admission_config_nbytes
         + estimated_shared_market_bytes
     ) * worker_multiplier
     return GridV2CacheEstimate(
@@ -2054,6 +2067,7 @@ def _estimate_grid_v2_cache_from_keys(
         month_id_nbytes=month_id_nbytes,
         day_id_nbytes=day_id_nbytes,
         mtm_sidecar_nbytes=mtm_sidecar_nbytes,
+        admission_config_nbytes=admission_config_nbytes,
         chandelier_combo_count=chandelier_combo_count,
         chandelier_atr_nbytes=chandelier_atr_nbytes,
         chandelier_mapping_nbytes=chandelier_mapping_nbytes,
@@ -2241,11 +2255,12 @@ def _stack_metadata_from_batch(
     stacked_data: Any,
     outputs: np.ndarray,
     max_drawdown_mtm_pct: np.ndarray | None = None,
+    admission_config_nbytes: int = 0,
 ) -> dict[str, Any]:
     mtm_sidecar_nbytes = (
         int(max_drawdown_mtm_pct.nbytes) if max_drawdown_mtm_pct is not None else 0
     )
-    total_nbytes = int(stacked_data.nbytes + outputs.nbytes + mtm_sidecar_nbytes)
+    total_nbytes = int(stacked_data.nbytes + outputs.nbytes + mtm_sidecar_nbytes + admission_config_nbytes)
     return {
         "stack_row_count": stacked_data.row_count,
         "stack_candidate_count": stacked_data.candidate_count,
@@ -2254,6 +2269,7 @@ def _stack_metadata_from_batch(
         "stack_shared_market_nbytes": stacked_data.shared_market_nbytes,
         "stack_output_nbytes": int(outputs.nbytes),
         "stack_mtm_sidecar_nbytes": mtm_sidecar_nbytes,
+        "stack_admission_config_nbytes": admission_config_nbytes,
         "stack_total_nbytes": total_nbytes,
         "stack_total_mb": total_nbytes / _BYTES_PER_MB,
     }
@@ -2467,6 +2483,7 @@ def execute_grid_v2_candidates(
                         ]
                         compiled_config_packing = "mapping"
                     batch = evaluate_compiled_stacked_batch(
+                        admission_rules=plan.settings.admission_rules,
                         stacked_data=stacked_data,
                         profile=plan.profile,
                         params_batch=params_batch,
@@ -2484,6 +2501,7 @@ def execute_grid_v2_candidates(
                     stacked_data,
                     batch.outputs,
                     batch.max_drawdown_mtm_pct,
+                    len(compiled_indices) * 24 if topology is None else 0,
                 )
                 if (
                     not peak_stack_metadata
@@ -2517,6 +2535,7 @@ def execute_grid_v2_candidates(
                     params = plan.candidate_table.params_for_index(candidate_index)
                     try:
                         run = run_v2_strategy(
+                            admission_rules=plan.settings.admission_rules,
                             data=data,
                             profile=plan.profile,
                             params=_normalized_candidate_params(hooks, params),
@@ -2547,6 +2566,9 @@ def execute_grid_v2_candidates(
     rows.sort(key=lambda row: row.candidate_id)
     selected = ()
     if plan.settings.slow_enrich_selected:
+        selectable = rows
+        if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1":
+            selectable = [row for row in rows if row.status == "ok"]
         selected = tuple(
             _slow_enrich_selected(
                 plan,
@@ -2558,7 +2580,7 @@ def execute_grid_v2_candidates(
                 selected_dataprep_cache,
                 compute_sharpe_daily=compute_sharpe_daily,
             )
-            for row in _rank_rows(rows, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
+            for row in _rank_rows(selectable, plan.settings.primary_metric)[: max(0, int(plan.settings.top_n))]
         )
     evaluation_seconds = time.time() - eval_started
     chunk_estimates = tuple(chunk.estimate for chunk in chunks)
@@ -4117,6 +4139,14 @@ def _pack_table_config_arrays(
     table = plan.candidate_table
     indices = np.asarray(tuple(int(index) for index in candidate_indices), dtype=np.int64)
     arrays = _empty_config_arrays(int(indices.shape[0]))
+    if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1":
+        from .engine_v2.compiled_kernel import pack_compiled_config_arrays_from_rows
+        # Typed accessors retain table semantics without materializing full candidates.
+        return pack_compiled_config_arrays_from_rows(row_count=len(indices),
+            get_value=lambda row, name, default: table.param_value_for_index(int(indices[row]), name)
+                if table.has_param_for_index(int(indices[row]), name) else default,
+            get_modes=lambda row: table.modes_for_index(int(indices[row])), trade_start_idx=trade_start_idx,
+            profile=plan.profile, admission_rules=plan.settings.admission_rules)
     if indices.size == 0:
         return arrays
 
@@ -4405,6 +4435,9 @@ def _row_from_compiled_output(
     params: Mapping[str, Any] | None = None,
     max_drawdown_mtm_pct: float | None = None,
 ) -> GridV2ResultRow:
+    from .engine_v2.contracts import GUARDRAIL_FLAG_EXECUTION_ERROR
+    if int(values[OUTPUT_FLAGS]) & GUARDRAIL_FLAG_EXECUTION_ERROR:
+        return _error_row(plan, candidate_index, ValueError("Admission execution failed: corrupt capital or unrepresentable sizing."))
     table = plan.candidate_table
     idx = int(candidate_index)
     variant_name = table.variant_names[int(table.variant_codes[idx])]
@@ -4580,6 +4613,7 @@ def _slow_enrich_selected(
     if data is None:
         data = hooks.build_execution_data(df, normalized_params)
     run = run_v2_strategy(
+        admission_rules=plan.settings.admission_rules,
         data=data,
         profile=plan.profile,
         params=normalized_params,
@@ -4613,6 +4647,7 @@ def _slow_enrich_selected(
         row=row,
         metrics=_jsonable_mapping(metrics),
         guardrail_summary=_guardrail_mapping(run.guardrail_summary),
+        entry_diagnostics=getattr(run.strategy_result, "entry_diagnostics", None),
     )
 
 

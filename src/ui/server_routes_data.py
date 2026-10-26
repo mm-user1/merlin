@@ -559,7 +559,8 @@ def register_routes(app):
                 root = resolve_root(config.get("data_input_root_override", source["pack_root"]))
                 prepared = prepare_manual_input(config["data_input"], root_override=str(root),
                     date_filter=True, start=start_date, end=end_date,
-                    warmup_bars=execution_context.warmup_bars)
+                    warmup_bars=execution_context.warmup_bars,
+                    admission_params=execution_context.base_params if "entry_admission" in config else None)
             except (ValueError, OSError) as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
             data_source = "original_parquet"
@@ -663,6 +664,8 @@ def register_routes(app):
 
         try:
             results_payload = run_period_test_for_trials(
+                admission_rules=prepared.admission_rules if prepared is not None else None,
+                diagnostic_scope="manual",
                 df=df,
                 strategy_id=study.get("strategy_id"),
                 warmup_bars=int(warmup_bars),
@@ -709,6 +712,8 @@ def register_routes(app):
 
         if prepared is not None:
             results_json["config"]["data_input"] = prepared.facts
+            if prepared.entry_admission is not None:
+                results_json["config"].update(entry_admission=prepared.entry_admission, fixed_params=fixed_params)
 
         trials_tested_csv = ",".join(str(int(n)) for n in trial_numbers)
         test_id = save_manual_test_to_db(
@@ -791,7 +796,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -846,7 +851,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -893,12 +898,12 @@ def register_routes(app):
 
         if is_parquet:
             try:
-                frame, idx, dates = replay_oos_input(study, trial)
+                frame, idx, dates, rules = replay_oos_input(study, trial)
             except (ValueError, OSError) as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
             csv_path = ""
             oos_start, oos_end = dates["start"], dates["end"]
-            export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx}
+            export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules}
         else:
             oos_start = study.get("oos_test_start_date")
             oos_end = study.get("oos_test_end_date")
@@ -978,7 +983,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -1270,7 +1275,7 @@ def register_routes(app):
         )
 
         equity_curve, timestamps, error = _run_equity_export(
-            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1371,7 +1376,7 @@ def register_routes(app):
         )
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1465,7 +1470,9 @@ def register_routes(app):
                 return jsonify({"error": "Failed to prepare dataset with warmup."}), HTTPStatus.BAD_REQUEST
 
             try:
-                result = strategy_class.run(df_prepared, params, trade_start_idx)
+                from core.engine_v2.admission import run_strategy
+                result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
+                    admission_rules=prepared.admission_rules if prepared is not None else None)
             except Exception as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 

@@ -81,6 +81,8 @@ class OptimizationConfig:
     csv_original_name: Optional[str] = None
     v2_runtime: Optional[Dict[str, Any]] = None
     data_input: Optional[Dict[str, Any]] = None
+    admission_rules: Any = None
+    entry_admission: Optional[Dict[str, Any]] = None
 
     # Strategy-specific execution defaults
     contract_size: float = 1.0

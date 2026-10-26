@@ -757,6 +757,12 @@ def register_routes(app):
                 """
             )
             rows = cursor.fetchall()
+            from core.engine_v2.admission import aggregate_entries
+            executions = {}
+            for window in conn.execute("SELECT study_id, window_id, entry_diagnostics_json FROM wfa_windows"):
+                diagnostics = _parse_json_dict(window["entry_diagnostics_json"])
+                executions.setdefault(window["study_id"], []).append((window["window_id"], diagnostics.get("oos")))
+            entry_summaries = {key: aggregate_entries(values) for key, values in executions.items()}
 
         studies: List[Dict[str, Any]] = []
         data_period_counts: Dict[Tuple[str, str], int] = {}
@@ -963,6 +969,7 @@ def register_routes(app):
                     "profitable_windows_pct": profitable_windows_pct,
                     "median_window_profit": _safe_float(row_dict.get("median_window_profit")),
                     "median_window_wr": _safe_float(row_dict.get("median_window_wr")),
+                    "entry_diagnostics": entry_summaries.get(row_dict.get("study_id")),
                     "has_equity_curve": has_equity_curve,
                     "equity_start_ts": equity_start_ts or None,
                     "equity_end_ts": equity_end_ts or None,

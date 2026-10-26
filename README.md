@@ -10,6 +10,8 @@ optimization platform with SQLite persistence and a Flask single-page web UI.
 - Backtester V2 optimization through deterministic core-owned Grid V2,
   including full and budgeted sampled planning.
 - Fixed and Adaptive walk-forward analysis with stitched OOS results.
+- Opt-in V2 risk-bracket admission for Parquet instruments, with a fixed entry
+  leverage cap and selected-run diagnostics across testing and WFA.
 - SQLite study history, multiple databases, manual/forward/OOS testing, and
   trade export.
 - Start, Results, and Analytics pages, saved study sets, and a scheduled run

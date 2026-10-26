@@ -18,6 +18,46 @@ must match the canonical reference for every metric they advertise.
 - Strategy Lab projects a fixed research schema from certified V2 execution;
   its MTM drawdown is not a public Merlin optimization metric.
 
+## Entry admission diagnostics
+
+Only `risk_bracket_v1` produces authoritative selected-run entry diagnostics:
+
+```json
+{"version":1,"scope":"is","maxEntryLeverageUsed":7.0,"leverageCapSkippedEntries":26}
+```
+
+Maximum is over accepted next-open fills using notional divided by realized
+balance after entry fee, including same-bar exits. It is null with no fills.
+Skips count only finite leverage strictly above the configured cap, once per
+pending order; minimum quantity/notional, unavailable inputs, invalid brackets,
+undefined leverage and occupied/suppressed signals do not count. This is an entry
+statistic, not simultaneous portfolio margin or maximum holding-time exposure.
+
+Selected Slow is authoritative. Nullable `trials.entry_diagnostics_json` maps
+`is`, `ft`, `oos_test`; `wfa_windows.entry_diagnostics_json` maps `is`, `oos`.
+`wfa_window_trials.module_metrics_json.entry_diagnostics` stores the selected
+module execution, and manual `results_json` entries carry scope `manual`.
+Transient/reference scope is `execution`. No historical backfill is performed.
+Stress selections use saved IS diagnostics; perturbations enforce the cap but
+their diagnostics are neither persisted individually nor summed into this card.
+
+Whole WFA/stitched summaries aggregate distinct actual OOS windows only. Selected
+IS is separate; a collapsed window header uses that window's OOS. Adaptive
+truncation retains fill leverage only for surviving trades, including the rule
+that an early entry with a later discarded exit contributes nothing. Refusals
+are retained through the inclusive trigger-time cutoff within the live interval.
+Delayed prefixes add no events. Proven no-trade/FT-rejected windows have null
+maximum and zero skips; missing/failed execution is unavailable. Aggregation is
+read-only and never sums optimizer populations or alternative module executions.
+Analytics deduplicates selected study identities; any missing included diagnostic
+makes a mixed aggregate unavailable.
+
+The last WFA/Analytics card is `Max Entry Lev / Skipped`, after OOS Win Rate (Med),
+with no tooltip. Non-WFA Optimize shows only this card under the chart for selected
+IS/FT/OOS/manual rows (Stress uses IS). Formats are `7.00× / 26`, `— / 0`, `— / 26`
+or `N/A` for unavailable/old data. The configured cap remains in Parameters.
+Selection/loading/error transitions clear stale values; saved views need no pack.
+
 ## Evaluation boundary
 
 `StrategyResult.metric_start_idx` is the first evaluation observation in the

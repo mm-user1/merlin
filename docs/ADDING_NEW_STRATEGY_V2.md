@@ -11,6 +11,26 @@ Optimize and WFA requests use explicit `optimization_mode="grid"`; do not add
 an Optuna smoke path. Historical Optuna compatibility is a platform concern,
 not part of a new strategy package.
 
+### Optional risk-bracket entry admission
+
+For a new strict ATR/swing RR bracket, top-level
+`execution.entryAdmission="risk_bracket_v1"` opts into generic admission in both
+reference and compiled Grid. Declare `maxEntryLeverage` as a fixed execution
+float, default 8, label `Max Entry Leverage`, group `Risk`; do not declare
+`contractSize`. Omit `stopMaxPct` to disable that filter, or declare a finite
+execution value. No trailing, price rounding, variant-level admission or cap
+optimization/ties/selectors are supported. Existing strategies are not migrated.
+
+Continue providing normal signals/dataprep and parameter normalization. Pass the
+explicit validated `admission_rules` argument when calling `run_v2_strategy`
+directly; the application adapter supplies this context for registered profiles.
+Never read a pack inside strategy signals, candidate execution or workers, and
+never import Pattern Lab. Application runs require Parquet; CSV CLI/Strategy Lab
+reject this mode. Verify both packing routes, actual spawned workers, saved replay
+and selected diagnostics as described in [Architecture](engine_v2/ARCHITECTURE.md)
+and [Parquet inputs](PARQUET_INPUTS.md). Synthetic generic-engine coverage alone
+does not establish Pine parity or market performance for a new strategy.
+
 ## 1. Freeze the external execution contract
 
 Before coding, record the exact Pine/external source and execution properties:

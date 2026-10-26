@@ -591,9 +591,16 @@ def _execute_backtest_request(
         if "dataInput" in request.form:
             if not strategy_context.is_v2:
                 raise ValueError("Parquet inputs require Backtester V2.")
-            prepared = replay_config({"data_input": json.loads(request.form["dataInput"])})
+            from core.engine_v2.admission import uses_admission, read_admission_envelope
+            replay = {"data_input": json.loads(request.form["dataInput"]), "fixed_params": payload}
+            if uses_admission(strategy_context.config):
+                replay["entry_admission"] = json.loads(request.form.get("entryAdmission", "null"))
+                read_admission_envelope(replay["entry_admission"], payload.get("maxEntryLeverage"))
+            prepared = replay_config(replay)
         else:
             prepared = prepare_request(request.form, strategy_context, payload, warmup_bars)
+        if prepared is not None and prepared.entry_admission is not None:
+            payload["maxEntryLeverage"] = prepared.entry_admission["maxEntryLeverage"]
         if request.path.endswith("/trades") and prepared is not None and "dataInput" not in request.form:
             raise ValueError("Download requires the dataInput returned by the displayed backtest.")
     except (ValueError, OSError) as exc:
@@ -663,7 +670,9 @@ def _execute_backtest_request(
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
 
     try:
-        result = strategy_class.run(df, payload, trade_start_idx)
+        from core.engine_v2.admission import run_strategy
+        result = run_strategy(strategy_class, df, payload, trade_start_idx,
+                              admission_rules=prepared.admission_rules if prepared is not None else None)
     except ValueError as exc:
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
     except Exception:  # pragma: no cover - defensive
@@ -676,6 +685,7 @@ def _execute_backtest_request(
         "csv_name": csv_name,
         "warmup_bars": warmup_bars,
         "data_input": prepared.facts if prepared is not None else None,
+        "entry_admission": prepared.entry_admission if prepared is not None else None,
     }, None
 
 
@@ -687,11 +697,16 @@ def _run_trade_export(
     warmup_bars: int,
     prepared_frame=None,
     prepared_trade_start_idx=None,
+    admission_rules=None,
 ) -> Tuple[Optional[List[Any]], Optional[str]]:
-    from strategies import get_strategy
+    from strategies import get_strategy, get_strategy_config
+    from core.engine_v2.admission import uses_admission
 
     try:
         strategy_class = get_strategy(strategy_id)
+        if (prepared_frame is None and getattr(strategy_class, "STRATEGY_ID", None)
+                and uses_admission(get_strategy_config(strategy_class.STRATEGY_ID))):
+            raise ValueError("risk_bracket_v1 export requires prepared Parquet input.")
     except ValueError as exc:
         return None, str(exc)
 
@@ -720,7 +735,8 @@ def _run_trade_export(
             return None, "Failed to prepare dataset with warmup."
 
     try:
-        result = strategy_class.run(df, payload, trade_start_idx)
+        from core.engine_v2.admission import run_strategy
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules)
     except Exception as exc:
         return None, str(exc)
 
@@ -735,11 +751,16 @@ def _run_equity_export(
     warmup_bars: int,
     prepared_frame=None,
     prepared_trade_start_idx=None,
+    admission_rules=None,
 ) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
-    from strategies import get_strategy
+    from strategies import get_strategy, get_strategy_config
+    from core.engine_v2.admission import uses_admission
 
     try:
         strategy_class = get_strategy(strategy_id)
+        if (prepared_frame is None and getattr(strategy_class, "STRATEGY_ID", None)
+                and uses_admission(get_strategy_config(strategy_class.STRATEGY_ID))):
+            raise ValueError("risk_bracket_v1 export requires prepared Parquet input.")
     except ValueError as exc:
         return None, None, str(exc)
 
@@ -768,7 +789,8 @@ def _run_equity_export(
             return None, None, "Failed to prepare dataset with warmup."
 
     try:
-        result = strategy_class.run(df, payload, trade_start_idx)
+        from core.engine_v2.admission import run_strategy
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules)
     except Exception as exc:
         return None, None, str(exc)
 
@@ -886,6 +908,12 @@ class ResolvedStoredExecutionContext:
         for name in V2_RESERVED_RUNTIME_PARAM_NAMES:
             params.pop(name, None)
             candidate.pop(name, None)
+        from core.engine_v2.admission import uses_admission, positive_cap
+        if uses_admission(self.strategy.config):
+            if "maxEntryLeverage" in candidate and positive_cap(candidate["maxEntryLeverage"]) != positive_cap(params.get("maxEntryLeverage")):
+                raise ValueError("Candidate maxEntryLeverage disagrees with saved execution context.")
+            if "contractSize" in candidate:
+                raise ValueError("risk_bracket_v1 does not accept contractSize.")
         params.update(candidate)
         runtime = dict(self.runtime_values or {})
         if operation_start is not None or operation_end is not None:
@@ -1088,6 +1116,18 @@ def _resolve_stored_execution_context(
         config = raw_config if isinstance(raw_config, dict) else {}
     raw_fixed = config.get("fixed_params")
     base_params = deepcopy(raw_fixed) if isinstance(raw_fixed, dict) else {}
+    from core.engine_v2.admission import uses_admission, read_admission_envelope, execution_admission
+    if uses_admission(context.config) or "entry_admission" in config:
+        try:
+            if not uses_admission(context.config):
+                raise ValueError("Saved admission context disagrees with the resolved execution profile.")
+            if "data_input" not in config:
+                raise ValueError("Saved risk bracket execution requires Parquet input.")
+            rules = read_admission_envelope(config.get("entry_admission"), base_params.get("maxEntryLeverage"))
+            execution_admission(context.profile, base_params, rules)
+        except ValueError as exc:
+            raise _validation_error(code="V2_STORED_ADMISSION_UNAVAILABLE", strategy_id=strategy_id,
+                path="config_json.entry_admission", message=f"{exc} A new study is required.") from exc
 
     if not context.is_v2:
         warmup_bars = int(
@@ -1923,6 +1963,10 @@ def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[
             strategy_id,
             warmup_bars if warmup_bars is not None else 1000,
         )
+        if context.profile and context.profile.modes.get("entryAdmission"):
+            from core.engine_v2.admission import read_admission_envelope
+            config_obj.admission_rules = read_admission_envelope(config.get("entry_admission"),
+                (config.get("fixed_params") or {}).get("maxEntryLeverage"))
         return preview_grid_parameter_space(config_obj)
     except V2ValidationError as exc:
         raise _grid_settings_error(

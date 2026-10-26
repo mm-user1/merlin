@@ -1,13 +1,13 @@
 """Merlin's strict, replayable market input boundary.
 
 Pack I/O ends before execution. Prepared frames travel as explicit transient
-arguments; only ``facts`` may enter persisted configuration.
+arguments; only candle ``facts`` and the optional admission envelope are persisted.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
@@ -189,6 +189,8 @@ class PreparedInput:
     frame: pd.DataFrame
     trade_start_idx: int
     facts: dict
+    admission_rules: object = None
+    entry_admission: dict | None = None
 
     def window(self, start, end, warmup_bars):
         return prepare_dataset_with_warmup(self.frame, start, end, warmup_bars)
@@ -233,10 +235,22 @@ def _prepare(session, source, **range_options):
     return _load(session, source, resolve_range(source, entry, **range_options))
 
 
-def prepare_input(source, *, cancelled=None, **range_options):
+def _with_admission(session, prepared, admission_params):
+    if admission_params is None:
+        return prepared
+    from .engine_v2.admission import AdmissionRules, admission_envelope
+    instrument = prepared.facts["source"]["instrument_id"]
+    entry = next(e for e in manifest.read_manifest(session.data_root)["instruments"]
+                 if e["instrument_id"] == instrument)
+    rules = AdmissionRules.from_entry(entry)
+    return replace(prepared, admission_rules=rules,
+                   entry_admission=admission_envelope(rules, admission_params.get("maxEntryLeverage", 8)))
+
+
+def prepare_input(source, *, cancelled=None, admission_params=None, **range_options):
     source = normalize_source(source)
     with pack_session(source["pack_root"], cancelled=cancelled) as session:
-        return _prepare(session, source, **range_options)
+        return _with_admission(session, _prepare(session, source, **range_options), admission_params)
 
 
 def validate_pin(pin):
@@ -277,16 +291,24 @@ def _replay(session, pin, source):
     return PreparedInput(prepared.frame, prepared.trade_start_idx, deepcopy(pin))
 
 
-def replay_input(pin, *, root_override=None, cancelled=None):
+def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None):
     source = validate_pin(pin)
     root = root_override if root_override is not None else source["pack_root"]
     with pack_session(root, cancelled=cancelled) as session:
-        return _replay(session, pin, source)
+        prepared = _replay(session, pin, source)
+        if entry_admission is None:
+            return prepared
+        from .engine_v2.admission import read_admission_envelope
+        pinned = read_admission_envelope(entry_admission, admission_cap)
+        current = _with_admission(session, prepared, {"maxEntryLeverage": admission_cap})
+        if pinned.semantic() != current.admission_rules.semantic():
+            raise DataInputError("Effective instrument rules changed; saved execution replay refused.")
+        return replace(prepared, admission_rules=pinned, entry_admission=deepcopy(entry_admission))
 
 
-def prepare_manual_input(pin, *, root_override=None, cancelled=None, **range_options):
+def prepare_manual_input(pin, *, root_override=None, cancelled=None, admission_params=None, **range_options):
     source = validate_pin(pin)
     source["pack_root"] = str(Path(root_override or source["pack_root"]).resolve())
     with pack_session(source["pack_root"], cancelled=cancelled) as session:
         _replay(session, pin, source)
-        return _prepare(session, source, **range_options)
+        return _with_admission(session, _prepare(session, source, **range_options), admission_params)

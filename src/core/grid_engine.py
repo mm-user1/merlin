@@ -527,6 +527,7 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
     enabled_variants = tuple(getattr(config, "grid_enabled_modes", []) or ()) or None
     compiled_workers = max(1, int(getattr(config, "worker_processes", 1) or 1))
     return GridV2Settings(
+        admission_rules=getattr(config, "admission_rules", None),
         top_n=max(0, int(getattr(config, "grid_top_candidates", 10) or 10)),
         max_signal_cache_mb=_grid_v2_max_cache_mb_from_config(config),
         worker_multiplier=1,
@@ -577,6 +578,8 @@ def _grid_v2_strategy_config_with_range_overrides(
 
     config_copy: Dict[str, Any] = deepcopy(dict(strategy_config))
     param_ranges = getattr(config, "param_ranges", {}) or {}
+    if (strategy_config.get("execution") or {}).get("entryAdmission") and "maxEntryLeverage" in param_ranges:
+        raise ValueError("maxEntryLeverage is fixed and cannot have an optimization range.")
     if not param_ranges:
         return config_copy
 
@@ -1564,10 +1567,12 @@ def _grid_v2_slow_result(
         data=data,
         profile=plan.profile,
         params=params,
+        admission_rules=plan.settings.admission_rules,
         trade_start_idx=trade_start_idx,
         compute_sharpe_daily=compute_sharpe_daily,
     )
     basic_metrics = run.basic_metrics
+    from .engine_v2.admission import result_diagnostics
     advanced_metrics = run.advanced_metrics
     result = OptimizationResult(
         params=dict(raw_params),
@@ -1594,6 +1599,7 @@ def _grid_v2_slow_result(
         consistency_score=advanced_metrics.consistency_score,
         optuna_trial_number=int(row.candidate_id),
     )
+    result.entry_diagnostics = result_diagnostics(run.strategy_result, "is")
     generation_mode = str(
         plan.per_block_counts.get(row.grid_mode_name, {}).get(
             "generation_mode", "full_enumeration_v2"
@@ -1725,6 +1731,16 @@ def _run_grid_v2_optimization(
         get_strategy_config(config.strategy_id),
         config,
     )
+    from .engine_v2.admission import uses_admission, read_admission_envelope, positive_cap
+    if uses_admission(strategy_config):
+        from .data_input import validate_pin
+        if prepared_frame is None or config.data_input is None:
+            raise ValueError("risk_bracket_v1 application execution requires prepared Parquet input.")
+        source = validate_pin(config.data_input)
+        config.fixed_params["maxEntryLeverage"] = positive_cap(config.fixed_params.get("maxEntryLeverage", 8))
+        pinned = read_admission_envelope(config.entry_admission, config.fixed_params["maxEntryLeverage"])
+        if (config.admission_rules != pinned or pinned.instrument_id != source["instrument_id"]):
+            raise ValueError("Prepared admission rules disagree with the pinned execution context.")
     strategy_class = get_strategy(config.strategy_id)
     strategy_module = importlib.import_module(strategy_class.__module__)
     hooks = GridV2StrategyHooks.from_strategy(strategy_module)

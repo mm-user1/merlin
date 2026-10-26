@@ -26,6 +26,30 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Risk-bracket admission uses `tests/v2/test_v2_entry_admission.py`,
+`tests/v2/test_v2_admission_grid.py`, `tests/test_entry_admission_integration.py`,
+`tests/test_entry_admission_adaptive.py`, `tests/server/test_entry_admission.py`
+and `tests/test_js_entry_admission.py`, plus the affected V2/server/data-input,
+Grid/WFA/FT/Stress/storage/Analytics/export/capital suites. The fixture under
+`tests/fixtures/admission_strategy/` is explicitly registered only for tests or
+an isolated preview. Its spawn wrapper registers the fixture then calls the
+production initializer with unchanged arguments; no frame/rule injection or
+mock worker execution. Collision checks protect the registry.
+
+The Grid test's `[1]` and `[2]` selectors require those actual Numba thread
+capacities; a one-CPU host cannot substitute for Windows two-thread evidence.
+Two-process spawn remains a distinct gate. The new JS wrapper also accepts
+`MERLIN_NODE_EXECUTABLE` for an existing compatible runtime (for Electron's
+bundled Node, use process-local `ELECTRON_RUN_AS_NODE=1`); no installation is
+implied. Browser layout/selection remains an owner check.
+
+Preserve the existing Pattern Lab bracket, bracket-consistency, account execution,
+account verification, account-study integration, carried selection and identity
+tests when shared V2 helpers change. Prospective source hashes change honestly;
+unchanged numerical fixtures do not imply unchanged implementation identity or
+permission to rewrite sealed artifacts. Strategy Lab stays CSV-only and rejects
+the new mode; its planning/packing preservation tests remain applicable.
+
 For Merlin Parquet input changes, add `tests/test_data_input.py`,
 `tests/test_data_input_workers.py`, `tests/server/test_data_input_routes.py`,
 `tests/server/test_data_input_timings.py` and `tests/test_js_parquet_input.py` to

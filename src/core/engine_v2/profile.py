@@ -49,6 +49,7 @@ VALID_PARAMETER_ROLES = {"signal", "execution", "runtime"}
 # Binding metadata remains the authority for active execution parameters. Mode
 # and combination support is validated once by execution_modes.py.
 MODE_PARAMETER_BINDINGS: tuple[ModeBinding, ...] = (
+    ModeBinding("entryAdmission", "risk_bracket_v1", "admission1", ("maxEntryLeverage",)),
     ModeBinding("topology", "signal_reversal", "phase34"),
     ModeBinding("entryOrder", "market_next_open", "phase1"),
     ModeBinding("stop", "atr_swing", "phase1", ("stopX", "stopLP", "stopMaxPct"), ("atr", "rolling_low_high")),
@@ -367,6 +368,9 @@ def _parse_variants(
                 variant=str(name),
                 code="V2_INVALID_PROFILE",
             )
+        if "entryAdmission" in payload:
+            raise _error(strategy_id, "entryAdmission is profile-wide; variants must not declare it.",
+                         path=f"execution.variants.{name}.entryAdmission", code="V2_INVALID_PROFILE")
         modes = dict(base_modes)
         modes.update({str(key): canonical_selector_key(value) for key, value in payload.items()})
         variants[str(name)] = VariantSpec(str(name), modes)
@@ -427,6 +431,8 @@ def _consumed_params_for_modes(modes: Mapping[str, Any]) -> set[str]:
         binding = _binding_for(field, value)
         if binding is not None:
             consumed.update(binding.consumes_params)
+    if modes.get("entryAdmission") == "risk_bracket_v1":
+        consumed.discard("contractSize")
     return consumed
 
 
@@ -449,7 +455,10 @@ def _validate_variants(
                 continue
             if binding.status == "later":
                 raise _error(strategy_id, f"{strategy_id}: variant '{name}' uses uncertified {field}={value!r}.", path=f"execution.variants.{name}.{field}", variant=name, code="V2_UNSUPPORTED_EXECUTION_MODE")
-            missing = [param for param in binding.consumes_params if param not in params]
+            required = binding.consumes_params
+            if variant.modes.get("entryAdmission") == "risk_bracket_v1":
+                required = tuple(p for p in required if p != "contractSize" and (p != "stopMaxPct" or p in params))
+            missing = [param for param in required if param not in params]
             if missing:
                 raise _error(strategy_id, f"{strategy_id}: variant '{name}' mode {field}={value!r} consumes undeclared parameter(s) {missing}.", path=f"execution.variants.{name}.{field}", variant=name, code="V2_UNDECLARED_CONSUMED_PARAMETER")
     return families
@@ -659,6 +668,25 @@ def parse_execution_profile(config: Mapping[str, Any]) -> ExecutionProfile:
     defaults = _parameter_defaults(params)
     roles = _parameter_roles(config)
     base_modes = _base_modes(execution)
+    if base_modes.get("entryAdmission") == "risk_bracket_v1":
+        from .admission import positive_cap
+        if "contractSize" in params:
+            raise _error(strategy_id, "risk_bracket_v1 must not declare contractSize; instrument rules own sizing.", path="parameters.contractSize", code="V2_INVALID_PROFILE")
+        cap_spec = params.get("maxEntryLeverage", {})
+        if roles.get("maxEntryLeverage") != "execution" or _is_optimized(cap_spec):
+            raise _error(strategy_id, "maxEntryLeverage must be a fixed execution parameter.", path="parameters.maxEntryLeverage", code="V2_INVALID_PROFILE")
+        try:
+            valid_default = positive_cap(cap_spec.get("default")) == 8
+        except ValueError:
+            valid_default = False
+        if not valid_default:
+            raise _error(strategy_id, "maxEntryLeverage must declare default 8.", path="parameters.maxEntryLeverage.default", code="V2_INVALID_PROFILE")
+        if cap_spec.get("depends_on") or any(isinstance(spec, Mapping) and
+                "maxEntryLeverage" in _dependency_names(spec.get("depends_on"), strategy_id=strategy_id, parameter_name=name)
+                for name, spec in params.items() if spec.get("depends_on")):
+            raise _error(strategy_id, "maxEntryLeverage cannot participate in dependencies.", path="parameters.maxEntryLeverage", code="V2_INVALID_PROFILE")
+        if (execution.get("variantSelector") or {}).get("param") == "maxEntryLeverage":
+            raise _error(strategy_id, "maxEntryLeverage cannot be a variant selector.", path="execution.variantSelector", code="V2_INVALID_PROFILE")
     variants = _parse_variants(execution, base_modes, strategy_id)
     selector = _parse_selector(execution, variants, params, roles, strategy_id)
     families = _validate_variants(strategy_id=strategy_id, variants=variants, params=params)

@@ -114,14 +114,15 @@ async function runWalkForwardRequest(formData, signal = null) {
   return data;
 }
 
-async function fetchGridPreviewRequest(config, strategyId, warmupBars) {
+async function fetchGridPreviewRequest(config, strategyId, warmupBars, source = null) {
   const response = await fetch('/api/grid/preview', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       config,
       strategyId,
-      warmupBars
+      warmupBars,
+      ...(source ? { source } : {})
     })
   });
 

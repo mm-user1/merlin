@@ -28,6 +28,26 @@ The TZ37 follow-up adds metadata-driven internal execution variants and same-rol
 boolean dependency collapse for S03-like Grid V2 planning without changing V1
 runtime paths.
 
+## Synthetic risk-bracket admission coverage (2026-10-26)
+
+`risk_bracket_v1` has generic-engine synthetic coverage in
+`tests/v2/test_v2_entry_admission.py`, `test_v2_admission_grid.py`,
+`tests/test_entry_admission_integration.py`, `test_entry_admission_adaptive.py`,
+`tests/server/test_entry_admission.py` and `tests/js/entry_admission.test.cjs`.
+The importable test-only strategy is registered explicitly in parent/spawned test
+processes and is absent from normal discovery. This is not Pine/PLH parity,
+production-strategy certification or evidence of market edge.
+
+Coverage includes independent IEEE/decimal boundaries, long/short/gap fills,
+fee/cap precedence, exact adjacent cap values, defensive failures, both packers,
+full/sampled Grid, selected Slow, separate legacy/new plans, one/two compiled
+threads, actual spawned FT/Stress with a locked source, strict replay and current
+manual rules, non-100 capital, Fixed/Adaptive delayed/rejected OOS, retained-trade
+and inclusive-cutoff diagnostics, persistence and UI scope. Existing historical
+certification rows and identity pins below remain preservation authorities.
+Owner browser appearance and platform-specific evidence are separate review gates;
+Node assertions are not visual acceptance.
+
 ## Fields
 
 - Profile feature set

@@ -122,6 +122,8 @@ def run_period_test_for_trials(
         Callable[[Dict[str, Any], pd.Timestamp, pd.Timestamp], Dict[str, Any]]
     ] = None,
     preparation_facts: Optional[Dict[str, Any]] = None,
+    admission_rules=None,
+    diagnostic_scope="oos_test",
 ) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         raise ValueError("Dataset is empty for period test.")
@@ -153,7 +155,8 @@ def run_period_test_for_trials(
             params["start"] = start_ts
             params["end"] = end_ts
 
-        result = strategy_class.run(df_prepared, params, trade_start_idx)
+        from .engine_v2.admission import run_strategy, result_diagnostics
+        result = run_strategy(strategy_class, df_prepared, params, trade_start_idx, admission_rules=admission_rules)
         test_metrics = build_test_metrics(result, resolve_execution_capital(strategy_id, params))
         original_metrics = original_metrics_resolver(trial)
         comparison = calculate_comparison_metrics(
@@ -169,6 +172,7 @@ def run_period_test_for_trials(
                 "original_metrics": original_metrics,
                 "test_metrics": test_metrics,
                 "comparison": comparison,
+                "entry_diagnostics": result_diagnostics(result, diagnostic_scope),
             }
         )
 

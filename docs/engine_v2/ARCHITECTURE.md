@@ -45,6 +45,59 @@ Optional validated modes are `maxDays=true|false`,
 `none`, `ma`, `r_distance`, `chandelier`, and `fixed_af_sar`, but only the
 compositions above are valid.
 
+### Application risk-bracket admission
+
+Profiles may opt in at top-level `execution.entryAdmission="risk_bracket_v1"`.
+This position-family mode requires next-open market entry, ATR/swing stop,
+risk-per-trade sizing, RR target, no trail/activation, strict-close boundary and
+no price rounding. Existing max-days and `margin=off|report_only` remain distinct.
+Every variant must satisfy this composition; variant-level admission is invalid.
+Absent admission preserves existing profiles and identity pins.
+
+The profile declares fixed execution parameter `maxEntryLeverage`, default 8,
+label `Max Entry Leverage`, group `Risk`. Positive finite fractional values are
+valid; booleans/null/nonpositive/nonfinite values and Grid axes/ranges/subsets,
+ties or selectors involving this cap are rejected. New runs resolve an absent cap
+once and save it. `contractSize` declarations/overrides are forbidden: validated
+instrument rules own the base-unit step. `stopMaxPct` is optional; an undeclared
+override is invalid, and a declared finite filter acts before sizing.
+
+Application entry requires Parquet. `PreparedInput.admission_rules` is an immutable
+`AdmissionRules` carrier resolved under the preparation session's pack lock, then
+passed explicitly through `OptimizationConfig`, Grid settings, selected reference
+execution, WFA and spawned FT/Stress workers. Workers consume the prepared frame
+and rules without reopening packs. `entry_admission` is the version-1 saved
+envelope; it pins the cap, effective decimal rules and validated source snapshot.
+See [Parquet inputs](../PARQUET_INPUTS.md) for conversion and replay semantics.
+Direct core and both compiled packers require rules too. CSV CLI and Strategy Lab
+generation reject this mode; V2 DSR remains unsupported.
+
+Eligible signal closes plan long first, inside entry bounds and outside warmup.
+Unavailable inputs, invalid stop/risk, exhausted finite capital, invalid target
+and stop width refuse before sizing. Nonfinite account state is an error. Sizing
+retains IEEE operation order: `floor((balance*riskPct/100/riskDistance)/step)*step`.
+Recover integer lots with rounding, never a second floor; unrepresentable sizing
+is an error. At next open, use unchanged quantity and
+`abs(open*quantity)/(balance-entryFee)`. Nonfinite arithmetic, minimum notional and
+undefined denominator refuse before the cap; only a finite value strictly above
+the cap increments skips. Equality fills. Refusals charge no fee and do not resize.
+Immediate fill-bar exits still contribute executed leverage. Strict boundary and
+max-days ordering remain unchanged (four days on the established 30m example
+closes after 96.5 hours).
+
+Compiled output remains 26 columns. New-mode cap refusals use column 15 and
+executed leverage column 18, including margin-off. Execution-error FLAGS bit 256
+is decoded before count conversion; failed rows cannot enter new-mode selection
+and an all-error application population fails. Three constant-size configuration
+arrays add 24 bytes per position candidate to memory estimates. Grid has no
+per-bar policy callback or attempt trace. Selected reference runs use the V2-local
+`AdmissionStrategyResult` subclass with sparse accepted/refused entry events;
+shared `StrategyResult` and provider code remain unchanged.
+
+Diagnostics, retained Adaptive aggregation and storage/UI scope are defined in
+[Metrics](../METRICS.md#entry-admission-diagnostics). This application capability
+does not replace or change the separate historical policy API below.
+
 ### Opt-in reference admission and trace
 
 `run_reference_kernel(..., policy=EntryPolicy(...), trace=KernelTrace())` adds an

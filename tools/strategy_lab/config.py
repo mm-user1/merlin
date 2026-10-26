@@ -386,6 +386,8 @@ def _validate_strategy(strategy: Mapping[str, Any]) -> tuple[Mapping[str, Any], 
         ) from None
     if profile.engine != "v2":
         raise StrategyLabConfigError("generation.strategy.strategy_id: resolved profile is not V2.")
+    if profile.modes.get("entryAdmission"):
+        raise StrategyLabConfigError("Strategy Lab CSV execution does not support risk_bracket_v1; use Merlin Parquet execution.")
     return config, profile
 
 

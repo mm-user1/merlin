@@ -296,6 +296,9 @@ def register_routes(app):
                 strategy_context.strategy_id,
                 warmup_bars,
             )
+            if strategy_context.profile and strategy_context.profile.modes.get("entryAdmission"):
+                prepared = prepare_request(payload, strategy_context, optimization_config.fixed_params, warmup_bars)
+                optimization_config.admission_rules = prepared.admission_rules
             preview = preview_grid_parameter_space(optimization_config)
         except V2ValidationError as exc:
             return _validation_error_response(exc)
@@ -507,10 +510,9 @@ def register_routes(app):
 
         prepared = None
         try:
-            if "source" in data:
-                prepared = prepare_request(data, strategy_context, config_payload.get("fixed_params") or {},
-                                           warmup_bars if strategy_context.is_v2 else 1000,
-                                           cancelled=lambda: _is_run_cancelled(run_id))
+            prepared = prepare_request(data, strategy_context, config_payload.get("fixed_params") or {},
+                                       warmup_bars if strategy_context.is_v2 else 1000,
+                                       cancelled=lambda: _is_run_cancelled(run_id))
         except (ValueError, OSError) as exc:
             return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         if prepared is not None:
@@ -1118,6 +1120,8 @@ def register_routes(app):
             "metrics": result.to_dict(),
             "parameters": payload,
             "data_input": execution.get("data_input"),
+            "entry_admission": execution.get("entry_admission"),
+            "entry_diagnostics": getattr(result, "entry_diagnostics", None),
         })
 
 
@@ -1429,6 +1433,8 @@ def register_routes(app):
         optimization_config.csv_original_name = source_name
         if prepared is not None:
             optimization_config.data_input = prepared.facts
+            optimization_config.admission_rules = prepared.admission_rules
+            optimization_config.entry_admission = prepared.entry_admission
         if v2_runtime_metadata is not None:
             optimization_config.v2_runtime = v2_runtime_metadata
         optimizer_mode = str(getattr(optimization_config, "optimization_mode", "optuna") or "optuna").lower()
@@ -1679,7 +1685,7 @@ def register_routes(app):
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
-                **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 optuna_results=ft_candidates,
@@ -1748,7 +1754,7 @@ def register_routes(app):
                 st_source = "dsr"
 
             st_results, st_summary = run_stress_test(
-                **({"prepared_frame": prepared.frame} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 source_results=st_candidates,
@@ -1849,6 +1855,7 @@ def register_routes(app):
 
             oos_preparation = {} if prepared is not None else None
             oos_results_payload = run_period_test_for_trials(
+                admission_rules=prepared.admission_rules if prepared is not None else None,
                 df=df_oos,
                 strategy_id=strategy_id,
                 warmup_bars=int(warmup_bars),

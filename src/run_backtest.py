@@ -2,7 +2,7 @@ import argparse
 import pandas as pd
 
 from core.backtest_engine import load_data, prepare_dataset_with_warmup
-from strategies import get_strategy
+from strategies import get_strategy, get_strategy_config
 from strategies.s01_trailing_ma import S01Params
 
 DEFAULT_CSV_PATH = "data/raw/OKX_LINKUSDT.P, 15 2025.05.01-2025.11.20.csv"
@@ -58,6 +58,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    strategy_cls = get_strategy("s01_trailing_ma")
+    from core.engine_v2.admission import uses_admission
+    if uses_admission(get_strategy_config(strategy_cls.STRATEGY_ID)):
+        raise ValueError("The CSV CLI does not support risk_bracket_v1; use Merlin Parquet execution.")
     df = load_data(args.csv)
     params = build_default_params()
 
@@ -65,7 +69,6 @@ def main() -> None:
         df, params.start, params.end, args.warmup
     )
 
-    strategy_cls = get_strategy("s01_trailing_ma")
     result = strategy_cls.run(df_prepared, params.__dict__, trade_start_idx)
 
     print(f"Net Profit %: {result.net_profit_pct:.2f}")

@@ -1739,6 +1739,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
         <div class="value">${formatUnsignedPercent(medianWr, 1)}</div>
         <div class="label">OOS WIN RATE (MED)</div>
       </div>
+      ${window.EntryDiagnostics?.card(study.entry_diagnostics) || ""}
     `;
   }
 
@@ -1772,6 +1773,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS Wins</div></div>
       <div class="summary-card"><div class="value">-</div><div class="label">Avg WFE</div></div>
       <div class="summary-card"><div class="value">-</div><div class="label">Avg OOS P(med)</div></div>
+      ${window.EntryDiagnostics?.card(null) || ""}
     `;
   }
 
@@ -1887,6 +1889,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
         <div class="value ${avgOosProfitClass}">${formatSignedPercent(tail.avgOosProfitMed, 1)}</div>
         <div class="label">Avg OOS P(med)</div>
       </div>
+      ${window.EntryDiagnostics?.card(window.EntryDiagnostics.aggregate(selected)) || ""}
     `;
   }
 

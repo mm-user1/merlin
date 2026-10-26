@@ -14,6 +14,39 @@ Benchmark numbers are machine-dependent. Always record the machine, CPU, Python
 version, Numba version, thread environment, command, worker count, candidate
 count, and the full Grid V2 timings dict before comparing runs.
 
+## Risk-bracket admission preservation measurement (2026-10-26)
+
+Exact parent `68a101c9ddf9d07d37bda35e8d880a2234975cb5` was captured before editing.
+Windows, AMD64 Family 26 Model 68 Stepping 0, 24 available CPUs/Numba threads,
+Python 3.13.7, NumPy 2.3.3, Numba 0.65.1. The deterministic old S06 B2 bracket
+fixture has 12,000 synthetic 30m bars, 200 warmup bars, five actual candidates,
+two compiled threads and three selected reference reruns. Each process makes
+six complete Grid calls: first separately, then median of five warm calls.
+
+| Capture | First call (s) | Warm median (s) | Process peak RSS (MiB) |
+| --- | ---: | ---: | ---: |
+| Parent, populated cache | 0.3538 | 0.1011 | 185.28 |
+| Current, populated cache | 0.3783 | 0.1039 | 185.75 |
+| Parent, fresh cache/JIT | 30.5835 | 0.1187 | 354.79 |
+| Current, fresh cache/JIT | 42.7266 | 0.1486 | 373.45 |
+
+Populated-cache warm median increased about 2.8% (2.85 ms); this small fixture
+does not show material steady-state old-mode regression. Fresh-process JIT costs
+increased and post-JIT warm timings were noisier/slower; these costs are not
+hidden in the steady-state claim. No absolute speed guarantee is inferred.
+Output stays 26 columns; three position-candidate admission configuration arrays
+add 120 bytes for this five-candidate batch. Estimated stack bytes changed from
+985,040 to 985,160. Pack reads finish before execution; candidate evaluation has
+no per-bar Python admission callback or Grid attempt log.
+
+All numerical/status/guardrail fields, canonical identities, semantic keys and
+plan fingerprint match exactly. The original helper serialized its lazy `params`
+mapping as a memory-address repr; comparison excludes only that unusable field.
+The preserved canonical identity/semantic key still compares semantic parameters
+exactly. Original parent files/helper were not rewritten. Retained artifacts live
+under `docs/_work/dev_04_merlin/T03/code-review-inputs/`; they are review evidence,
+not operational dependencies. No market data or historical goldens were regenerated.
+
 ## TZ17-1 Stateful-Trail Engine Measurement
 
 Measured 2026-08-27 on Windows 10 build 19042 with Python 3.13.7, NumPy

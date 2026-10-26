@@ -211,6 +211,7 @@ function bindTableExpandToggle() {
 }
 
 async function activateTab(tabId) {
+  window.EntryDiagnostics?.show(null, ResultsState.mode !== 'wfa');
   ResultsState.activeTab = tabId;
   ResultsState.selectedRowId = null;
   updateTabsVisibility();
@@ -756,7 +757,7 @@ function calculateSummaryFromEquity(equityCurve) {
   return { final_net_profit_pct: finalNetProfitPct, max_drawdown_pct: maxDd };
 }
 
-async function applyStudyPayload(data) {
+async function applyStudyPayload(data, loadVersion = studyLoadVersion) {
   const study = data.study || {};
   ResultsState.studyId = study.study_id || ResultsState.studyId;
   ResultsState.studyName = study.study_name || ResultsState.studyName;
@@ -933,6 +934,7 @@ async function applyStudyPayload(data) {
         profitable_windows: storedStitched.profitable_windows ?? study.profitable_windows ?? profitableWindows,
         total_windows: storedStitched.total_windows ?? study.total_windows ?? totalWindows,
         median_window_profit: storedStitched.median_window_profit ?? study.median_window_profit ?? medianWindowProfit,
+        entry_diagnostics: storedStitched.entry_diagnostics,
         median_window_wr: storedStitched.median_window_wr ?? study.median_window_wr ?? medianWindowWr,
         worst_window_profit: storedStitched.worst_window_profit ?? study.worst_window_profit ?? null,
         worst_window_dd: storedStitched.worst_window_dd ?? study.worst_window_dd ?? null,
@@ -968,6 +970,7 @@ async function applyStudyPayload(data) {
   if (ResultsState.strategyId) {
     try {
       const strategyConfig = await fetchStrategyConfig(ResultsState.strategyId);
+      if (loadVersion !== studyLoadVersion) return false;
       ResultsState.strategyConfig = strategyConfig || {};
       ResultsState.strategy = {
         name: strategyConfig.name || ResultsState.strategyId,
@@ -1047,10 +1050,15 @@ async function applyStudyPayload(data) {
   updateResultsHeader();
 }
 
+let studyLoadVersion = 0;
+
 async function openStudy(studyId) {
   if (!studyId) return;
+  const loadVersion = ++studyLoadVersion;
+  window.EntryDiagnostics?.show(null, ResultsState.mode !== 'wfa');
   try {
     const data = await fetchStudyDetails(studyId);
+    if (loadVersion !== studyLoadVersion) return;
     ResultsState.studyId = studyId;
     ResultsState.studyName = data.study?.study_name || ResultsState.studyName;
 
@@ -1059,12 +1067,15 @@ async function openStudy(studyId) {
       return;
     }
 
-    await applyStudyPayload(data);
+    await applyStudyPayload(data, loadVersion);
+    if (loadVersion !== studyLoadVersion) return;
     if (ResultsState.activeTab === 'manual_tests') {
       await ensureManualTestSelection();
     }
+    if (loadVersion !== studyLoadVersion) return;
     setQueryStudyId(studyId);
     await loadStudiesList();
+    if (loadVersion !== studyLoadVersion) return;
     refreshResultsView();
   } catch (error) {
     console.warn('Failed to open study', error);
@@ -1212,13 +1223,18 @@ function bindTabs() {
 }
 
 async function fetchEquityCurve(result, options = null) {
+  const selection = [ResultsState.studyId, ResultsState.activeTab, ResultsState.selectedRowId, ResultsState.activeManualTest?.id].join('|');
+  const current = () => selection === [ResultsState.studyId, ResultsState.activeTab, ResultsState.selectedRowId, ResultsState.activeManualTest?.id].join('|');
+  try {
   if (ResultsState.studyId && ResultsState.hasDataInput) {
     const response = await fetch(`/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${result.trial_number}/equity`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ module: ResultsState.activeTab, testId: ResultsState.activeManualTest?.id })
     });
     const data = await response.json();
+    if (!current()) return null;
     if (!response.ok) {
+      window.EntryDiagnostics?.show(null, true);
       renderEquityChart([]);
       setComparisonLine(data.error || 'Pinned replay failed.');
       return null;
@@ -1254,13 +1270,23 @@ async function fetchEquityCurve(result, options = null) {
     body: formData
   });
   if (!response.ok) {
+    if (current()) window.EntryDiagnostics?.show(null, true);
     return null;
   }
   const data = await response.json();
+  if (!current()) return null;
   if (!data || !data.metrics) return null;
   const equity = data.metrics.equity_curve || data.metrics.balance_curve || [];
   const timestamps = data.metrics.timestamps || [];
   return { equity, timestamps };
+  } catch (error) {
+    if (current()) {
+      window.EntryDiagnostics?.show(null, true);
+      renderEquityChart([]);
+      setComparisonLine(error.message || 'Equity replay failed.');
+    }
+    return null;
+  }
 }
 
 function refreshResultsView() {
@@ -1299,8 +1325,7 @@ function refreshResultsView() {
     renderWindowIndicators(ResultsState.summary?.total_windows || ResultsState.results?.length || 0);
   } else {
     setComparisonLine('');
-    const summaryRow = document.querySelector('.summary-row');
-    if (summaryRow) summaryRow.style.display = 'none';
+    window.EntryDiagnostics?.show(null, true);
     const periodLabel = getActivePeriodLabel();
     if (ResultsState.activeTab === 'forward_test') {
       const sortLabel = formatSortMetricLabel(ResultsState.forwardTest.sortMetric) || 'FT results';

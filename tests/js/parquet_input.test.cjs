@@ -163,7 +163,9 @@ async function replayChartChecks() {
   }
   const svg = new Node('svg'), axis = new Node('axis'), comparison = new Node('comparison');
   let response;
+  let clearedDiagnostics = false;
   const context = {
+    window: { EntryDiagnostics: { show(value) { assert.equal(value, null); clearedDiagnostics = true; } } },
     ResultsState: { studyId: 'old-metadata', hasDataInput: true, activeTab: 'oos_test' },
     document: {
       querySelector: selector => selector === '.chart-svg' ? svg : null,
@@ -189,6 +191,7 @@ async function replayChartChecks() {
   const error = 'This study predates exact OOS replay metadata; a new study is required for OOS reconstruction.';
   response = { ok: false, json: async () => ({ error }) };
   assert.equal(await context.fetchEquityCurve({ trial_number: 1 }), null);
+  assert(clearedDiagnostics);
   assert.equal(svg.children.length, 0);
   assert.equal(axis.children.length, 0);
   assert.equal(comparison.textContent, error);

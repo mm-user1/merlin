@@ -1,5 +1,10 @@
 ### Changelog
 All significant changes and version history are recorded in this file.
+#### Unreleased — 2026-10-26
+- Added opt-in generic V2 risk-bracket entry admission with instrument-owned sizing
+  rules, fixed Max Entry Leverage, strict saved replay and selected-run diagnostics.
+- Added nullable diagnostic storage and the Max Entry Lev / Skipped card in
+  Optimize Results, WFA and Analytics. Existing profiles and saved records are preserved.
 #### [1.3.2] - 2026-07-02
 - Added Multi-Equity mode for the Analytics page
 - Added Fast Numba Grid Search for S_03 v10

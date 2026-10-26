@@ -2168,12 +2168,16 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
     const formData = buildBacktestRequestFormData(primarySource.type === 'parquet' ? '' : primaryPath, payload);
     if (primarySource.type === 'parquet') appendDataSource(formData, primarySource);
     let displayedInput = null;
+    let displayedAdmission = null;
+    let displayedParams = payload;
 
     resultsEl.textContent = `Running calculation... (${index + 1}/${combinations.length})`;
 
     try {
       const data = await runBacktestRequest(formData);
       displayedInput = data.data_input;
+      displayedAdmission = data.entry_admission;
+      displayedParams = data.parameters || payload;
       aggregatedResults.push(formatResultBlock(index + 1, combinations.length, payload, data));
     } catch (err) {
       resultsEl.textContent = 'An error occurred.';
@@ -2185,8 +2189,9 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
 
     if (downloadTrades) {
       try {
-        const downloadForm = buildBacktestRequestFormData(primaryPath, payload);
+        const downloadForm = buildBacktestRequestFormData(primaryPath, displayedParams);
         if (displayedInput) downloadForm.append('dataInput', JSON.stringify(displayedInput));
+        if (displayedAdmission) downloadForm.append('entryAdmission', JSON.stringify(displayedAdmission));
         const tradesResponse = await downloadBacktestTradesRequest(downloadForm);
         await triggerDownloadFromResponse(
           tradesResponse,
@@ -2394,7 +2399,8 @@ async function updateGridPreview() {
     const config = buildGridConfig(state);
     const previewConfigKey = getGridPreviewConfigKey(config);
     const warmupBars = Number(document.getElementById('warmupBars')?.value) || 1000;
-    const preview = await fetchGridPreviewRequest(config, window.currentStrategyId, warmupBars);
+    const source = window.currentStrategyConfig?.execution?.entryAdmission ? getSelectedDataSources()[0] : null;
+    const preview = await fetchGridPreviewRequest(config, window.currentStrategyId, warmupBars, source);
     if (seq !== gridPreviewSeq) return;
     updateGridPreviewDom(preview);
     // Dynamic V2 manual controls may be created from this Preview. Recompute

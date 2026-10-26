@@ -111,6 +111,17 @@
   function setWfaSelection(selection) {
     if (!window.ResultsState) return;
     window.ResultsState.wfaSelection = selection;
+    let diagnostics = null;
+    if (selection.type === 'stitched') {
+      diagnostics = window.ResultsState.stitched_oos?.entry_diagnostics;
+    } else if (selection.moduleType) {
+      const trials = WFAState.windowTrials[selection.windowNumber]?.modules?.[selection.moduleType] || [];
+      diagnostics = trials.find((trial) => Number(trial.trial_number) === selection.trialNumber)?.module_metrics?.entry_diagnostics;
+    } else {
+      const period = selection.period === 'is' ? 'is' : 'oos';
+      diagnostics = getWindowData(selection.windowNumber)?.entry_diagnostics?.[period];
+    }
+    window.EntryDiagnostics?.show(diagnostics);
   }
 
   function selectRow(row) {
@@ -160,6 +171,8 @@
   async function generateWindowEquity(windowNumber, period) {
     const studyId = getStudyId();
     if (!studyId) return;
+    const selection = window.ResultsState.wfaSelection;
+    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection;
 
     try {
       const response = await fetch(`/api/studies/${encodeURIComponent(studyId)}/wfa/windows/${windowNumber}/equity`, {
@@ -168,11 +181,13 @@
         body: JSON.stringify({ period })
       });
 
+      if (!current()) return;
       if (!response.ok) {
         throw new Error(`Failed to generate equity: ${response.status}`);
       }
 
       const data = await response.json();
+      if (!current()) return;
       if (typeof renderEquityChart === 'function') {
         const timestamps = data.timestamps || [];
         const boundaries = period === 'both'
@@ -181,6 +196,7 @@
         renderEquityChart(data.equity_curve || [], boundaries, timestamps);
       }
     } catch (error) {
+      if (current()) window.EntryDiagnostics?.show(null);
       console.error('Error generating window equity:', error);
     }
   }
@@ -188,6 +204,8 @@
   async function generateTrialEquity(windowNumber, moduleType, trialNumber, period) {
     const studyId = getStudyId();
     if (!studyId) return;
+    const selection = window.ResultsState.wfaSelection;
+    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection;
 
     try {
       const response = await fetch(`/api/studies/${encodeURIComponent(studyId)}/wfa/windows/${windowNumber}/equity`, {
@@ -196,15 +214,18 @@
         body: JSON.stringify({ moduleType, trialNumber, period })
       });
 
+      if (!current()) return;
       if (!response.ok) {
         throw new Error(`Failed to generate equity: ${response.status}`);
       }
 
       const data = await response.json();
+      if (!current()) return;
       if (typeof renderEquityChart === 'function') {
         renderEquityChart(data.equity_curve || [], [], data.timestamps || []);
       }
     } catch (error) {
+      if (current()) window.EntryDiagnostics?.show(null);
       console.error('Error generating trial equity:', error);
     }
   }

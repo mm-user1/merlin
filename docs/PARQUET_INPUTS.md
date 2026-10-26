@@ -115,6 +115,38 @@ A bounded `lastError` survives reload and clears on the next attempt. Restore us
 source types rather than a contradictory form snapshot; mixed/invalid items remain
 preserved but cannot be edited as one Start selection.
 
+## Risk-bracket instrument rules
+
+Profiles opting into `execution.entryAdmission="risk_bracket_v1"` require Parquet
+at application execution boundaries. During the same locked preparation session,
+the existing manifest API validates the selected instrument's rule snapshot.
+`PreparedInput.admission_rules` carries immutable effective rules; the version-1
+`entry_admission` envelope persists the resolved cap, rules and source snapshot.
+The cap defaults to 8 only for a new request, never to repair saved context.
+
+BYBIT linear USDT quantity step/minimum are base units. OKX linear USDT contracts
+use `baseStep=lotSz*ctVal`, `baseMinimum=minSz*ctVal`, with finite `ctMult=1` only.
+Decimal normalization and exact rational ceiling derive minimum lots without
+binary rounding; runtime sizing retains the established IEEE expression. Rules
+must remain representable as positive finite floats and exact supported integer
+lot counts (up to 2^53). Published minimum notional may be null; null and a positive
+value are different semantics. Price tick is retained but does not round prices.
+
+Saved replay validates current schema and exact effective decimal semantics:
+instrument/venue/contract/currencies, quantity unit, base step/minimum, minimum
+lots/notional and OKX multiplier/value. Equivalent decimal spelling is accepted.
+Acquisition timestamp/reference, listing time and unused price tick may change
+without changing execution semantics. Root relocation and history extension
+outside consumed candles retain the existing candle-pin rules. Saved provenance
+is preserved. The envelope cap must equal the authoritative saved execution cap.
+
+New manual tests first verify the parent's consumed candles/instrument facts,
+then resolve current rules in the same session and save their own envelope.
+Changed parent rules therefore permit a new manual test but reject reconstruction
+of the old saved execution. Missing/malformed/unknown context blocks reconstruction
+for a current admission profile; stored tables remain readable offline. FT/Stress
+spawned workers receive frame/rules explicitly and never reopen the pack.
+
 ## Locations, locks and explicit collection
 
 Generic test/WFA metric callers now use execution initial capital for CSV and

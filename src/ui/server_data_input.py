@@ -52,21 +52,31 @@ def request_source(values):
 
 
 def prepare_request(values, strategy_context, params, warmup_bars, *, cancelled=None):
+    from core.engine_v2.admission import uses_admission, execution_admission
+    admission = uses_admission(strategy_context.config)
     source = request_source(values)
     if source is None:
+        if admission:
+            raise DataInputError("risk_bracket_v1 requires a Parquet source with instrument rules; CSV is unsupported.")
         return None
     if not strategy_context.is_v2:
         raise DataInputError("Parquet inputs require Backtester V2. Switch engine or use CSV.")
     source["pack_root"] = str(resolve_root(source["pack_root"]))
-    return prepare_input(source, date_filter=bool(params.get("dateFilter", False)),
+    prepared = prepare_input(source, date_filter=bool(params.get("dateFilter", False)),
                          start=params.get("start"), end=params.get("end"),
-                         warmup_bars=warmup_bars, cancelled=cancelled)
+                         warmup_bars=warmup_bars, cancelled=cancelled,
+                         admission_params=params if admission else None)
+    if admission:
+        execution_admission(strategy_context.profile, params, prepared.admission_rules)
+    return prepared
 
 
 def effective_params(params, prepared):
     result = dict(params)
     bounds = prepared.facts["bounds"]
     result.update(dateFilter=True, start=bounds["evaluation_start"], end=bounds["evaluation_end"])
+    if prepared.entry_admission is not None:
+        result["maxEntryLeverage"] = prepared.entry_admission["maxEntryLeverage"]
     return result
 
 
@@ -75,7 +85,9 @@ def replay_config(config, *, cancelled=None):
         return None
     source = validate_pin(config["data_input"])
     root = resolve_root(config.get("data_input_root_override", source["pack_root"]))
-    return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled)
+    return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled,
+                        entry_admission=config.get("entry_admission"),
+                        admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
 
 
 def execution_input(study, manual=None):
@@ -143,7 +155,7 @@ def replay_oos_input(study, trial):
             or frame.index[0] != dates["preparation_start"]
             or frame.index[-1] != dates["preparation_end"]):
         raise DataInputError("OOS preparation conflicts with saved parquet_oos_replay facts; reconstruction refused.")
-    return frame, idx, dates
+    return frame, idx, dates, prepared.admission_rules
 
 
 def browse(raw):
@@ -213,7 +225,9 @@ def register_routes(app):
             if not isinstance(raw_root, str) or not raw_root.strip():
                 raise DataInputError("packRoot must be a nonblank path string.")
             root = resolve_root(raw_root)
-            replay_input(config["data_input"], root_override=str(root))
+            replay_input(config["data_input"], root_override=str(root),
+                entry_admission=config.get("entry_admission"),
+                admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
             updated = {**config, "data_input_root_override": str(root)}
             if manual is None:
                 storage.update_study_config_json(study_id, updated)
@@ -263,14 +277,14 @@ def register_routes(app):
                 raise DataInputError("Unknown result module.")
             export_options = {}
             if module == "oos_test" and "data_input" in (study.get("config_json") or {}):
-                frame, idx, dates = replay_oos_input(study, trial)
+                frame, idx, dates, rules = replay_oos_input(study, trial)
                 csv_path = ""
                 start, end = dates["start"], dates["end"]
-                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx}
+                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules}
             else:
                 csv_path, prepared = execution_input(study, manual)
                 if prepared is not None:
-                    export_options = {"prepared_frame": prepared.frame}
+                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules}
             params = context.params_for(trial.get("params") or {}, operation_start=start, operation_end=end)
             equity, timestamps, error = _run_equity_export(
                 strategy_id=study["strategy_id"], csv_path=csv_path, params=params,

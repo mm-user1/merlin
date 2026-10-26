@@ -408,6 +408,8 @@ class WindowResult:
     window_status: str = "traded"
     no_trade_reason: Optional[str] = None
 
+    entry_diagnostics: Optional[Dict[str, Any]] = None
+
     # Grid WFA replay prerequisites (None for non-Grid or DSR-disabled windows)
     grid_dsr_enabled: Optional[bool] = None
     grid_dsr_top_k: Optional[int] = None
@@ -541,6 +543,8 @@ class WalkForwardEngine:
         self.prepared_input = prepared_input
         if prepared_input is not None:
             self.base_config_template["data_input"] = deepcopy(prepared_input.facts)
+            if prepared_input.entry_admission is not None:
+                self.base_config_template["entry_admission"] = deepcopy(prepared_input.entry_admission)
         self._grid_v2_plan_cache = None
 
         from strategies import get_strategy, get_strategy_config
@@ -558,7 +562,12 @@ class WalkForwardEngine:
             from .engine_v2.profile import parse_execution_profile
 
             # Construction is the certification boundary for every caller.
-            parse_execution_profile(strategy_config)
+            profile = parse_execution_profile(strategy_config)
+            if profile.modes.get("entryAdmission"):
+                from .engine_v2.admission import execution_admission
+                if prepared_input is None:
+                    raise ValueError("risk_bracket_v1 WFA requires prepared Parquet input.")
+                execution_admission(profile, self.base_config_template.get("fixed_params", {}), prepared_input.admission_rules)
             from .engine_v2.parameter_ties import enabled_parameter_ties
             selected_ties = self.base_config_template.get("grid_v2_enabled_tie_groups", [])
             enabled_parameter_ties(strategy_config, selected_ties)
@@ -810,7 +819,7 @@ class WalkForwardEngine:
                     "OOS validation skipped: "
                     f"{execution_plan.no_trade_reason or 'no_trade'}"
                 )
-                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end, capital)
+                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end, capital, admission=self.prepared_input is not None and self.prepared_input.admission_rules is not None)
                 trade_end = None
             else:
                 trade_start = execution_plan.trade_start or window.oos_start
@@ -884,6 +893,7 @@ class WalkForwardEngine:
 
             window_results.append(
                 WindowResult(
+                    entry_diagnostics=self._window_admission(is_result, prefixed_oos_result),
                     window_id=window.window_id,
                     is_start=execution_plan.final_is_start,
                     is_end=execution_plan.final_is_end,
@@ -1024,7 +1034,9 @@ class WalkForwardEngine:
         )
 
         run_params = self._window_execution_params(params, start, end)
-        return self.strategy_class.run(df_prepared, run_params, trade_start_idx)
+        from .engine_v2.admission import run_strategy
+        return run_strategy(self.strategy_class, df_prepared, run_params, trade_start_idx,
+            admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None)
 
     def _window_execution_params(
         self,
@@ -1248,7 +1260,7 @@ class WalkForwardEngine:
                 ft_start_date=training_end.strftime("%Y-%m-%d"),
                 ft_end_date=is_end.strftime("%Y-%m-%d"),
                 n_workers=worker_count,
-                **({"prepared_frame": self.prepared_input.frame} if self.prepared_input is not None else {}),
+                **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules} if self.prepared_input is not None else {}),
             )
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
@@ -1316,7 +1328,7 @@ class WalkForwardEngine:
                         fixed_params=fixed_params,
                         config_json=strategy_config_json,
                         n_workers=worker_count,
-                        **({"prepared_frame": self.prepared_input.frame} if self.prepared_input is not None else {}),
+                        **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules} if self.prepared_input is not None else {}),
                     )
                     module_status["stress_test"]["ran"] = True
                 except Exception as exc:
@@ -1591,20 +1603,23 @@ class WalkForwardEngine:
         return shifted_is_start, shifted_is_end, trade_start
 
     @staticmethod
-    def _build_flat_result(start: pd.Timestamp, end: pd.Timestamp, initial_balance: float = 100.0) -> StrategyResult:
+    def _build_flat_result(start: pd.Timestamp, end: pd.Timestamp, initial_balance: float = 100.0, *, admission=False) -> StrategyResult:
         if end < start:
             end = start
         timestamps = [start]
         if end > start:
             timestamps.append(end)
         curve = [initial_balance for _ in timestamps]
-        return StrategyResult(
+        from .engine_v2.admission import AdmissionStrategyResult, summarize_entries
+        result_type = AdmissionStrategyResult if admission else StrategyResult
+        return result_type(
             trades=[],
             equity_curve=curve,
             balance_curve=list(curve),
             timestamps=timestamps,
             metric_start_idx=0,
             metric_initial_equity=initial_balance,
+            **({"entry_diagnostics": summarize_entries((), "oos")} if admission else {}),
         )
 
     @staticmethod
@@ -1659,13 +1674,15 @@ class WalkForwardEngine:
                 deduped_equity.append(eq)
                 deduped_balance.append(bal)
 
-        return StrategyResult(
+        return type(result)(
             trades=list(getattr(result, "trades", None) or []),
             equity_curve=deduped_equity,
             balance_curve=deduped_balance,
             timestamps=deduped_timestamps,
             metric_start_idx=0,
             metric_initial_equity=anchor,
+            **({"entry_events": result.entry_events, "entry_diagnostics": result.entry_diagnostics}
+               if hasattr(result, "entry_events") else {}),
         )
 
     @staticmethod
@@ -2212,6 +2229,8 @@ class WalkForwardEngine:
         oos_equity = list(getattr(oos_result, "equity_curve", None) or [])
         metric_view = metrics._advanced_metric_view(oos_result)
         validated_metric_start_idx = len(oos_timestamps) - len(metric_view.timestamps)
+        from .engine_v2.admission import retained_events
+        diagnostics = retained_events(oos_result, truncated_trades, trigger_time)
 
         if not oos_timestamps:
             return (
@@ -2222,6 +2241,7 @@ class WalkForwardEngine:
                     timestamps=[],
                     metric_start_idx=0,
                     metric_initial_equity=getattr(oos_result, "metric_initial_equity", None),
+                    **diagnostics,
                 ),
                 trigger_time,
             )
@@ -2248,6 +2268,7 @@ class WalkForwardEngine:
                     len(truncated_timestamps),
                 ),
                 metric_initial_equity=getattr(oos_result, "metric_initial_equity", None),
+                **diagnostics,
             ),
             trigger_time,
         )
@@ -2393,7 +2414,7 @@ class WalkForwardEngine:
                     "OOS validation skipped: "
                     f"{execution_plan.no_trade_reason or 'no_trade'}"
                 )
-                prefixed_oos_result = self._build_flat_result(oos_start, oos_max_end, capital)
+                prefixed_oos_result = self._build_flat_result(oos_start, oos_max_end, capital, admission=self.prepared_input is not None and self.prepared_input.admission_rules is not None)
                 oos_actual_end = oos_max_end
                 adaptive_roll_end = oos_max_end
                 cooldown_days_applied = None
@@ -2504,6 +2525,7 @@ class WalkForwardEngine:
 
             window_results.append(
                 WindowResult(
+                    entry_diagnostics=self._window_admission(is_result, prefixed_oos_result),
                     window_id=window_id,
                     is_start=execution_plan.final_is_start,
                     is_end=execution_plan.final_is_end,
@@ -2886,6 +2908,7 @@ class WalkForwardEngine:
         else:
             normalized_sources = []
         module_metrics = {
+            **({"entry_diagnostics": result.entry_diagnostics} if getattr(result, "entry_diagnostics", None) is not None else {}),
             "grid_rank": getattr(result, "grid_rank", None),
             "slow_refinement_rank": getattr(result, "slow_refinement_rank", None),
             "grid_mode_name": getattr(result, "grid_mode_name", None),
@@ -2943,6 +2966,7 @@ class WalkForwardEngine:
                     "is_pareto_optimal": getattr(original, "is_pareto_optimal", None),
                     "dominance_rank": getattr(original, "dominance_rank", None),
                     "module_metrics": {
+                        "entry_diagnostics": getattr(original, "entry_diagnostics", None),
                         "grid_rank": getattr(original, "grid_rank", None),
                         "dsr_probability": getattr(result, "dsr_probability", None),
                         "dsr_rank": getattr(result, "dsr_rank", None),
@@ -2999,6 +3023,7 @@ class WalkForwardEngine:
                     "is_pareto_optimal": getattr(optuna_result, "is_pareto_optimal", None),
                     "dominance_rank": getattr(optuna_result, "dominance_rank", None),
                     "module_metrics": {
+                        "entry_diagnostics": getattr(result, "entry_diagnostics", None),
                         "is_net_profit_pct": getattr(result, "is_net_profit_pct", None),
                         "is_max_drawdown_pct": getattr(result, "is_max_drawdown_pct", None),
                         "is_total_trades": getattr(result, "is_total_trades", None),
@@ -3090,6 +3115,7 @@ class WalkForwardEngine:
                     "dominance_rank": getattr(optuna_result, "dominance_rank", None),
                     "status": getattr(result, "status", None),
                     "module_metrics": {
+                        "entry_diagnostics": getattr(optuna_result, "entry_diagnostics", None),
                         "profit_retention": getattr(result, "profit_retention", None),
                         "romad_retention": getattr(result, "romad_retention", None),
                         "profit_worst": getattr(result, "profit_worst", None),
@@ -3124,6 +3150,9 @@ class WalkForwardEngine:
 
         optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
         base_config = OptimizationConfig(
+            data_input=self.prepared_input.facts if self.prepared_input is not None else None,
+            admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None,
+            entry_admission=self.prepared_input.entry_admission if self.prepared_input is not None else None,
             csv_file=csv_buffer,
             strategy_id=self.config.strategy_id,
             enabled_params=deepcopy(self.base_config_template["enabled_params"]),
@@ -3261,6 +3290,12 @@ class WalkForwardEngine:
         buffer.seek(0)
         return buffer
 
+    @staticmethod
+    def _window_admission(is_result, oos_result):
+        from .engine_v2.admission import result_diagnostics
+        values = {"is": result_diagnostics(is_result, "is"), "oos": result_diagnostics(oos_result, "oos")}
+        return values if any(value is not None for value in values.values()) else None
+
     def _result_to_params(self, result) -> Dict[str, Any]:
         params = dict(getattr(result, "params", {}) or {})
 
@@ -3268,7 +3303,8 @@ class WalkForwardEngine:
         params.setdefault("start", None)
         params.setdefault("end", None)
         params.setdefault("riskPerTrade", float(self.base_config_template["risk_per_trade_pct"]))
-        params.setdefault("contractSize", float(self.base_config_template["contract_size"]))
+        if not (self.prepared_input is not None and self.prepared_input.admission_rules is not None):
+            params.setdefault("contractSize", float(self.base_config_template["contract_size"]))
         params.setdefault("commissionRate", float(self.base_config_template["commission_rate"]))
 
         return params

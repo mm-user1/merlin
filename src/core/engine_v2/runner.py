@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import math
 from typing import Any, Mapping, Optional, Sequence
 
@@ -22,6 +22,7 @@ from .execution_modes import (
 )
 from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD, validate_tick_size
 from .profile import active_mode_values
+from .admission import AdmissionRules, AdmissionStrategyResult, execution_admission, summarize_entries
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ def build_kernel_config(
     profile: Any,
     params: Mapping[str, Any],
     trade_start_idx: int = 0,
+    admission_rules: AdmissionRules | None = None,
 ) -> KernelConfig:
     """Convert a parsed execution profile and params into kernel settings."""
 
@@ -113,6 +115,7 @@ def build_kernel_config(
         params,
     )
     trail_params = stateful_trail_params(trail_mode, params)
+    admission = execution_admission(profile, params, admission_rules)
     return KernelConfig(
         initial_capital=float(params.get("initialCapital", 100.0)),
         commission_pct=float(params.get("commissionPct", 0.0)),
@@ -121,7 +124,10 @@ def build_kernel_config(
         max_stop_pct=float(params.get("stopMaxPct", float("inf"))),
         max_days=float(params.get("stopMaxDays", float("inf"))),
         risk_per_trade_pct=float(params.get("riskPerTrade", 2.0)),
-        contract_size=float(params.get("contractSize", 0.01)),
+        contract_size=float(admission[1].base_step) if admission else float(params.get("contractSize", 0.01)),
+        entry_admission=modes.get("entryAdmission"),
+        admission_rules=admission_rules if admission else None,
+        max_entry_leverage=admission[0] if admission else 8.0,
         enable_long=_coerce_bool(params.get("enableLong"), True),
         enable_short=_coerce_bool(params.get("enableShort"), True),
         target_mode=target_mode,
@@ -182,6 +188,7 @@ def run_v2_strategy(
     trade_start_idx: int = 0,
     compute_sharpe_daily: bool = False,
     compute_max_drawdown_mtm: bool = False,
+    admission_rules: AdmissionRules | None = None,
 ) -> V2RunResult:
     """Run V2 execution and return an enriched Merlin strategy result."""
 
@@ -192,12 +199,14 @@ def run_v2_strategy(
         kernel_result = run_signal_reversal_kernel(data, config)
         initial_balance = config.initial_capital
     elif topology is None:
-        config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
+        config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx,
+                                     admission_rules=admission_rules)
         kernel_result = run_reference_kernel(data, config)
         initial_balance = config.initial_capital
     else:
         raise ValueError(f"Unsupported V2 execution topology: {topology!r}.")
-    strategy_result = StrategyResult(
+    result_type = AdmissionStrategyResult if kernel_result.entry_events is not None else StrategyResult
+    strategy_result = result_type(
         trades=kernel_result.trades,
         equity_curve=kernel_result.equity_curve,
         balance_curve=kernel_result.balance_curve,
@@ -205,12 +214,24 @@ def run_v2_strategy(
         metric_start_idx=trade_start_idx,
         metric_initial_equity=initial_balance,
     )
-    basic_metrics, advanced_metrics = metrics.enrich_strategy_result(
-        strategy_result,
-        initial_balance=initial_balance,
-        risk_free_rate=0.02,
-        compute_sharpe_daily=compute_sharpe_daily,
-    )
+    if kernel_result.entry_events is not None:
+        strategy_result.entry_events = kernel_result.entry_events
+        strategy_result.entry_diagnostics = summarize_entries(kernel_result.entry_events)
+    if kernel_result.entry_events is not None and initial_balance < 0:
+        # Finite exhausted capital is an admission refusal. Return the actual
+        # unchanged account curve; return-based metrics have no valid anchor.
+        basic_metrics = metrics.calculate_basic(strategy_result, initial_balance=initial_balance)
+        advanced_metrics = AdvancedMetrics()
+        for name, value in basic_metrics.to_dict().items():
+            if name in {field.name for field in fields(strategy_result)}:
+                setattr(strategy_result, name, value)
+    else:
+        basic_metrics, advanced_metrics = metrics.enrich_strategy_result(
+            strategy_result,
+            initial_balance=initial_balance,
+            risk_free_rate=0.02,
+            compute_sharpe_daily=compute_sharpe_daily,
+        )
     return V2RunResult(
         strategy_result=strategy_result,
         basic_metrics=basic_metrics,

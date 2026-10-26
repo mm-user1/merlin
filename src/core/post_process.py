@@ -24,12 +24,14 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 _prepared_worker_frame = None
+_prepared_worker_rules = None
 
 
-def _initialize_prepared_worker(frame):
+def _initialize_prepared_worker(frame, admission_rules=None):
     """One RAM payload per spawned worker, never a pack locator or lock."""
-    global _prepared_worker_frame
+    global _prepared_worker_frame, _prepared_worker_rules
     _prepared_worker_frame = frame
+    _prepared_worker_rules = admission_rules
 
 FT_REJECT_ACTION_NO_TRADE = "no_trade"
 FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE = "cooldown_reoptimize"
@@ -251,6 +253,7 @@ def _ft_worker_entry(
     is_period_days: int,
     ft_period_days: int,
     prepared_frame=None,
+    admission_rules=None,
 ) -> Optional[Dict[str, Any]]:
     """
     Entry point for FT worker process.
@@ -295,7 +298,9 @@ def _ft_worker_entry(
         run_params["dateFilter"] = True
         run_params["start"] = ft_start
         run_params["end"] = ft_end
-        result = strategy_class.run(df_ft_with_warmup, run_params, trade_start_idx)
+        from .engine_v2.admission import run_strategy, result_diagnostics
+        result = run_strategy(strategy_class, df_ft_with_warmup, run_params, trade_start_idx,
+            admission_rules=admission_rules if prepared_frame is not None else _prepared_worker_rules)
 
         capital = resolve_execution_capital(strategy_id, run_params)
         basic = metrics.calculate_basic(result, capital)
@@ -328,6 +333,7 @@ def _ft_worker_entry(
             "is_metrics": is_metrics,
             "ft_metrics": ft_metrics,
             "comparison": comparison,
+            "entry_diagnostics": result_diagnostics(result, "ft"),
         }
 
     except Exception as exc:
@@ -889,7 +895,7 @@ def _ft_result_from_payload(payload: Dict[str, Any]) -> FTResult:
     is_metrics = payload["is_metrics"]
     ft_metrics = payload["ft_metrics"]
     comparison = payload["comparison"]
-    return FTResult(
+    result = FTResult(
         trial_number=int(payload["trial_number"]),
         source_rank=int(payload["source_rank"]),
         params=deepcopy(payload["params"]),
@@ -919,6 +925,8 @@ def _ft_result_from_payload(payload: Dict[str, Any]) -> FTResult:
         sharpe_change=comparison.get("sharpe_change", 0.0),
         pf_change=comparison.get("pf_change", 0.0),
     )
+    result.entry_diagnostics = payload.get("entry_diagnostics")
+    return result
 
 
 def run_forward_test(
@@ -933,6 +941,7 @@ def run_forward_test(
     ft_end_date: str,
     n_workers: int,
     prepared_frame=None,
+    admission_rules=None,
 ) -> List[FTResult]:
     """
     Run forward test for top-K optuna results.
@@ -966,7 +975,7 @@ def run_forward_test(
     ctx = mp.get_context("spawn")
     results: List[FTResult] = []
 
-    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame,)}
+    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules)}
                     if prepared_frame is not None else {})
     with ctx.Pool(processes=max_workers, **pool_options) as pool:
         worker_args = [
@@ -1105,6 +1114,7 @@ def _run_is_backtest(
     is_end_date: Optional[str],
     warmup_bars: int,
     prepared_frame=None,
+    admission_rules=None,
 ) -> Optional[Dict[str, Any]]:
     from .backtest_engine import align_date_bounds, load_data, prepare_dataset_with_warmup
     from . import metrics
@@ -1128,7 +1138,9 @@ def _run_is_backtest(
         if df_prepared.empty:
             raise ValueError("No data available for stress test period.")
 
-        result = strategy_class.run(df_prepared, params, trade_start_idx)
+        from .engine_v2.admission import run_strategy
+        result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
+            admission_rules=admission_rules if prepared_frame is not None else _prepared_worker_rules)
 
         capital = resolve_execution_capital(strategy_id, params)
         basic = metrics.calculate_basic(result, capital)
@@ -1161,6 +1173,7 @@ def _perturbation_worker(
     base_value: Any,
     perturbed_value: Any,
     prepared_frame=None,
+    admission_rules=None,
 ) -> Optional[Dict[str, Any]]:
     try:
         full_params = dict(fixed_params or {})
@@ -1173,6 +1186,7 @@ def _perturbation_worker(
             is_end_date=end_date,
             warmup_bars=warmup_bars,
             prepared_frame=prepared_frame,
+            admission_rules=admission_rules,
         )
         if metrics_payload is None:
             return None
@@ -1201,6 +1215,7 @@ def run_perturbations_parallel(
     warmup_bars: int,
     n_workers: int,
     prepared_frame=None,
+    admission_rules=None,
 ) -> List[dict]:
     if not perturbations:
         return []
@@ -1225,7 +1240,7 @@ def run_perturbations_parallel(
     ]
 
     results: List[dict] = []
-    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame,)}
+    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules)}
                     if prepared_frame is not None else {})
     with ctx.Pool(processes=max_workers, **pool_options) as pool:
         for payload in pool.starmap(_perturbation_worker, worker_args):
@@ -1474,6 +1489,7 @@ def run_stress_test(
     config_json: dict,
     n_workers: int = 6,
     prepared_frame=None,
+    admission_rules=None,
 ) -> Tuple[List[StressTestResult], dict]:
     if not config.enabled:
         return [], {}
@@ -1499,6 +1515,7 @@ def run_stress_test(
             is_end_date=is_end_date,
             warmup_bars=int(config.warmup_bars),
             prepared_frame=prepared_frame,
+            admission_rules=admission_rules,
         )
 
         trial_number = _get_trial_number(candidate, source_rank)
@@ -1578,6 +1595,7 @@ def run_stress_test(
             warmup_bars=int(config.warmup_bars),
             n_workers=int(n_workers or 1),
             prepared_frame=prepared_frame,
+            admission_rules=admission_rules,
         )
 
         metrics = calculate_retention_metrics(

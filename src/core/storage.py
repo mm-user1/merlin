@@ -613,6 +613,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("trials", "validation_status", "TEXT")
     ensure("trials", "validation_message", "TEXT")
     ensure("trials", "fast_metrics_json", "TEXT")
+    ensure("trials", "entry_diagnostics_json", "TEXT")
+    ensure("wfa_windows", "entry_diagnostics_json", "TEXT")
     ensure("trials", "validation_diffs_json", "TEXT")
 
 
@@ -2670,6 +2672,7 @@ def save_grid_study_to_db(
         optimization_time_seconds = None
 
     config_payload["grid_settings"] = _safe_dict(grid_settings)
+    config_payload["grid_settings"].pop("admission_rules", None)
     config_payload["grid_summary"] = json_safe(grid_summary)
 
     grid_section = (grid_summary.get("grid") or {}) if isinstance(grid_summary, dict) else {}
@@ -2843,6 +2846,10 @@ def save_grid_study_to_db(
                     rows,
                 )
 
+            _write_trial_diagnostics(conn, study_id, "is", [
+                (int(getattr(result, "candidate_id", None) or getattr(result, "optuna_trial_number", None) or index),
+                 getattr(result, "entry_diagnostics", None))
+                for index, result in enumerate(trial_results or [], 1)])
             conn.execute("COMMIT")
         except Exception as exc:
             conn.execute("ROLLBACK")
@@ -3412,6 +3419,10 @@ def save_wfa_study_to_db(
 
             for window in wf_result.windows:
                 window_key = f"{study_id}_w{window.window_id}"
+                diagnostics = getattr(window, "entry_diagnostics", None)
+                if diagnostics is not None:
+                    conn.execute("UPDATE wfa_windows SET entry_diagnostics_json = ? WHERE window_id = ?",
+                                 (json.dumps(diagnostics, allow_nan=False), window_key))
                 _save_window_trials(conn, window_key, "optuna_is", window.optuna_is_trials)
                 _save_window_trials(conn, window_key, "dsr", window.dsr_trials)
                 _save_window_trials(conn, window_key, "forward_test", window.forward_test_trials)
@@ -3709,6 +3720,7 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
             )
             for row in cursor.fetchall():
                 trial = dict(row)
+                trial["entry_diagnostics"] = _parse_entry_diagnostics(trial.pop("entry_diagnostics_json", None))
                 trial["params"] = json.loads(trial["params_json"])
                 trial["objective_values"] = json.loads(trial["objective_values_json"] or "[]")
                 trial["constraint_values"] = json.loads(trial["constraint_values_json"] or "[]")
@@ -3842,6 +3854,7 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
             )
             for row in cursor.fetchall():
                 window = dict(row)
+                window["entry_diagnostics"] = _parse_entry_diagnostics(window.pop("entry_diagnostics_json", None))
                 window["best_params"] = json.loads(window["best_params_json"])
                 if window.get("oos_equity_curve"):
                     window["oos_equity_curve"] = json.loads(window["oos_equity_curve"])
@@ -3892,6 +3905,11 @@ def load_study_from_db(study_id: str) -> Optional[Dict]:
         )
         manual_tests = [dict(row) for row in cursor.fetchall()]
 
+    if stitched_oos is not None:
+        from .engine_v2.admission import aggregate_entries
+        stitched_oos["entry_diagnostics"] = aggregate_entries([
+            (window["window_id"], (window.get("entry_diagnostics") or {}).get("oos")) for window in windows])
+
     return {
         "study": study,
         "trials": trials,
@@ -3912,6 +3930,7 @@ def get_study_trial(study_id: str, trial_number: int) -> Optional[Dict]:
         if not row:
             return None
         trial = dict(row)
+        trial["entry_diagnostics"] = _parse_entry_diagnostics(trial.pop("entry_diagnostics_json", None))
         trial["params"] = json.loads(trial["params_json"])
         if trial.get("selection_sources_json"):
             try:
@@ -3954,6 +3973,27 @@ def update_study_config_json(study_id: str, config_json: Dict[str, Any]) -> bool
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def _parse_entry_diagnostics(raw, fallback=None):
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+        return value if isinstance(value, dict) else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _write_trial_diagnostics(conn, study_id, scope, executions):
+    """Replace one module's saved executions without mixing other scopes."""
+    values = dict(executions)
+    for row in conn.execute("SELECT trial_number, entry_diagnostics_json FROM trials WHERE study_id = ?", (study_id,)).fetchall():
+        current = _parse_entry_diagnostics(row["entry_diagnostics_json"], {})
+        current.pop(scope, None)
+        value = values.get(row["trial_number"])
+        if value is not None:
+            current[scope] = {**value, "scope": scope}
+        conn.execute("UPDATE trials SET entry_diagnostics_json = ? WHERE study_id = ? AND trial_number = ?",
+                     (json.dumps(current, allow_nan=False) if current else None, study_id, row["trial_number"]))
 
 
 def save_forward_test_results(
@@ -4071,6 +4111,7 @@ def save_forward_test_results(
                     rows,
                 )
 
+            _write_trial_diagnostics(conn, study_id, "ft", [(getattr(r, "trial_number", None) if not isinstance(r, dict) else r.get("trial_number"), getattr(r, "entry_diagnostics", None) if not isinstance(r, dict) else r.get("entry_diagnostics")) for r in ft_results])
             conn.execute("COMMIT")
         except Exception as exc:
             conn.execute("ROLLBACK")
@@ -4458,6 +4499,7 @@ def save_oos_test_results(
                 conn.execute("UPDATE studies SET config_json = ? WHERE study_id = ?",
                              (json.dumps(config), study_id))
 
+            _write_trial_diagnostics(conn, study_id, "oos_test", [(r.get("trial_number"), r.get("entry_diagnostics")) for r in oos_results])
             conn.execute("COMMIT")
         except Exception as exc:
             conn.execute("ROLLBACK")
@@ -4582,6 +4624,12 @@ def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
     """Serialize and validate optional V2 runtime metadata before DB work."""
 
     payload = _safe_dict(config)
+    payload.pop("admission_rules", None)
+    if not isinstance(config, dict) and payload.get("entry_admission") is None:
+        payload.pop("entry_admission", None)
+    if "entry_admission" in payload:
+        from .engine_v2.admission import read_admission_envelope
+        read_admission_envelope(payload["entry_admission"], (payload.get("fixed_params") or {}).get("maxEntryLeverage"))
     # Optional dataclass default is absent for CSV; persisted key presence is
     # authoritative and must never be erased from a supplied saved mapping.
     if not isinstance(config, dict) and payload.get("data_input") is None:

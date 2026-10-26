@@ -724,6 +724,11 @@ function selectTableRow(index, rowId) {
     rows[index].classList.add('selected');
   }
   ResultsState.selectedRowId = rowId;
+  const tab = ResultsState.activeTab;
+  const scope = tab === 'forward_test' ? 'ft' : tab === 'oos_test' ? 'oos_test' : 'is';
+  const trial = (ResultsState.results || []).find((item) => String(item.trial_number ?? item.candidate_id) === String(rowId));
+  const manual = (ResultsState.manualTestResults || []).find((item) => String(item.trial_number) === String(rowId));
+  window.EntryDiagnostics?.show(tab === 'manual_tests' ? manual?.entry_diagnostics : trial?.entry_diagnostics?.[scope], true);
 }
 
 async function showParameterDetails(result) {
@@ -1190,6 +1195,7 @@ function displaySummaryCards(stitchedOOS) {
   `;
 
   container.style.display = 'grid';
+  window.EntryDiagnostics?.show(stitchedOOS.entry_diagnostics);
 }
 
 function formatPercentWithOptionalSign(value, digits = 1) {

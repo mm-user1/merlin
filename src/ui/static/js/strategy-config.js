@@ -300,7 +300,8 @@ function generateBacktestForm(config) {
 
   for (const [paramName, paramDef] of Object.entries(params)) {
     if (!shouldRenderDynamicBacktestParam(paramName, paramDef)) continue;
-    const group = paramDef.group || 'Other';
+    if (paramName === 'maxEntryLeverage' && config.execution?.entryAdmission !== 'risk_bracket_v1') continue;
+    const group = paramName === 'maxEntryLeverage' ? 'Risk' : paramDef.group || 'Other';
     if (!groups[group]) {
       groups[group] = [];
     }
