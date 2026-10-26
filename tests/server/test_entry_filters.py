@@ -20,6 +20,75 @@ def config_for(source, enabled=True):
     return config
 
 
+@pytest.mark.parametrize("endpoint,instrument", [
+    ("/api/backtest", "BTCUSDT"), ("/api/optimize", "OKX_BTC_USDT"),
+    ("/api/walkforward", "BTCUSDT"), ("/api/grid/preview", "OKX_BTC_USDT"),
+    ("/api/backtest", None),
+])
+def test_invalid_filter_launch_is_400_without_execution(client, tmp_path, monkeypatch, endpoint, instrument):
+    from data_provider import data
+    from core.engine_v2 import runner
+    source = publish(tmp_path / "pack", rows=5000)
+    config = {**config_for(source), "strategy_id": strategy.STRATEGY_ID}
+    config["entryFilters"]["items"][0]["source"]["instrument_id"] = instrument
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Invalid descriptor reached source preparation or execution")
+    monkeypatch.setattr(data, "read_session", forbidden)
+    monkeypatch.setattr(runner, "run_v2_strategy", forbidden)
+    with storage.get_db_connection() as conn:
+        before = conn.execute("SELECT study_id FROM studies ORDER BY study_id").fetchall()
+    with installed(filtered=True):
+        if endpoint == "/api/grid/preview":
+            response = client.post(endpoint, json=dict(strategy=strategy.STRATEGY_ID, source=source, config=config))
+        else:
+            fields = dict(strategy=strategy.STRATEGY_ID, source=json.dumps(source), config=json.dumps(config),
+                payload=json.dumps(config["fixed_params"]), entryFilters=json.dumps(config["entryFilters"]), warmupBars="100",
+                wf_is_period_days="5", wf_oos_period_days="4")
+            response = client.post(endpoint, data=fields)
+    assert response.status_code == 400, response.get_data(as_text=True)
+    assert "Entry Filters" in response.get_data(as_text=True) and "instrument_id" in response.get_data(as_text=True)
+    with storage.get_db_connection() as conn:
+        assert conn.execute("SELECT study_id FROM studies ORDER BY study_id").fetchall() == before
+
+
+def test_analytics_invalid_saved_instrument_isolated_without_repair(client, tmp_path, monkeypatch):
+    import uuid
+    from core.data_input import prepare_input, DataInputError
+    from data_provider import data
+    source = publish(tmp_path / "pack", rows=5000)
+    config = config_for(source)
+    prepared = prepare_input(source, date_filter=True, start="2024-01-03", end="2024-01-03",
+        warmup_bars=2, entry_filters=effective_config(config["entryFilters"]))
+    active = dict(entryFilters=config["entryFilters"], entry_filter_inputs=prepared.entry_filter_inputs)
+    off = dict(entryFilters=dict(version=1, enabled=False, items=[]), entry_filter_inputs=dict(version=1, state="off"))
+    ids = {kind: str(uuid.uuid4()) for kind in ("active", "damaged", "off")}
+    with storage.get_db_connection() as conn:
+        for kind, value in (("active", active), ("damaged", active), ("off", off)):
+            conn.execute("INSERT INTO studies (study_id, study_name, strategy_id, optimization_mode, config_json) VALUES (?, ?, ?, ?, ?)",
+                (ids[kind], "Synthetic " + kind, strategy.STRATEGY_ID, "wfa", json.dumps(value)))
+        damaged = deepcopy(active)
+        damaged["entryFilters"]["items"][0]["source"]["instrument_id"] = "OKX_BTC_USDT"
+        conn.execute("UPDATE studies SET config_json = ? WHERE study_id = ?", (json.dumps(damaged), ids["damaged"]))
+        conn.commit()
+        before = conn.execute("SELECT study_id, config_json FROM studies ORDER BY study_id").fetchall()
+    def no_io(*args, **kwargs):
+        raise AssertionError("Saved Analytics description opened a pack")
+    monkeypatch.setattr(data, "read_session", no_io)
+    with installed(filtered=True):
+        response = client.get("/api/analytics/summary")
+        assert response.status_code == 200, response.get_data(as_text=True)
+        rows = {row["study_id"]: row for row in response.get_json()["studies"]}
+        assert set(ids.values()) <= rows.keys()
+        assert rows[ids["damaged"]]["entry_filters"] == dict(key=None, text="Unavailable")
+        assert rows[ids["active"]]["entry_filters"] == describe_saved(active)
+        assert rows[ids["active"]]["entry_filters"]["key"] not in (None, "off")
+        assert rows[ids["off"]]["entry_filters"] == dict(key="off", text="Filter Off")
+        with pytest.raises(DataInputError, match="instrument_id"):
+            storage.save_wfa_study_to_db(None, damaged, "", 0)
+    with storage.get_db_connection() as conn:
+        assert conn.execute("SELECT study_id, config_json FROM studies ORDER BY study_id").fetchall() == before
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_backtest_download_explicit_context(client, tmp_path, enabled):
     from core.engine_v2.admission import run_strategy

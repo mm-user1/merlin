@@ -41,6 +41,12 @@ Timeframes follow the positive 5m-multiple m/h/D contract. Confirm Bars is an
 integer >=2, excluding booleans, fractions and unrepresentable values. Multiple
 active filters intersect per side.
 
+Invalid active instrument IDs use the provider's validation rules and are reported
+as application input errors, including HTTP 400 at launch. An invalid ID in saved
+filter settings makes that study's offline description Unavailable; other Analytics
+studies remain visible. Reads do not repair saved settings. Inactive descriptor
+content remains unused while master or item Off applies.
+
 ## Native clock and source bounds
 
 Colour is +1 for close>open, -1 for close<open and zero for neutral. Consecutive

@@ -34,9 +34,21 @@ is registered by these tests. Tests cover causal native-clock permissions, prefi
 gaps, bounded replay, hook/worker transport, Fast ranking, HTTP/Queue/WFA/manual
 execution and real editor/Analytics handlers. Use the isolated launcher below.
 Run `test_filtered_fast_reference_packers_threads[1]` and `[2]` on a host with
-those actual Numba thread capacities; Linux one-CPU review excludes only `[2]`
-plus the existing admission two-thread case. The real two-process spawn cases
-are distinct and still run on Linux. The new filter-root symlink case must run
+those actual Numba thread capacities. The broad T04 one-CPU review excludes exactly:
+
+- `v2/test_v2_entry_filters.py::test_filtered_fast_reference_packers_threads[2]`
+- `v2/test_v2_admission_grid.py::test_fast_admission_packers_and_threads[2]`
+- `v2/test_v2_grid_compiled.py::test_compiled_grid_v2_worker_count_is_deterministic`
+- `v2/test_v2_grid_signal_topology.py::test_compiled_signal_worker_count_is_deterministic`
+
+The narrower invalid-instrument follow-up uses `test_entry_filters.py`,
+`server/test_entry_filters.py`, `server/test_analytics.py` and
+`v2/test_v2_entry_filters.py`; only the first two-thread selector above is in that
+set. Its regressions cover application-error translation, inactive Off controls,
+launch 400 without execution and offline Analytics 200/Unavailable for a damaged
+row alongside valid records, with unchanged saved configuration and strict writes.
+Real two-process spawn checks are distinct from Numba thread capacity and still
+run in the broad Linux gate. The filter-root symlink case must run
 on a symlink-capable host; Windows privilege failures are not passes. All JS
 wrappers in this slice accept the installed `MERLIN_NODE_EXECUTABLE`, including
 Electron with process-local `ELECTRON_RUN_AS_NODE=1`; they run from external scratch.

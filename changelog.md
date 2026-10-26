@@ -1,6 +1,8 @@
 ### Changelog
 All significant changes and version history are recorded in this file.
 #### Unreleased — 2026-10-26
+- Report invalid entry-filter instrument IDs as input errors; keep Analytics
+  available when one saved filter descriptor has an invalid instrument.
 - Add opt-in fixed entry filters with causal configurable F06, explicit execution
   context, bounded replay pins and dependency relocation. Add the compact strategy
   selector, Entry Filters editor/Queue restoration and Analytics consensus row.

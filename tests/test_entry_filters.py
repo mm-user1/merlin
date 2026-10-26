@@ -22,6 +22,59 @@ def bars(colours, minutes=240):
         index=pd.date_range("2024-01-01", periods=len(colours), freq=f"{minutes}min", tz="UTC"))
 
 
+@pytest.mark.parametrize("instrument", ["BTCUSDT", "OKX_BTC_USDT", "", None, 42, True, []])
+def test_invalid_instrument_is_application_error_and_inactive_is_off(instrument):
+    from core.entry_filters import descriptor
+    from core.entry_filter_input import describe_saved
+    from data_provider.errors import DataProviderError
+    value = editor(dict(type="parquet", version=1, pack_root="/synthetic",
+        instrument_id=instrument, timeframe_minutes=240))
+    for validate in (lambda: descriptor(value["items"][0]), lambda: effective_config(value)):
+        with pytest.raises(DataInputError, match="Entry Filters:.*instrument_id") as caught:
+            validate()
+        assert isinstance(caught.value.__cause__, DataProviderError)
+        assert str(caught.value.__cause__) in str(caught.value)
+    assert describe_saved({"entryFilters": value, "entry_filter_inputs": {"version": 1, "state": "off"}}) == {
+        "key": None, "text": "Unavailable"}
+    value["enabled"] = False
+    assert effective_config(value) == []
+    value["enabled"] = True
+    value["items"][0]["enabled"] = False
+    assert effective_config(value) == []
+
+
+def test_valid_instrument_identity_and_offline_saved_controls(tmp_path, monkeypatch):
+    from core.entry_filters import descriptor
+    from core.entry_filter_input import describe_saved, saved_effective
+    from data_provider import data
+    exact = dict(type="parquet", version=1, pack_root="/synthetic",
+        instrument_id="OKX_BTC-USDT-SWAP", timeframe_minutes=240)
+    assert descriptor(editor(exact)["items"][0]) == dict(type="candleDirection", version=1,
+        parameters={"confirmationBars": 2}, source=exact)
+    source = publish(tmp_path / "pack")
+    value = editor(source)
+    prepared = prepare_input(source, date_filter=True, start="2024-01-03", end="2024-01-03",
+        warmup_bars=2, entry_filters=effective_config(value))
+    saved = dict(entryFilters=value, entry_filter_inputs=prepared.entry_filter_inputs)
+    def no_io(*args, **kwargs):
+        raise AssertionError("Offline description opened a pack")
+    monkeypatch.setattr(data, "read_session", no_io)
+    assert describe_saved(saved) == dict(key=canonical(effective_config(value)), text="F06 · TEST_AAA-USDT-SWAP · 5m · 2 bars")
+    off = dict(entryFilters=dict(version=1, enabled=False, items=[]), entry_filter_inputs=dict(version=1, state="off"))
+    assert describe_saved(off) == describe_saved({}) == dict(key="off", text="Filter Off")
+    for change in ("invalid-id", "future-version", "conflicting-pin"):
+        invalid = deepcopy(saved)
+        if change == "invalid-id":
+            invalid["entryFilters"]["items"][0]["source"]["instrument_id"] = "BTCUSDT"
+        elif change == "future-version":
+            invalid["entryFilters"]["items"][0]["version"] = 2
+        else:
+            invalid["entry_filter_inputs"] = {"version": 1, "state": "off"}
+        assert describe_saved(invalid) == dict(key=None, text="Unavailable")
+        with pytest.raises(DataInputError):
+            saved_effective(invalid, required=True)
+
+
 @pytest.mark.parametrize("count", [2, 3, 35])
 def test_native_warmup_neutral_reversal_and_expiry(count):
     prior = max(28, count-1)

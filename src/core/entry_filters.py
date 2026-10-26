@@ -48,6 +48,7 @@ def source_locator(value):
 
 def descriptor(item):
     from .data_input import timeframe_minutes
+    from data_provider.errors import DataProviderError
     from data_provider.manifest import normalize_instrument_id
     if not isinstance(item, dict) or set(item) - {"id", "type", "version", "enabled", "parameters", "source"}:
         raise _error("unsupported filter fields or expression/optimization settings.")
@@ -63,9 +64,13 @@ def descriptor(item):
     if (not isinstance(source, dict) or set(source) != {"type", "version", "pack_root", "instrument_id", "timeframe_minutes"}
             or source.get("type") != "parquet" or type(source.get("version")) is not int or source["version"] != 1):
         raise _error("expected a version-1 Parquet source.")
+    try:
+        instrument_id = normalize_instrument_id(source["instrument_id"])
+    except DataProviderError as exc:
+        raise _error(f"invalid source instrument_id: {exc}") from exc
     return {"type": item["type"], "version": 1, "parameters": {"confirmationBars": count},
             "source": {**source, "pack_root": source_locator(source["pack_root"]),
-                       "instrument_id": normalize_instrument_id(source["instrument_id"]),
+                       "instrument_id": instrument_id,
                        "timeframe_minutes": timeframe_minutes(source["timeframe_minutes"])}}
 
 
