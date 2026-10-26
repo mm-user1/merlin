@@ -52,7 +52,7 @@ def test_partial_cap_is_oos_storage_matches_direct_reference(client, tmp_path, n
             params = context.params_for(trial["params"])
             start, end = align_date_bounds(prepared.frame.index, params["start"], params["end"])
             frame, idx = prepare_dataset_with_warmup(prepared.frame, start, end, context.warmup_bars)
-            oos_frame, oos_idx, dates, rules = replay_oos_input(study, trial)
+            oos_frame, oos_idx, dates, rules, filters = replay_oos_input(study, trial)
             oos_params = context.params_for(trial["params"], operation_start=dates["start"], operation_end=dates["end"])
             for scope, bars, origin, values in (("is", frame, idx, params), ("oos_test", oos_frame, oos_idx, oos_params)):
                 direct = run_strategy(AdmissionTestStrategy, bars, values, origin, admission_rules=rules)

@@ -6,35 +6,41 @@ from types import SimpleNamespace
 from .strategy import AdmissionTestStrategy, STRATEGY_ID, load_config
 
 
-def register():
+def register(filtered=False):
     import strategies
-    previous = strategies._REGISTRY.get(STRATEGY_ID)
-    if previous is not None and previous.get("class") is not AdmissionTestStrategy:
+    from . import filtered as filter_fixture
+    identity = filter_fixture.STRATEGY_ID if filtered else STRATEGY_ID
+    strategy_class = filter_fixture.FilterTestStrategy if filtered else AdmissionTestStrategy
+    config = filter_fixture.load_config() if filtered else load_config()
+    previous = strategies._REGISTRY.get(identity)
+    if previous is not None and previous.get("class") is not strategy_class:
         raise ValueError("Admission fixture ID collides with an existing strategy.")
-    strategies._REGISTRY[STRATEGY_ID] = dict(
-        config=load_config(), **{"class": AdmissionTestStrategy}, path=Path(__file__).parent)
+    strategies._REGISTRY[identity] = dict(
+        config=config, **{"class": strategy_class}, path=Path(__file__).parent)
     return previous
 
 
-def _worker_initialize(initializer, initargs):
-    register()
+def _worker_initialize(initializer, initargs, filtered=False):
+    register(filtered)
     if initializer is not None:
         initializer(*initargs)
 
 
 @contextmanager
-def installed():
+def installed(filtered=False):
     """Only post_process's local context gets a registration-first Pool initializer."""
     import multiprocessing
     import strategies
     from core import post_process
-    previous = register()
+    from . import filtered as filter_fixture
+    identity = filter_fixture.STRATEGY_ID if filtered else STRATEGY_ID
+    previous = register(filtered)
     original_mp = post_process.mp
     real_context = multiprocessing.get_context("spawn")
 
     def pool(*args, initializer=None, initargs=(), **kwargs):
         return real_context.Pool(*args, initializer=_worker_initialize,
-                                 initargs=(initializer, initargs), **kwargs)
+                                 initargs=(initializer, initargs, filtered), **kwargs)
 
     def get_context(method):
         if method != "spawn":
@@ -47,9 +53,9 @@ def installed():
     finally:
         post_process.mp = original_mp
         if previous is None:
-            strategies._REGISTRY.pop(STRATEGY_ID, None)
+            strategies._REGISTRY.pop(identity, None)
         else:
-            strategies._REGISTRY[STRATEGY_ID] = previous
+            strategies._REGISTRY[identity] = previous
 
 
 def publish(root, *, rows=3000, venue="BYBIT", step="0.1", minimum="0.1", notional="5", turn_day=None):

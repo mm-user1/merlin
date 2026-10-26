@@ -1,4 +1,5 @@
 import io
+from core.entry_filters import MISSING, capability, effective_config
 import json
 import math
 import os
@@ -593,6 +594,15 @@ def _execute_backtest_request(
                 raise ValueError("Parquet inputs require Backtester V2.")
             from core.engine_v2.admission import uses_admission, read_admission_envelope
             replay = {"data_input": json.loads(request.form["dataInput"]), "fixed_params": payload}
+            methods = capability(strategy_context.config)
+            requested_filters = effective_config(json.loads(request.form["entryFilters"]) if "entryFilters" in request.form else MISSING)
+            if requested_filters and not methods:
+                raise ValueError("This strategy does not support Entry Filters; turn them Off.")
+            if methods:
+                replay["entryFilters"] = json.loads(request.form.get("entryFilters", "null"))
+                replay["entry_filter_inputs"] = json.loads(request.form.get("entryFilterInputs", "null"))
+            elif "entryFilterInputs" in request.form:
+                raise ValueError("This strategy does not support entryFilterInputs.")
             if uses_admission(strategy_context.config):
                 replay["entry_admission"] = json.loads(request.form.get("entryAdmission", "null"))
                 read_admission_envelope(replay["entry_admission"], payload.get("maxEntryLeverage"))
@@ -672,7 +682,8 @@ def _execute_backtest_request(
     try:
         from core.engine_v2.admission import run_strategy
         result = run_strategy(strategy_class, df, payload, trade_start_idx,
-                              admission_rules=prepared.admission_rules if prepared is not None else None)
+                              admission_rules=prepared.admission_rules if prepared is not None else None,
+                              entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING)
     except ValueError as exc:
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
     except Exception:  # pragma: no cover - defensive
@@ -686,6 +697,7 @@ def _execute_backtest_request(
         "warmup_bars": warmup_bars,
         "data_input": prepared.facts if prepared is not None else None,
         "entry_admission": prepared.entry_admission if prepared is not None else None,
+        "entry_filter_inputs": prepared.entry_filter_inputs if prepared is not None else None,
     }, None
 
 
@@ -698,6 +710,7 @@ def _run_trade_export(
     prepared_frame=None,
     prepared_trade_start_idx=None,
     admission_rules=None,
+    entry_filter_context=MISSING,
 ) -> Tuple[Optional[List[Any]], Optional[str]]:
     from strategies import get_strategy, get_strategy_config
     from core.engine_v2.admission import uses_admission
@@ -736,7 +749,7 @@ def _run_trade_export(
 
     try:
         from core.engine_v2.admission import run_strategy
-        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules)
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context)
     except Exception as exc:
         return None, str(exc)
 
@@ -752,6 +765,7 @@ def _run_equity_export(
     prepared_frame=None,
     prepared_trade_start_idx=None,
     admission_rules=None,
+    entry_filter_context=MISSING,
 ) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
     from strategies import get_strategy, get_strategy_config
     from core.engine_v2.admission import uses_admission
@@ -790,7 +804,7 @@ def _run_equity_export(
 
     try:
         from core.engine_v2.admission import run_strategy
-        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules)
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context)
     except Exception as exc:
         return None, None, str(exc)
 
@@ -1128,6 +1142,16 @@ def _resolve_stored_execution_context(
         except ValueError as exc:
             raise _validation_error(code="V2_STORED_ADMISSION_UNAVAILABLE", strategy_id=strategy_id,
                 path="config_json.entry_admission", message=f"{exc} A new study is required.") from exc
+    from core.entry_filter_input import saved_effective
+    methods = capability(context.config)
+    if methods or "entry_filter_inputs" in config or "entryFilters" in config:
+        try:
+            if not methods and "entry_filter_inputs" in config:
+                raise ValueError("Saved filter inputs disagree with the current strategy capability.")
+            saved_effective(config, required=bool(methods))
+        except ValueError as exc:
+            raise _validation_error(code="V2_STORED_FILTERS_UNAVAILABLE", strategy_id=strategy_id,
+                path="config_json.entry_filter_inputs", message=str(exc)) from exc
 
     if not context.is_v2:
         warmup_bars = int(
@@ -2893,6 +2917,10 @@ def _build_optimization_config(
         raise ValueError("Strategy ID is required for optimization.")
     if not isinstance(payload, dict):
         raise ValueError("Invalid optimization config payload.")
+    from strategies import get_strategy_config
+    filters = effective_config(payload.get("entryFilters", MISSING))
+    if filters and not capability(get_strategy_config(strategy_id)):
+        raise ValueError("This strategy does not support Entry Filters; disable them before launching.")
 
     def _parse_bool(value, default=False):
         if isinstance(value, bool):
@@ -3393,6 +3421,8 @@ def _build_optimization_config(
         optuna_params["primary_objective"] = primary_objective
 
     config = OptimizationConfig(
+        entryFilters=deepcopy(payload.get("entryFilters", {"version": 1, "enabled": False, "items": []}))
+            if capability(get_strategy_config(strategy_id)) else None,
         csv_file=csv_file,
         strategy_id=str(strategy_id),
         enabled_params=enabled_params,

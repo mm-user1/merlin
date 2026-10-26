@@ -139,6 +139,7 @@ function clearStrategyGeneratedState() {
   parameterTieState = {};
   window.currentStrategyConfig = null;
   window.currentStrategyConfigId = null;
+  window.EntryFilters?.render();
 
   const backtestContainer = document.getElementById('backtestParamsContent');
   const optimizerContainer = document.getElementById('optimizerParamsContainer');
@@ -239,6 +240,7 @@ async function loadStrategyConfig(strategyId) {
 
     provisionalConfig = config;
     window.currentStrategyConfig = config;
+    window.EntryFilters?.render();
     updateStrategyInfo(config);
     generateBacktestForm(config);
     generateOptimizerForm(config);

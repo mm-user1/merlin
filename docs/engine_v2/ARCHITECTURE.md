@@ -188,6 +188,14 @@ fixed per block.
 
 ## Signal and dataprep identity
 
+Opt-in [fixed entry filters](../ENTRY_FILTERS.md) sit between preparation and
+execution. Top-level `entryFilterSupport` is outside modes. Capable hooks/runners
+require explicit Off or prepared context; single/batch wrappers independently mask
+long/short entries without mutating cached raw signals or exits. Context travels
+beside frames/rules through Grid, WFA, workers and replay. Active effective settings
+enter plan identity; Off and legacy candidate identities remain unchanged. Source
+pins are separate. The linked guide owns native timing, source bounds and replay.
+
 Signals are causal, aligned one-dimensional boolean arrays; absent values are
 explicit `False`. Dataprep arrays are aligned floating arrays with NaN only
 where a kernel contract permits unavailable/inactive values. The strategy may

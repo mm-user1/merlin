@@ -222,20 +222,21 @@
     try {
       const response = await fetch(`/api/parquet/browse?path=${encodeURIComponent(path || '')}`);
       const payload = await response.json(); if (!response.ok) throw new Error(payload.error);
-      if (sequence !== state.sequence || !state.mode) return;
+      if (sequence !== state.sequence || (!state.mode && !state.packChoice)) return;
       csvBrowserState.currentPath = payload.current_path; csvBrowserState.entries = payload.entries;
       el('csvBrowserPath').value = payload.current_path;
-      state.paths.parquet = payload.current_path; state.pack = payload.pack;
+      if (!state.packChoice) state.paths.parquet = payload.current_path;
+      state.pack = payload.pack;
       if (payload.pack) state.metadata.set(payload.current_path, payload.pack);
       renderCsvBrowserEntries(payload.entries);
-      model.reset(payload.pack?.instruments || []); renderGrid();
+      if (!state.packChoice) { model.reset(payload.pack?.instruments || []); renderGrid(); }
       el('csvBrowserList').hidden = Boolean(payload.pack);
-      el('parquetGrid').hidden = !payload.pack;
-      el('parquetCoverage').hidden = !payload.pack;
+      el('parquetGrid').hidden = !payload.pack || Boolean(state.packChoice);
+      el('parquetCoverage').hidden = !payload.pack || Boolean(state.packChoice);
       el('csvBrowserOpenBtn').disabled = Boolean(payload.pack);
       el('csvBrowserAddBtn').disabled = !payload.pack;
       el('csvBrowserHelp').textContent = payload.pack
-        ? 'Select instruments with click, Ctrl/Shift-click or the keyboard, check timeframes, then Add Selected. Edit a timeframe label directly.'
+        ? (state.packChoice ? 'Use this pack, then choose one instrument in the filter editor.' : 'Select instruments with click, Ctrl/Shift-click or the keyboard, check timeframes, then Add Selected. Edit a timeframe label directly.')
         : payload.entries.length
           ? 'Open a pack directory containing manifest.json. Instruments appear when the pack is opened.'
           : 'No pack manifest or subfolders here. Use Up to return to the pack root; internal ohlcv folders are not selectable sources.';
@@ -245,10 +246,14 @@
   async function add() {
     try {
       if (!state.pack) throw new Error('Open a valid pack directory before adding or locating a source.');
+      if (state.packChoice) {
+        state.packChoice(csvBrowserState.currentPath, state.pack);
+        closeCsvBrowserModal(); return;
+      }
       if (state.relocation) {
         const response = await fetch(`/api/studies/${encodeURIComponent(state.relocation.study)}/locate-parquet-pack`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ packRoot: csvBrowserState.currentPath, testId: state.relocation.testId })
+          body: JSON.stringify({ packRoot: csvBrowserState.currentPath, testId: state.relocation.testId, dependency: state.relocation.dependency })
         });
         const result = await response.json(); if (!response.ok) throw new Error(result.error);
         window.location.href = '/results?study=' + encodeURIComponent(state.relocation.study);
@@ -273,9 +278,15 @@
     setMode(true); el('csvDirectory').value = state.paths.parquet; persist(); renderSelected();
   }
   root.ParquetInput = { ...api, state, model, setMode, renderSelected, load, add, restore, summary,
-    active: () => state.mode,
+    active: () => state.mode || Boolean(state.packChoice),
+    choosePack: async (path, callback) => {
+      state.packChoice = callback;
+      await openCsvBrowserModal();
+      if (path) await load(path);
+      el('csvBrowserAddBtn').textContent = 'Use pack';
+    },
     sources: () => state.sources.map(s => ({ ...s })),
-    close: () => { state.sequence++; model.invalid.clear(); model.drafts.clear(); },
+    close: () => { state.sequence++; state.packChoice = null; el('csvBrowserAddBtn').textContent = 'Add Selected'; model.invalid.clear(); model.drafts.clear(); },
     clear: () => { state.sources = []; persist(); renderSelected(); } };
   document.addEventListener('DOMContentLoaded', () => {
     state.paths.csv = el('csvDirectory')?.value || '';
@@ -283,7 +294,7 @@
     ['start', 'end', 'startDate', 'endDate', 'startTime', 'endTime', 'dateFilter', 'warmupBars'].forEach(id => el(id)?.addEventListener('change', summary));
     const query = new URLSearchParams(window.location.search);
     if (query.has('locatePack')) {
-      state.relocation = { study: query.get('locatePack'), testId: query.get('testId') ? Number(query.get('testId')) : null };
+      state.relocation = { study: query.get('locatePack'), testId: query.get('testId') ? Number(query.get('testId')) : null, dependency: query.get('dependency') || 'target' };
       state.paths.parquet = query.get('packRoot') || '';
       setMode(true);
       el('csvBrowserAddBtn').textContent = 'Verify and use pack';

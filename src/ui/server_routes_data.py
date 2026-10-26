@@ -1,4 +1,6 @@
 import io
+from core.entry_filters import MISSING
+from core.entry_filter_input import saved_effective
 import re
 import tempfile
 import threading
@@ -557,10 +559,20 @@ def register_routes(app):
             try:
                 source = validate_pin(config["data_input"])
                 root = resolve_root(config.get("data_input_root_override", source["pack_root"]))
+                filter_options = {}
+                if "entry_filter_inputs" in config:
+                    filters = saved_effective(config, required=True)
+                    overrides = config.get("entry_filter_root_overrides", {})
+                    for item in filters:
+                        original = item["source"]["pack_root"]
+                        resolve_root(overrides.get(original, original))
+                    filter_options = dict(entry_filters=filters, parent_filter_inputs=config["entry_filter_inputs"],
+                                          filter_root_overrides=overrides)
                 prepared = prepare_manual_input(config["data_input"], root_override=str(root),
                     date_filter=True, start=start_date, end=end_date,
                     warmup_bars=execution_context.warmup_bars,
-                    admission_params=execution_context.base_params if "entry_admission" in config else None)
+                    admission_params=execution_context.base_params if "entry_admission" in config else None,
+                    **filter_options)
             except (ValueError, OSError) as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
             data_source = "original_parquet"
@@ -665,6 +677,7 @@ def register_routes(app):
         try:
             results_payload = run_period_test_for_trials(
                 admission_rules=prepared.admission_rules if prepared is not None else None,
+                entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING,
                 diagnostic_scope="manual",
                 df=df,
                 strategy_id=study.get("strategy_id"),
@@ -712,6 +725,9 @@ def register_routes(app):
 
         if prepared is not None:
             results_json["config"]["data_input"] = prepared.facts
+            if prepared.entry_filter_inputs is not None:
+                results_json["config"].update(entryFilters=config["entryFilters"],
+                                              entry_filter_inputs=prepared.entry_filter_inputs)
             if prepared.entry_admission is not None:
                 results_json["config"].update(entry_admission=prepared.entry_admission, fixed_params=fixed_params)
 
@@ -796,7 +812,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -851,7 +867,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -898,12 +914,12 @@ def register_routes(app):
 
         if is_parquet:
             try:
-                frame, idx, dates, rules = replay_oos_input(study, trial)
+                frame, idx, dates, rules, filters = replay_oos_input(study, trial)
             except (ValueError, OSError) as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
             csv_path = ""
             oos_start, oos_end = dates["start"], dates["end"]
-            export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules}
+            export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules, "entry_filter_context": filters}
         else:
             oos_start = study.get("oos_test_start_date")
             oos_end = study.get("oos_test_end_date")
@@ -983,7 +999,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -1275,7 +1291,7 @@ def register_routes(app):
         )
 
         equity_curve, timestamps, error = _run_equity_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1376,7 +1392,7 @@ def register_routes(app):
         )
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1472,7 +1488,8 @@ def register_routes(app):
             try:
                 from core.engine_v2.admission import run_strategy
                 result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
-                    admission_rules=prepared.admission_rules if prepared is not None else None)
+                    admission_rules=prepared.admission_rules if prepared is not None else None,
+                    entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING)
             except Exception as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 

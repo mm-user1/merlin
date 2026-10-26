@@ -1788,6 +1788,7 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
 
   applyQueueConfigFallback(item);
   applyQueueUiSnapshot(item.uiSnapshot);
+  window.EntryFilters?.restore(item.config?.entryFilters);
   if (typeof applyQueueParameterTies === 'function') applyQueueParameterTies(item);
 
   await applyQueueDatabaseTarget(item.dbTarget);

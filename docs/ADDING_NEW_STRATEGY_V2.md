@@ -1,5 +1,11 @@
 # Importing a Backtester V2 Strategy
 
+Compatible `risk_bracket_v1` position profiles may opt into the top-level
+`entryFilterSupport` capability described in [Fixed entry filters](ENTRY_FILTERS.md).
+Keep raw strategy signals independent of fixed external filters. Capable adapters
+must explicitly transport Off/prepared context; omission is an error. Do not add
+filter settings to strategy parameters/modes or opt existing strategies in silently.
+
 This is the primary procedure for new Merlin strategy work. Read the stable
 [V2 architecture contract](engine_v2/ARCHITECTURE.md) and
 [cross-engine metrics contract](METRICS.md) before implementation. Exact

@@ -21,6 +21,7 @@ import pandas as pd
 from data_provider import data, manifest
 from data_provider.errors import BusyError, DataProviderError, PendingError
 from .backtest_engine import prepare_dataset_with_warmup
+from .entry_filters import MISSING
 
 VERSION = 1
 POLICY = "merlin_contiguous_quote_v1"
@@ -191,6 +192,8 @@ class PreparedInput:
     facts: dict
     admission_rules: object = None
     entry_admission: dict | None = None
+    entry_filter_context: object = MISSING
+    entry_filter_inputs: dict | None = None
 
     def window(self, start, end, warmup_bars):
         return prepare_dataset_with_warmup(self.frame, start, end, warmup_bars)
@@ -270,8 +273,13 @@ def _with_admission(session, prepared, admission_params):
                    entry_admission=admission_envelope(rules, admission_params.get("maxEntryLeverage", 8)))
 
 
-def prepare_input(source, *, cancelled=None, admission_params=None, **range_options):
+def prepare_input(source, *, cancelled=None, admission_params=None, entry_filters=MISSING, **range_options):
     source = normalize_source(source)
+    if entry_filters is not MISSING:
+        from .entry_filter_input import prepare_bundle
+        return prepare_bundle(source["pack_root"],
+            lambda session: _with_admission(session, _prepare(session, source, **range_options), admission_params),
+            entry_filters, cancelled=cancelled)
     with pack_session(source["pack_root"], cancelled=cancelled) as session:
         return _with_admission(session, _prepare(session, source, **range_options), admission_params)
 
@@ -314,10 +322,11 @@ def _replay(session, pin, source):
     return PreparedInput(prepared.frame, prepared.trade_start_idx, deepcopy(pin))
 
 
-def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None):
+def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None,
+                 entry_filters=MISSING, entry_filter_inputs=MISSING, filter_root_overrides=None):
     source = validate_pin(pin)
     root = root_override if root_override is not None else source["pack_root"]
-    with pack_session(root, cancelled=cancelled) as session:
+    def load(session):
         prepared = _replay(session, pin, source)
         if entry_admission is None:
             return prepared
@@ -327,11 +336,26 @@ def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=Non
         if pinned.semantic() != current.admission_rules.semantic():
             raise DataInputError("Effective instrument rules changed; saved execution replay refused.")
         return replace(prepared, admission_rules=pinned, entry_admission=deepcopy(entry_admission))
+    if entry_filters is not MISSING:
+        from .entry_filter_input import prepare_bundle, validate_envelope
+        validate_envelope(entry_filter_inputs, entry_filters)
+        return prepare_bundle(root, load, entry_filters, saved=entry_filter_inputs,
+                              overrides=filter_root_overrides, cancelled=cancelled)
+    with pack_session(root, cancelled=cancelled) as session:
+        return load(session)
 
 
-def prepare_manual_input(pin, *, root_override=None, cancelled=None, admission_params=None, **range_options):
+def prepare_manual_input(pin, *, root_override=None, cancelled=None, admission_params=None,
+                         entry_filters=MISSING, parent_filter_inputs=None, filter_root_overrides=None, **range_options):
     source = validate_pin(pin)
     source["pack_root"] = str(Path(root_override or source["pack_root"]).resolve())
-    with pack_session(source["pack_root"], cancelled=cancelled) as session:
+    def load(session):
         _replay(session, pin, source)
         return _with_admission(session, _prepare(session, source, **range_options), admission_params)
+    if entry_filters is not MISSING:
+        from .entry_filter_input import prepare_bundle, validate_envelope
+        validate_envelope(parent_filter_inputs, entry_filters)
+        return prepare_bundle(source["pack_root"], load, entry_filters, overrides=filter_root_overrides,
+            parent_target=pin, parent_filters=parent_filter_inputs, cancelled=cancelled)
+    with pack_session(source["pack_root"], cancelled=cancelled) as session:
+        return load(session)

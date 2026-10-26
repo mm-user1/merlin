@@ -755,6 +755,17 @@ async function showParameterDetails(result) {
   const params = result.params || result.best_params || {};
   content.innerHTML = '';
 
+  const filterConfig = ResultsState.activeTab === 'manual_tests'
+    ? ResultsState.activeManualTest?.config || {} : ResultsState.savedConfig || {};
+  if (window.EntryFilters) {
+    const filterCard = document.createElement('div'); filterCard.className = 'param-group-card';
+    const heading = document.createElement('div'); heading.className = 'param-group-title'; heading.textContent = 'Entry Filters';
+    const detail = document.createElement('div'); detail.className = 'param-item'; detail.style.whiteSpace = 'pre-line';
+    detail.textContent = window.EntryFilters.saved(filterConfig).details;
+    filterCard.append(heading, detail); content.appendChild(filterCard);
+    window.EntryFilters.dependencies(filterConfig);
+  }
+
   const orderedKeys = getParamDisplayOrder(params, ResultsState.strategyConfig);
   const paramDefs = ResultsState.strategyConfig?.parameters || {};
   const groupOrder = ResultsState.strategyConfig?.group_order || [];

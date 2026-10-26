@@ -4626,7 +4626,17 @@ def _safe_dict(obj: Any) -> Dict[str, Any]:
 def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
     """Serialize and validate optional V2 runtime metadata before DB work."""
 
+    from dataclasses import replace, is_dataclass
+    if is_dataclass(config) and hasattr(config, "entry_filter_context"):
+        config = replace(config, entry_filter_context=None)
     payload = _safe_dict(config)
+    payload.pop("entry_filter_context", None)
+    if not isinstance(config, dict) and payload.get("entry_filter_inputs") is None and payload.get("entryFilters") is None:
+        payload.pop("entry_filter_inputs", None)
+        payload.pop("entryFilters", None)
+    if "entry_filter_inputs" in payload or "entryFilters" in payload:
+        from .entry_filter_input import saved_effective
+        saved_effective(payload, required=True)
     payload.pop("admission_rules", None)
     if not isinstance(config, dict) and payload.get("entry_admission") is None:
         payload.pop("entry_admission", None)

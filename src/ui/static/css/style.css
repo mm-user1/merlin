@@ -3686,3 +3686,18 @@
 .parquet-table input.parquet-timeframe { width: 52px; margin: 0 0 0 5px; padding: 3px; display: inline-block; border: 1px solid transparent; background: transparent; }
 .parquet-timeframe:focus { border-color: #4476c3; background: white; }
 .parquet-timeframe[aria-invalid="true"] { border-color: #c13232; background: #fff1f1; }
+
+/* Fixed per-run entry filter editor. */
+.strategy-selector-section summary { cursor: pointer; user-select: none; }
+.entry-filters-editor { margin: 10px 0 16px; }
+.entry-filter-heading, .entry-filter-item summary, .entry-filter-source { display: flex; align-items: center; gap: 8px; }
+.entry-filter-heading button, .entry-filter-item summary button { margin-left: auto; }
+.entry-filter-item { border: 1px solid #ccc; border-radius: 3px; margin-top: 8px; padding: 8px; }
+.entry-filter-item summary { cursor: pointer; }
+.entry-filter-item fieldset { border: 0; padding: 8px 0 0; min-width: 0; }
+.entry-filter-item fieldset > label, .entry-filter-item small { display: block; margin-top: 6px; }
+.entry-filter-source input { min-width: 0; flex: 1; }
+.entry-filter-source { margin-top: 6px; }
+.entry-filter-item select { width: 100%; }
+.entry-filter-item pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.entry-filters-editor .csv-browser-error:empty { display: none; }

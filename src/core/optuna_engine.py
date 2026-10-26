@@ -1,6 +1,8 @@
 """Optuna-based Bayesian optimization engine for S_01 TrailingMA."""
 from __future__ import annotations
 
+from core.entry_filters import MISSING
+
 import bisect
 from contextlib import contextmanager
 import io
@@ -83,6 +85,9 @@ class OptimizationConfig:
     data_input: Optional[Dict[str, Any]] = None
     admission_rules: Any = None
     entry_admission: Optional[Dict[str, Any]] = None
+    entryFilters: Any = None
+    entry_filter_inputs: Any = None
+    entry_filter_context: Any = MISSING
 
     # Strategy-specific execution defaults
     contract_size: float = 1.0

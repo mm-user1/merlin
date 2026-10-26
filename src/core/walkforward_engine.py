@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from copy import deepcopy
 import io
+from core.entry_filters import MISSING, effective_config, validate_context
 import logging
 import math
 import time
@@ -543,6 +544,9 @@ class WalkForwardEngine:
         self.prepared_input = prepared_input
         if prepared_input is not None:
             self.base_config_template["data_input"] = deepcopy(prepared_input.facts)
+            if prepared_input.entry_filter_inputs is not None:
+                self.base_config_template["entry_filter_inputs"] = deepcopy(prepared_input.entry_filter_inputs)
+                self.base_config_template.setdefault("entryFilters", {"version": 1, "enabled": False, "items": []})
             if prepared_input.entry_admission is not None:
                 self.base_config_template["entry_admission"] = deepcopy(prepared_input.entry_admission)
         self._grid_v2_plan_cache = None
@@ -563,6 +567,9 @@ class WalkForwardEngine:
 
             # Construction is the certification boundary for every caller.
             profile = parse_execution_profile(strategy_config)
+            validate_context(getattr(profile, "entry_filter_methods", ()),
+                prepared_input.entry_filter_context if prepared_input is not None else MISSING,
+                effective_config(self.base_config_template.get("entryFilters", MISSING)))
             if profile.modes.get("entryAdmission"):
                 from .engine_v2.admission import execution_admission
                 if prepared_input is None:
@@ -1036,7 +1043,8 @@ class WalkForwardEngine:
         run_params = self._window_execution_params(params, start, end)
         from .engine_v2.admission import run_strategy
         return run_strategy(self.strategy_class, df_prepared, run_params, trade_start_idx,
-            admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None)
+            admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None,
+            entry_filter_context=self.prepared_input.entry_filter_context if self.prepared_input is not None else MISSING)
 
     def _window_execution_params(
         self,
@@ -1260,7 +1268,7 @@ class WalkForwardEngine:
                 ft_start_date=training_end.strftime("%Y-%m-%d"),
                 ft_end_date=is_end.strftime("%Y-%m-%d"),
                 n_workers=worker_count,
-                **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules} if self.prepared_input is not None else {}),
+                **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
             )
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
@@ -1328,7 +1336,7 @@ class WalkForwardEngine:
                         fixed_params=fixed_params,
                         config_json=strategy_config_json,
                         n_workers=worker_count,
-                        **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules} if self.prepared_input is not None else {}),
+                        **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
                     )
                     module_status["stress_test"]["ran"] = True
                 except Exception as exc:
@@ -3150,8 +3158,11 @@ class WalkForwardEngine:
 
         optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
         base_config = OptimizationConfig(
+            entryFilters=deepcopy(self.base_config_template.get("entryFilters")),
+            entry_filter_inputs=self.prepared_input.entry_filter_inputs if self.prepared_input is not None else None,
             data_input=self.prepared_input.facts if self.prepared_input is not None else None,
             admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None,
+            entry_filter_context=self.prepared_input.entry_filter_context if self.prepared_input is not None else MISSING,
             entry_admission=self.prepared_input.entry_admission if self.prepared_input is not None else None,
             csv_file=csv_buffer,
             strategy_id=self.config.strategy_id,

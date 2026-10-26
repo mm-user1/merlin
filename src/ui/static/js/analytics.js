@@ -2259,6 +2259,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function updateVisualsForSelection() {
+    renderResearchInfo();
     reconcileCompareStateToCurrentContext();
     renderTableHeaderMeta();
     if (window.AnalyticsSets && typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
@@ -2283,6 +2284,10 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
     const wfaModes = Array.isArray(info.wfa_modes) ? info.wfa_modes : [];
     const isOosPeriods = Array.isArray(info.is_oos_periods) ? info.is_oos_periods : [];
     const dataPeriods = Array.isArray(info.data_periods) ? info.data_periods : [];
+    const filterPopulation = window.EntryFilters?.population({ studies: AnalyticsState.studies,
+      context: getVisibleOrderedStudyIds().map(id => getStudyMap().get(id)).filter(Boolean),
+      focusedId: AnalyticsState.focusedStudyId, mode: window.AnalyticsSets?.getViewMode() || 'allStudies',
+      sets: AnalyticsState.sets, focusedSetId: AnalyticsState.focusedSetId, checkedSetIds: AnalyticsState.checkedSetIds });
 
     return [
       { key: 'Studies', val: `${info.total_studies || 0} total (${info.wfa_studies || 0} WFA)` },
@@ -2292,6 +2297,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       { key: 'WFA Mode', val: wfaModes.length ? wfaModes.join(', ') : MISSING_TEXT },
       { key: 'IS / OOS', val: isOosPeriods.length ? isOosPeriods.join(', ') : MISSING_TEXT },
       { key: 'Data Periods', val: `${dataPeriods.length} periods` },
+      { key: 'Entry Filters', val: window.EntryFilters?.consensus(filterPopulation || []) || '?' },
     ];
   }
 
@@ -2312,6 +2318,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       const val = document.createElement('span');
       val.className = 'val';
       val.textContent = displayValue(row.val);
+      if (row.key === 'Entry Filters') val.style.whiteSpace = 'pre-line';
 
       item.appendChild(key);
       item.appendChild(val);

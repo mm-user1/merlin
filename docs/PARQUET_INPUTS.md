@@ -1,5 +1,10 @@
 # Parquet inputs in Merlin
 
+Opted-in V2 risk-bracket strategies can bind separate OHLCV sources through
+[fixed entry filters](ENTRY_FILTERS.md). Their gap-aware native preparation remains
+distinct from strict target continuity. Same-root dependencies share a read session;
+saved filter pins and separate location overrides accompany the target pin.
+
 Backtester V2 accepts prepared market-data packs through Start and Queue. Choose
 **Use Parquet**, open a directory containing `manifest.json`, select instruments
 and check their timeframes. The directory browser lists manifest instruments,
@@ -58,7 +63,7 @@ New V2 Optimize/WFA remain Grid-only. Existing V2 DSR rejection remains in force
 this integration does not add DSR engine support. Manual tests, trial/test equity,
 Start Backtest and its download, and applicable IS/FT/OOS/manual/WFA trade exports
 use source-aware preparation. Legacy V1 Lancelot remains CSV-only. No new engine,
-strategy, filter, funding cashflow, leverage rule, selector or Preset support is added.
+strategy, funding cashflow, selector or Preset support is added by Parquet transport.
 
 Each study stores a versioned `config_json.data_input` envelope containing the
 source descriptor, requested/resolved/consumed bounds, bound origins, warmup origin,

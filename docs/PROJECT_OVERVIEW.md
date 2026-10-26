@@ -127,6 +127,11 @@ not maintain a duplicate endpoint list.
 
 The browser UI has three pages:
 
+Start's compact selector retains metadata in Details. Opted-in risk-bracket V2
+profiles expose [fixed entry filters](ENTRY_FILTERS.md) before date/source controls.
+Queue preserves settings; Results Parameters shows saved filters; Analytics has
+one selection-sensitive Entry Filters row. Other Research Info rows remain DB-wide.
+
 - **Start** dynamically renders strategy config, market/date/Warmup settings,
   V1 Optuna/Grid or V2 Grid controls, Grid Preview, WFA, and Queue management.
 - **Results** browses stored studies and trials/windows, renders metrics/equity,

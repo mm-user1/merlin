@@ -1,4 +1,5 @@
 import json
+from core.entry_filter_input import describe_saved
 import math
 import re
 import time
@@ -970,6 +971,7 @@ def register_routes(app):
                     "median_window_profit": _safe_float(row_dict.get("median_window_profit")),
                     "median_window_wr": _safe_float(row_dict.get("median_window_wr")),
                     "entry_diagnostics": entry_summaries.get(row_dict.get("study_id")),
+                    "entry_filters": describe_saved(config_payload),
                     "has_equity_curve": has_equity_curve,
                     "equity_start_ts": equity_start_ts or None,
                     "equity_end_ts": equity_end_ts or None,

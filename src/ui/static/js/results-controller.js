@@ -770,6 +770,8 @@ async function applyStudyPayload(data, loadVersion = studyLoadVersion) {
   ResultsState.gridSettings = study.grid_settings || null;
 
   const config = study.config_json || {};
+  ResultsState.savedConfig = config;
+  window.EntryFilters?.dependencies(config, true);
   ResultsState.hasDataInput = Object.prototype.hasOwnProperty.call(config, 'data_input');
   ResultsState.dataInput = config.data_input;
   const locatePack = document.getElementById('locateParquetBtn');
@@ -1879,8 +1881,10 @@ async function hydrateFromServer() {
 function initResultsPage() {
   document.getElementById('locateParquetBtn')?.addEventListener('click', () => {
     const manual = ResultsState.activeTab === 'manual_tests' ? ResultsState.activeManualTest : null;
-    const pin = manual?.config?.data_input || ResultsState.dataInput;
-    const query = new URLSearchParams({ locatePack: ResultsState.studyId, packRoot: pin?.source?.pack_root || '' });
+    const config = manual?.config || ResultsState.savedConfig || {};
+    const dependency = document.getElementById('parquetDependency')?.value || 'target';
+    const path = dependency === 'target' ? config.data_input?.source?.pack_root : dependency;
+    const query = new URLSearchParams({ locatePack: ResultsState.studyId, packRoot: path || '', dependency });
     if (manual) query.set('testId', manual.id);
     window.location.href = '/?' + query.toString();
   });

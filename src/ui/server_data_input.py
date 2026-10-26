@@ -6,6 +6,8 @@ import re
 import pandas as pd
 
 from core.backtest_engine import prepare_dataset_with_warmup
+from core.entry_filters import MISSING, capability, effective_config, source_locator
+from core.entry_filter_input import metadata_entry, saved_effective
 
 from core.data_input import (
     DataInputError, normalize_source, prepare_input, replay_input, validate_pin,
@@ -51,9 +53,29 @@ def request_source(values):
     return normalize_source(raw)
 
 
+def request_filters(values, strategy_context):
+    raw = values.get("entryFilters", MISSING)
+    if raw is MISSING and "config" in values:
+        config = values["config"]
+        config = json.loads(config) if isinstance(config, str) else config
+        if isinstance(config, dict):
+            raw = config.get("entryFilters", MISSING)
+    raw = json.loads(raw) if isinstance(raw, str) else raw
+    effective = effective_config(raw)
+    methods = capability(strategy_context.config)
+    if effective and not methods:
+        raise DataInputError("This strategy does not support Entry Filters; turn them Off or select a capable strategy.")
+    if "entryFilterInputs" in values and not methods:
+        raise DataInputError("This strategy does not support entryFilterInputs.")
+    for item in effective:
+        resolve_root(item["source"]["pack_root"])
+    return effective if methods else MISSING
+
+
 def prepare_request(values, strategy_context, params, warmup_bars, *, cancelled=None):
     from core.engine_v2.admission import uses_admission, execution_admission
     admission = uses_admission(strategy_context.config)
+    filters = request_filters(values, strategy_context)
     source = request_source(values)
     if source is None:
         if admission:
@@ -65,7 +87,7 @@ def prepare_request(values, strategy_context, params, warmup_bars, *, cancelled=
     prepared = prepare_input(source, date_filter=bool(params.get("dateFilter", False)),
                          start=params.get("start"), end=params.get("end"),
                          warmup_bars=warmup_bars, cancelled=cancelled,
-                         admission_params=params if admission else None)
+                         admission_params=params if admission else None, entry_filters=filters)
     if admission:
         execution_admission(strategy_context.profile, params, prepared.admission_rules)
     return prepared
@@ -78,7 +100,21 @@ def preview_request_rules(values, strategy_context, params, *, cancelled=None):
     if source is None:
         raise DataInputError("risk_bracket_v1 requires a Parquet source with instrument rules; CSV is unsupported.")
     source["pack_root"] = str(resolve_root(source["pack_root"]))
-    rules = preview_admission_rules(source, cancelled=cancelled)
+    filters = request_filters(values, strategy_context)
+    from core.data_input import pack_session, _admission_rules
+    groups = {}
+    for item in (() if filters is MISSING else filters):
+        root = source_locator(str(resolve_root(item["source"]["pack_root"])))
+        groups.setdefault(root, []).append(item["source"])
+    with pack_session(source["pack_root"], cancelled=cancelled) as session:
+        metadata_entry(session, source)
+        rules = _admission_rules(session, source["instrument_id"])
+        for binding in groups.pop(source_locator(source["pack_root"]), []):
+            metadata_entry(session, binding)
+    for root, bindings in groups.items():
+        with pack_session(root, cancelled=cancelled) as session:
+            for binding in bindings:
+                metadata_entry(session, binding)
     execution_admission(strategy_context.profile, params, rules)
     return rules
 
@@ -97,9 +133,20 @@ def replay_config(config, *, cancelled=None):
         return None
     source = validate_pin(config["data_input"])
     root = resolve_root(config.get("data_input_root_override", source["pack_root"]))
+    options = {}
+    if "entryFilters" in config or "entry_filter_inputs" in config:
+        effective = saved_effective(config)
+        overrides = config.get("entry_filter_root_overrides", {})
+        if not isinstance(overrides, dict):
+            raise DataInputError("Invalid filter root overrides.")
+        for item in effective:
+            original = item["source"]["pack_root"]
+            resolve_root(overrides.get(original, original))
+        options = dict(entry_filters=effective, entry_filter_inputs=config["entry_filter_inputs"],
+                       filter_root_overrides=overrides)
     return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled,
                         entry_admission=config.get("entry_admission"),
-                        admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
+                        admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"), **options)
 
 
 def execution_input(study, manual=None):
@@ -167,7 +214,7 @@ def replay_oos_input(study, trial):
             or frame.index[0] != dates["preparation_start"]
             or frame.index[-1] != dates["preparation_end"]):
         raise DataInputError("OOS preparation conflicts with saved parquet_oos_replay facts; reconstruction refused.")
-    return frame, idx, dates, prepared.admission_rules
+    return frame, idx, dates, prepared.admission_rules, prepared.entry_filter_context
 
 
 def browse(raw):
@@ -237,10 +284,18 @@ def register_routes(app):
             if not isinstance(raw_root, str) or not raw_root.strip():
                 raise DataInputError("packRoot must be a nonblank path string.")
             root = resolve_root(raw_root)
-            replay_input(config["data_input"], root_override=str(root),
-                entry_admission=config.get("entry_admission"),
-                admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
-            updated = {**config, "data_input_root_override": str(root)}
+            dependency = body.get("dependency", "target")
+            if dependency == "target":
+                replay_input(config["data_input"], root_override=str(root),
+                    entry_admission=config.get("entry_admission"),
+                    admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
+                updated = {**config, "data_input_root_override": str(root)}
+            else:
+                from core.entry_filter_input import verify_relocation
+                original = source_locator(dependency)
+                verify_relocation(config, original, root)
+                overrides = {**config.get("entry_filter_root_overrides", {}), original: str(root)}
+                updated = {**config, "entry_filter_root_overrides": overrides}
             if manual is None:
                 storage.update_study_config_json(study_id, updated)
             else:
@@ -289,14 +344,14 @@ def register_routes(app):
                 raise DataInputError("Unknown result module.")
             export_options = {}
             if module == "oos_test" and "data_input" in (study.get("config_json") or {}):
-                frame, idx, dates, rules = replay_oos_input(study, trial)
+                frame, idx, dates, rules, filters = replay_oos_input(study, trial)
                 csv_path = ""
                 start, end = dates["start"], dates["end"]
-                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules}
+                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules, "entry_filter_context": filters}
             else:
                 csv_path, prepared = execution_input(study, manual)
                 if prepared is not None:
-                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules}
+                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context}
             params = context.params_for(trial.get("params") or {}, operation_start=start, operation_end=end)
             equity, timestamps, error = _run_equity_export(
                 strategy_id=study["strategy_id"], csv_path=csv_path, params=params,

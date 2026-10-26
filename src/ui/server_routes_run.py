@@ -1,4 +1,5 @@
 import io
+from core.entry_filters import MISSING, effective_config, validate_context
 import json
 import math
 import re
@@ -223,6 +224,8 @@ def register_routes(app):
 
         config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else payload
         config_payload = dict(config_payload)
+        if "entryFilters" in payload:
+            config_payload["entryFilters"] = payload["entryFilters"]
         config_payload["optimization_mode"] = "grid"
 
         try:
@@ -511,6 +514,9 @@ def register_routes(app):
 
         prepared = None
         try:
+            if "entryFilters" in data:
+                raw_filters = data["entryFilters"]
+                config_payload["entryFilters"] = json.loads(raw_filters) if isinstance(raw_filters, str) else raw_filters
             prepared = prepare_request(data, strategy_context, config_payload.get("fixed_params") or {},
                                        warmup_bars if strategy_context.is_v2 else 1000,
                                        cancelled=lambda: _is_run_cancelled(run_id))
@@ -726,6 +732,8 @@ def register_routes(app):
             "grid_v2_prefer_compiled": bool(getattr(optimization_config, "grid_v2_prefer_compiled", True)),
             "grid_v2_max_cache_mb": getattr(optimization_config, "grid_v2_max_cache_mb", None),
         }
+        if optimization_config.entryFilters is not None:
+            base_template["entryFilters"] = optimization_config.entryFilters
         if post_process_payload:
             base_template["postProcess"] = post_process_payload
         if v2_runtime_metadata is not None:
@@ -950,6 +958,8 @@ def register_routes(app):
             )
         except V2ValidationError as exc:
             return _validation_error_response(exc)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), HTTPStatus.BAD_REQUEST
 
         db_apply_error = _apply_db_target_from_form(data)
         if db_apply_error:
@@ -1122,6 +1132,7 @@ def register_routes(app):
             "parameters": payload,
             "data_input": execution.get("data_input"),
             "entry_admission": execution.get("entry_admission"),
+            "entry_filter_inputs": execution.get("entry_filter_inputs"),
             "entry_diagnostics": getattr(result, "entry_diagnostics", None),
         })
 
@@ -1201,6 +1212,8 @@ def register_routes(app):
 
         prepared = None
         try:
+            if "entryFilters" in request.form:
+                config_payload["entryFilters"] = json.loads(request.form["entryFilters"])
             prepared = prepare_request(request.form, strategy_context, config_payload.get("fixed_params") or {},
                                        warmup_bars)
         except (ValueError, OSError) as exc:
@@ -1436,6 +1449,8 @@ def register_routes(app):
             optimization_config.data_input = prepared.facts
             optimization_config.admission_rules = prepared.admission_rules
             optimization_config.entry_admission = prepared.entry_admission
+            optimization_config.entry_filter_inputs = prepared.entry_filter_inputs
+            optimization_config.entry_filter_context = prepared.entry_filter_context
         if v2_runtime_metadata is not None:
             optimization_config.v2_runtime = v2_runtime_metadata
         optimizer_mode = str(getattr(optimization_config, "optimization_mode", "optuna") or "optuna").lower()
@@ -1686,7 +1701,7 @@ def register_routes(app):
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
-                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 optuna_results=ft_candidates,
@@ -1755,7 +1770,7 @@ def register_routes(app):
                 st_source = "dsr"
 
             st_results, st_summary = run_stress_test(
-                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 source_results=st_candidates,
@@ -1857,6 +1872,7 @@ def register_routes(app):
             oos_preparation = {} if prepared is not None else None
             oos_results_payload = run_period_test_for_trials(
                 admission_rules=prepared.admission_rules if prepared is not None else None,
+                entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING,
                 df=df_oos,
                 strategy_id=strategy_id,
                 warmup_bars=int(warmup_bars),

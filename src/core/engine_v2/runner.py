@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from core.entry_filters import MISSING, validate_context, apply_permissions
+
 from dataclasses import dataclass, fields
 import math
 from typing import Any, Mapping, Optional, Sequence
@@ -189,9 +191,12 @@ def run_v2_strategy(
     compute_sharpe_daily: bool = False,
     compute_max_drawdown_mtm: bool = False,
     admission_rules: AdmissionRules | None = None,
+    entry_filter_context=MISSING,
 ) -> V2RunResult:
     """Run V2 execution and return an enriched Merlin strategy result."""
 
+    validate_context(getattr(profile, "entry_filter_methods", ()), entry_filter_context)
+    data = apply_permissions(data, entry_filter_context)
     modes = active_mode_values(profile, params)
     topology = modes.get("topology")
     if topology == "signal_reversal":

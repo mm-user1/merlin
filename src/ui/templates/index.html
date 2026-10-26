@@ -29,9 +29,9 @@
               <!-- ============================================ -->
               <div
                 class="strategy-selector-section"
-                style="margin-bottom: 30px; padding: 20px; background-color: #f0f8ff; border: 2px solid #4a90e2; border-radius: 8px;"
+                style="margin-bottom: 12px; padding: 4px 0;"
               >
-                <h2 style="margin-top: 0; color: #4a90e2;">📊 Select Strategy</h2>
+                <h2 style="margin: 0 0 8px;">Select Strategy</h2>
 
                 <div class="form-group">
                   <label style="font-weight: bold;">Strategy:</label>
@@ -44,9 +44,9 @@
                   </select>
                 </div>
 
-                <div
+                <details><summary>Details</summary><div
                   id="strategyInfo"
-                  style="margin-top: 15px; padding: 15px; background-color: white; border-radius: 5px; display: none;"
+                  style="margin-top: 8px; display: none;"
                 >
                   <div style="display: grid; grid-template-columns: auto 1fr; gap: 10px; font-size: 14px;">
                     <strong>Name:</strong> <span id="strategyName"></span>
@@ -54,8 +54,10 @@
                     <strong>Description:</strong> <span id="strategyDescription"></span>
                     <strong>Parameters:</strong> <span id="strategyParamCount"></span>
                   </div>
-                </div>
+                </div></details>
               </div>
+
+              <section id="entryFiltersEditor" class="entry-filters-editor" aria-label="Entry Filters"></section>
 
               <div class="section">
                 <div class="form-group">
@@ -1331,6 +1333,7 @@
   <script src="/static/js/optuna-ui.js"></script>
   <script src="/static/js/ui-handlers.js"></script>
   <script src="/static/js/parquet-input.js"></script>
+  <script src="/static/js/entry-filters.js"></script>
   <script src="/static/js/presets.js"></script>
   <script src="/static/js/post-process-ui.js"></script>
   <script src="/static/js/oos-test-ui.js"></script>

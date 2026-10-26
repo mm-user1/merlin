@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
 
@@ -18,6 +19,12 @@ from .runtime_contract import (
     V2RuntimeValidationError,
     validate_v2_runtime_declarations,
 )
+
+
+@dataclass(frozen=True)
+class FilterExecutionProfile(ExecutionProfile):
+    """Application capability, outside the shared profile/mode ABI."""
+    entry_filter_methods: tuple[str, ...] = ("candleDirection",)
 
 
 class ProfileValidationError(V2ValidationError):
@@ -703,7 +710,13 @@ def parse_execution_profile(config: Mapping[str, Any]) -> ExecutionProfile:
         families=families,
         selector=selector,
     )
-    return ExecutionProfile(
+    from core.entry_filters import capability
+    try:
+        methods = capability(config, variants)
+    except ValueError as exc:
+        raise _error(strategy_id, str(exc), path="entryFilterSupport", code="V2_INVALID_PROFILE") from exc
+    profile_type = FilterExecutionProfile if methods else ExecutionProfile
+    return profile_type(
         strategy_id=strategy_id,
         engine=engine,
         modes=dict(base_modes),

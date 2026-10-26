@@ -526,7 +526,9 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
     )
     enabled_variants = tuple(getattr(config, "grid_enabled_modes", []) or ()) or None
     compiled_workers = max(1, int(getattr(config, "worker_processes", 1) or 1))
+    from core.entry_filters import effective_config
     return GridV2Settings(
+        entry_filter_config=tuple(effective_config(config.entryFilters)) if getattr(config, "entryFilters", None) is not None else (),
         admission_rules=getattr(config, "admission_rules", None),
         top_n=max(0, int(getattr(config, "grid_top_candidates", 10) or 10)),
         max_signal_cache_mb=_grid_v2_max_cache_mb_from_config(config),
@@ -1568,6 +1570,7 @@ def _grid_v2_slow_result(
         profile=plan.profile,
         params=params,
         admission_rules=plan.settings.admission_rules,
+        entry_filter_context=hooks.entry_filter_context,
         trade_start_idx=trade_start_idx,
         compute_sharpe_daily=compute_sharpe_daily,
     )
@@ -1743,7 +1746,12 @@ def _run_grid_v2_optimization(
             raise ValueError("Prepared admission rules disagree with the pinned execution context.")
     strategy_class = get_strategy(config.strategy_id)
     strategy_module = importlib.import_module(strategy_class.__module__)
-    hooks = GridV2StrategyHooks.from_strategy(strategy_module)
+    from .entry_filter_input import saved_effective
+    from .entry_filters import capability
+    if capability(strategy_config):
+        saved_effective({"entryFilters": config.entryFilters, "entry_filter_inputs": config.entry_filter_inputs}, required=True)
+    hooks = GridV2StrategyHooks.from_strategy(strategy_module, config=strategy_config,
+                                            entry_filter_context=config.entry_filter_context)
     settings = _grid_v2_settings_from_config(config)
     constraints = _build_constraint_specs(getattr(config, "constraints", []) or [])
     selection_config = resolve_grid_selection_config(config)

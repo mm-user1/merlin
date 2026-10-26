@@ -7,6 +7,8 @@ signal/dataprep hooks.
 
 from __future__ import annotations
 
+from core.entry_filters import MISSING, validate_context
+
 from core.engine_v2.parameter_ties import enabled_parameter_ties, expand_parameter_ties
 
 import hashlib
@@ -160,6 +162,7 @@ class GridV2Settings:
     manual_percents: tuple[tuple[str, float], ...] = ()
     enabled_tie_groups: tuple[str, ...] = ()
     admission_rules: Any = None
+    entry_filter_config: tuple = ()
 
     @property
     def top_candidates(self) -> int:
@@ -179,9 +182,23 @@ class GridV2StrategyHooks:
     signal_param_names: tuple[str, ...] | None = None
     dataprep_param_names: tuple[str, ...] | None = None
     function_fingerprint: str | None = None
+    entry_filter_context: Any = MISSING
+
+    def __post_init__(self):
+        from core.entry_filters import wrap_builders
+        single, batch = wrap_builders(self.build_execution_data, self.build_execution_data_batch,
+                                      self.entry_filter_context)
+        object.__setattr__(self, "build_execution_data", single)
+        object.__setattr__(self, "build_execution_data_batch", batch)
 
     @classmethod
-    def from_strategy(cls, strategy: Any) -> "GridV2StrategyHooks":
+    def from_strategy(cls, strategy: Any, *, entry_filter_context=MISSING, config=None) -> "GridV2StrategyHooks":
+        from core.entry_filters import capability
+        context = entry_filter_context
+        if config is None:
+            loader = getattr(strategy, "load_config", None)
+            config = loader() if callable(loader) else {}
+        validate_context(capability(config), context)
         builder = getattr(strategy, "build_v2_execution_data", None)
         if builder is None:
             builder = getattr(strategy, "build_execution_data", None)
@@ -204,6 +221,7 @@ class GridV2StrategyHooks:
             label=str(getattr(strategy, "__name__", getattr(strategy, "__class__", type(strategy)).__name__)),
             signal_param_names=signal_names,
             dataprep_param_names=dataprep_names,
+            entry_filter_context=context,
         )
 
 
@@ -1441,6 +1459,7 @@ def _grid_v2_plan_identity_signature(plan: GridV2Plan) -> Any:
 def _grid_v2_planning_identity_payload(prelude: _GridV2PlanPrelude) -> dict[str, Any]:
     planning = prelude.planning
     return {
+        **({"entry_filters": list(prelude.settings.entry_filter_config)} if prelude.settings.entry_filter_config else {}),
         **({"entry_admission_rules": prelude.settings.admission_rules.semantic()}
            if prelude.profile.modes.get("entryAdmission") == "risk_bracket_v1" else {}),
         **({"grid_v2_parameter_ties_v1": {"groups": list(prelude.settings.enabled_tie_groups), "pairs": prelude.parameter_ties}} if prelude.parameter_ties else {}),
@@ -1939,6 +1958,8 @@ def estimate_grid_v2_cache(
 
     hooks = _coerce_hooks(hooks)
     selected_indices = _selected_candidate_indices(plan, candidate_indices)
+    validate_context(getattr(plan.profile, "entry_filter_methods", ()), hooks.entry_filter_context,
+                     list(plan.settings.entry_filter_config))
     n_bars = int(len(df))
     context = _cache_key_context(df, trade_start_idx, hooks)
     cache_keys = _candidate_cache_keys(plan, context, hooks, selected_indices)
@@ -2290,6 +2311,8 @@ def execute_grid_v2_candidates(
     """Execute planned candidates through the selected V2 batch backend."""
 
     hooks = _coerce_hooks(hooks)
+    validate_context(getattr(plan.profile, "entry_filter_methods", ()), hooks.entry_filter_context,
+                     list(plan.settings.entry_filter_config))
     selected_indices = _selected_candidate_indices(plan, candidate_indices)
     topology = _grid_v2_execution_topology(plan)
     context = _cache_key_context(df, trade_start_idx, hooks)
@@ -2535,6 +2558,7 @@ def execute_grid_v2_candidates(
                     params = plan.candidate_table.params_for_index(candidate_index)
                     try:
                         run = run_v2_strategy(
+                            entry_filter_context=hooks.entry_filter_context,
                             admission_rules=plan.settings.admission_rules,
                             data=data,
                             profile=plan.profile,
@@ -3657,6 +3681,7 @@ def _coerce_hooks(hooks: GridV2StrategyHooks | Any) -> GridV2StrategyHooks:
             signal_param_names=hooks.signal_param_names,
             dataprep_param_names=hooks.dataprep_param_names,
             function_fingerprint=_callable_fingerprint(hooks.build_execution_data),
+            entry_filter_context=hooks.entry_filter_context,
         )
     return _coerce_hooks(GridV2StrategyHooks.from_strategy(hooks))
 
@@ -4613,6 +4638,7 @@ def _slow_enrich_selected(
     if data is None:
         data = hooks.build_execution_data(df, normalized_params)
     run = run_v2_strategy(
+        entry_filter_context=hooks.entry_filter_context,
         admission_rules=plan.settings.admission_rules,
         data=data,
         profile=plan.profile,

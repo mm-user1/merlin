@@ -1,6 +1,9 @@
 ### Changelog
 All significant changes and version history are recorded in this file.
 #### Unreleased — 2026-10-26
+- Add opt-in fixed entry filters with causal configurable F06, explicit execution
+  context, bounded replay pins and dependency relocation. Add the compact strategy
+  selector, Entry Filters editor/Queue restoration and Analytics consensus row.
 - Accept published zero minimum notional while keeping null distinct; avoid
   unchanged trial diagnostic writes and candle preparation in new-mode Grid Preview.
 - Added opt-in generic V2 risk-bracket entry admission with instrument-owned sizing

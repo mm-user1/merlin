@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from core.backtest_engine import StrategyResult
+from core.entry_filters import MISSING, capability, validate_context
 
 ADMISSION_MODE = "risk_bracket_v1"
 
@@ -18,24 +19,27 @@ def uses_admission(config):
     return (config.get("execution") or {}).get("entryAdmission") == ADMISSION_MODE
 
 
-def run_strategy(strategy_class, frame, params, trade_start_idx=0, *, admission_rules=None):
+def run_strategy(strategy_class, frame, params, trade_start_idx=0, *, admission_rules=None, entry_filter_context=MISSING):
     """Application adapter; legacy strategies retain their existing run entry point."""
     from strategies import get_strategy_config
     strategy_id = getattr(strategy_class, "STRATEGY_ID", None)
     if strategy_id is None:
+        validate_context((), entry_filter_context)
         return strategy_class.run(frame, params, trade_start_idx)
     config = get_strategy_config(strategy_id)
+    validate_context(capability(config), entry_filter_context)
     if not uses_admission(config):
         return strategy_class.run(frame, params, trade_start_idx)
     import importlib
     from .profile import parse_execution_profile
     from .runner import run_v2_strategy
     from core.grid_v2 import GridV2StrategyHooks
-    hooks = GridV2StrategyHooks.from_strategy(importlib.import_module(strategy_class.__module__))
+    hooks = GridV2StrategyHooks.from_strategy(importlib.import_module(strategy_class.__module__),
+        config=config, entry_filter_context=entry_filter_context)
     normalized = hooks.normalize_params(dict(params)) if hooks.normalize_params else dict(params)
     return run_v2_strategy(data=hooks.build_execution_data(frame, normalized),
         profile=parse_execution_profile(config), params=normalized, trade_start_idx=trade_start_idx,
-        admission_rules=admission_rules).strategy_result
+        admission_rules=admission_rules, entry_filter_context=entry_filter_context).strategy_result
 
 
 def positive_cap(value: Any) -> float:

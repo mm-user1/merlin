@@ -1593,6 +1593,7 @@ function buildOptimizationConfig(state, optimizerMode = 'optuna') {
 
   return {
     enabled_params: enabledParams,
+    ...(window.EntryFilters ? { entryFilters: window.EntryFilters.collect() } : {}),
     param_ranges: paramRanges,
     fixed_params: fixedParams,
     param_types: paramTypes,
@@ -2067,7 +2068,7 @@ async function runWalkForward({ sources, state }) {
   setCurrentOptimizationRunId('');
 }
 
-function buildBacktestRequestFormData(csvPath, payload) {
+function buildBacktestRequestFormData(csvPath, payload, entryFilters) {
   const formData = new FormData();
   formData.append('strategy', window.currentStrategyId);
   const warmupInput = document.getElementById('warmupBars');
@@ -2076,6 +2077,7 @@ function buildBacktestRequestFormData(csvPath, payload) {
     formData.append('csvPath', csvPath);
   }
   formData.append('payload', JSON.stringify(payload));
+  if (window.EntryFilters) formData.append('entryFilters', JSON.stringify(entryFilters ?? window.EntryFilters.collect()));
   return formData;
 }
 
@@ -2165,18 +2167,22 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
     const combo = combinations[index];
     const payload = { ...state.payload, ...combo };
 
-    const formData = buildBacktestRequestFormData(primarySource.type === 'parquet' ? '' : primaryPath, payload);
-    if (primarySource.type === 'parquet') appendDataSource(formData, primarySource);
+    let displayedFilters;
     let displayedInput = null;
     let displayedAdmission = null;
+    let displayedFilterInputs = null;
     let displayedParams = payload;
 
     resultsEl.textContent = `Running calculation... (${index + 1}/${combinations.length})`;
 
     try {
+      displayedFilters = window.EntryFilters?.collect();
+      const formData = buildBacktestRequestFormData(primarySource.type === 'parquet' ? '' : primaryPath, payload, displayedFilters);
+      if (primarySource.type === 'parquet') appendDataSource(formData, primarySource);
       const data = await runBacktestRequest(formData);
       displayedInput = data.data_input;
       displayedAdmission = data.entry_admission;
+      displayedFilterInputs = data.entry_filter_inputs;
       displayedParams = data.parameters || payload;
       aggregatedResults.push(formatResultBlock(index + 1, combinations.length, payload, data));
     } catch (err) {
@@ -2189,9 +2195,10 @@ async function executeBacktestRun({ event = null, downloadTrades = false } = {})
 
     if (downloadTrades) {
       try {
-        const downloadForm = buildBacktestRequestFormData(primaryPath, displayedParams);
+        const downloadForm = buildBacktestRequestFormData(primaryPath, displayedParams, displayedFilters);
         if (displayedInput) downloadForm.append('dataInput', JSON.stringify(displayedInput));
         if (displayedAdmission) downloadForm.append('entryAdmission', JSON.stringify(displayedAdmission));
+        if (displayedFilterInputs) downloadForm.append('entryFilterInputs', JSON.stringify(displayedFilterInputs));
         const tradesResponse = await downloadBacktestTradesRequest(downloadForm);
         await triggerDownloadFromResponse(
           tradesResponse,

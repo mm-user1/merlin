@@ -26,6 +26,23 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Fixed entry-filter coverage is in `test_entry_filters.py`,
+`test_entry_filter_workers.py`, `v2/test_v2_entry_filters.py`,
+`server/test_entry_filters.py` and `test_js_entry_filters.py`. The synthetic opt-in
+strategy stays in `fixtures/admission_strategy/filtered.py`; no production strategy
+is registered by these tests. Tests cover causal native-clock permissions, prefix
+gaps, bounded replay, hook/worker transport, Fast ranking, HTTP/Queue/WFA/manual
+execution and real editor/Analytics handlers. Use the isolated launcher below.
+Run `test_filtered_fast_reference_packers_threads[1]` and `[2]` on a host with
+those actual Numba thread capacities; Linux one-CPU review excludes only `[2]`
+plus the existing admission two-thread case. The real two-process spawn cases
+are distinct and still run on Linux. The new filter-root symlink case must run
+on a symlink-capable host; Windows privilege failures are not passes. All JS
+wrappers in this slice accept the installed `MERLIN_NODE_EXECUTABLE`, including
+Electron with process-local `ELECTRON_RUN_AS_NODE=1`; they run from external scratch.
+Browser layout/focus remains a separate owner gate. See
+[entry filters](../docs/ENTRY_FILTERS.md) for the contracts.
+
 Risk-bracket admission uses `tests/v2/test_v2_entry_admission.py`,
 `tests/v2/test_v2_admission_grid.py`, `tests/test_entry_admission_integration.py`,
 `tests/test_entry_admission_adaptive.py`, `tests/server/test_entry_admission.py`
