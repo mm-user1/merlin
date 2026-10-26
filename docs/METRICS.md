@@ -34,8 +34,9 @@ boundary.
 
 Net Profit, gross profit/loss, Profit Factor, trade counts, Win Rate, average
 trade statistics, and maximum consecutive losses are derived from completed
-trades. Percentage Net Profit uses the supplied initial balance where the
-calling surface provides it.
+trades. Net Profit is final realized balance minus execution initial capital;
+Net Profit % divides that difference by execution initial capital, not by the
+first curve observation or ending mark-to-market equity.
 
 Realized Max DD is balance-based; non-finite balance observations do not create
 drawdown points. The Slow/Python calculation converts the realized
@@ -54,6 +55,50 @@ truncates this scan. An unrecovered final loss therefore remains visible.
 RoMaD uses Net Profit percentage divided by this realized percentage Max DD.
 It retains the established zero-drawdown convention in `calculate_advanced`;
 it must not be recomputed from MTM drawdown.
+
+### Execution capital and historical results
+
+OOS/manual, Forward Test, Stress Test and Fixed/Adaptive WFA pass the actual
+execution capital to both canonical metric functions. `core.execution_capital`
+resolves the final execution parameters after candidate/fixed merging or stored
+runtime resolution. A declared `initialCapital` value wins when present; only
+an absent key uses the registered strategy's default. It must parse as a finite,
+positive number; null, booleans and malformed/nonpositive/nonfinite values fail.
+S01 v26 has no declared capital and keeps its established fixed 100, ignoring
+extraneous capital keys. No strategy defaults or launch validators are changed.
+The execution denominator remains distinct from `metric_initial_equity` and the
+advanced evaluation boundary. Canonical formulas are unchanged.
+
+Invalid declared capital follows existing caller failures: manual requests return
+400, OOS/WFA calculations fail, FT workers return no result, and a failed Stress
+base is `skipped_bad_base`. These are not new launch-time validation guarantees.
+
+Earlier non-100 FT/OOS/manual and WFA-window Net Profit % and RoMaD may be wrong.
+Derived comparisons/degradation, FT admission/ranks, stress retention/status, WFE,
+OOS win rate and save-time profitable-window aggregates may also be affected.
+Correcting FT/stress metrics can change candidate selection and subsequent WFA
+plans; identical candidate execution inputs still produce identical trades,
+fees, quantities, balances, equity and timestamps.
+
+Stored rows are never repaired by reading or exporting them. A new manual test
+uses corrected metrics but compares with the saved source: `forward_test` uses
+potentially affected historical `ft_*` metrics; `optuna` (including Grid IS),
+`dsr` and `stress_test` use original IS trial metrics. Original optimizer IS/DSR,
+realized DD, Win Rate, Profit Factor, SQN and advanced path metrics with explicit
+anchors were not directly corrupted by this denominator bug. Normalized stitched
+profit/DD and Analytics calculations also have no direct capital-base mismatch,
+although their historical window selection may reflect faulty FT/stress decisions.
+Run a fresh full study for a consistently corrected selection chain. Reconstructed
+charts do not repair stored metrics. The frontend's fixed-100 reference line and
+y-range remain a separate deferred visual issue.
+
+WFA no-trade curves use execution capital; delayed engine prefixes preserve the
+existing advanced anchor and use execution capital only for a missing anchor.
+Route synthetic prefixes use saved execution capital. The engine's evaluation-only
+view and the route's existing warmup/timestamp ordering are distinct; this correction
+does not redesign them. Stitching remains a normalized index starting at 100.
+Daily Sharpe availability is unchanged: IS and dense OOS are supported; delayed
+and no-trade OOS remain unavailable.
 
 ## Monthly risk-adjusted metrics
 

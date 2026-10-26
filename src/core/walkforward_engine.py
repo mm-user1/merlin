@@ -13,6 +13,7 @@ import time
 import pandas as pd
 
 from . import metrics
+from .execution_capital import resolve_execution_capital
 from .backtest_engine import StrategyResult, prepare_dataset_with_warmup
 from .grid_engine import build_grid_dsr_results, run_grid_optimization, supports_grid_v2
 from .engine_v2.runtime_contract import (
@@ -796,10 +797,11 @@ class WalkForwardEngine:
                 end=execution_plan.final_is_end,
                 params=is_pipeline.best_params,
             )
-            is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
+            capital = resolve_execution_capital(self.config.strategy_id, is_pipeline.best_params)
+            is_basic = metrics.calculate_basic(is_result, initial_balance=capital)
             is_adv = metrics.calculate_advanced(
                 is_result,
-                initial_balance=100.0,
+                initial_balance=capital,
                 compute_sharpe_daily=True,
             )
 
@@ -808,7 +810,7 @@ class WalkForwardEngine:
                     "OOS validation skipped: "
                     f"{execution_plan.no_trade_reason or 'no_trade'}"
                 )
-                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end)
+                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end, capital)
                 trade_end = None
             else:
                 trade_start = execution_plan.trade_start or window.oos_start
@@ -826,17 +828,18 @@ class WalkForwardEngine:
                     live_oos_result,
                     scheduled_start=window.oos_start,
                     live_start=trade_start,
+                    initial_balance=capital,
                 )
                 trade_end = window.oos_end
 
-            oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
+            oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=capital)
             oos_daily_available = self._should_compute_oos_daily(
                 execution_plan,
                 window.oos_start,
             )
             oos_adv = metrics.calculate_advanced(
                 prefixed_oos_result,
-                initial_balance=100.0,
+                initial_balance=capital,
                 compute_sharpe_daily=oos_daily_available,
             )
 
@@ -1588,20 +1591,20 @@ class WalkForwardEngine:
         return shifted_is_start, shifted_is_end, trade_start
 
     @staticmethod
-    def _build_flat_result(start: pd.Timestamp, end: pd.Timestamp) -> StrategyResult:
+    def _build_flat_result(start: pd.Timestamp, end: pd.Timestamp, initial_balance: float = 100.0) -> StrategyResult:
         if end < start:
             end = start
         timestamps = [start]
         if end > start:
             timestamps.append(end)
-        curve = [100.0 for _ in timestamps]
+        curve = [initial_balance for _ in timestamps]
         return StrategyResult(
             trades=[],
             equity_curve=curve,
             balance_curve=list(curve),
             timestamps=timestamps,
             metric_start_idx=0,
-            metric_initial_equity=100.0,
+            metric_initial_equity=initial_balance,
         )
 
     @staticmethod
@@ -1610,6 +1613,7 @@ class WalkForwardEngine:
         *,
         scheduled_start: pd.Timestamp,
         live_start: Optional[pd.Timestamp],
+        initial_balance: float = 100.0,
     ) -> StrategyResult:
         if live_start is None or live_start <= scheduled_start:
             return result
@@ -1617,7 +1621,7 @@ class WalkForwardEngine:
         metric_view = metrics._advanced_metric_view(result)
         timestamps = list(metric_view.timestamps)
         equity_curve = list(metric_view.equity_observations)
-        anchor = 100.0 if metric_view.initial_equity is None else metric_view.initial_equity
+        anchor = initial_balance if metric_view.initial_equity is None else metric_view.initial_equity
 
         source_balance = list(getattr(result, "balance_curve", None) or [])
         source_timestamps = list(getattr(result, "timestamps", None) or [])
@@ -2364,10 +2368,11 @@ class WalkForwardEngine:
                 end=execution_plan.final_is_end,
                 params=is_pipeline.best_params,
             )
-            is_basic = metrics.calculate_basic(is_result, initial_balance=100.0)
+            capital = resolve_execution_capital(self.config.strategy_id, is_pipeline.best_params)
+            is_basic = metrics.calculate_basic(is_result, initial_balance=capital)
             is_adv = metrics.calculate_advanced(
                 is_result,
-                initial_balance=100.0,
+                initial_balance=capital,
                 compute_sharpe_daily=True,
             )
             baseline = self._compute_is_baseline(is_result, self.config.is_period_days)
@@ -2388,13 +2393,13 @@ class WalkForwardEngine:
                     "OOS validation skipped: "
                     f"{execution_plan.no_trade_reason or 'no_trade'}"
                 )
-                prefixed_oos_result = self._build_flat_result(oos_start, oos_max_end)
+                prefixed_oos_result = self._build_flat_result(oos_start, oos_max_end, capital)
                 oos_actual_end = oos_max_end
                 adaptive_roll_end = oos_max_end
                 cooldown_days_applied = None
                 oos_elapsed_days = self._duration_days(oos_start, adaptive_roll_end)
-                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
-                oos_adv = metrics.calculate_advanced(prefixed_oos_result, initial_balance=100.0)
+                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=capital)
+                oos_adv = metrics.calculate_advanced(prefixed_oos_result, initial_balance=capital)
                 trigger_type = "ft_reject_no_trade"
                 cusum_final = None
                 trigger_cusum_threshold = None
@@ -2431,6 +2436,7 @@ class WalkForwardEngine:
                     truncated_live_result,
                     scheduled_start=oos_start,
                     live_start=live_trade_start,
+                    initial_balance=capital,
                 )
                 adaptive_roll_end, cooldown_days_applied = self._resolve_adaptive_roll_end(
                     trigger_result=trigger_result,
@@ -2438,10 +2444,10 @@ class WalkForwardEngine:
                     trading_end=trading_end,
                 )
                 oos_elapsed_days = self._duration_days(oos_start, adaptive_roll_end)
-                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=100.0)
+                oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=capital)
                 oos_adv = metrics.calculate_advanced(
                     prefixed_oos_result,
-                    initial_balance=100.0,
+                    initial_balance=capital,
                     compute_sharpe_daily=self._should_compute_oos_daily(
                         execution_plan,
                         oos_start,

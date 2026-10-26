@@ -39,6 +39,7 @@ from core.post_process import (
     run_forward_test,
     run_stress_test,
 )
+from core.execution_capital import resolve_execution_capital
 from core.testing import run_period_test_for_trials, select_oos_source_candidates
 from core.storage import (
     create_new_db,
@@ -233,18 +234,19 @@ def register_routes(app):
         *,
         scheduled_start: Any,
         live_start: Any,
+        initial_balance: float,
     ) -> Tuple[List[float], List[str]]:
         scheduled_start_ts = parse_timestamp_utc(scheduled_start)
         live_start_ts = parse_timestamp_utc(live_start)
         if scheduled_start_ts is None or live_start_ts is None or live_start_ts <= scheduled_start_ts:
             return list(equity_curve or []), list(timestamps or [])
 
-        prefixed_curve: List[float] = [100.0]
+        prefixed_curve: List[float] = [initial_balance]
         prefixed_timestamps: List[str] = [scheduled_start_ts.isoformat()]
 
         first_live_ts = parse_timestamp_utc(timestamps[0]) if timestamps else None
         if first_live_ts is None or first_live_ts > live_start_ts:
-            prefixed_curve.append(100.0)
+            prefixed_curve.append(initial_balance)
             prefixed_timestamps.append(live_start_ts.isoformat())
 
         prefixed_curve.extend(list(equity_curve or []))
@@ -1228,6 +1230,10 @@ def register_routes(app):
         actual_end = end
         is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
         if is_window_oos:
+            try:
+                capital = resolve_execution_capital(study.get("strategy_id"), execution_context.params_for(params))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
             actual_start = (
                 window.get("trade_start_ts")
                 or window.get("trade_start_date")
@@ -1245,10 +1251,10 @@ def register_routes(app):
                 equity_curve = []
                 if start_ts is not None:
                     timestamps.append(start_ts.isoformat())
-                    equity_curve.append(100.0)
+                    equity_curve.append(capital)
                 if end_ts is not None and start_ts is not None and end_ts > start_ts:
                     timestamps.append(end_ts.isoformat())
-                    equity_curve.append(100.0)
+                    equity_curve.append(capital)
                 return jsonify({"equity_curve": equity_curve, "timestamps": timestamps})
 
 
@@ -1279,6 +1285,7 @@ def register_routes(app):
                 timestamps or [],
                 scheduled_start=scheduled_start,
                 live_start=actual_start,
+                initial_balance=capital,
             )
 
         return jsonify({"equity_curve": equity_curve or [], "timestamps": timestamps or []})

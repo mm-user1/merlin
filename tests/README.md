@@ -281,6 +281,14 @@ processes. Tests never write protected application data.
 
 The former server module is now `tests/server`, with these responsibilities:
 
+`test_execution_capital.py` checks capital/default precedence, the S01 fixed-base
+exception, hand-calculated realized profit/RoMaD, real FT/stress spawn values,
+and Fixed/Adaptive WFA flat/delayed/truncated metrics and normalized stitching.
+`server/test_data_input_followup.py` covers non-100 CSV/Parquet OOS/manual storage,
+historical source comparisons, real Grid/WFA and offline flat reconstruction,
+shared delayed-chart observations and malformed relocation requests. These tracked
+regressions use synthetic inputs and do not import ignored task evidence.
+
 | Module | Ownership |
 | --- | --- |
 | `test_ui_contracts.py` | Source-text UI/readiness, bootstrap and logging |

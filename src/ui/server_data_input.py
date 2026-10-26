@@ -209,7 +209,10 @@ def register_routes(app):
         try:
             if "data_input" not in config:
                 raise DataInputError("This result has no Parquet input pin.")
-            root = resolve_root(body.get("packRoot", ""))
+            raw_root = body.get("packRoot")
+            if not isinstance(raw_root, str) or not raw_root.strip():
+                raise DataInputError("packRoot must be a nonblank path string.")
+            root = resolve_root(raw_root)
             replay_input(config["data_input"], root_override=str(root))
             updated = {**config, "data_input_root_override": str(root)}
             if manual is None:

@@ -353,6 +353,15 @@ observations, retains only its scheduled flat prefix, produces increasing
 unique timestamps, and rebases the metric boundary with an explicit anchor.
 Non-delayed stitched output is unchanged.
 
+IS/OOS metric callers resolve capital from the same final parameters used for
+execution. Flat no-trade windows use that balance; delayed engine prefixes retain
+the explicit advanced anchor, with execution capital as the missing-anchor fallback.
+Reconstructed route prefixes use saved execution capital while preserving their
+existing warmup/order behavior. Stitched curves remain normalized at 100.
+Corrected non-100 FT/stress metrics can alter later selection; fixed-candidate raw
+executions are unchanged. Historical rows are not repaired; see
+[metric compatibility](../METRICS.md#execution-capital-and-historical-results).
+
 ## Persistence and historical compatibility
 
 V2 Parquet integration uses the [application input contract](../PARQUET_INPUTS.md).

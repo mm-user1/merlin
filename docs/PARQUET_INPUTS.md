@@ -117,6 +117,18 @@ preserved but cannot be edited as one Start selection.
 
 ## Locations, locks and explicit collection
 
+Generic test/WFA metric callers now use execution initial capital for CSV and
+Parquet alike. Exact OOS preparation metadata, pin/transaction rules and replay
+refusals are unchanged. Saved historical values remain untouched; fresh manual
+tests can still compare against affected old Forward Test metrics. A fresh full
+study is needed for corrected selection throughout; see
+[metric history](METRICS.md#execution-capital-and-historical-results).
+
+Locate Pack requires a nonblank string `packRoot`. Malformed or missing roots
+return 400 before pack IO or writes, after the existing study/test ownership and
+missing-pin checks. Valid strings retain their original path semantics; relocation
+still verifies the pin and changes only the root override.
+
 The default root is repository-relative `data/parquet-data/`, ignored by Git.
 Merlin does not create a fake pack or download when it is absent. Other roots must
 be inside the existing configured CSV allowed roots or this resolved default root.

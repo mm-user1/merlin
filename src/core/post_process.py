@@ -8,6 +8,8 @@ Phase 1: Forward Test (FT) implementation
 """
 from __future__ import annotations
 
+from .execution_capital import resolve_execution_capital
+
 import logging
 import multiprocessing as mp
 from copy import deepcopy
@@ -295,8 +297,9 @@ def _ft_worker_entry(
         run_params["end"] = ft_end
         result = strategy_class.run(df_ft_with_warmup, run_params, trade_start_idx)
 
-        basic = metrics.calculate_basic(result, 100.0)
-        advanced = metrics.calculate_advanced(result, 100.0)
+        capital = resolve_execution_capital(strategy_id, run_params)
+        basic = metrics.calculate_basic(result, capital)
+        advanced = metrics.calculate_advanced(result, capital)
 
         ft_metrics = {
             "net_profit_pct": basic.net_profit_pct,
@@ -1127,8 +1130,9 @@ def _run_is_backtest(
 
         result = strategy_class.run(df_prepared, params, trade_start_idx)
 
-        basic = metrics.calculate_basic(result, 100.0)
-        advanced = metrics.calculate_advanced(result, 100.0)
+        capital = resolve_execution_capital(strategy_id, params)
+        basic = metrics.calculate_basic(result, capital)
+        advanced = metrics.calculate_advanced(result, capital)
 
         return {
             "net_profit_pct": basic.net_profit_pct,

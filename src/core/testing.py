@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import pandas as pd
 
 from .backtest_engine import prepare_dataset_with_warmup
+from .execution_capital import resolve_execution_capital
 from .post_process import calculate_comparison_metrics, filter_ft_passed_results
 from . import metrics
 
@@ -86,9 +87,9 @@ def _build_source_candidates(items: Iterable[Any], rank_key: Optional[str]) -> L
     return candidates
 
 
-def build_test_metrics(result: Any) -> Dict[str, Any]:
-    basic = metrics.calculate_basic(result, 100.0)
-    advanced = metrics.calculate_advanced(result, 100.0)
+def build_test_metrics(result: Any, initial_balance: float) -> Dict[str, Any]:
+    basic = metrics.calculate_basic(result, initial_balance)
+    advanced = metrics.calculate_advanced(result, initial_balance)
     return {
         "net_profit_pct": basic.net_profit_pct,
         "max_drawdown_pct": basic.max_drawdown_pct,
@@ -153,7 +154,7 @@ def run_period_test_for_trials(
             params["end"] = end_ts
 
         result = strategy_class.run(df_prepared, params, trade_start_idx)
-        test_metrics = build_test_metrics(result)
+        test_metrics = build_test_metrics(result, resolve_execution_capital(strategy_id, params))
         original_metrics = original_metrics_resolver(trial)
         comparison = calculate_comparison_metrics(
             original_metrics,

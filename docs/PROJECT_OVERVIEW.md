@@ -198,6 +198,12 @@ per-window candidate identity where available, and produce stitched OOS
 results. Analytics reads persisted WFA results, creates focused or portfolio
 equity views, and caches group summaries in SQLite.
 
+Window IS/OOS metrics and synthetic flat balances use the selected execution's
+initial capital; stitching still produces a normalized index at 100. Corrected
+FT/stress metrics may change selection at other capitals. Existing saved metrics
+are not backfilled; a fresh study is required for a consistently corrected chain.
+See [execution capital and history](METRICS.md#execution-capital-and-historical-results).
+
 This section owns shared day/calendar WFA and WFE semantics. The
 [V2 architecture WFA section](engine_v2/ARCHITECTURE.md#wfa) owns only V2
 runtime rebasing, worker transport, delayed-OOS handling, and plan reuse.

@@ -23,7 +23,8 @@ def optimize(client, source, config, warmup=100):
 
 @pytest.mark.parametrize("minutes", [5, 15])
 @pytest.mark.parametrize("end", ["2024-01-20T00:00:00Z", "2024-01-20T12:07:03.123456Z", None])
-def test_oos_replays_actual_original_execution(client, tmp_path, monkeypatch, minutes, end):
+@pytest.mark.parametrize("capital", [100, 1000])
+def test_oos_replays_actual_original_execution(client, tmp_path, monkeypatch, minutes, end, capital):
     from ui import server_routes_run
     from strategies import get_strategy
     from data_provider import data
@@ -31,6 +32,7 @@ def test_oos_replays_actual_original_execution(client, tmp_path, monkeypatch, mi
     source = publish(tmp_path / "pack", rows=6000, triangle=True)
     source["timeframe_minutes"] = minutes
     config = grid_payload()
+    config["fixed_params"]["initialCapital"] = capital
     if end:
         config["fixed_params"].update(dateFilter=True, start="2024-01-04T00:07:00.123456Z", end=end)
     config["oosTest"] = {"enabled": True, "periodDays": 3, "topK": 2}
@@ -95,7 +97,7 @@ def test_oos_replays_actual_original_execution(client, tmp_path, monkeypatch, mi
         assert trades.get_data(as_text=True) == export_trades_csv(result.trades, symbol="TEST:AAA-USDT-SWAP")
         assert len(result.trades) == trial["oos_test_total_trades"]
         capital = float(params["initialCapital"])
-        assert (equity[-1] / capital - 1) * 100 == pytest.approx(trial["oos_test_net_profit_pct"], abs=1e-9)
+        assert (result.balance_curve[-1] / capital - 1) * 100 == pytest.approx(trial["oos_test_net_profit_pct"], abs=1e-9)
         for module, prefix in [("optuna", ""), ("forward_test", "ft_")]:
             preserved = client.post(base + "/equity", json={"module": module})
             assert preserved.status_code == 200, preserved.get_data(as_text=True)
@@ -180,6 +182,106 @@ def test_oos_save_is_atomic_and_merges_config(oos_study):
     assert all(t["oos_test_total_trades"] == 0 for t in after["trials"])
 
 
+@pytest.mark.parametrize("zero_trades", [False, True])
+def test_non100_csv_parquet_oos_manual_and_historical_metrics(client, tmp_path, monkeypatch, zero_trades):
+    from strategies import get_strategy
+    from ui import server_routes_run, server_routes_data
+    from core.metrics import calculate_basic, calculate_advanced
+    from core.post_process import calculate_comparison_metrics
+    source = publish(tmp_path / "pack", rows=4000, triangle=True)
+    frame = prepare_input(source, date_filter=False).frame
+    csv_frame = frame.copy()
+    csv_frame.insert(0, "time", frame.index.asi8 // 10**9)
+    path = tmp_path / "TEST_AAA, 5 synthetic.csv"
+    csv_frame.to_csv(path, index=False)
+    config = grid_payload()
+    config["fixed_params"].update(initialCapital=1000, dateFilter=True,
+        start="2024-01-03T00:00:00Z", end="2024-01-14T00:00:00Z")
+    if zero_trades:
+        config["fixed_params"].update(closeCountLong=100000, closeCountShort=100000)
+    config["oosTest"] = dict(enabled=True, periodDays=3, topK=2)
+    raw_run = get_strategy(STRATEGY).run
+    period_original = server_routes_run.run_period_test_for_trials
+    originals = []
+    def capture_period(**kwargs):
+        def run(frame, params, idx):
+            result = raw_run(frame, params, idx)
+            originals.append((frame.copy(), deepcopy(params), idx, result))
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(get_strategy(STRATEGY), "run", staticmethod(run))
+            return period_original(**kwargs)
+    monkeypatch.setattr(server_routes_run, "run_period_test_for_trials", capture_period)
+    economic = []
+    for kind in ("csv", "parquet"):
+        originals.clear()
+        fields = dict(strategy=STRATEGY, warmupBars="100", config=json.dumps(config))
+        fields.update({"source": json.dumps(source)} if kind == "parquet" else {"csvPath": str(path)})
+        response = client.post("/api/optimize", data=fields)
+        assert response.status_code == 200, response.get_data(as_text=True)
+        study_id = response.get_json()["study_id"]
+        saved = storage.load_study_from_db(study_id)
+        assert len(originals) == 2
+        for trial in saved["trials"]:
+            _, _, _, raw = next(item for item in originals if item[1]["maLength3"] == trial["params"]["maLength3"])
+            assert bool(raw.trades) is not zero_trades
+            assert trial["oos_test_net_profit_pct"] == pytest.approx((raw.balance_curve[-1] / 1000 - 1) * 100)
+            assert trial["oos_test_romad"] == calculate_advanced(raw, 1000).romad
+        economic.append(sorted((t["params"]["maLength3"], t["oos_test_net_profit_pct"], t["oos_test_romad"],
+            t["oos_test_total_trades"]) for t in saved["trials"]))
+        # A task-owned historical row deliberately retains the old inflated FT baseline.
+        with storage.get_db_connection() as conn:
+            conn.execute("UPDATE studies SET ft_enabled=1,ft_period_days=3 WHERE study_id=?", (study_id,))
+            conn.execute("UPDATE trials SET ft_net_profit_pct=900,ft_romad=450,ft_max_drawdown_pct=2,ft_rank=trial_number WHERE study_id=?", (study_id,))
+            conn.commit()
+        historical = storage.load_study_from_db(study_id)
+        base = f"/api/studies/{study_id}"
+        assert client.get(base).status_code == 200
+        number = historical["trials"][0]["trial_number"]
+        assert client.post(base + f"/trials/{number}/trades", json={}).status_code == 200
+        assert storage.load_study_from_db(study_id) == historical
+        for tab in ("optuna", "forward_test"):
+            manual_raw = []
+            def manual_run(frame, params, idx):
+                raw = raw_run(frame, params, idx)
+                manual_raw.append((deepcopy(params), raw))
+                return raw
+            with monkeypatch.context() as patch:
+                patch.setattr(get_strategy(STRATEGY), "run", staticmethod(manual_run))
+                response = client.post(base + "/test", json=dict(dataSource="original_" + kind,
+                    startDate="2024-01-05", endDate="2024-01-08", trialNumbers=[t["trial_number"] for t in historical["trials"]], sourceTab=tab))
+            assert response.status_code == 200, response.get_data(as_text=True)
+            payload = response.get_json()
+            manual = storage.load_manual_test_results(study_id, payload["test_id"])
+            results = manual["results_json"]["results"]
+            assert len(results) == len(manual_raw) == 2
+            for item, (params, raw) in zip(results, manual_raw):
+                assert params["initialCapital"] == 1000
+                assert item["test_metrics"]["net_profit_pct"] == calculate_basic(raw, 1000).net_profit_pct
+                assert item["test_metrics"]["romad"] == calculate_advanced(raw, 1000).romad
+                trial = next(t for t in historical["trials"] if t["trial_number"] == item["trial_number"])
+                assert item["original_metrics"]["net_profit_pct"] == (900 if tab == "forward_test" else trial["net_profit_pct"])
+                from core.post_process import calculate_is_period_days
+                days = 3 if tab == "forward_test" else (historical["study"]["is_period_days"] or calculate_is_period_days(historical["study"]["config_json"]) or 0)
+                expected = calculate_comparison_metrics(item["original_metrics"], item["test_metrics"], days, 3)
+                assert item["comparison"]["profit_degradation"] == expected["profit_degradation"]
+            values = [item["comparison"]["profit_degradation"] for item in results]
+            assert manual["best_profit_degradation"] == payload["summary"]["best_profit_degradation"] == max(values)
+            assert manual["worst_profit_degradation"] == payload["summary"]["worst_profit_degradation"] == min(values)
+            assert storage.load_study_from_db(study_id)["trials"] == historical["trials"]
+        # Stored runtime resolution supplies an invalid value to the real manual caller.
+        original_context = server_routes_data._resolve_stored_execution_context
+        context = original_context(historical["study"])
+        monkeypatch.setattr(server_routes_data, "_resolve_stored_execution_context", lambda _: SimpleNamespace(
+            base_params=context.base_params, warmup_bars=context.warmup_bars,
+            params_for=lambda *a, **k: {**context.params_for(*a, **k), "initialCapital": 0}))
+        response = client.post(base + "/test", json=dict(dataSource="original_" + kind,
+            startDate="2024-01-05", endDate="2024-01-08", trialNumbers=[number], sourceTab="optuna"))
+        assert response.status_code == 400
+        monkeypatch.setattr(server_routes_data, "_resolve_stored_execution_context", original_context)
+    assert economic[0] == economic[1]
+
+
 def test_relocation_request_validation_without_io_or_writes(client, oos_study, monkeypatch):
     from ui import server_data_input
     before = storage.load_study_from_db(oos_study)
@@ -191,6 +293,11 @@ def test_relocation_request_validation_without_io_or_writes(client, oos_study, m
         assert response.status_code == 400, (body, response.get_data(as_text=True))
     for test_id in [999999, "999999", "999999999999999999999999999999999"]:
         assert client.post(url, json={"testId": test_id}).status_code == 404
+    for body in [{}, *[{"packRoot": value} for value in [None, "", "  ", 1, True, False, [], {}]]]:
+        response = client.post(url, json=body)
+        assert response.status_code == 400
+        assert "packRoot must be a nonblank path string" in response.get_json()["error"]
+        assert client.post("/api/studies/missing/locate-parquet-pack", json=body).status_code == 404
     # An ID belonging to another study must never be relocated through this one.
     with storage.get_db_connection() as conn:
         conn.execute("INSERT INTO studies(study_id,study_name,strategy_id,optimization_mode) VALUES (?,?,?,?)",
@@ -202,6 +309,13 @@ def test_relocation_request_validation_without_io_or_writes(client, oos_study, m
         worst_profit_degradation=None, results_json={"config": before["study"]["config_json"]})
     assert client.post(url, json={"testId": str(other_id)}).status_code == 404
     assert storage.load_study_from_db(oos_study) == before
+    config = before["study"]["config_json"]
+    storage.update_study_config_json(oos_study, {k: v for k, v in config.items() if k != "data_input"})
+    no_pin = storage.load_study_from_db(oos_study)
+    response = client.post(url, json={"packRoot": []})
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "This result has no Parquet input pin."
+    assert storage.load_study_from_db(oos_study) == no_pin
 
 
 def test_valid_relocation_and_missing_or_changed_inputs(client, oos_study, tmp_path, monkeypatch):
@@ -252,11 +366,32 @@ def test_valid_relocation_and_missing_or_changed_inputs(client, oos_study, tmp_p
 
 
 @pytest.mark.parametrize("kind", ["csv", "parquet"])
-def test_wfa_symbols_and_offline_no_trade_order(client, tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_wfa_symbols_and_offline_no_trade_order(client, tmp_path, monkeypatch, kind, adaptive):
     from ui import server_routes_data, server_data_input
+    from core.walkforward_engine import WalkForwardEngine
+    from core import metrics
+    from strategies import get_strategy
+    captured = []
+    original = WalkForwardEngine._run_period_backtest
+    def capture(self, **kwargs):
+        result = original(self, **kwargs)
+        captured.append((kwargs, result))
+        return result
+    monkeypatch.setattr(WalkForwardEngine, "_run_period_backtest", capture)
+    original_truncate = WalkForwardEngine._truncate_oos_result
+    def truncate(self, **kwargs):
+        result, end = original_truncate(self, **kwargs)
+        captured[-1] = (captured[-1][0], result)
+        return result, end
+    monkeypatch.setattr(WalkForwardEngine, "_truncate_oos_result", truncate)
     source = publish(tmp_path / "pack", rows=5000, triangle=True)
-    fields = {"strategy": STRATEGY, "warmupBars": "100", "config": json.dumps(grid_payload()),
+    config = grid_payload()
+    config["fixed_params"]["initialCapital"] = 1000
+    fields = {"strategy": STRATEGY, "warmupBars": "100", "config": json.dumps(config),
               "wf_is_period_days": "5", "wf_oos_period_days": "3"}
+    if adaptive:
+        fields.update(wf_adaptive_mode="true", wf_max_oos_period_days="3", wf_min_oos_trades="10000")
     if kind == "parquet":
         fields["source"] = json.dumps(source)
         symbol = "TEST:AAA-USDT-SWAP"
@@ -271,6 +406,20 @@ def test_wfa_symbols_and_offline_no_trade_order(client, tmp_path, monkeypatch, k
     assert response.status_code == 200, response.get_data(as_text=True)
     study_id = response.get_json()["study_id"]
     saved = storage.load_study_from_db(study_id)
+    assert captured and len(captured) == 2 * len(saved["windows"])
+    for window, ((is_args, is_raw), (oos_args, oos_raw)) in zip(saved["windows"], zip(captured[::2], captured[1::2])):
+        assert is_args["params"]["initialCapital"] == oos_args["params"]["initialCapital"] == 1000
+        for prefix, raw in [("is_", is_raw), ("oos_", oos_raw)]:
+            if prefix == "is_":
+                assert raw.trades
+            assert window[prefix + "net_profit_pct"] == pytest.approx((raw.balance_curve[-1] / 1000 - 1) * 100)
+            assert window[prefix + "romad"] == metrics.calculate_advanced(raw, 1000).romad
+    scalar = 100.
+    for _, raw in captured[1::2]:
+        scalar *= raw.balance_curve[-1] / raw.balance_curve[0]
+    stored_curve = json.loads(saved["study"]["stitched_oos_equity_curve"])
+    assert stored_curve[0] == 100
+    assert saved["study"]["stitched_oos_net_profit_pct"] == pytest.approx(scalar - 100)
     number = saved["windows"][0]["window_number"]
     base = f"/api/studies/{study_id}/wfa"
     for endpoint in [f"windows/{number}/trades", "trades"]:
@@ -278,11 +427,42 @@ def test_wfa_symbols_and_offline_no_trade_order(client, tmp_path, monkeypatch, k
         assert response.status_code == 200
         rows = list(csv.reader(io.StringIO(response.get_data(as_text=True))))
         assert len(rows) > 1 and {r[0] for r in rows[1:]} == {symbol}
+    if not adaptive:
+        # Existing route warmup/order differs from engine evaluation arrays. Compare
+        # synthetic amounts and common live observations, not the entire arrays.
+        scheduled = pd.Timestamp(saved["windows"][0]["oos_start_date"], tz="UTC")
+        live = scheduled + pd.Timedelta(days=1)
+        with storage.get_db_connection() as conn:
+            conn.execute("UPDATE wfa_windows SET trade_start_ts=? WHERE study_id=? AND window_number=?",
+                         (live.isoformat(), study_id, number))
+            conn.commit()
+        raw_runs = []
+        original_run = get_strategy(STRATEGY).run
+        def replay(frame, params, idx):
+            result = original_run(frame, params, idx)
+            raw_runs.append(result)
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(get_strategy(STRATEGY), "run", staticmethod(replay))
+            response = client.post(base + f"/windows/{number}/equity", json={"period": "oos"})
+        assert response.status_code == 200, response.get_data(as_text=True)
+        assert len(raw_runs) == 1
+        route = response.get_json()
+        assert route["equity_curve"][0] == 1000
+        engine_view = WalkForwardEngine._prepend_flat_prefix(raw_runs[0], scheduled_start=scheduled,
+            live_start=live, initial_balance=1000)
+        assert engine_view.equity_curve[0] == 1000
+        common = {pd.Timestamp(t): v for t, v in zip(route["timestamps"], route["equity_curve"]) if pd.Timestamp(t) >= live}
+        assert common
+        for stamp, value in zip(engine_view.timestamps, engine_view.equity_curve):
+            if stamp >= live:
+                assert common[stamp] == value
     with storage.get_db_connection() as conn:
         conn.execute("UPDATE wfa_windows SET window_status='no_trade' WHERE study_id=?", (study_id,))
         conn.commit()
     monkeypatch.setattr(server_routes_data, "_resolve_csv_path", lambda *a, **k: pytest.fail("shortcut resolved CSV"))
     monkeypatch.setattr(server_data_input, "replay_config", lambda *a, **k: pytest.fail("shortcut replayed pack"))
+    monkeypatch.setattr(get_strategy(STRATEGY), "run", lambda *a, **k: pytest.fail("flat shortcut ran strategy"))
     for endpoint in ("equity", "trades"):
         assert client.post(base + f"/windows/999/{endpoint}", json={"period": "oos"}).status_code == 404
         assert client.post(base + f"/windows/{number}/{endpoint}", json={"moduleType": "optuna", "trialNumber": 999}).status_code == 404
@@ -290,7 +470,7 @@ def test_wfa_symbols_and_offline_no_trade_order(client, tmp_path, monkeypatch, k
         response = client.post(base + f"/windows/{number}/{endpoint}", json={"period": "oos"})
         assert response.status_code == 200
         if endpoint == "equity":
-            assert response.get_json()["equity_curve"] == [100.0, 100.0]
+            assert response.get_json()["equity_curve"] == [1000.0, 1000.0]
         else:
             assert response.get_data(as_text=True) == export_trades_csv([], symbol=symbol)
     assert storage.load_study_from_db(study_id)["study"]["config_json"] == saved["study"]["config_json"]
@@ -307,7 +487,7 @@ def test_csv_export_error_contract(client, monkeypatch, failure, status, message
     study = dict(study_id="stub", strategy_id=STRATEGY, optimization_mode="grid", config_json={},
                  csv_file_path="original.csv", ft_enabled=True, oos_test_enabled=True)
     monkeypatch.setattr(routes, "load_study_from_db", lambda _: {"study": study, "windows": []})
-    monkeypatch.setattr(routes, "_resolve_stored_execution_context", lambda _: SimpleNamespace(warmup_bars=0))
+    monkeypatch.setattr(routes, "_resolve_stored_execution_context", lambda _: SimpleNamespace(warmup_bars=0, params_for=lambda p: p))
     paths = []
 
     def resolve(path):
