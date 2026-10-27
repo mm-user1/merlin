@@ -512,10 +512,24 @@ def _settings_from_config(config: OptimizationConfig) -> GridSettings:
     )
 
 
+def _normalize_fixed_config(config: OptimizationConfig) -> None:
+    from .parameter_mode import normalize_parameter_mode
+    from strategies import get_strategy_config
+    payload = dict(vars(config))
+    if payload.get("parameterMode") is None:
+        payload.pop("parameterMode", None)
+    normalized = normalize_parameter_mode(payload, get_strategy_config(config.strategy_id))
+    if normalized.get("parameterMode") == "fixed":
+        for name, value in normalized.items():
+            setattr(config, name, value)
+
+
 def _grid_v2_settings_from_config(config: OptimizationConfig):
     from .grid_v2 import GridV2Settings
     from .engine_v2.parameter_ties import enabled_parameter_ties
     from strategies import get_strategy_config
+
+    _normalize_fixed_config(config)
 
     requested_ties = getattr(config, "grid_v2_enabled_tie_groups", [])
     enabled_parameter_ties(get_strategy_config(config.strategy_id), requested_ties)
@@ -536,7 +550,7 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
         compiled_workers=compiled_workers,
         slow_enrich_selected=False,
         enabled_variants=enabled_variants,
-        enabled_axes=enabled_axes or None,
+        enabled_axes=() if config.parameterMode == "fixed" else enabled_axes or None,
         enabled_tie_groups=tuple(requested_ties),
         prefer_compiled=bool(getattr(config, "grid_v2_prefer_compiled", True)),
         planning_policy=normalize_grid_v2_planning_policy(
@@ -879,6 +893,10 @@ def _preview_grid_v2_parameter_space(config: OptimizationConfig) -> Dict[str, An
         config,
     )
     settings = _grid_v2_settings_from_config(config)
+    if config.parameterMode == "fixed":
+        from .grid_v2 import build_grid_v2_plan
+        from .parameter_mode import require_singleton
+        require_singleton(build_grid_v2_plan(strategy_config, settings=settings, base_params=config.fixed_params))
     preview = preview_grid_v2_counts(
         strategy_config,
         settings=settings,
@@ -1723,6 +1741,8 @@ def _run_grid_v2_optimization(
     grid_v2_plan_cache: Any | None = None,
     prepared_frame=None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
+    _normalize_fixed_config(config)
+    fixed_mode = config.parameterMode == "fixed"
     if bool(getattr(config, "grid_needs_dsr", False)):
         raise ValueError("V2 Grid DSR is unavailable in Phase 2.5; disable DSR for engine='v2'.")
 
@@ -1820,6 +1840,10 @@ def _run_grid_v2_optimization(
         timings["runtime_rebase_seconds"] = 0.0
     timings["candidate_generation_seconds"] = time.time() - plan_started
 
+    if fixed_mode:
+        from .parameter_mode import require_singleton
+        require_singleton(plan)
+
     data_started = time.time()
     df, trade_start_idx, start_ts, end_ts = _prepare_grid_dataframe(config, prepared_frame)
     timings["data_prepare_seconds"] = time.time() - data_started
@@ -1835,6 +1859,11 @@ def _run_grid_v2_optimization(
         compute_sqn=fast_metric_request.compute_sqn,
     )
     timings["fast_evaluation_seconds"] = time.time() - eval_started
+    if fixed_mode:
+        if len(run_result.rows) != 1:
+            raise ValueError("Fixed execution must return exactly one row.")
+        if run_result.rows[0].status != "ok":
+            raise ValueError(run_result.rows[0].error or "Fixed execution failed.")
     for key in (
         "cache_key_build_seconds",
         "signal_build_seconds",
@@ -1868,19 +1897,23 @@ def _run_grid_v2_optimization(
     timings["fast_result_materialization_seconds"] = time.time() - fast_materialization_started
 
     ranking_started = time.time()
-    ranked_fast = rank_grid_results(
-        all_fast_results,
-        objectives=selection_config.fast_objectives,
-        primary_objective=selection_config.fast_primary_objective,
-        constraints=constraints,
-        stage_label="Grid V2 fast screening",
-    )
-    selected_fast, diversity_metadata = apply_diversity_cap(
-        ranked_fast,
-        top_n=settings.top_n,
-        enabled=bool(getattr(config, "grid_diversity_enabled", True)),
-        max_per_group=max(1, int(getattr(config, "grid_diversity_max_per_group", 2) or 2)),
-    )
+    if fixed_mode:
+        ranked_fast = selected_fast = all_fast_results
+        setattr(selected_fast[0], "grid_rank", 1)
+    else:
+        ranked_fast = rank_grid_results(
+            all_fast_results,
+            objectives=selection_config.fast_objectives,
+            primary_objective=selection_config.fast_primary_objective,
+            constraints=constraints,
+            stage_label="Grid V2 fast screening",
+        )
+        selected_fast, diversity_metadata = apply_diversity_cap(
+            ranked_fast,
+            top_n=settings.top_n,
+            enabled=bool(getattr(config, "grid_diversity_enabled", True)),
+            max_per_group=max(1, int(getattr(config, "grid_diversity_max_per_group", 2) or 2)),
+        )
     timings["ranking_seconds"] = time.time() - ranking_started
     objective_selected_count = len(selected_fast)
 
@@ -2170,6 +2203,8 @@ def run_grid_optimization(
     grid_v2_plan_cache: Any | None = None,
     prepared_frame=None,
 ) -> Tuple[List[OptimizationResult], Optional[str]]:
+    if config.parameterMode is not None:
+        _normalize_fixed_config(config)
     if supports_grid_v2(config.strategy_id):
         selection = resolve_grid_selection_config(config)
         _validate_fast_objective_limit(selection.fast_objectives)

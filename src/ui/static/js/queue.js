@@ -1240,12 +1240,23 @@ function applyQueueGridObjectiveSelection(kind, objectives, primaryObjective) {
   }
 }
 
+function applyQueueParameterMode(config) {
+  const fixed = config?.parameterMode === 'fixed';
+  const grid = config?.optimization_mode === 'grid';
+  [['optimizerModeFixed', fixed], ['optimizerModeGrid', grid && !fixed],
+    ['optimizerModeOptuna', !grid && !fixed]].forEach(([id, checked]) => {
+    const control = document.getElementById(id);
+    if (control) control.checked = checked;
+  });
+}
+
 function applyQueueGridConfig(config) {
+  applyQueueParameterMode(config);
   const isGrid = config?.optimization_mode === 'grid';
   const gridRadio = document.getElementById('optimizerModeGrid');
   const optunaRadio = document.getElementById('optimizerModeOptuna');
   if (gridRadio && optunaRadio) {
-    gridRadio.checked = isGrid;
+    gridRadio.checked = isGrid && config?.parameterMode !== 'fixed';
     optunaRadio.checked = !isGrid;
   }
   if (!isGrid) return;
@@ -1732,6 +1743,10 @@ async function ensureQueueItemStrategyLoaded(item) {
   if (!loaded || !isCurrentStrategyConfigReady()) {
     throw new Error(STRATEGY_CONFIG_NOT_READY_MESSAGE);
   }
+  if (item.config?.parameterMode === 'fixed'
+      && (window.currentStrategyConfig?.engine !== 'v2' || item.config.optimization_mode !== 'grid')) {
+    throw new Error('This queued Fixed request requires a V2 strategy and the Grid engine.');
+  }
 }
 
 async function loadQueueItemIntoForm(itemId, options = {}) {
@@ -1788,6 +1803,7 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
 
   applyQueueConfigFallback(item);
   applyQueueUiSnapshot(item.uiSnapshot);
+  if (item.config) applyQueueParameterMode(item.config);
   window.EntryFilters?.restore(item.config?.entryFilters);
   if (typeof applyQueueParameterTies === 'function') applyQueueParameterTies(item);
 
@@ -1884,6 +1900,7 @@ function formatQueueCompactTrialCount(rawCount) {
 }
 
 function getQueueGridPlannedFacts(item) {
+  if (item?.config?.parameterMode === 'fixed') return {count: 1, source: 'fixed'};
   const planned = Number(
     item?.planned_candidate_count
     ?? item?.config?.planned_candidate_count
@@ -1898,6 +1915,7 @@ function getQueueGridPlannedFacts(item) {
 }
 
 function buildQueueAutoSetBudgetLabel(item) {
+  if (item?.config?.parameterMode === 'fixed') return 'FIXED 1 cfg';
   if (item?.config?.optimization_mode === 'grid') {
     const facts = getQueueGridPlannedFacts(item);
     return `${formatQueueCompactTrialCount(facts.count)}c ${facts.source}`;
@@ -2120,7 +2138,7 @@ function collectQueueItem() {
     }
   }
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
-  if (!hasEnabledParams) {
+  if (!hasEnabledParams && config.parameterMode !== 'fixed') {
     showQueueError('Please enable at least one parameter to optimize.');
     return null;
   }
@@ -2167,7 +2185,7 @@ function collectQueueItem() {
   });
 
   if (mode === 'wfa') {
-    const adaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
+    const adaptiveMode = config.parameterMode !== 'fixed' && Boolean(document.getElementById('enableAdaptiveWF')?.checked);
     const cooldownEnabled = adaptiveMode && Boolean(document.getElementById('wfCooldownEnabled')?.checked);
     const periodUnit = document.getElementById('wfCalendarMonths')?.checked ? 'months' : 'days';
     item.wfa = {
@@ -2238,8 +2256,13 @@ function generateQueueLabel(item) {
     }
   }
 
+  if (item.config?.parameterMode === 'fixed') {
+    modeLabel = item.mode === 'wfa' ? buildQueueAutoSetModeLabel(item) + ' \u00B7 FIXED 1 cfg' : 'FIXED 1 cfg';
+    budgetLabel = '';
+  }
+
   return '#' + index + ' \u00B7 ' + strategyLabel + ' \u00B7 ' + csvLabel + ' \u00B7 '
-    + dateLabel + ' \u00B7 ' + modeLabel + ' \u00B7 ' + budgetLabel;
+    + dateLabel + ' \u00B7 ' + modeLabel + (budgetLabel ? ' \u00B7 ' + budgetLabel : '');
 }
 
 async function addToQueue(item) {

@@ -1004,8 +1004,8 @@ function getWorkerProcessesValue() {
 
 function getOptimizerMode() {
   const engine = String(window.currentStrategyConfig?.engine || 'v1').trim().toLowerCase();
-  if (engine === 'v2') return 'grid';
   const selected = document.querySelector('input[name="optimizerMode"]:checked');
+  if (engine === 'v2') return selected?.value === 'fixed' ? 'fixed' : 'grid';
   return selected && selected.value === 'grid' ? 'grid' : 'optuna';
 }
 
@@ -1047,7 +1047,7 @@ function getGridBudgetValue() {
 }
 
 function getSelectedObjectiveKeys() {
-  if (getOptimizerMode() === 'grid') {
+  if (getOptimizerMode() !== 'optuna') {
     return collectGridObjectiveSelection('fast').objectives;
   }
   if (window.OptunaUI && typeof window.OptunaUI.collectObjectives === 'function') {
@@ -1289,6 +1289,7 @@ function parseBoolOptionValue(rawValue) {
 }
 
 function validateOptimizerForm(config) {
+  if (getOptimizerMode() === 'fixed') return [];
   const params = config?.parameters || {};
   const errors = [];
   let enabledCount = 0;
@@ -1527,7 +1528,7 @@ function buildOptimizationConfig(state, optimizerMode = 'optuna') {
     optimizableNames.add(name);
     const paramDef = def || {};
     const paramType = paramDef.type || 'float';
-    const isChecked = Boolean(checkbox && checkbox.checked);
+    const isChecked = optimizerMode !== 'fixed' && Boolean(checkbox && checkbox.checked);
     enabledParams[name] = isChecked;
 
     if (isChecked) {
@@ -1606,7 +1607,7 @@ function buildOptimizationConfig(state, optimizerMode = 'optuna') {
     score_config: collectScoreConfig(),
     detailed_log: Boolean(document.getElementById('detailedLog')?.checked),
     trials_log: Boolean(document.getElementById('trialsLog')?.checked),
-    optimization_mode: optimizerMode === 'grid' ? 'grid' : 'optuna'
+    optimization_mode: optimizerMode === 'optuna' ? 'optuna' : 'grid'
   };
 }
 
@@ -1791,8 +1792,28 @@ function getGridPreviewConfigKey(config) {
   return JSON.stringify(config || {});
 }
 
+function buildFixedConfig(state) {
+  const config = buildOptimizationConfig(state, 'fixed');
+  return {
+    ...config, parameterMode: 'fixed', enabled_params: {}, param_ranges: {},
+    objectives: ['net_profit_pct'], primary_objective: 'net_profit_pct',
+    grid_fast_objectives: ['net_profit_pct'], grid_fast_primary_objective: 'net_profit_pct',
+    grid_slow_refinement_enabled: false, grid_slow_objectives: ['net_profit_pct'],
+    grid_slow_primary_objective: 'net_profit_pct', grid_enabled_modes: [],
+    grid_v2_enabled_tie_groups: typeof getEnabledParameterTieGroups === 'function' ? getEnabledParameterTieGroups() : [],
+    grid_top_candidates: 1, grid_diversity_enabled: false, grid_diversity_max_per_group: 2,
+    grid_v2_planning_policy: 'full', grid_budget: 200000, grid_seed: 42,
+    grid_allocation_method: 'auto_sqrt_space', grid_min_quota: 0.10, grid_manual_percents: {},
+    grid_strict_validation: Boolean(document.getElementById('gridStrictValidation')?.checked),
+    constraints: [], filter_min_profit: false, score_config: {...config.score_config, filter_enabled: false},
+    postProcess: {enabled: false, dsrEnabled: false, stressTest: {enabled: false}},
+    oosTest: window.OosTestUI ? window.OosTestUI.collectConfig() : {enabled: false}
+  };
+}
+
 function buildCurrentOptimizerConfig(state) {
-  return getOptimizerMode() === 'grid' ? buildGridConfig(state) : buildOptunaConfig(state);
+  const mode = getOptimizerMode();
+  return mode === 'fixed' ? buildFixedConfig(state) : mode === 'grid' ? buildGridConfig(state) : buildOptunaConfig(state);
 }
 function clearWFResults() {
   const wfStatusEl = document.getElementById('wfStatus');
@@ -1852,7 +1873,7 @@ async function runWalkForward({ sources, state }) {
   const config = buildCurrentOptimizerConfig(state);
   const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
-  if (!hasEnabledParams) {
+  if (!hasEnabledParams && config.parameterMode !== 'fixed') {
     if (wfStatusEl) {
       wfStatusEl.textContent = 'Please enable at least one parameter to optimize before running Walk-Forward.';
     }
@@ -1864,7 +1885,7 @@ async function runWalkForward({ sources, state }) {
   const wfPeriodUnit = document.getElementById('wfCalendarMonths')?.checked ? 'months' : 'days';
   const wfaPeriodState = buildWfaPeriodState(wfPeriodUnit, wfIsPeriodDays, wfOosPeriodDays);
   const wfStoreTopNTrials = document.getElementById('wfStoreTopNTrials')?.value || '50';
-  const wfAdaptiveMode = Boolean(document.getElementById('enableAdaptiveWF')?.checked);
+  const wfAdaptiveMode = config.parameterMode !== 'fixed' && Boolean(document.getElementById('enableAdaptiveWF')?.checked);
   const wfCooldownEnabled = wfAdaptiveMode && Boolean(document.getElementById('wfCooldownEnabled')?.checked);
   const wfCooldownDays = document.getElementById('wfCooldownDays')?.value || '15';
   const wfMaxOosPeriodDays = document.getElementById('wfMaxOosPeriodDays')?.value || '90';
@@ -2389,7 +2410,7 @@ function resetGridPreviewState() {
 }
 
 function scheduleGridPreviewUpdate() {
-  if (getOptimizerMode() !== 'grid') return;
+  if (getOptimizerMode() === 'optuna') return;
   if (gridPreviewTimer) {
     window.clearTimeout(gridPreviewTimer);
   }
@@ -2397,13 +2418,13 @@ function scheduleGridPreviewUpdate() {
 }
 
 async function updateGridPreview() {
-  if (getOptimizerMode() !== 'grid') return;
+  if (getOptimizerMode() === 'optuna') return;
   if (typeof fetchGridPreviewRequest !== 'function') return;
   if (!isCurrentStrategyConfigReady()) return;
   const seq = ++gridPreviewSeq;
   try {
     const state = gatherFormState();
-    const config = buildGridConfig(state);
+    const config = buildCurrentOptimizerConfig(state);
     const previewConfigKey = getGridPreviewConfigKey(config);
     const warmupBars = Number(document.getElementById('warmupBars')?.value) || 1000;
     const source = window.currentStrategyConfig?.execution?.entryAdmission ? getSelectedDataSources()[0] : null;
@@ -2414,8 +2435,9 @@ async function updateGridPreview() {
     // the key after rendering so non-operative retained values do not make the
     // just-returned Preview appear stale.
     window.lastGridPreviewConfigKey = getGridPreviewConfigKey(
-      buildGridConfig(gatherFormState())
+      buildCurrentOptimizerConfig(gatherFormState())
     ) || previewConfigKey;
+    syncFixedControls();
   } catch (error) {
     if (seq !== gridPreviewSeq) return;
     setGridPreviewError(error?.message || 'Grid preview failed.');
@@ -2423,7 +2445,7 @@ async function updateGridPreview() {
 }
 
 function syncGridParameterOptions() {
-  const isGrid = getOptimizerMode() === 'grid';
+  const isGrid = getOptimizerMode() !== 'optuna';
   const isS03Grid = isGrid && window.currentStrategyId === 's03_reversal_v10';
   const vwapOptions = Array.from(
     document.querySelectorAll('input.select-option-checkbox[data-param-name="maType3"][data-option-value="VWAP"]')
@@ -2453,7 +2475,7 @@ function syncGridParameterOptions() {
 }
 
 function syncGridObjectiveAndConstraintUi() {
-  const isGrid = getOptimizerMode() === 'grid';
+  const isGrid = getOptimizerMode() !== 'optuna';
   document.querySelectorAll('.objective-checkbox').forEach((checkbox) => {
     const objective = checkbox.dataset.objective;
     const unsupported = isGrid && !GRID_SUPPORTED_OBJECTIVES.has(objective);
@@ -2493,12 +2515,18 @@ function syncGridObjectiveAndConstraintUi() {
 }
 
 function syncOptimizerModeUI() {
+  fixedDisabledControls.forEach((disabled, control) => { control.disabled = disabled; });
+  fixedDisabledControls.clear();
   const strategyConfig = window.currentStrategyConfig;
   const isV2 = String(strategyConfig?.engine || 'v1').trim().toLowerCase() === 'v2';
   const gridSettings = document.getElementById('gridSettings');
   const optunaSettings = document.getElementById('optunaSettings');
   const gridRadio = document.getElementById('optimizerModeGrid');
   const optunaRadio = document.getElementById('optimizerModeOptuna');
+  const fixedRadio = document.getElementById('optimizerModeFixed');
+  const fixedLabel = document.getElementById('optimizerModeFixedLabel');
+  if (fixedLabel) fixedLabel.style.display = isV2 ? '' : 'none';
+  if (fixedRadio) fixedRadio.disabled = !isV2;
   const optunaLabel = document.getElementById('optimizerModeOptunaLabel');
   const gridHelp = document.getElementById('gridModeHelp');
   // Only the V2 Grid policy disables this radio. Capture the previous lock
@@ -2511,7 +2539,7 @@ function syncOptimizerModeUI() {
   if (!strategyConfig) {
     if (optunaRadio) optunaRadio.disabled = false;
     if (gridRadio) gridRadio.disabled = false;
-    if (wasV2Locked) {
+    if (wasV2Locked && !fixedRadio?.checked) {
       if (optunaRadio) optunaRadio.checked = true;
       if (gridRadio) gridRadio.checked = false;
     }
@@ -2523,8 +2551,11 @@ function syncOptimizerModeUI() {
   }
 
   if (isV2) {
-    if (gridRadio) gridRadio.checked = true;
+    if (gridRadio) gridRadio.checked = !fixedRadio?.checked;
     if (optunaRadio) optunaRadio.checked = false;
+  } else if (fixedRadio?.checked) {
+    fixedRadio.checked = false;
+    if (optunaRadio) optunaRadio.checked = true;
   }
 
   const gridMeta = getEnabledGridMetadata();
@@ -2537,7 +2568,7 @@ function syncOptimizerModeUI() {
     }
   }
 
-  const effectiveGrid = getOptimizerMode() === 'grid';
+  const effectiveGrid = getOptimizerMode() !== 'optuna';
   if (gridHelp) {
     gridHelp.textContent = gridMeta.available ? '' : gridMeta.reason;
   }
@@ -2563,9 +2594,33 @@ function syncOptimizerModeUI() {
   }
 
   if (typeof syncParameterTieControls === 'function') syncParameterTieControls();
+  syncFixedControls();
   if (effectiveGrid) {
     scheduleGridPreviewUpdate();
   }
+}
+
+const fixedDisabledControls = new Map();
+
+function syncFixedControls() {
+  if (getOptimizerMode() !== 'fixed') return;
+  const controls = new Set(document.querySelectorAll(
+    '#gridSettings input, #gridSettings select, #optunaSettings input, #optunaSettings select, '
+    + '#minProfitFilterGroup input, #scoreFilterGroup input, #adaptiveWFSettings input, #enableAdaptiveWF'
+  ));
+  ['enableDSR', 'enablePostProcess', 'enableStressTest'].forEach((id) => {
+    const section = document.getElementById(id)?.closest('.wf-section');
+    section?.querySelectorAll('input, select, button').forEach((control) => controls.add(control));
+  });
+  getOptimizerParamElements().forEach(({checkbox, fromInput, toInput, stepInput}) => {
+    [checkbox, fromInput, toInput, stepInput].filter(Boolean).forEach((control) => controls.add(control));
+  });
+  document.querySelectorAll('input.select-option-checkbox').forEach((control) => controls.add(control));
+  controls.forEach((control) => {
+    if (control.id === 'gridStrictValidation' || control.id?.startsWith('grid-tie-')) return;
+    if (!fixedDisabledControls.has(control)) fixedDisabledControls.set(control, control.disabled);
+    control.disabled = true;
+  });
 }
 
 async function submitOptimization(event) {
@@ -2670,7 +2725,7 @@ async function submitOptimization(event) {
   const config = buildCurrentOptimizerConfig(state);
   const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
   const hasEnabledParams = Object.values(config.enabled_params || {}).some(Boolean);
-  if (!hasEnabledParams) {
+  if (!hasEnabledParams && config.parameterMode !== 'fixed') {
     optimizerResultsEl.textContent = 'Please enable at least one parameter to optimize.';
     optimizerResultsEl.classList.remove('ready');
     optimizerResultsEl.classList.remove('loading');

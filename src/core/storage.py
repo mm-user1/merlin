@@ -4630,6 +4630,10 @@ def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
     if is_dataclass(config) and hasattr(config, "entry_filter_context"):
         config = replace(config, entry_filter_context=None)
     payload = _safe_dict(config)
+    if not isinstance(config, dict) and payload.get("parameterMode") is None:
+        payload.pop("parameterMode", None)
+    from .parameter_mode import parameter_mode
+    parameter_mode(payload)
     payload.pop("entry_filter_context", None)
     if not isinstance(config, dict) and payload.get("entry_filter_inputs") is None and payload.get("entryFilters") is None:
         payload.pop("entry_filter_inputs", None)

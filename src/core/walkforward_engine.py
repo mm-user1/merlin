@@ -863,7 +863,9 @@ class WalkForwardEngine:
                 print(
                     "Warning: Window "
                     f"{window.window_id} produced no OOS trades. "
-                    "This may indicate overfitting, FT rejection, or unsuitable parameters."
+                    + ("The fixed configuration made no trades in this OOS window."
+                       if self.base_config_template.get("parameterMode") == "fixed"
+                       else "This may indicate overfitting, FT rejection, or unsuitable parameters.")
                 )
 
             dense_curve = list(prefixed_oos_result.balance_curve or [])
@@ -3158,6 +3160,7 @@ class WalkForwardEngine:
 
         optimizer_mode = str(self.base_config_template.get("optimization_mode") or "optuna").lower()
         base_config = OptimizationConfig(
+            parameterMode=self.base_config_template.get("parameterMode"),
             entryFilters=deepcopy(self.base_config_template.get("entryFilters")),
             entry_filter_inputs=self.prepared_input.entry_filter_inputs if self.prepared_input is not None else None,
             data_input=self.prepared_input.facts if self.prepared_input is not None else None,

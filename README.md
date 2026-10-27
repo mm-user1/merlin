@@ -9,6 +9,8 @@ optimization platform with SQLite persistence and a Flask single-page web UI.
 - Backtester V1 optimization through Optuna or deterministic Fast Grid.
 - Backtester V2 optimization through deterministic core-owned Grid V2,
   including full and budgeted sampled planning.
+- V2 Fixed research for one scalar configuration, with optional OOS or regular
+  day/calendar WFA through the Grid engine.
 - Fixed and Adaptive walk-forward analysis with stitched OOS results.
 - Opt-in V2 risk-bracket admission for Parquet instruments, with a fixed entry
   leverage cap and selected-run diagnostics across testing and WFA.
@@ -22,7 +24,8 @@ optimization platform with SQLite persistence and a Flask single-page web UI.
 ## Optimizer compatibility
 
 Backtester V1 supports Optuna and Grid. New Backtester V2 Optimize and WFA
-requests must explicitly use Grid. Optuna has not been removed: historical V2
+requests must explicitly use the Grid engine. The visible Fixed mode uses that
+engine without parameter search. Optuna has not been removed: historical V2
 Optuna studies remain readable, supported replay/manual-test paths remain
 compatible, and V1 Optuna remains fully supported. Merlin never silently
 converts old Optuna requests, Queue items, Presets, or studies to Grid.

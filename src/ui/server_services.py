@@ -1128,6 +1128,7 @@ def _resolve_stored_execution_context(
             )
     else:
         config = raw_config if isinstance(raw_config, dict) else {}
+    config = _normalize_parameter_mode_payload(context, config)
     raw_fixed = config.get("fixed_params")
     base_params = deepcopy(raw_fixed) if isinstance(raw_fixed, dict) else {}
     from core.engine_v2.admission import uses_admission, read_admission_envelope, execution_admission
@@ -1381,6 +1382,7 @@ def _normalize_v2_optimizer_payload(
     missing_date_filter: bool = False,
 ) -> Tuple[Dict[str, Any], ResolvedV2Runtime]:
     _require_valid_v2_context(context)
+    payload = _normalize_parameter_mode_payload(context, payload)
     optimization_mode = payload.get("optimization_mode")
     normalized_mode = (
         optimization_mode.strip().lower()
@@ -1418,6 +1420,15 @@ def _normalize_v2_optimizer_payload(
         normalized_fixed.update(runtime.execution_projection)
         normalized["fixed_params"] = normalized_fixed
     return normalized, runtime
+
+
+def _normalize_parameter_mode_payload(context, payload):
+    from core.parameter_mode import normalize_parameter_mode
+    try:
+        return normalize_parameter_mode(payload, context.config)
+    except (TypeError, ValueError) as exc:
+        raise _validation_error(code="V2_INVALID_PARAMETER_MODE", strategy_id=context.strategy_id,
+                                path="parameterMode", message=str(exc)) from exc
 
 
 SCORE_METRIC_KEYS: Tuple[str, ...] = (
@@ -2031,12 +2042,20 @@ def build_grid_settings_view(
     else:
         return None
 
+    from core.parameter_mode import parameter_mode
+    try:
+        fixed_mode = parameter_mode(config) == "fixed"
+    except ValueError as exc:
+        return {"enabled": True, "is_wfa_grid": is_wfa_grid, "available": False,
+                "rows": [], "allocation_rows": [], "unavailable_reason": "invalid_parameter_mode",
+                "derivation_status": "unavailable", "validation_warnings": [str(exc)], "diagnostics": []}
+
     grid_summary = _parse_json_dict(study.get("grid_summary"))
     if not grid_summary:
         grid_summary = _parse_json_dict(study.get("grid_summary_json"))
     if not grid_summary:
         grid_summary = _parse_json_dict(config.get("grid_summary"))
-    preview = _grid_preview_from_summary(grid_summary)
+    preview = {} if fixed_mode else _grid_preview_from_summary(grid_summary)
     compatibility_error: Optional[_GridSettingsCompatibilityError] = None
     derivation_attempted = not bool(preview)
     if not preview:
@@ -2366,7 +2385,14 @@ def build_grid_settings_view(
     )
     allocation_rows = [{"key": "Allocation", "val": allocation_label}]
     allocation_rows.extend(mode_rows)
-    available = compatibility_error is None or bool(grid_summary)
+    available = compatibility_error is None or (bool(grid_summary) and not fixed_mode)
+    if fixed_mode:
+        rows = [{"key": "Parameter Mode", "val": "Fixed"}, {"key": "Result", "val": "Reference"}] + [
+            row for row in rows if row["key"] in {"Workers", "Linked parameters", "Runtime"}
+        ]
+        if is_wfa_grid:
+            rows.append({"key": "Runtime", "val": _format_duration_seconds(study.get("optimization_time_seconds"))})
+        allocation_rows = []
     return {
         "enabled": True,
         "is_wfa_grid": is_wfa_grid,
@@ -2918,6 +2944,8 @@ def _build_optimization_config(
     if not isinstance(payload, dict):
         raise ValueError("Invalid optimization config payload.")
     from strategies import get_strategy_config
+    from core.parameter_mode import normalize_parameter_mode
+    payload = normalize_parameter_mode(payload, get_strategy_config(strategy_id))
     filters = effective_config(payload.get("entryFilters", MISSING))
     if filters and not capability(get_strategy_config(strategy_id)):
         raise ValueError("This strategy does not support Entry Filters; disable them before launching.")
@@ -3443,6 +3471,7 @@ def _build_optimization_config(
         dispatcher_soft_duplicate_cycle_limit_enabled=dispatcher_soft_duplicate_cycle_limit_enabled,
         dispatcher_duplicate_cycle_limit=dispatcher_duplicate_cycle_limit,
         optimization_mode=optimization_mode,
+        parameterMode=payload.get("parameterMode"),
         objectives=objectives,
         primary_objective=primary_objective,
         constraints=payload.get("constraints", []),

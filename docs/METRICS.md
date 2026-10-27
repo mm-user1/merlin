@@ -198,6 +198,11 @@ invalid objective returns as failed trials; Grid removes candidates with a
 non-finite selected objective from ranking. Short WFA windows can therefore
 have no rankable SQN, Daily Sharpe, or Sortino candidate.
 
+Fixed research bypasses ranking and retains every successful singleton reference
+result, including losses, zero trades and undefined metrics. It does not fabricate
+missing metrics or treat execution-error rows as valid no-trade results. Its regular
+WFA IS windows are descriptive; existing WFE and OOS stitching formulas are unchanged.
+
 ## Surface availability
 
 `Yes` means the metric is available on that surface when its mathematical

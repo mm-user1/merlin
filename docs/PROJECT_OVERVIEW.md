@@ -91,7 +91,7 @@ strategy discovery and request validation
 ```
 
 Backtester V1 supports Optuna and Grid. New V2 Optimize/WFA requests require
-explicit Grid. Historical V2 Optuna studies remain readable and supported
+the explicit Grid engine, with either search or Fixed research. Historical V2 Optuna studies remain readable and supported
 replay/manual-test paths remain compatible; no stored or queued object is
 silently converted.
 
@@ -133,13 +133,22 @@ Queue preserves settings; Results Parameters shows saved filters; Analytics has
 one selection-sensitive Entry Filters row. Other Research Info rows remain DB-wide.
 
 - **Start** dynamically renders strategy config, market/date/Warmup settings,
-  V1 Optuna/Grid or V2 Grid controls, Grid Preview, WFA, and Queue management.
+  V1 Optuna/Grid or V2 Grid/Fixed controls, Grid Preview, WFA, and Queue management.
 - **Results** browses stored studies and trials/windows, renders metrics/equity,
   and exposes supported tests and exports.
 - **Analytics** filters and compares WFA studies, aggregates equity, and
   manages persisted study sets.
 
 Frontend code is organized by page and concern under `src/ui/static/js/`.
+Fixed keeps scalar strategy fields, data, risk/cap, supported entry filters, ties,
+ordinary WFA/OOS and workers editable. Grid Modes and search controls, Post Process
+and Adaptive WFA are disabled; returning to Grid restores their retained state.
+The scalar variant field is authoritative. Queue preserves executable
+`parameterMode` after its UI snapshot and labels Fixed items `FIXED 1 cfg`, or
+`WFA-F 90/30 · FIXED 1 cfg` for a regular WFA schedule. Presets are unchanged.
+Results and supported WFA Analytics show compact Parameter Mode, Reference result,
+Workers, linked parameters and Runtime settings without search allocation rows.
+
 Strategy forms come from `config.json`; strategy parameters are not duplicated
 in JavaScript. Starting a new config load, or failing the current load, clears
 strategy-generated form, strategy-info, and Grid Preview state while preserving

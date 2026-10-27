@@ -104,6 +104,7 @@ class OptimizationConfig:
     dispatcher_soft_duplicate_cycle_limit_enabled: bool = True
     dispatcher_duplicate_cycle_limit: int = 18
     optimization_mode: str = "optuna"
+    parameterMode: Optional[str] = None
     objectives: List[str] = field(default_factory=list)
     primary_objective: Optional[str] = None
     constraints: List[Dict[str, Any]] = field(default_factory=list)
@@ -3430,6 +3431,10 @@ def run_optuna_optimization(
 
 def run_optimization(config: OptimizationConfig, *, prepared_frame=None) -> Tuple[List[OptimizationResult], Optional[str]]:
     """Compat wrapper that dispatches the requested optimizer mode."""
+
+    if config.parameterMode is not None:
+        from .grid_engine import _normalize_fixed_config
+        _normalize_fixed_config(config)
 
     if not getattr(config, "strategy_id", ""):
         raise ValueError("strategy_id must be specified in OptimizationConfig.")

@@ -1,5 +1,9 @@
 ### Changelog
 All significant changes and version history are recorded in this file.
+#### Unreleased — 2026-10-27
+- Add V2 Fixed research through the Grid engine: one validated scalar configuration,
+  retained reference results, standalone OOS and regular day/month WFA. Add mode
+  restoration in Start/Queue and compact stored settings, preserving historical search.
 #### Unreleased — 2026-10-26
 - Report invalid entry-filter instrument IDs as input errors; keep Analytics
   available when one saved filter descriptor has an invalid instrument.

@@ -54,6 +54,7 @@ function syncParameterTieControls() {
       });
     });
   });
+  if (typeof syncFixedControls === 'function') syncFixedControls();
 }
 
 function toggleParameterTie(group, enabled) {

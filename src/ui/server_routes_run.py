@@ -87,6 +87,7 @@ try:
         _load_preset,
         _normalize_run_id,
         _normalize_v2_optimizer_payload,
+        _normalize_parameter_mode_payload,
         _normalize_preset_payload,
         _parse_csv_parameter_block,
         _parse_warmup_bars,
@@ -126,6 +127,7 @@ except ImportError:
         _load_preset,
         _normalize_run_id,
         _normalize_v2_optimizer_payload,
+        _normalize_parameter_mode_payload,
         _normalize_preset_payload,
         _parse_csv_parameter_block,
         _parse_warmup_bars,
@@ -449,11 +451,18 @@ def register_routes(app):
             except json.JSONDecodeError:
                 return jsonify({"error": "Invalid optimization config JSON."}), HTTPStatus.BAD_REQUEST
 
+        try:
+            config_payload = _normalize_parameter_mode_payload(strategy_context, config_payload)
+        except V2ValidationError as exc:
+            return _validation_error_response(exc)
         adaptive_raw = data.get("wf_adaptive_mode", False)
         if isinstance(adaptive_raw, str):
             adaptive_mode = adaptive_raw.strip().lower() in {"true", "1", "yes", "on"}
         else:
             adaptive_mode = bool(adaptive_raw)
+
+        if config_payload.get("parameterMode") == "fixed" and adaptive_mode:
+            return jsonify({"error": "V2_INVALID_PARAMETER_MODE: Fixed does not support Adaptive WFA."}), HTTPStatus.BAD_REQUEST
 
         try:
             period_unit, is_period_months, oos_period_months = validate_wfa_period_settings(
@@ -732,6 +741,8 @@ def register_routes(app):
             "grid_v2_prefer_compiled": bool(getattr(optimization_config, "grid_v2_prefer_compiled", True)),
             "grid_v2_max_cache_mb": getattr(optimization_config, "grid_v2_max_cache_mb", None),
         }
+        if optimization_config.parameterMode is not None:
+            base_template["parameterMode"] = optimization_config.parameterMode
         if optimization_config.entryFilters is not None:
             base_template["entryFilters"] = optimization_config.entryFilters
         if post_process_payload:
@@ -1205,6 +1216,10 @@ def register_routes(app):
         except V2ValidationError as exc:
             return _validation_error_response(exc)
         strategy_id = strategy_context.strategy_id
+        try:
+            config_payload = _normalize_parameter_mode_payload(strategy_context, config_payload)
+        except V2ValidationError as exc:
+            return _validation_error_response(exc)
 
         csv_path_raw = (request.form.get("csvPath") or "").strip()
         data_path = ""

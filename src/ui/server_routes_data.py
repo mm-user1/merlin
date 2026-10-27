@@ -723,6 +723,8 @@ def register_routes(app):
             "results": results_payload,
         }
 
+        if "parameterMode" in config:
+            results_json["config"]["parameterMode"] = config["parameterMode"]
         if prepared is not None:
             results_json["config"]["data_input"] = prepared.facts
             if prepared.entry_filter_inputs is not None:

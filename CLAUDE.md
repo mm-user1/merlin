@@ -44,7 +44,9 @@ baselines, or mutate external systems unless explicitly authorized.
 - Merlin is a config-driven cryptocurrency strategy backtesting and
   optimization platform with a Flask SPA and SQLite persistence.
 - Backtester V1 supports Optuna and Grid. New Backtester V2 Optimize and WFA
-  requests are explicit Grid-only. Historical V2 Optuna studies remain
+  requests use the Grid engine explicitly. Start offers Grid search and Fixed
+  research (`parameterMode="fixed"`), which retains one scalar configuration
+  through the same engine, without ranking or Post Process. Historical V2 Optuna studies remain
   readable and supported replay/manual-test paths remain compatible. Never
   silently convert an old request, Queue item, Preset, or study to Grid.
   Optuna remains a supported V1 optimizer.

@@ -26,6 +26,16 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Fixed research coverage is in `v2/test_v2_fixed_singleton.py`,
+`server/test_fixed_mode.py` and `test_js_fixed_mode.py` (real JavaScript handlers).
+It covers scalar/variant singleton planning, early refusal, successful loss/no-trade
+retention, actual Fast/reference metrics, CSV/Parquet OOS/WFA, stored Preview,
+manual replay/pins and Queue restoration/fan-out. Use the existing Grid domains,
+identity, dispatch/storage, plan-reuse, server Grid/settings/WFA/Queue, OOS selection,
+admission integration and UI regression modules alongside these tests. No host
+exclusions are implicit. Use external scratch and retain logs/XML; owner browser
+appearance is a separate gate. The marker changes no certified execution arithmetic.
+
 Fixed entry-filter coverage is in `test_entry_filters.py`,
 `test_entry_filter_workers.py`, `v2/test_v2_entry_filters.py`,
 `server/test_entry_filters.py` and `test_js_entry_filters.py`. The synthetic opt-in

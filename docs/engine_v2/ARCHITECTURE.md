@@ -288,7 +288,8 @@ value. Target editing values/ranges do not intersect that domain or alter the
 effective plan. Redundant target enablement is normalized away; target-only
 enablement is rejected. Generated source values must fit the target domain.
 An explicitly empty `enabled_axes=()` in the direct planner yields one fixed
-expanded candidate; HTTP/UI/OptimizationConfig empty-axis behavior is unchanged.
+expanded candidate per selected variant/logical block. Unmarked HTTP/config
+empty-axis search behavior still selects default axes.
 
 Preview multiplies reduced dimensions without building a table. Full plans
 expand those dimensions directly; sampled K < N requests use the existing
@@ -339,6 +340,40 @@ explicit target values and independent-axis geometry. Resume protects both
 plan and run identity, even when fixed candidate values coincide. The bounded
 S03 certification covers CRV windows 1..3; Presets integration remains outside
 this work. See the [Lab guide](../../tools/strategy_lab/README.md).
+
+## Fixed research mode
+
+Top-level `parameterMode` accepts exactly `search` or `fixed`; absence keeps
+existing search semantics. Explicit null, unknown values and wrong types fail.
+The optional `OptimizationConfig` None default represents absence and is omitted
+from saved dataclass configurations; an explicit saved dictionary null stays invalid.
+Fixed requires V2 and `optimization_mode="grid"`, without a new optimizer enum.
+
+Fixed collects every non-runtime scalar, resolves defaults/dependencies/ties and
+validates strict Grid types plus declared options/min/max. The scalar variant
+selector resolves exactly one variant; conflicting nonempty Grid Modes fail.
+Internal selectors keep empty Grid Modes. The adapter passes `enabled_axes=()`
+and checks the actual deduplicated plan has exactly one candidate, including Preview.
+The marker travels through WFA base templates and per-window configs and stored
+Preview. It does not enter semantic/plan identity; existing unmarked identities remain.
+
+Active axes/ranges/subsets, constraints, profit/score filters, Slow refinement,
+DSR/Forward/Stress and Adaptive WFA are refused before dataset preparation.
+Inert objectives, budget/allocation and diversity values normalize before parsing:
+one internal Net Profit objective, top count 1, diversity off, full planning and
+ordinary inert budget defaults. Original search controls belong only to UI restoration.
+
+The runner requires one successful row and surfaces a failed row's original error,
+including admission execution flags. It bypasses ranking/diversity and retains the
+authoritative reference result even for losses, zero trades or unavailable metrics.
+Only finite objective metadata is populated. Existing runtime validation is unchanged:
+Daily Sharpe comparison is request-gated; an empty diff map is not general parity proof.
+
+Standalone OOS and regular day/month WFA execute the same effective non-runtime
+parameters, filter and cap in every window. IS is descriptive. Existing bounds,
+capital, position closing, OOS-only stitching, WFE and diagnostic deduplication remain.
+Zero-trade windows remain visible. This adds no portfolio carry or Analytics study types.
+Malformed saved mode metadata is unavailable per study; reads never repair it.
 
 ## Compiled execution and resources
 
