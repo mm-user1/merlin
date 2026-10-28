@@ -24,6 +24,11 @@ MISSING = FilterContext.MISSING
 OFF = FilterContext.OFF
 METHODS = {"candleDirection": {"version": 1, "name": "F06 · Candle Direction"}}
 POLICY = "closed_candle_direction_v1"
+POLICIES = {1: POLICY, 2: "closed_candle_direction_v2"}
+
+
+def origin_rule(item):
+    return "declared_source_origin" if item["version"] == 2 and item["parameters"]["breakBars"] > 1 else "bounded_prefix"
 
 
 def _error(message):
@@ -52,14 +57,19 @@ def descriptor(item):
     from data_provider.manifest import normalize_instrument_id
     if not isinstance(item, dict) or set(item) - {"id", "type", "version", "enabled", "parameters", "source"}:
         raise _error("unsupported filter fields or expression/optimization settings.")
-    if item.get("type") not in METHODS or type(item.get("version")) is not int or item["version"] != 1:
+    if item.get("type") not in METHODS or type(item.get("version")) is not int or item["version"] not in POLICIES:
         raise _error("unsupported filter method/version.")
     params = item.get("parameters")
-    if not isinstance(params, dict) or set(params) != {"confirmationBars"}:
-        raise _error("candleDirection requires only confirmationBars.")
+    keys = {"confirmationBars"} if item["version"] == 1 else {"confirmationBars", "breakBars"}
+    if not isinstance(params, dict) or set(params) != keys:
+        raise _error("candleDirection parameters conflict with its method version.")
     count = params["confirmationBars"]
     if type(count) is not int or not 2 <= count <= np.iinfo(np.int64).max:
         raise _error("confirmationBars must be a representable integer >= 2.")
+    if item["version"] == 2:
+        opposite = params["breakBars"]
+        if count > 6 or type(opposite) is not int or not 1 <= opposite <= 4 or opposite >= count:
+            raise _error("v2 requires Trend Confirm Bars 2..6 and Trend Break Bars 1..4, strictly below Confirm Bars.")
     source = item.get("source")
     if (not isinstance(source, dict) or set(source) != {"type", "version", "pack_root", "instrument_id", "timeframe_minutes"}
             or source.get("type") != "parquet" or type(source.get("version")) is not int or source["version"] != 1):
@@ -68,7 +78,7 @@ def descriptor(item):
         instrument_id = normalize_instrument_id(source["instrument_id"])
     except DataProviderError as exc:
         raise _error(f"invalid source instrument_id: {exc}") from exc
-    return {"type": item["type"], "version": 1, "parameters": {"confirmationBars": count},
+    return {"type": item["type"], "version": item["version"], "parameters": dict(params),
             "source": {**source, "pack_root": source_locator(source["pack_root"]),
                        "instrument_id": instrument_id,
                        "timeframe_minutes": timeframe_minutes(source["timeframe_minutes"])}}
@@ -187,7 +197,7 @@ def wrap_builders(builder, batch, context):
     return single, multiple if batch else None
 
 
-def candle_direction(bars, source_minutes, confirmation_bars, decisions_ns):
+def candle_direction(bars, source_minutes, confirmation_bars, decisions_ns, *, break_bars=None):
     """Publish closed native states; newest unknown/neutral replaces older state."""
     step = int(source_minutes) * 60 * 10**9
     opens = pd.DatetimeIndex(bars.index).as_unit("ns").asi8
@@ -196,14 +206,28 @@ def candle_direction(bars, source_minutes, confirmation_bars, decisions_ns):
     known = np.zeros(len(opens), dtype=bool)
     long = known.copy()
     short = known.copy()
-    run = position = 0
+    run = position = green = red = direction = 0
     for i, colour in enumerate(colours):
         contiguous = i > 0 and int(opens[i]) - int(opens[i-1]) == step
         position = position + 1 if contiguous else 0
         run = (run + 1 if contiguous and colour == colours[i-1] else 1) if colour else 0
         known[i] = position >= prior
-        long[i] = known[i] and colour > 0 and run >= confirmation_bars
-        short[i] = known[i] and colour < 0 and run >= confirmation_bars
+        if break_bars is None:  # Historical v1 semantics and domain are unchanged.
+            long[i] = known[i] and colour > 0 and run >= confirmation_bars
+            short[i] = known[i] and colour < 0 and run >= confirmation_bars
+        else:
+            if not contiguous or colour == 0:
+                green = red = direction = 0
+            green = green + 1 if colour > 0 else 0
+            red = red + 1 if colour < 0 else 0
+            if green >= confirmation_bars:
+                direction = 1
+            elif red >= confirmation_bars:
+                direction = -1
+            elif (direction == 1 and red >= break_bars) or (direction == -1 and green >= break_bars):
+                direction = 0
+            long[i] = known[i] and direction == 1
+            short[i] = known[i] and direction == -1
     # Python integers prevent overflow at the timestamp boundary.
     closes = np.array([int(t) + step for t in opens], dtype=np.int64)
     decisions = np.asarray(decisions_ns, dtype=np.int64)

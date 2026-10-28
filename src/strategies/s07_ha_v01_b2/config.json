@@ -1,0 +1,202 @@
+{
+  "id": "s07_ha_v01_b2",
+  "name": "S_07 HA",
+  "version": "v01",
+  "engine": "v2",
+  "description": "One-shot Heikin-Ashi runs with ATR/swing brackets and pack-based risk admission.",
+  "entryFilterSupport": {
+    "version": 1,
+    "methods": [
+      "candleDirection"
+    ]
+  },
+  "execution": {
+    "entryAdmission": "risk_bracket_v1",
+    "entryOrder": "market_next_open",
+    "stop": "atr_swing",
+    "sizing": "risk_per_trade",
+    "target": "rr",
+    "trail": "none",
+    "trailActivation": "none",
+    "maxDays": true,
+    "boundary": "strict_close",
+    "priceRounding": "none",
+    "margin": "off"
+  },
+  "parameters": {
+    "enableLong": {
+      "type": "bool",
+      "label": "Enable Long",
+      "default": true,
+      "group": "HA Signal",
+      "role": "signal",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "enableShort": {
+      "type": "bool",
+      "label": "Enable Short",
+      "default": true,
+      "group": "HA Signal",
+      "role": "signal",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "entryRunLength": {
+      "type": "int",
+      "label": "HA Run Length",
+      "default": 6,
+      "min": 2,
+      "max": 8,
+      "step": 1,
+      "group": "HA Signal",
+      "role": "signal",
+      "optimize": {
+        "enabled": true,
+        "min": 2,
+        "max": 8,
+        "step": 1
+      }
+    },
+    "stopX": {
+      "type": "float",
+      "label": "Stop X",
+      "default": 2.0,
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": true,
+        "min": 1.0,
+        "max": 3.0,
+        "step": 0.5
+      }
+    },
+    "stopRR": {
+      "type": "float",
+      "label": "Stop RR",
+      "default": 3.0,
+      "min": 1.5,
+      "max": 3.0,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": true,
+        "min": 1.5,
+        "max": 3.0,
+        "step": 0.5
+      }
+    },
+    "stopLP": {
+      "type": "int",
+      "label": "Stop LP",
+      "default": 2,
+      "min": 2,
+      "max": 4,
+      "step": 2,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": true,
+        "min": 2,
+        "max": 4,
+        "step": 2
+      }
+    },
+    "stopMaxDays": {
+      "type": "int",
+      "label": "Stop Max Days",
+      "default": 4,
+      "min": 2,
+      "max": 6,
+      "step": 2,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": true,
+        "min": 2,
+        "max": 6,
+        "step": 2
+      }
+    },
+    "riskPerTrade": {
+      "type": "float",
+      "label": "Risk Per Trade",
+      "default": 2.0,
+      "min": 0.01,
+      "step": 0.5,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "maxEntryLeverage": {
+      "type": "float",
+      "label": "Max Entry Leverage",
+      "default": 8.0,
+      "min": 1.0,
+      "max": 10.0,
+      "step": 1.0,
+      "group": "Risk",
+      "role": "execution",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "initialCapital": {
+      "type": "float",
+      "label": "Initial Capital",
+      "default": 100.0,
+      "min": 0.01,
+      "max": 1000000.0,
+      "step": 1.0,
+      "group": "Backtest Settings",
+      "role": "execution",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "commissionPct": {
+      "type": "float",
+      "label": "Commission (%)",
+      "default": 0.05,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "group": "Backtest Settings",
+      "role": "execution",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "dateFilter": {
+      "type": "bool",
+      "label": "Date Filter",
+      "default": true,
+      "group": "Backtest Settings",
+      "role": "runtime",
+      "optimize": {
+        "enabled": false
+      }
+    },
+    "warmupBars": {
+      "type": "int",
+      "label": "Warmup Bars",
+      "default": 1000,
+      "min": 100,
+      "max": 5000,
+      "step": 50,
+      "group": "Backtest Settings",
+      "role": "runtime",
+      "optimize": {
+        "enabled": false
+      }
+    }
+  }
+}

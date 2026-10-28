@@ -50,6 +50,21 @@ elements.delete('backtest_maxEntryLeverage');
 sandbox.generateBacktestForm({...config,execution:{}});
 assert.equal(elements.has('backtest_maxEntryLeverage'),false);
 sandbox.generateBacktestForm(config);
+// The API sorts object keys but carries the original strategy declaration order.
+const s07 = JSON.parse(fs.readFileSync(path.join(root, 'src/strategies/s07_ha_v01_b2/config.json'), 'utf8'));
+s07.parameter_order = Object.keys(s07.parameters);
+s07.parameters = Object.fromEntries(Object.entries(s07.parameters).sort(([a], [b]) => a.localeCompare(b)));
+for (const [render, id, labelIndex] of [[sandbox.generateBacktestForm, 'backtestParamsContent', 0],
+                                     [sandbox.generateOptimizerForm, 'optimizerParamsContainer', 1]]) {
+  elements.get(id).children = [];
+  render(s07);
+  const risk = elements.get(id).children.find(group => group.children[0].textContent === 'Risk');
+  const labels = risk.children.slice(1).map(row => row.children[labelIndex].textContent);
+  assert.deepEqual(labels.filter(label => label.startsWith('Stop ')), ['Stop X', 'Stop RR', 'Stop LP', 'Stop Max Days']);
+}
+const fallback = {parameters:{b:{},a:{}},parameter_order:['a','missing','a']};
+assert.equal(JSON.stringify(sandbox.orderedParameterEntries(fallback).map(([name])=>name)), '["a","b"]');
+assert.equal(JSON.stringify(sandbox.orderedParameterEntries({parameters:fallback.parameters}).map(([name])=>name)), '["b","a"]');
 const queue=source('queue.js');
 vm.runInContext(queue.slice(queue.indexOf('function collectQueueUiSnapshot()'),queue.indexOf('function triggerControlEvent(')),sandbox);
 sandbox.document.querySelectorAll=()=>[elements.get('backtest_maxEntryLeverage')];

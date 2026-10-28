@@ -17,7 +17,8 @@ not implemented.
 
 Start places Entry Filters after the compact strategy selector; selector metadata
 remains in collapsed Details. Master/item Off retain settings. Add creates a
-stable item ID. Unsupported strategies disable editing but retain master Off;
+stable item ID and method v2 defaults (Confirm 2 / Break 1). Selecting a capable
+strategy does not activate filters. Unsupported strategies disable editing but retain master Off;
 active unsupported settings block launch. Queue preserves editor settings and
 unknown inactive records, restoring authoritative `entryFilters`. Presets do not
 gain entry-filter persistence.
@@ -26,8 +27,8 @@ The request/Queue namespace is separate from fixed strategy parameters:
 
 ```json
 {"entryFilters":{"version":1,"enabled":true,"items":[{
-  "id":"filter-1","type":"candleDirection","version":1,"enabled":true,
-  "parameters":{"confirmationBars":2},
+  "id":"filter-1","type":"candleDirection","version":2,"enabled":true,
+  "parameters":{"confirmationBars":2,"breakBars":1},
   "source":{"type":"parquet","version":1,"pack_root":"/absolute/pack",
     "instrument_id":"OKX_BTC-USDT-SWAP","timeframe_minutes":240}
 }]}}
@@ -38,8 +39,12 @@ timeframe 4h and exactly `OKX_BTC-USDT-SWAP`. The user selects a pack explicitly
 there is no venue fallback or pack guessing. Other valid OHLCV instruments are
 allowed without sizing rules; only the trading target needs those rules.
 Timeframes follow the positive 5m-multiple m/h/D contract. Confirm Bars is an
-integer >=2, excluding booleans, fractions and unrepresentable values. Multiple
-active filters intersect per side.
+integer, excluding booleans and fractions. Method v2 requires Confirm N=2..6,
+Break M=1..4, and M<N. Historical method v1 retains its integer N>=2 domain and
+has no Break parameter. Editing a v1 count, source or toggle preserves v1; only
+an explicit valid Break edit converts it to v2. For a saved v1 N>6, change N to
+a valid v2 value before conversion. Master/item Off and Queue retain either
+version. Multiple active filters intersect per side; v1 and v2 identities differ.
 
 Invalid active instrument IDs use the provider's validation rules and are reported
 as application input errors, including HTTP 400 at launch. An invalid ID in saved
@@ -49,11 +54,18 @@ content remains unused while master or item Off applies.
 
 ## Native clock and source bounds
 
-Colour is +1 for close>open, -1 for close<open and zero for neutral. Consecutive
+Colour is +1 for close>open, -1 for close<open and zero for neutral. In v1, consecutive
 colour count resets on neutrality, reversal or gap. With N confirmation bars,
 P=max(28,N-1) prior contiguous native candles are also required. Zero-based segment
 position >=P is known; the default first known candle is the 29th. Positive or
 negative runs >=N permit long or short. Known neutral/unconfirmed states block both.
+
+V2 tracks consecutive green/red counts and a directional state. N green/red
+candles activates long/short. M opposite candles blocks the active direction;
+fewer retain it. Neutral resets both counts and direction. Gaps reset direction,
+counts and the 29-contiguous-candle readiness clock (P=28). Thus v2 M=1 matches
+v1 permissions for the same N, while M>1 can retain state indefinitely through
+alternating candles. Unknown states block both directions.
 
 A source close at T publishes at T and expires at T+S exclusively, where S is its
 declared duration. Target decisions use open plus declared target duration. The
@@ -65,9 +77,14 @@ From admitted target evaluation bounds, excluding target warmup, resolve:
 ```text
 D0 = bounds.start + targetDuration
 D1 = bounds.end
-sourceStart = floor(D0 / S) * S - (P + 1) * S
+boundedStart = floor(D0 / S) * S - (P + 1) * S
 sourceEnd   = floor(D1 / S) * S
 ```
+
+V1 and v2 M=1 use sourceStart=boundedStart. V2 M>1 reads once from the aligned
+declared source origin: `ceil(first_open_utc / S) * S`, which must be representable
+and no later than boundedStart. Metadata and candles use the same read session.
+There is no backward anchor search. Gaps still reset state and readiness.
 
 Read `[sourceStart, sourceEnd)` on the UTC epoch grid. Integer bounds are checked
 before timestamp construction. Changing target Warmup does not change filter
@@ -120,6 +137,13 @@ facts contain effective descriptors, method policy, native bounds/origin,
 priorBars, instrument facts and bounded fingerprints including absent observations.
 Prepared arrays never enter saved configuration or Queue.
 
+V1 retains policy `closed_candle_direction_v1` and its existing pin shape. V2 uses
+`closed_candle_direction_v2`, with `originRule="bounded_prefix"` for M=1 and
+`originRule="declared_source_origin"` for M>1. Saved bounds include start, end,
+origin=start and priorBars=28. Offline validation checks version, N/M, policy,
+origin rule, native alignment and the relationship to target bounds. V2 display
+requires the target pin and shows the version plus N / break M.
+
 Backtest returns `entry_filter_inputs`; download must post it as `entryFilterInputs`
 with `entryFilters` and existing target/admission facts. Missing, null, unsupported
 or conflicting facts refuse replay. Non-capable strategies refuse injected inputs.
@@ -129,7 +153,11 @@ current capable execution cannot invent missing context.
 Changed consumed candles/gaps/settings/policy refuse exact replay. Unused history
 extensions and physical rewrites preserving consumed facts remain compatible.
 Original-source manual tests verify parent target/filter pins, then prepare and
-save their new interval. Locate Parquet Pack selects target or filter dependency.
+save their new interval. For v2 M>1, replay, relocation and parent-based manual
+execution reuse the saved source start, even if current metadata has gained
+earlier history. All history consumed since that start remains fingerprinted;
+an early repair refuses replay even if eventual permissions happen to agree.
+Extensions outside consumed bounds remain compatible. Locate Parquet Pack selects target or filter dependency.
 All filter bindings sharing a selected original locator are verified before saving
 an override. Original pins stay unchanged; target relocation is separate.
 

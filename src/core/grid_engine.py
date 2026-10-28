@@ -1769,7 +1769,8 @@ def _run_grid_v2_optimization(
     from .entry_filter_input import saved_effective
     from .entry_filters import capability
     if capability(strategy_config):
-        saved_effective({"entryFilters": config.entryFilters, "entry_filter_inputs": config.entry_filter_inputs}, required=True)
+        saved_effective({"entryFilters": config.entryFilters, "entry_filter_inputs": config.entry_filter_inputs,
+                         "data_input": config.data_input}, required=True)
     hooks = GridV2StrategyHooks.from_strategy(strategy_module, config=strategy_config,
                                             entry_filter_context=config.entry_filter_context)
     settings = _grid_v2_settings_from_config(config)

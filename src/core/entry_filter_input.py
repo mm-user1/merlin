@@ -12,11 +12,11 @@ import pandas as pd
 
 from data_provider.errors import DataProviderError
 from .data_input import DataInputError, _timestamp, _iso, pack_session, timeframe_minutes
-from .entry_filters import (MISSING, OFF, POLICY, PreparedPermissions, canonical,
-                            descriptor, effective_config, source_locator, candle_direction)
+from .entry_filters import (MISSING, OFF, POLICIES, PreparedPermissions, canonical,
+                            descriptor, effective_config, source_locator, candle_direction, origin_rule)
 
 
-def source_bounds(target_pin, item):
+def _bounded_bounds(target_pin, item):
     target_step = timeframe_minutes(target_pin["source"]["timeframe_minutes"]) * 60 * 10**9
     step = item["source"]["timeframe_minutes"] * 60 * 10**9
     prior = max(28, item["parameters"]["confirmationBars"] - 1)
@@ -28,7 +28,32 @@ def source_bounds(target_pin, item):
     return {"start": _iso(start), "end": _iso(end), "origin": _iso(start), "priorBars": prior}
 
 
-def validate_envelope(envelope, effective):
+def source_bounds(target_pin, item, *, declared_first_open=None):
+    bounds = _bounded_bounds(target_pin, item)
+    if origin_rule(item) == "declared_source_origin":
+        if declared_first_open is None:
+            raise DataInputError("F06 v2 Break > 1 requires declared source history metadata.")
+        step = item["source"]["timeframe_minutes"] * 60 * 10**9
+        first = _timestamp(declared_first_open).value
+        start = -(-first // step) * step
+        if not pd.Timestamp.min.value <= start <= _timestamp(bounds["start"]).value:
+            raise DataInputError("F06 declared source origin does not cover the required prefix; select a later Start.")
+        bounds.update(start=_iso(start), origin=_iso(start))
+    return bounds
+
+
+def validate_target_bounds(pin, target_pin, item):
+    bounded = _bounded_bounds(target_pin, item)
+    actual = pin["bounds"]
+    if origin_rule(item) == "declared_source_origin":
+        if (actual["end"] != bounded["end"] or actual["priorBars"] != 28
+                or _timestamp(actual["start"]) > _timestamp(bounded["start"])):
+            raise DataInputError("Filter declared-origin bounds conflict with the saved target input.")
+    elif actual != bounded:
+        raise DataInputError("Filter bounds conflict with the saved target input.")
+
+
+def validate_envelope(envelope, effective, target_pin=None):
     """Offline validation: absent/malformed new facts never silently become Off."""
     try:
         if not isinstance(envelope, dict) or type(envelope.get("version")) is not int or envelope["version"] != 1:
@@ -41,9 +66,13 @@ def validate_envelope(envelope, effective):
                 or envelope["effective"] != effective or len(envelope["sources"]) != len(effective)):
             raise ValueError("inputs conflict with saved entryFilters")
         for item, pin in zip(effective, envelope["sources"]):
-            if (pin["descriptor"] != item or pin["policy"] != POLICY or pin["fingerprint_version"] != 1
+            if descriptor(item) != item:
+                raise ValueError("invalid effective descriptor")
+            if (pin["descriptor"] != item or pin["policy"] != POLICIES[item["version"]] or pin["fingerprint_version"] != 1
                     or type(pin["fingerprint_version"]) is not int or not re.fullmatch("[0-9a-f]{64}", pin["input_fingerprint"])):
                 raise ValueError("invalid source policy/binding/fingerprint")
+            if (item["version"] == 2 and pin.get("originRule") != origin_rule(item)) or (item["version"] == 1 and "originRule" in pin):
+                raise ValueError("invalid method originRule")
             bounds = pin["bounds"]
             step = item["source"]["timeframe_minutes"] * 60 * 10**9
             start, end = (_timestamp(bounds[k]).value for k in ("start", "end"))
@@ -51,6 +80,8 @@ def validate_envelope(envelope, effective):
                     or type(bounds["priorBars"]) is not int or bounds["priorBars"] != max(28, item["parameters"]["confirmationBars"] - 1)
                     or not isinstance(pin["instrument"], dict)):
                 raise ValueError("invalid native preparation origin")
+            if target_pin is not None:
+                validate_target_bounds(pin, target_pin, item)
         return envelope
     except (KeyError, TypeError, ValueError) as exc:
         raise DataInputError(f"Invalid saved entry_filter_inputs: {exc}; recomputation refused.") from exc
@@ -62,7 +93,9 @@ def saved_effective(config, *, required=False):
     if "entryFilters" not in config or "entry_filter_inputs" not in config:
         raise DataInputError("Saved entry-filter settings/inputs are missing; a new study is required.")
     effective = effective_config(config["entryFilters"])
-    validate_envelope(config["entry_filter_inputs"], effective)
+    if any(item["version"] == 2 for item in effective) and not isinstance(config.get("data_input"), dict):
+        raise DataInputError("Saved v2 entry-filter context requires its target input bounds.")
+    validate_envelope(config["entry_filter_inputs"], effective, config.get("data_input"))
     return effective
 
 
@@ -71,7 +104,10 @@ def describe_saved(config):
     from .data_input import timeframe_label
     try:
         items = saved_effective(config)
-        text = "\n".join(f"F06 · {i['source']['instrument_id']} · {timeframe_label(i['source']['timeframe_minutes'])} · {i['parameters']['confirmationBars']} bars" for i in items)
+        text = "\n".join(
+            f"F06{' v2' if i['version'] == 2 else ''} · {i['source']['instrument_id']} · {timeframe_label(i['source']['timeframe_minutes'])} · "
+            + (f"N {i['parameters']['confirmationBars']} / break {i['parameters']['breakBars']}" if i['version'] == 2 else f"{i['parameters']['confirmationBars']} bars")
+            for i in items)
         return {"key": canonical(items) if items else "off", "text": text or "Filter Off"}
     except (ValueError, TypeError, KeyError):
         return {"key": None, "text": "Unavailable"}
@@ -97,8 +133,7 @@ def verify_relocation(config, original, root):
         cache = {}
         for i in affected:
             pin = config["entry_filter_inputs"]["sources"][i]
-            if pin["bounds"] != source_bounds(config["data_input"], effective[i]):
-                raise DataInputError("Filter bounds disagree with the saved target input.")
+            validate_target_bounds(pin, config["data_input"], effective[i])
             _, actual = _load(session, effective[i], pin["bounds"], cache)
             if actual != pin:
                 raise DataInputError("Relocated filter consumed inputs differ; override was not saved.")
@@ -119,10 +154,12 @@ def _load(session, item, bounds, cache):
                 raise DataInputError(f"F06 {source['instrument_id']}: empty source; no complete candle in the required interval.") from exc
             raise
     loaded = cache[key]
-    facts = {"descriptor": deepcopy(item), "policy": POLICY, "bounds": deepcopy(bounds),
+    facts = {"descriptor": deepcopy(item), "policy": POLICIES[item["version"]], "bounds": deepcopy(bounds),
         "fingerprint_version": loaded.fingerprint_version, "input_fingerprint": loaded.input_fingerprint,
         "instrument": {"instrument_id": loaded.instrument_id, "venue": loaded.venue,
                        "contract": loaded.contract, "quote_currency": loaded.quote_currency, "volume_unit": "quote_turnover"}}
+    if item["version"] == 2:
+        facts["originRule"] = origin_rule(item)
     return loaded, facts
 
 
@@ -154,14 +191,21 @@ def prepare_bundle(target_root, target_loader, effective, *, saved=MISSING, over
             item = effective[i]
             if parent_filters is not None and effective:
                 parent = parent_filters["sources"][i]
-                if parent["bounds"] != source_bounds(parent_target, item):
-                    raise DataInputError("Parent filter bounds conflict with its target input.")
+                validate_target_bounds(parent, parent_target, item)
                 _, actual_parent = _load(session, item, parent["bounds"], cache)
                 if actual_parent != parent:
                     raise DataInputError("Parent filter inputs changed; manual execution refused.")
-            bounds = source_bounds(prepared.facts, item)
-            if saved is not MISSING and saved["sources"][i]["bounds"] != bounds:
-                raise DataInputError("Filter preparation bounds conflict with the target pin.")
+            if saved is not MISSING:
+                validate_target_bounds(saved["sources"][i], prepared.facts, item)
+                bounds = saved["sources"][i]["bounds"]
+            elif parent_filters is not None and origin_rule(item) == "declared_source_origin":
+                # A manual child verifies and retains the parent's consumed origin.
+                # Current metadata may have gained earlier history since that run.
+                bounds = source_bounds(prepared.facts, item,
+                    declared_first_open=parent_filters["sources"][i]["bounds"]["start"])
+            else:
+                first_open = metadata_entry(session, item["source"])["first_open_utc"] if origin_rule(item) == "declared_source_origin" else None
+                bounds = source_bounds(prepared.facts, item, declared_first_open=first_open)
             loaded, facts = _load(session, item, bounds, cache)
             if saved is not MISSING and facts != saved["sources"][i]:
                 raise DataInputError("Pinned filter input changed in consumed candles/gaps/facts; replay refused.")
@@ -183,7 +227,8 @@ def prepare_bundle(target_root, target_loader, effective, *, saved=MISSING, over
     reasons = np.zeros(len(opens), dtype=np.int8)
     for i, item in enumerate(effective):
         lo, sh, valid, why = candle_direction(loaded_by_index[i].bars,
-            item["source"]["timeframe_minutes"], item["parameters"]["confirmationBars"], decisions)
+            item["source"]["timeframe_minutes"], item["parameters"]["confirmationBars"], decisions,
+            break_bars=item["parameters"].get("breakBars"))
         long &= lo
         short &= sh
         known &= valid

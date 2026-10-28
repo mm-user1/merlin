@@ -5,6 +5,13 @@ Opted-in V2 risk-bracket strategies can bind separate OHLCV sources through
 distinct from strict target continuity. Same-root dependencies share a read session;
 saved filter pins and separate location overrides accompany the target pin.
 
+F06 method v2 M>1 consumes native history from the aligned declared source origin
+once per preparation; M=1 and historical v1 retain bounded prefixes. Replay and
+parent-based manual execution retain the saved origin. All consumed early history
+participates in the fingerprint, even where a repair leaves later permissions
+unchanged. Version/policy/origin and target-relative bounds are validated offline;
+see [Entry Filters](ENTRY_FILTERS.md) for the exact rules.
+
 Backtester V2 accepts prepared market-data packs through Start and Queue. Choose
 **Use Parquet**, open a directory containing `manifest.json`, select instruments
 and check their timeframes. The directory browser lists manifest instruments,

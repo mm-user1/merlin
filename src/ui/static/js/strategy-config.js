@@ -290,6 +290,14 @@ function updateStrategyInfo(config) {
   info.style.display = 'block';
 }
 
+function orderedParameterEntries(config) {
+  const params = config.parameters || {};
+  const declared = Array.isArray(config.parameter_order) ? config.parameter_order : [];
+  return [...new Set([...declared, ...Object.keys(params)])]
+    .filter(name => Object.prototype.hasOwnProperty.call(params, name))
+    .map(name => [name, params[name]]);
+}
+
 function generateBacktestForm(config) {
   const container = document.getElementById('backtestParamsContent');
   if (!container) {
@@ -298,10 +306,9 @@ function generateBacktestForm(config) {
 
   container.innerHTML = '';
 
-  const params = config.parameters || {};
   const groups = {};
 
-  for (const [paramName, paramDef] of Object.entries(params)) {
+  for (const [paramName, paramDef] of orderedParameterEntries(config)) {
     if (!shouldRenderDynamicBacktestParam(paramName, paramDef)) continue;
     if (paramName === 'maxEntryLeverage' && config.execution?.entryAdmission !== 'risk_bracket_v1') continue;
     const group = paramName === 'maxEntryLeverage' ? 'Risk' : paramDef.group || 'Other';
@@ -342,10 +349,9 @@ function generateOptimizerForm(config) {
 
   container.innerHTML = '';
 
-  const params = config.parameters || {};
   const groups = {};
 
-  for (const [paramName, paramDef] of Object.entries(params)) {
+  for (const [paramName, paramDef] of orderedParameterEntries(config)) {
     if (paramDef.optimize && paramDef.optimize.enabled) {
       const group = paramDef.group || 'Other';
       if (!groups[group]) {

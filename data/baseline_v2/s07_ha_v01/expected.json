@@ -1,0 +1,20 @@
+{
+  "strategy_id": "s07_ha_v01_b2",
+  "pine_sha256": "dda5010d2b597d75bf87d7c1370f22c530670ec75727309283fcc6cfae616413",
+  "pack": {
+    "manifest.json": "379c5a7ee70767ddf13046dba275422b8eff46590788e411e664b09840190ff1",
+    "ohlcv/OKX_BTC-USDT-SWAP_5m.parquet": "136e779094e21b9a28bb63deb68c55fba8fcb58bde7160ddba0c1a71241dc335",
+    "ohlcv/OKX_ETH-USDT-SWAP_5m.parquet": "fd62dd723f0cd9d9298a262a38e387176fb8038125418b15944d8ed0bdee9256"
+  },
+  "september": {
+    "eth-btc-prepared-inputs.npz": "eb3ee2635742772d4f391fd54ebaa38b8409936b7c49c5bef0616d9357a3e5de",
+    "eth-september-decisions.csv": "a71d6808fdeb914e672f2822d8ae3c619b084ae6fca73e058142e8976c7ce202",
+    "eth-september-trades.csv": "66d1f23e7fa91b20c8dc1acb74d800c678948c42c054d55b370bf612cd94f61e",
+    "eth-september-attempts.csv": "ce1c8bbe7d5bf1ff0f6a557b446b63f6a99a0ea7df7e9d52c296690e184c05e4",
+    "eth-account-expectations.json": "e16b6beccbd82eb8e6b21a2c15c617a3cd7982e204e0171dd1d0657596b1a185"
+  },
+  "tradingview": {
+    "reference_a_filter_on": {"sha256": "0980b4a153f3e531b93437632af2883ab0e962af80eb42d9f32deaf985f8c2a0", "trades": 253, "wins": 68, "net_pnl": -5282.47, "profit_factor": 0.831},
+    "reference_b_filter_off": {"sha256": "a458f5744cadd929a036a0e66d69e1249d15b7dc75260419c4bd4c56bfcdc134", "trades": 363, "wins": 110, "net_pnl": -1766.93, "profit_factor": 0.969}
+  }
+}

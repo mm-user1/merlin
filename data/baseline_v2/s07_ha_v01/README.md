@@ -92,3 +92,54 @@ Do not assume its fixture-specific explanation proves parity for this longer run
 | B / tradingview_trades.csv | `a458f5744cadd929a036a0e66d69e1249d15b7dc75260419c4bd4c56bfcdc134` |
 | B / tradingview_inputs.PNG | `dd949056fc7c12ed27b656a4b1b3dab1b5100f21dc12068e1282fae07877b9ab` |
 | B / tradingview_metrics.PNG | `9a4edb1e2787e0998787a52b23d080b0bf1f21da05905efe47fb1228105c5c0f` |
+
+## Merlin import comparison (2026-10-28)
+
+The registered `s07_ha_v01_b2` adapter and generic reference/compiled singleton
+paths are checked by `tests/test_s07_baselines.py`. Explicit external inputs are
+required; ordinary synthetic tests never open the market pack. `expected.json`
+pins the raw Pine, exports, relevant market files and sealed September evidence.
+No raw reference was regenerated. This records coder verification; tech-lead
+acceptance remains a separate step.
+
+The long request uses Start 2025-03-01, inclusive date-only End 2026-09-30 and
+2832 warmup bars, giving January 1 preparation and 30624 total 30m bars.
+
+| Comparison | A: F06 v2 2/1 | B: filter Off |
+| --- | ---: | ---: |
+| Matching entry/exit bars and sides | 253 / 253 | 363 / 363 |
+| Missing / extra trades | 0 / 0 | 0 / 0 |
+| Merlin net PnL, USDT | -5281.315609786063 | -1763.7725887271454 |
+| TV reconstructed net PnL, USDT | -5282.471147604992 | -1766.9252191649794 |
+| Exit price differences | 229 | 318 |
+| Largest absolute exit price difference | 0.009884739146400534 | 0.009974266404469745 |
+| Different integer lot counts | 80 | 216 |
+| TV lots recovered from TV balance and Merlin risk distance | 253 / 253 | 363 / 363 |
+| Merlin maximum actual post-fee entry leverage | 6.550997223579572 | 4.222643284907139 |
+| Merlin cap skips | 0 | 0 |
+
+All changed intrabar exit prices adjust outward by less than one 0.01 tick;
+actual exit bars agree. The first differences are stops on trade 1: A has Merlin
+2226.228537938632 versus TV 2226.23, and B has 2206.8905342229314 versus 2206.89.
+Entry prices and integer lots agree on those trades. Fees/PnL derived from those
+prices explain the initial balance drift. The first lot differences occur at
+A trade 13 (Merlin 5728 versus TV 5727) and B trade 16 (6274 versus 6273).
+Reapplying the same floor formula with TV's reconstructed pre-trade balance
+recovers every exported lot count; cumulative-export half-cent intervals are
+also retained, without summing rounded per-trade PnL. Full comparisons retain
+signal/permission, ATR/extrema, levels, exit OHLC, lots, fees and balance evidence.
+This is a fixture-specific classification, not a universal TradingView waiver.
+Accepted fills alone cannot establish absence of unseen Pine cap refusals.
+
+The independent sealed September gate matches every one of 1440 HA/ATR/stop,
+colour/run, raw-event and F06 permission rows exactly. All 252 admitted/rejected
+attempt outcomes and L/S/LS trades (9/11/15) agree. Final balances are
+9933.548144608067, 9966.667764853013 and 10198.0221955016, checked at absolute
+1e-9 / relative 1e-12 tolerance. Both January preparation through the explicit
+core route (11664 warmup bars) and the production input route with W=500 pass.
+The user warmup maximum is unchanged. Terminal close timestamps compare semantic
+bar ends while preserving Merlin/TV bar-open labels separately.
+
+TV drawdown is not compared to Merlin realized or bar-close MTM drawdown as if
+they were one metric. Changed N/M, axes and alternative timeframes have synthetic
+coverage; the external long references cover only LS default axes with 2/1 or Off.

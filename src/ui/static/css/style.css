@@ -23,7 +23,7 @@
 
     .split {
       display: grid;
-      grid-template-columns: 1fr 1.2fr 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr);
       gap: 0;
       padding: 0;
       height: 100%;
@@ -36,6 +36,7 @@
     }
 
     .frame {
+      min-width: 0;
       background: #f5f5f5;
       border: none;
       border-right: 1px solid #4a4a4a;
@@ -3694,10 +3695,15 @@
 .entry-filter-heading button, .entry-filter-item summary button { margin-left: auto; }
 .entry-filter-item { border: 1px solid #ccc; border-radius: 3px; margin-top: 8px; padding: 8px; }
 .entry-filter-item summary { cursor: pointer; }
+.entry-filter-item summary span { min-width: 0; overflow-wrap: anywhere; }
+.entry-filter-item summary button { flex-shrink: 0; }
 .entry-filter-item fieldset { border: 0; padding: 8px 0 0; min-width: 0; }
 .entry-filter-item fieldset > label, .entry-filter-item small { display: block; margin-top: 6px; }
 .entry-filter-source input { min-width: 0; flex: 1; }
 .entry-filter-source { margin-top: 6px; }
+.entry-filter-parameters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.entry-filter-parameters label { display: flex; align-items: center; gap: 8px; }
+.entry-filter-parameters input { width: 65px; min-width: 0; box-sizing: border-box; }
 .entry-filter-item select { width: 100%; }
 .entry-filter-item pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .entry-filters-editor .csv-browser-error:empty { display: none; }

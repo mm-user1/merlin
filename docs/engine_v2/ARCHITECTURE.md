@@ -195,6 +195,9 @@ long/short entries without mutating cached raw signals or exits. Context travels
 beside frames/rules through Grid, WFA, workers and replay. Active effective settings
 enter plan identity; Off and legacy candidate identities remain unchanged. Source
 pins are separate. The linked guide owns native timing, source bounds and replay.
+F06 v1 and v2 dispatch by descriptor version. V2 with Break > 1 retains state
+from a pinned declared source origin; Break=1 remains bounded. This preparation
+changes neither execution kernels nor the signal-mask ABI.
 
 Signals are causal, aligned one-dimensional boolean arrays; absent values are
 explicit `False`. Dataprep arrays are aligned floating arrays with NaN only
@@ -206,6 +209,17 @@ never module-global.
 `role=signal`. `DATAPREP_CACHE_PARAM_NAMES` adds every parameter that changes
 dataprep arrays. Runtime fields never enter either declaration. A parameter
 inactive in the resolved variant does not enter the semantic/cache key.
+
+The S07 HA adapter (`s07_ha_v01_b2`) owns causal HA/run arrays and deterministic
+ATR14: first TR is high-low; the initial 14 terms are folded left to right in
+float64, then `(previous * 13 + TR) / 14`. It emits only the kth directional
+HA event after index 64 and finite ATR/extrema. HA starts at the first supplied
+preparation bar; warmup events do not carry forward. Its call-scoped batch shares
+HA/ATR and caches inclusive extrema by stopLP. Signal identity includes
+entryRunLength/enableLong/enableShort; dataprep additionally includes stopLP.
+Generic risk-bracket execution still owns ordinary-price fills, sizing, cap and
+strict-close exits. Its five default axes form 840 candidates; Fixed retains one
+scalar configuration. Entry filters remain independent, fixed and initially Off.
 
 Compiled evaluation shares identical OHLC/timestamp arrays and internally
 stacks signal/dataprep rows. The signal-reversal stack contains boolean entry

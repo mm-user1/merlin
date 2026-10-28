@@ -703,6 +703,30 @@ coverage reports external too if requesting HTML/XML output.
 
 ## Evidence and external certification
 
+S07 HA synthetic coverage is in `tests/v2/test_v2_s07_ha.py`,
+`tests/test_entry_filters_v2.py` and the versioned editor/Queue assertions in
+`tests/js/entry_filters.test.cjs`. The full five-axis plan has 840 candidates;
+one/two-thread and reference/compiled checks execute a small subset, not a market
+parameter sweep. Historical F06 v1 and generic admission gates remain required.
+
+`tests/test_s07_baselines.py` is an explicit external certification gate. Set
+`MERLIN_S07_PACK` to the existing market pack and `MERLIN_S07_REFERENCE` to the
+sealed `PLH-013-A/reference-evidence` directory, then use the isolated launcher.
+Without the pack opt-in it skips; missing or mismatched opted-in inputs fail.
+It verifies the hashes in `data/baseline_v2/s07_ha_v01/expected.json`, reads packs
+under supported locks and writes comparisons only into retained test scratch.
+It never imports the Pattern Lab account runner or rebuilds sealed references.
+Keep `--keep-temp` for the two long-TV reports and September decision/trade/attempt
+results. The January-origin September core check deliberately exceeds the UI
+warmup limit; a separate production preparation with W=500 checks the same gate.
+Do not raise the application maximum or call these synthetic CI fixtures.
+
+```powershell
+$env:MERLIN_S07_PACK = (Resolve-Path data/parquet-data).Path
+$env:MERLIN_S07_REFERENCE = (Resolve-Path docs/_work/pattern-lab-for-strategies/PLH-013-A/reference-evidence).Path
+& $py tools/run_tests.py --keep-temp -- tests/test_s07_baselines.py
+```
+
 The T04B-1 selection follow-up uses all `tests/pattern_lab/test_selection*.py`
 through `tools/run_tests.py` with an external `MERLIN_TEST_ROOT`. Auxiliary tests
 cover per-cell parsing, immutable ownership/native-price checks, batch release

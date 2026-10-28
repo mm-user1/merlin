@@ -354,6 +354,7 @@ complete current strategy matrix in general documentation.
 | `s06_r_trend_v02_b2` | S06 R-Trend B2 | `v02-b2` | V2 | S06 v02 signals on generic position execution |
 | `s06_r_trend_v02_regime_trendlines_b2` | S06 R-Trend Regime-TL B2 | `v02-regime-tl-b2` | V2 | S06 plus optional trendline regime filtering |
 | `s06_r_trend_v06_4_a2_b2` | S06 R-Trend v06-4-A2 B2 | `v06-4-a2-b2` | V2 | Multi-mode bracket, R-distance, Chandelier, and Fixed-AF SAR strategy |
+| `s07_ha_v01_b2` | S_07 HA | `v01` | V2 | One-shot HA runs, ATR/swing brackets, pack-based admission and optional independent F06 filters |
 
 ## Procedures and evidence
 

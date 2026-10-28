@@ -138,6 +138,7 @@ vm.runInContext(
   "const GLOBAL_BACKTEST_CONTROL_PARAM_NAMES = new Set(['dateFilter', 'start', 'end', 'warmupBars']);\n"
     + 'function isGlobalBacktestControlParam(name) { return GLOBAL_BACKTEST_CONTROL_PARAM_NAMES.has(String(name || \'\')); }\n'
     + sourceSlice(strategySource, 'let parameterTieState', 'const STRATEGY_CONFIG_NOT_READY_MESSAGE')
+    + sourceSlice(strategySource, 'function orderedParameterEntries(', 'function generateBacktestForm(')
     + sourceSlice(strategySource, 'function generateOptimizerForm(', 'function createFormField(')
     + sourceSlice(handlersSource, 'function getBacktestParamValue(', 'function getWorkerProcessesValue(')
     + sourceSlice(handlersSource, 'function getEnabledGridMetadata()', 'function readSelectedOptimizerOptionValues(')

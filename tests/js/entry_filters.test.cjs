@@ -28,6 +28,27 @@ const second=item('two');second.parameters.confirmationBars=3;
 assert.equal(F.saved(record(editor(item(),second))).key,F.saved(record(editor(second,item()))).key);
 for(const value of [null,{}, {version:1,enabled:true,items:[item(),item()]}]) assert.throws(()=>F.effective(value));
 assert.equal(F.saved({entryFilters:F.off()}).text,'Unavailable');
+// V2 pins carry target-relative bounds and an explicit versioned origin rule.
+function recordV2(n=3,m=2) {
+  const value=editor({...item(),version:2,parameters:{confirmationBars:n,breakBars:m}});
+  const result=record(value), pin=result.entry_filter_inputs.sources[0];
+  result.data_input={source:{timeframe_minutes:30},bounds:{start:'2024-01-10T00:00:00Z',end:'2024-02-01T00:00:00Z'}};
+  pin.policy='closed_candle_direction_v2';pin.originRule=m>1?'declared_source_origin':'bounded_prefix';
+  if(m===1) pin.bounds.start=pin.bounds.origin='2024-01-05T04:00:00Z';
+  return result;
+}
+const v2=recordV2();
+assert.match(F.saved(v2).text,/F06 v2.*N 3 \/ break 2/);
+assert.notEqual(F.saved(recordV2(2,1)).key,F.saved(a).key);
+assert.notEqual(F.saved(recordV2(3,1)).key,null);
+for(const mutate of [c=>delete c.data_input,c=>c.entry_filter_inputs.sources[0].originRule='bounded_prefix',
+  c=>c.entry_filter_inputs.sources[0].policy='closed_candle_direction_v1',
+  c=>c.data_input.bounds.end='2024-02-02T00:00:00Z',
+  c=>Object.assign(c.entry_filter_inputs.sources[0].bounds,{start:'2024-01-10T00:00:00Z',origin:'2024-01-10T00:00:00Z'})]) {
+  const broken=clone(v2);mutate(broken);assert.equal(F.saved(broken).text,'Unavailable');
+}
+for(const [n,m] of [[true,1],[3,true],[2,2],[7,1],[6,5],[3,0],[3,1.5]])
+  assert.throws(()=>recordV2(n,m));
 const studies=[{study_id:'a',config_json:a},{study_id:'b',config_json:duplicate},{study_id:'c',config_json:changed},
   {study_id:'old',config_json:{}},{study_id:'bad',config_json:{entryFilters:null}}];
 assert.equal(F.consensus([studies[0],studies[1]]),F.saved(a).text);
@@ -65,6 +86,8 @@ sourceInput.value='C:/Data/Pack';
 sandbox.ParquetInput={choosePack:(path,callback)=>callback('C:/Data/Pack',{instruments:[{instrument_id:'OKX_BTC-USDT-SWAP',first_open_utc:'2024-01-01',coverage_end_utc:'2024-02-01'}]})};
 details.children[1].children[1].children[1].onclick();
 let collected=api.collect();assert.equal(collected.items.length,1);const id=collected.items[0].id;
+assert.equal(collected.items[0].version,2);
+assert.deepEqual(clone(collected.items[0].parameters),{confirmationBars:2,breakBars:1});
 details=host.children.find(n=>n.tagName==='details');details.open=false;details.ontoggle();api.render();
 assert(!host.children.find(n=>n.tagName==='details').open);
 master=elements.get('entryFiltersEnabled');master.checked=false;master.onchange();assert(!host.children.some(n=>n.tagName==='details'));
@@ -76,6 +99,25 @@ const unknown=editor({...item(),type:'future',enabled:false});api.restore(unknow
 api.restore(editor(null));assert(host.children.some(n=>String(n.textContent).includes('Unsupported saved filter')));
 api.restore(collected);sandbox.currentStrategyConfig={entryFilterSupport:{version:1,methods:['candleDirection']}};api.render();
 assert.equal(host.children[0].children[2].className,'btn-secondary');
+function input(label) {
+  function find(node) {return node['aria-label']===label ? node : node.children.map(find).find(Boolean);}
+  return find(host);
+}
+function edit(label,value) {const node=input(label);node.value=String(value);node.onchange();}
+const legacy=editor(item());legacy.items[0].parameters.confirmationBars=100;
+api.restore(legacy);
+edit('Trend Confirm Bars',99);edit('Filter timeframe','1h');
+assert.equal(api.collect().items[0].version,1);
+edit('Trend Break Bars',2); // Explicit conversion must first have valid N.
+assert.equal(api.collect().items[0].version,1);
+assert.match(elements.get('entryFiltersError').textContent,/before converting/);
+edit('Trend Confirm Bars',4);
+assert.equal(api.collect().items[0].version,1);
+edit('Trend Break Bars',2);
+assert.equal(api.collect().items[0].version,2);
+assert.deepEqual(clone(api.collect().items[0].parameters),{confirmationBars:4,breakBars:2});
+edit('Trend Break Bars',4);assert.throws(()=>api.collect(),/strictly below/);
+api.restore(collected);
 
 // Actual Sets All Studies handler and Analytics Research Info builder. Expose
 // existing closure functions only in this VM; production globals stay unchanged.
@@ -108,7 +150,9 @@ applyQueueUiSnapshot=()=>EntryFilters.restore({version:1,enabled:false,items:[]}
 applyQueueDatabaseTarget=async()=>{};buildQueueStudySetState=()=>({configured:false});
 syncQueueAutoCreateSetUi=()=>{};refreshQueueFormUiAfterApply=()=>{};
 window.restoreQueueForTest=loadQueueItemIntoForm;`,sandbox);
-sandbox.restoreQueueForTest('filter-queue',{itemSnapshot:{id:'filter-queue',sources:[{type:'path',path:'C:/sample.csv'}],config:{entryFilters:collected}}})
-  .then(()=>{assert.deepEqual(clone(api.collect()),clone(collected));console.log('Real Queue restore passed');})
+(async()=>{for(const value of [legacy,collected]) {
+  await sandbox.restoreQueueForTest('filter-queue',{itemSnapshot:{id:'filter-queue',sources:[{type:'path',path:'C:/sample.csv'}],config:{entryFilters:value}}});
+  assert.deepEqual(clone(api.collect()),clone(value));
+}console.log('Real Queue restore passed for both method versions');})()
   .catch(e=>{console.error(e);process.exitCode=1;});
 console.log('Entry filter config, editor and Analytics population contracts passed');

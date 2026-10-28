@@ -1,0 +1,45 @@
+{
+  "schema": "merlin.s07.reference-inputs.v1",
+  "strategy_id": "s07_ha_v01_b2",
+  "authority": "Owner-supplied TradingView exports plus sealed PLH-013-A September account evidence; raw files are immutable",
+  "hash_manifest": "expected.json",
+  "local_pack": "data/parquet-data",
+  "review_pack": "docs/_work/pattern-lab-data/ohlcv_250101-261001",
+  "september_reference": "docs/_work/pattern-lab-for-strategies/PLH-013-A/reference-evidence",
+  "target": {"instrument_id": "OKX_ETH-USDT-SWAP", "timeframe_minutes": 30},
+  "filter": {"instrument_id": "OKX_BTC-USDT-SWAP", "timeframe_minutes": 240, "method": "candleDirection", "version": 2, "confirmationBars": 2, "breakBars": 1},
+  "parameters": {"entryRunLength": 6, "stopLP": 2, "stopX": 2, "stopRR": 3, "stopMaxDays": 4, "riskPerTrade": 2, "maxEntryLeverage": 8, "initialCapital": 10000, "commissionPct": 0.05},
+  "long_period": {
+    "start": "2025-03-01",
+    "inclusive_end_date": "2026-09-30",
+    "exclusive_end_utc": "2026-10-01T00:00:00Z",
+    "warmup_bars": 2832,
+    "preparation_start_utc": "2025-01-01T00:00:00Z",
+    "total_rows": 30624,
+    "evaluation_rows": 27792,
+    "allocations": ["LS filtered", "LS Off"]
+  },
+  "september": {
+    "start": "2025-09-01",
+    "inclusive_end_date": "2025-09-30",
+    "exclusive_end_utc": "2025-10-01T00:00:00Z",
+    "prepared_core_warmup_bars": 11664,
+    "application_warmup_bars": 500,
+    "evaluation_rows": 1440,
+    "raw_events": {"long": 44, "short": 40},
+    "attempt_outcomes": 252,
+    "accounts": {
+      "HA_F06_L": {"trades": 9, "final_balance": 9933.548144608067},
+      "HA_F06_S": {"trades": 11, "final_balance": 9966.667764853013},
+      "HA_F06_LS": {"trades": 15, "final_balance": 10198.0221955016}
+    },
+    "balance_absolute_tolerance": 1e-9,
+    "balance_relative_tolerance": 1e-12
+  },
+  "comparisons": {
+    "september_features": "exact parsed float64 values and exact event/permission state",
+    "september_trades": "exact integer lots, prices, sides and semantic timestamps/exit bars",
+    "tradingview": "entry/exit bars and sides exact; per-trade price, balance, lot and fee attribution, not aggregate-profit tolerance",
+    "terminal_timestamps": "retain raw last-bar-open label separately from semantic bar-close boundary"
+  }
+}

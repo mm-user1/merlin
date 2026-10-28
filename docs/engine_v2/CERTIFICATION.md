@@ -48,7 +48,24 @@ certification rows and identity pins below remain preservation authorities.
 Owner browser appearance and platform-specific evidence are separate review gates;
 Node assertions are not visual acceptance.
 
-## Fields
+## S07 HA import evidence (2026-10-28; pending review)
+
+`s07_ha_v01_b2` composes the existing generic `risk_bracket_v1`, market-next-open,
+ATR/swing stop, RR target, max-days and strict-close modes, with no price rounding
+or trailing. No execution kernel changed. Its external evidence is recorded in
+[the frozen baseline README](../../data/baseline_v2/s07_ha_v01/README.md) and
+`expected.json`, with opt-in reproduction in `tests/test_s07_baselines.py`.
+
+Coder verification matches both long TV trade skeletons (253 filtered / 363 Off),
+with sub-tick outward price and resulting realized-balance/lot residuals traced
+trade by trade. September matches all 1440 decision rows, 35 trades across three
+allocations, and 252 attempt outcomes; January-origin core and W=500 production
+preparation both pass. See the linked evidence for exact balances, hashes and
+tolerances. These checks do not claim profitability or universal TV equivalence.
+Changed N/M, axes and timeframes have synthetic coverage. Independent review,
+owner appearance confirmation and final tech-lead disposition remain separate.
+
+## Registry fields
 
 - Profile feature set
 - Covered modes
