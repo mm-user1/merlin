@@ -2,6 +2,7 @@
 (function (root) {
   'use strict';
   const defaults = [5, 15, 30, 60, 120, 240, 1440];
+  const tickerSets = { Main: 'trading', Additional: 'research_only', All: null };
   function parseDuration(text) {
     const match = /^(\d+)(m|h|D|d)$/.exec(String(text).trim());
     if (!match) throw new Error('Use a positive integer followed by m, h or D (for example 90m or 3D).');
@@ -47,6 +48,15 @@
       const all = this.checked.length > 0 && this.checked.every(row => row[column]);
       this.checked.forEach(row => { row[column] = !all; });
     }
+    members(name) {
+      if (!Object.prototype.hasOwnProperty.call(tickerSets, name)) return [];
+      const seen = new Set();
+      return this.instruments.flatMap((instrument, index) => {
+        if (seen.has(instrument.instrument_id) || (tickerSets[name] && !(Array.isArray(instrument.roles) && instrument.roles.includes(tickerSets[name])))) return [];
+        seen.add(instrument.instrument_id); return [index];
+      });
+    }
+    selectSet(name) { this.selected = new Set(this.members(name)); this.anchor = [...this.selected][0] || 0; }
     sources(packRoot) {
       if (this.invalid.size) throw new Error('Fix or cancel the invalid timeframe before adding.');
       if (!this.selected.size) throw new Error('Select at least one instrument row.');
@@ -88,6 +98,7 @@
     if (el('parquetCoverageDetails')) el('parquetCoverageDetails').hidden = !state.mode;
     if (typeof renderSelectedFiles === 'function') renderSelectedFiles([]);
     if (state.mode) refreshSelectedMetadata();
+    root.notifyDataSourcesChanged?.();
   }
   function renderSelected() {
     const list = el('selectedFilesList'); if (!list) return;
@@ -98,7 +109,7 @@
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '\u00d7';
       remove.className = 'parquet-source-remove';
       remove.title = `Remove ${sourceLabel(source)}`; remove.setAttribute('aria-label', remove.title);
-      remove.addEventListener('click', () => { state.sources.splice(i, 1); persist(); renderSelected(); });
+      remove.addEventListener('click', () => { state.sources.splice(i, 1); persist(); renderSelected(); root.notifyDataSourcesChanged?.(); });
       li.appendChild(remove); list.appendChild(li);
     });
     const instruments = new Set(state.sources.map(s => `${s.pack_root}|${s.instrument_id}`)).size;
@@ -216,6 +227,8 @@
   async function load(path) {
     const sequence = ++state.sequence; showCsvBrowserError('');
     state.pack = null; model.reset([]);
+    const sets = el('parquetTickerSets');
+    sets.hidden = true; sets.value = '';
     el('parquetGrid').hidden = true;
     el('parquetCoverage').hidden = true;
     el('csvBrowserAddBtn').disabled = true;
@@ -230,6 +243,14 @@
       if (payload.pack) state.metadata.set(payload.current_path, payload.pack);
       renderCsvBrowserEntries(payload.entries);
       if (!state.packChoice) { model.reset(payload.pack?.instruments || []); renderGrid(); }
+      sets.replaceChildren();
+      const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = 'Ticker Sets'; sets.appendChild(placeholder);
+      Object.keys(tickerSets).forEach(name => {
+        const count = model.members(name).length, option = document.createElement('option');
+        option.value = name; option.textContent = `${name} (${count})`; option.disabled = !count; sets.appendChild(option);
+      });
+      sets.hidden = !payload.pack || Boolean(state.packChoice || state.relocation);
+      sets.onchange = () => { model.selectSet(sets.value); sets.value = ''; renderGrid(); };
       el('csvBrowserList').hidden = Boolean(payload.pack);
       el('parquetGrid').hidden = !payload.pack || Boolean(state.packChoice);
       el('parquetCoverage').hidden = !payload.pack || Boolean(state.packChoice);
@@ -262,7 +283,7 @@
       const added = model.sources(csvBrowserState.currentPath);
       const unique = new Map([...state.sources, ...added].map(s => [identity(s), s]));
       state.sources = [...unique.values()]; el('csvDirectory').value = state.paths.parquet;
-      persist(); renderSelected(); closeCsvBrowserModal();
+      persist(); renderSelected(); root.notifyDataSourcesChanged?.(); closeCsvBrowserModal();
     } catch (error) { showCsvBrowserError(error.message); }
   }
   function restore(sources) {
@@ -287,7 +308,7 @@
     },
     sources: () => state.sources.map(s => ({ ...s })),
     close: () => { state.sequence++; state.packChoice = null; el('csvBrowserAddBtn').textContent = 'Add Selected'; model.invalid.clear(); model.drafts.clear(); },
-    clear: () => { state.sources = []; persist(); renderSelected(); } };
+    clear: () => { state.sources = []; persist(); renderSelected(); root.notifyDataSourcesChanged?.(); } };
   document.addEventListener('DOMContentLoaded', () => {
     state.paths.csv = el('csvDirectory')?.value || '';
     el('useParquet')?.addEventListener('change', event => setMode(event.target.checked));

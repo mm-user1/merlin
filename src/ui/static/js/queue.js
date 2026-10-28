@@ -765,10 +765,11 @@ function updateQueueSecondaryRow() {
 }
 
 function getQueueAutoCreateSetUiState() {
-  const selectedPaths = typeof getSelectedCsvPaths === 'function' ? getSelectedCsvPaths() : [];
+  const selectedSources = typeof getSelectedDataSources === 'function' ? getSelectedDataSources() : [];
   const wfToggle = document.getElementById('enableWF');
   const wfEnabled = Boolean(wfToggle && wfToggle.checked && !wfToggle.disabled);
-  const selectedCount = selectedPaths.length;
+  const selectedCount = new Set(selectedSources.map(source => source.type === 'parquet'
+    ? window.ParquetInput.identity(source) : JSON.stringify(source))).size;
   return {
     visible: wfEnabled,
     disabled: wfEnabled && selectedCount <= 1,
@@ -1908,6 +1909,8 @@ function getQueueGridPlannedFacts(item) {
   if (Number.isFinite(planned) && planned > 0) {
     return { count: planned, source: 'planned' };
   }
+  const v2 = item?.strategyConfig?.engine === 'v2' || item?.strategyConfig?.grid_optimizer?.profile === 'full_enumeration_v2';
+  if (v2 && item?.config?.grid_v2_planning_policy === 'full') return { count: null, source: 'unavailable' };
   return {
     count: Number(item?.config?.grid_budget || 200000),
     source: 'legacy budget'
@@ -1918,7 +1921,7 @@ function buildQueueAutoSetBudgetLabel(item) {
   if (item?.config?.parameterMode === 'fixed') return 'FIXED 1 cfg';
   if (item?.config?.optimization_mode === 'grid') {
     const facts = getQueueGridPlannedFacts(item);
-    return `${formatQueueCompactTrialCount(facts.count)}c ${facts.source}`;
+    return facts.count === null ? 'count unavailable' : `${formatQueueCompactTrialCount(facts.count)}c ${facts.source}`;
   }
   const budgetMode = String(item?.config?.optuna_budget_mode || 'trials').trim().toLowerCase();
   if (budgetMode === 'time') {
@@ -2221,8 +2224,12 @@ function generateQueueLabel(item) {
   const strategyVersion = item.strategyConfig?.version || '';
   const strategyLabel = strategyVersion ? (strategyName + ' v' + strategyVersion) : strategyName;
 
-  const csvCount = getQueueSources(item).length;
-  const csvLabel = csvCount === 1 ? '1 CSV' : (csvCount + ' CSVs');
+  const sourceCounts = { PQ: 0, CSV: 0, unsupported: 0 };
+  getQueueSources(item).forEach(source => {
+    sourceCounts[source.type === 'parquet' ? 'PQ' : source.type === 'path' ? 'CSV' : 'unsupported']++;
+  });
+  const csvLabel = Object.entries(sourceCounts).filter(([, count]) => count)
+    .map(([kind, count]) => `${count} ${kind}${kind === 'unsupported' ? ' source' : ''}${count === 1 ? '' : 's'}`).join(' + ') || '0 sources';
 
   const startRaw = item.config?.fixed_params?.start || '';
   const endRaw = item.config?.fixed_params?.end || '';
@@ -2243,7 +2250,7 @@ function generateQueueLabel(item) {
   let budgetLabel;
   if (item.config?.optimization_mode === 'grid' || item.mode === 'grid') {
     const facts = getQueueGridPlannedFacts(item);
-    budgetLabel = String(facts.count) + 'c ' + facts.source;
+    budgetLabel = facts.count === null ? 'count unavailable' : String(facts.count) + 'c ' + facts.source;
   } else {
     const budgetMode = item.config?.optuna_budget_mode || 'trials';
     if (budgetMode === 'trials') {
@@ -2361,7 +2368,7 @@ function buildQueueTooltip(item) {
 
   if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
     const facts = getQueueGridPlannedFacts(item);
-    const candidates = Number(facts.count).toLocaleString('en-US');
+    const candidates = facts.count === null ? 'unavailable' : Number(facts.count).toLocaleString('en-US');
     const policy = item.planned_candidate_policy || item.config?.grid_v2_planning_policy || 'legacy';
     lines.push('Candidates: ' + candidates + ' (' + facts.source + ', policy: ' + policy + ')');
   } else {
@@ -2810,6 +2817,7 @@ async function runQueue() {
   let cancelNotified = false;
   let inFlightRunId = '';
   let stopAfterCurrent = false;
+  const sourceErrors = [];
 
   try {
     while (true) {
@@ -2876,7 +2884,7 @@ async function runQueue() {
         if (optunaProgressText) {
           if (item.mode === 'grid' || item.config?.optimization_mode === 'grid') {
             const candidates = getQueueGridPlannedFacts(item).count;
-            optunaProgressText.textContent = 'Candidate: 0 / ' + candidates.toLocaleString('en-US') + ' (0%)';
+            optunaProgressText.textContent = 'Candidate: 0 / ' + (candidates?.toLocaleString('en-US') ?? 'unavailable') + ' (0%)';
           } else {
             const budgetMode = item.config?.optuna_budget_mode;
             if (budgetMode === 'trials') {
@@ -2955,6 +2963,7 @@ async function runQueue() {
             break;
           }
           itemFailure += 1;
+          sourceErrors.push((sourceName + ': ' + error.message).slice(0, 1000));
           await persistItemProgress(item.id, { lastError: (sourceName + ': ' + error.message).slice(0, 1000) });
           console.error('Queue source failed: ' + sourceName, error);
           inFlightRunId = '';
@@ -3088,6 +3097,7 @@ async function runQueue() {
       }
 
       const studySetSummary = [];
+      if (sourceErrors.length) optimizerResultsEl.textContent += '\n' + sourceErrors.join('\n');
       if (createdStudySets > 0) {
         studySetSummary.push('Study Sets created: ' + createdStudySets);
       }

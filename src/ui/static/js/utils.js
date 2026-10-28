@@ -196,7 +196,7 @@ function buildCsvPathDisplayEntries(paths) {
 }
 
 function renderSelectedFiles(files) {
-  if (window.ParquetInput?.active()) return window.ParquetInput.renderSelected();
+  if (window.ParquetInput?.state.mode) return window.ParquetInput.renderSelected();
   const selectedFilesWrapper = document.getElementById('selectedFilesWrapper');
   const selectedFilesList = document.getElementById('selectedFilesList');
   const clearSelectedCsvBtn = document.getElementById('clearSelectedCsvBtn');

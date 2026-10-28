@@ -31,6 +31,30 @@ Reopening clears row selections/checks, retaining committed column durations.
 Added source pairs are independent of later header edits and deduplicate by
 resolved pack root, exact venue/contract instrument ID and duration.
 
+**Ticker Sets**, beside Refresh in an opened target pack, replaces highlighted
+rows using manifest roles: Main (`trading`), Additional (`research_only`), or All
+(including factor and unclassified instruments). Counts come from that pack;
+empty actions are disabled. Existing timeframe checks and committed durations
+remain unchanged. Choose timeframes and use Add Selected to merge source pairs;
+the action never removes previously added sources. CSV browsing, directory
+navigation, filter pack selection and relocation do not show Ticker Sets.
+
+Source changes immediately invalidate Grid Preview and schedule a fresh metadata
+request. Usable counts belong to the current strategy, admission source, warmup
+and optimizer/filter settings; obsolete replies are ignored even during debounce.
+Full-enumeration V2 displays an unavailable count until a matching Preview exists,
+without treating a retained legacy budget as the candidate population. This does
+not prevent valid launches. Fixed retains one configuration and sampled/V1 budget
+semantics are unchanged.
+
+Auto-create Set is available for Grid or Fixed WFA with more than one active
+source pair. Explicit Off survives source/mode changes and temporary ineligibility.
+Filter sources are independent and do not count as target sources. Queue labels
+use PQ/PQs and CSV/CSVs, with separate counts for mixed sources and an explicit
+unsupported-source label. Failed source messages appear in the existing run-message
+area as well as the retained item error; Queue state and set completion rules
+remain unchanged.
+
 Start keeps per-source details in the collapsed **Coverage and warmup (UTC)**
 section. Metadata coverage is advisory and reads no candle rows. Execution rechecks the
 consumed interval. Bars use the fixed UTC epoch grid, including multi-day bars:
@@ -39,6 +63,28 @@ Start/End select **bar opens inclusively**. Date-only End includes the last
 microsecond of that date; explicit midnight End includes the midnight-open bar.
 For example, 30m from 10:10 through 11:00 selects 10:30 and 11:00 and requires
 base candles through 11:30. A selected multi-day bar can close after End.
+
+### Collection planning for inclusive End
+
+When preparing or extending Merlin packs, collect enough closed base candles to
+complete the last included target bar, rather than stopping at the UI End instant.
+For duration T and inclusive End E, the required exclusive coverage boundary is
+`(floor(E / T) + 1) * T`, using the UTC epoch grid. Take the maximum required
+boundary across the intended target timeframes and separately check the data
+requirements of enabled filters. Preserve the requested research dates.
+
+For month-boundary End at 00:00 UTC, the owner's standard collection policy is
+one additional UTC day, supporting the standard 5m, 15m, 30m, 1h, 2h, 4h and 1D
+timeframes. Custom durations, especially multi-day bars, require the formula
+above; one day is not a guarantee for arbitrary durations. This is an explicit
+collection convention, not an automatic downloader or relaxed coverage check.
+Only collect candles that have actually closed; do not fill or truncate missing
+data to satisfy the buffer. Previously consumed history must remain unchanged.
+
+Funding/OI snapshots have their own observation, publication, coverage and
+staleness contracts. Extend them when a consuming feature requires later data;
+do not impose OHLCV continuity or manufacture samples at candle boundaries.
+Current S07/F06 use OHLCV and do not require auxiliary snapshot extension.
 
 With Date Filter on, missing bounds use the first/last complete certified bar.
 With it off, stale form dates are ignored and all complete certified coverage is

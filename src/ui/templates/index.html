@@ -57,7 +57,7 @@
                 </div></details>
               </div>
 
-              <section id="entryFiltersEditor" class="entry-filters-editor" aria-label="Entry Filters"></section>
+              <section id="entryFiltersEditor" class="entry-filters-editor" aria-label="Entry Filters" data-default-pack="{{ default_parquet_root }}"></section>
 
               <div class="section">
                 <div class="form-group">
@@ -1311,6 +1311,7 @@
             <button type="button" class="btn-secondary" id="csvBrowserUpBtn">Up</button>
             <button type="button" class="btn-secondary" id="csvBrowserOpenBtn">Open Folder</button>
             <button type="button" class="btn-secondary" id="csvBrowserRefreshBtn">Refresh</button>
+            <select id="parquetTickerSets" aria-label="Ticker Sets" hidden><option value="">Ticker Sets</option></select>
           </div>
           <div class="modal-note" id="csvBrowserHelp">
             Double-click folder to open. Select CSV files with Ctrl/Shift-click, then Add Selected.

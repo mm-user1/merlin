@@ -13,6 +13,23 @@ STRATEGY = "s03_reversal_v11_regime_er_b2"
 from tests._data_input_helpers import grid_payload
 
 
+def test_start_exposes_default_pack_without_reading_it(client, monkeypatch, tmp_path):
+    from ui import server_routes_data
+    missing = tmp_path / 'absent-pack'
+    monkeypatch.setattr(server_routes_data, 'DEFAULT_PARQUET_ROOT', missing)
+    response = client.get('/')
+    assert response.status_code == 200
+    assert f'data-default-pack="{missing}"' in response.get_data(as_text=True)
+    assert not missing.exists()
+
+
+def test_browser_exposes_existing_instrument_roles(client, tmp_path):
+    source = publish(tmp_path / 'roles-pack')
+    response = client.get('/api/parquet/browse', query_string={'path': source['pack_root']})
+    assert response.status_code == 200
+    assert response.get_json()['pack']['instruments'][0]['roles'] == ['trading']
+
+
 def test_start_backtest_and_pinned_download(client, tmp_path):
     source = publish(tmp_path / "pack")
     params = grid_payload()["fixed_params"]

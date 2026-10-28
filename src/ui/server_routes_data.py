@@ -87,7 +87,7 @@ def _unsupported_lancelot_strategy_error(strategy_id: str) -> V2ValidationError:
     )
 
 try:
-    from .server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input, replay_oos_input
+    from .server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input, replay_oos_input, DEFAULT_PARQUET_ROOT
     from .server_services import (
         DEFAULT_PRESET_NAME,
         DEFAULT_CSV_ROOT,
@@ -128,7 +128,7 @@ try:
         validate_sampler_config,
     )
 except ImportError:
-    from server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input, replay_oos_input
+    from server_data_input import register_routes as register_input_routes, browse, resolve_root, execution_input, replay_oos_input, DEFAULT_PARQUET_ROOT
     from server_services import (
         DEFAULT_PRESET_NAME,
         DEFAULT_CSV_ROOT,
@@ -315,7 +315,7 @@ def register_routes(app):
 
     @app.route("/")
     def index() -> object:
-        return render_template("index.html")
+        return render_template("index.html", default_parquet_root=str(DEFAULT_PARQUET_ROOT))
 
 
 

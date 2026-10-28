@@ -213,7 +213,7 @@ inactive in the resolved variant does not enter the semantic/cache key.
 The S07 HA adapter (`s07_ha_v01_b2`) owns causal HA/run arrays and deterministic
 ATR14: first TR is high-low; the initial 14 terms are folded left to right in
 float64, then `(previous * 13 + TR) / 14`. It emits only the kth directional
-HA event after index 64 and finite ATR/extrema. HA starts at the first supplied
+HA event from index 64 with finite ATR/extrema. HA starts at the first supplied
 preparation bar; warmup events do not carry forward. Its call-scoped batch shares
 HA/ATR and caches inclusive extrema by stopLP. Signal identity includes
 entryRunLength/enableLong/enableShort; dataprep additionally includes stopLP.

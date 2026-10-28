@@ -26,6 +26,15 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Start/Queue source UI preservation uses `test_js_source_workflow.py` alongside
+the existing Queue, Parquet, Entry Filters, admission, Fixed, Grid-objective and
+strategy-readiness JavaScript checks. It drives actual selection/editor/Queue
+handlers with deterministic pending responses and simulated source completion:
+typed eligibility, explicit Off, matching Preview counts, late replies, role-based
+Ticker Sets, independent filter defaults and actionable partial failures. Server
+data-input tests check metadata roles and the default-root template without reading
+or creating a production pack. Browser layout remains a separate owner check.
+
 Fixed research coverage is in `v2/test_v2_fixed_singleton.py`,
 `server/test_fixed_mode.py` and `test_js_fixed_mode.py` (real JavaScript handlers).
 It covers scalar/variant singleton planning, early refusal, successful loss/no-trade

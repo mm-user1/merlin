@@ -35,8 +35,15 @@ The request/Queue namespace is separate from fixed strategy parameters:
 ```
 
 F06 · Candle Direction uses ordinary closed candles. Defaults are Confirm Bars 2,
-timeframe 4h and exactly `OKX_BTC-USDT-SWAP`. The user selects a pack explicitly;
-there is no venue fallback or pack guessing. Other valid OHLCV instruments are
+timeframe 4h and exactly `OKX_BTC-USDT-SWAP`. A new filter uses the current Parquet
+directory (the remembered Parquet directory in CSV mode), otherwise the server's
+resolved `data/parquet-data` default. Its actual path is populated and metadata
+loaded through normal allowed-root browsing. A missing pack or BTC instrument
+shows an actionable inline message, retaining the chosen path and exact instrument;
+there is no venue fallback or automatic substitution. Browse remains available.
+Restored filters retain their source, and later target changes do not rewrite it.
+Obsolete metadata replies after removal, path changes or restoration are ignored.
+Other valid OHLCV instruments are
 allowed without sizing rules; only the trading target needs those rules.
 Timeframes follow the positive 5m-multiple m/h/D contract. Confirm Bars is an
 integer, excluding booleans and fractions. Method v2 requires Confirm N=2..6,

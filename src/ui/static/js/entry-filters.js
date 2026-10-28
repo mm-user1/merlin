@@ -121,6 +121,7 @@
   if (!root.document) return;
   let editor = off(), sequence = 0;
   const opened = new Set(), metadata = new Map();
+  const loads = new WeakMap(), loadErrors = new WeakMap();
   const host = () => document.getElementById('entryFiltersEditor');
   const supported = () => root.currentStrategyConfig?.entryFilterSupport?.version === 1
     && root.currentStrategyConfig.entryFilterSupport.methods?.includes('candleDirection');
@@ -128,11 +129,20 @@
   function changed() { root.resetGridPreviewState?.(); root.scheduleGridPreviewUpdate?.(); }
   function errorText(message) { const el = document.getElementById('entryFiltersError'); if (el) el.textContent = message; }
   async function loadPack(item, path) {
-    const response = await fetch(`/api/parquet/browse?path=${encodeURIComponent(path)}`);
-    const value = await response.json();
-    if (!response.ok || !value.pack) throw Error(value.error || 'Choose a directory containing a pack manifest.');
-    if (!editor.items?.includes(item) || item.source.pack_root !== path) return;
-    metadata.set(path, value.pack); render();
+    const token = {}; loads.set(item, token); loadErrors.delete(item);
+    const current = () => editor.items?.includes(item) && item.source.pack_root === path && loads.get(item) === token;
+    try {
+      if (!path) throw Error('Source pack is unavailable. Use Browse to choose a Parquet pack.');
+      const response = await fetch(`/api/parquet/browse?path=${encodeURIComponent(path)}`);
+      const value = await response.json();
+      if (!current()) return;
+      if (!response.ok || !value.pack) throw Error(value.error || 'Choose a directory containing a pack manifest.');
+      metadata.set(path, value.pack);
+    } catch (error) {
+      if (!current()) return;
+      loadErrors.set(item, `${error.message} Use Browse to choose a valid pack.`);
+    }
+    if (current()) render();
   }
   function render() {
     const container = host(); if (!container) return;
@@ -144,7 +154,10 @@
     const add = node('button', '+ Add Filter'); add.type = 'button'; add.disabled = !supported() || !editor?.enabled;
     add.onclick = () => { const item = { id: `filter-${Date.now()}-${++sequence}`, type: 'candleDirection', version: 2, enabled: true,
       parameters: { confirmationBars: 2, breakBars: 1 }, source: { type: 'parquet', version: 1, pack_root: '', instrument_id: 'OKX_BTC-USDT-SWAP', timeframe_minutes: 240 } };
-      editor.items.push(item); opened.add(item.id); render(); changed(); };
+      const target = root.ParquetInput?.state;
+      item.source.pack_root = String((target?.mode ? document.getElementById('csvDirectory')?.value : target?.paths.parquet) || '').trim()
+        || String(host()?.dataset?.defaultPack || '').trim();
+      editor.items.push(item); opened.add(item.id); render(); changed(); loadPack(item, item.source.pack_root); };
     heading.append(master, label, add); container.append(heading);
     if (!supported()) container.append(node('small', 'This strategy does not support entry filters. Turn Entry Filters Off to launch.'));
     const error = node('div'); error.id = 'entryFiltersError'; error.className = 'csv-browser-error'; container.append(error);
@@ -171,9 +184,13 @@
         controls.append(node('pre', JSON.stringify(item, null, 2)));
       } else {
         const path = node('input'); path.type = 'text'; path.value = item.source.pack_root; path.setAttribute('aria-label', 'Source pack');
-        path.onchange = () => { item.source.pack_root = path.value; changed(); loadPack(item, path.value).catch(e => errorText(e.message)); };
-        const browse = node('button', 'Browse'); browse.type = 'button'; browse.onclick = () => root.ParquetInput.choosePack(path.value, (rootPath, pack) => {
-          item.source.pack_root = rootPath; metadata.set(rootPath, pack); render(); changed(); });
+        path.onchange = () => { item.source.pack_root = path.value; changed(); loadPack(item, path.value); };
+        const browse = node('button', 'Browse'); browse.type = 'button'; browse.onclick = () => {
+          const previousPath = item.source.pack_root;
+          root.ParquetInput.choosePack(path.value, (rootPath, pack) => {
+          if (!editor.items?.includes(item) || item.source.pack_root !== previousPath) return;
+          loads.delete(item); loadErrors.delete(item);
+          item.source.pack_root = rootPath; metadata.set(rootPath, pack); render(); changed(); }); };
         const packLine = node('div'); packLine.className = 'entry-filter-source'; packLine.append(path, browse);
         controls.append(node('label', 'Source pack'), packLine);
         const instrument = node('select'); instrument.setAttribute('aria-label', 'Filter instrument');
@@ -182,8 +199,12 @@
         if (!ids.includes(item.source.instrument_id)) ids.unshift(item.source.instrument_id);
         ids.forEach(id => { const option = node('option', id); option.value = id; instrument.append(option); });
         instrument.value = item.source.instrument_id;
-        instrument.onchange = () => { item.source.instrument_id = instrument.value; changed(); };
+        instrument.onchange = () => { item.source.instrument_id = instrument.value; changed(); render(); };
         controls.append(node('label', 'Instrument'), instrument);
+        if (loadErrors.has(item)) controls.append(node('small', loadErrors.get(item)));
+        else if (pack && !pack.instruments.some(i => i.instrument_id === item.source.instrument_id)) {
+          controls.append(node('small', `${item.source.instrument_id} is absent from this pack. Choose a pack containing it or explicitly select another instrument.`));
+        }
         const line = node('div'); line.className = 'entry-filter-parameters';
         const timeframe = node('input'); timeframe.value = tf(item.source.timeframe_minutes); timeframe.setAttribute('aria-label', 'Filter timeframe');
         timeframe.onchange = () => { try { item.source.timeframe_minutes = duration(timeframe.value); timeframe.setCustomValidity(''); changed(); } catch (e) { item.source.timeframe_minutes = timeframe.value; timeframe.setCustomValidity(e.message); errorText(e.message); } };

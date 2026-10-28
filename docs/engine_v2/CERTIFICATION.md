@@ -48,7 +48,7 @@ certification rows and identity pins below remain preservation authorities.
 Owner browser appearance and platform-specific evidence are separate review gates;
 Node assertions are not visual acceptance.
 
-## S07 HA import evidence (2026-10-28; pending review)
+## S07 HA import evidence (accepted 2026-10-28)
 
 `s07_ha_v01_b2` composes the existing generic `risk_bracket_v1`, market-next-open,
 ATR/swing stop, RR target, max-days and strict-close modes, with no price rounding
@@ -56,14 +56,22 @@ or trailing. No execution kernel changed. Its external evidence is recorded in
 [the frozen baseline README](../../data/baseline_v2/s07_ha_v01/README.md) and
 `expected.json`, with opt-in reproduction in `tests/test_s07_baselines.py`.
 
-Coder verification matches both long TV trade skeletons (253 filtered / 363 Off),
+Coder verification and independent Linux review match both long TV trade skeletons (253 filtered / 363 Off),
 with sub-tick outward price and resulting realized-balance/lot residuals traced
 trade by trade. September matches all 1440 decision rows, 35 trades across three
 allocations, and 252 attempt outcomes; January-origin core and W=500 production
 preparation both pass. See the linked evidence for exact balances, hashes and
 tolerances. These checks do not claim profitability or universal TV equivalence.
-Changed N/M, axes and timeframes have synthetic coverage. Independent review,
-owner appearance confirmation and final tech-lead disposition remain separate.
+Changed N/M, axes and timeframes have synthetic coverage. Commit
+`0928b8045b0413b244d1e3535cd29139b8e1085b` is accepted for this scope after
+independent review and tech-lead verification. Windows has 1403 broad-gate passes
+plus the overlapping 15-case final UI gate; Linux has 1400 passes, two existing
+two-thread capacity skips and five explicit two-thread deselections, all covered
+on Windows. A further tech-lead S07/F06 check passed 31 cases. Owner visual
+confirmation covers the reported Stop-order and filter-width corrections.
+For F06 v2 M>1, parent-based manual tests retain the parent's pinned source origin;
+a new study uses current declared history. This reviewed clarification preserves
+the parent context and is distinct from a new study after backward extension.
 
 ## Registry fields
 

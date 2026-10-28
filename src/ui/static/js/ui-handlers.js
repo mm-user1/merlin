@@ -213,7 +213,7 @@ function getSelectedCsvPaths() {
 }
 
 function getSelectedDataSources() {
-  if (window.ParquetInput?.active()) return window.ParquetInput.sources();
+  if (window.ParquetInput?.state.mode) return window.ParquetInput.sources();
   return getSelectedCsvPaths().map(path => ({ type: 'path', path }));
 }
 
@@ -232,9 +232,12 @@ function setSelectedCsvPaths(paths) {
   }
   window.uiState.csvPath = window.selectedCsvPath;
   renderSelectedFiles([]);
-  if (typeof syncQueueAutoCreateSetUi === 'function') {
-    syncQueueAutoCreateSetUi();
-  }
+  notifyDataSourcesChanged();
+}
+
+function notifyDataSourcesChanged() {
+  if (typeof syncQueueAutoCreateSetUi === 'function') syncQueueAutoCreateSetUi();
+  scheduleGridPreviewUpdate();
 }
 
 const csvBrowserState = {
@@ -328,6 +331,7 @@ async function openCsvBrowserModal() {
     ? 'Open a pack directory containing manifest.json. Instruments appear when the pack is opened.'
     : 'Double-click folder to open. Select CSV files with Ctrl/Shift-click, then Add Selected.';
   document.getElementById('parquetGrid').hidden = true;
+  document.getElementById('parquetTickerSets').hidden = true;
   document.getElementById('parquetCoverage').hidden = !parquet;
   const rootPath = String(rootInput?.value || '').trim();
   await loadCsvBrowserDirectory(rootPath);
@@ -1776,6 +1780,7 @@ function buildGridConfig(state) {
 }
 
 function getCurrentPlannedGridCandidates(config) {
+  if (config?.parameterMode === 'fixed') return 1;
   const preview = window.lastGridPreview;
   if (
     preview
@@ -1785,11 +1790,15 @@ function getCurrentPlannedGridCandidates(config) {
   ) {
     return Number(preview.planned_candidate_count);
   }
+  const v2 = window.currentStrategyConfig?.engine === 'v2' || window.currentStrategyConfig?.grid_optimizer?.profile === 'full_enumeration_v2';
+  if (v2 && config?.grid_v2_planning_policy === 'full') return null;
   return Number(config?.grid_budget || 0);
 }
 
 function getGridPreviewConfigKey(config) {
-  return JSON.stringify(config || {});
+  return JSON.stringify({ config: config || {}, strategy: window.currentStrategyId,
+    source: window.currentStrategyConfig?.execution?.entryAdmission ? getSelectedDataSources()[0] : null,
+    warmup: Number(document.getElementById('warmupBars')?.value) || 1000 });
 }
 
 function buildFixedConfig(state) {
@@ -2382,6 +2391,7 @@ function updateGridPreviewDom(preview) {
 }
 
 function setGridPreviewError(message) {
+  window.lastGridPreview = null;
   window.lastGridPreviewConfigKey = null;
   const errorEl = document.getElementById('gridPreviewError');
   const summary = document.getElementById('gridPreviewSummary');
@@ -2410,10 +2420,11 @@ function resetGridPreviewState() {
 }
 
 function scheduleGridPreviewUpdate() {
-  if (getOptimizerMode() === 'optuna') return;
+  resetGridPreviewState();
   if (gridPreviewTimer) {
     window.clearTimeout(gridPreviewTimer);
   }
+  if (getOptimizerMode() === 'optuna') return;
   gridPreviewTimer = window.setTimeout(updateGridPreview, 250);
 }
 
@@ -2430,6 +2441,7 @@ async function updateGridPreview() {
     const source = window.currentStrategyConfig?.execution?.entryAdmission ? getSelectedDataSources()[0] : null;
     const preview = await fetchGridPreviewRequest(config, window.currentStrategyId, warmupBars, source);
     if (seq !== gridPreviewSeq) return;
+    if (previewConfigKey !== getGridPreviewConfigKey(buildCurrentOptimizerConfig(gatherFormState()))) return;
     updateGridPreviewDom(preview);
     // Dynamic V2 manual controls may be created from this Preview. Recompute
     // the key after rendering so non-operative retained values do not make the
@@ -2796,7 +2808,7 @@ async function submitOptimization(event) {
   }
   if (optunaProgressText) {
     if (optimizerMode === 'grid') {
-      optunaProgressText.textContent = `Grid candidates: 0 / ${getCurrentPlannedGridCandidates(config).toLocaleString('en-US')}`;
+      optunaProgressText.textContent = `Grid candidates: 0 / ${getCurrentPlannedGridCandidates(config)?.toLocaleString('en-US') ?? 'unavailable'}`;
     } else if (config.optuna_budget_mode === 'trials') {
       optunaProgressText.textContent = `Trial: 0 / ${config.optuna_n_trials.toLocaleString('en-US')} (0%)`;
     } else if (config.optuna_budget_mode === 'time') {
