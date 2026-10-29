@@ -31,6 +31,7 @@ from .execution_modes import (
 )
 from .profile import active_mode_values
 from .admission import ADMISSION_MODE, admission_cap, execution_admission
+from .quantity import execution_quantity
 from .contracts import GUARDRAIL_FLAG_EXECUTION_ERROR, GUARDRAIL_FLAG_MARGIN_REJECT
 
 
@@ -185,6 +186,7 @@ def evaluate_compiled_batch(
     month_ids: np.ndarray | None = None,
     day_ids: np.ndarray | None = None,
     admission_rules=None,
+    quantity_rules=None,
 ) -> CompiledBatchOutput:
     """Evaluate one batch of candidates sharing the same ``ExecutionData``."""
 
@@ -200,6 +202,7 @@ def evaluate_compiled_batch(
         len(data.timestamps),
     )
     _validate_sharpe_daily_day_ids(metric_day_ids, len(data.timestamps), compute_sharpe_daily)
+    execution_quantity(profile, quantity_rules, admission_rules)
     if not params_batch:
         execution_admission(profile, profile.parameter_defaults, admission_rules)
         return CompiledBatchOutput(
@@ -209,8 +212,8 @@ def evaluate_compiled_batch(
             ),
         )
 
-    packed = _pack_config_arrays(profile, params_batch, trade_start_idx, admission_rules)
-    _validate_admission_batch(profile, packed, admission_rules, (data.open, data.high, data.low, data.close))
+    packed = _pack_config_arrays(profile, params_batch, trade_start_idx, admission_rules, quantity_rules)
+    _validate_admission_batch(profile, packed, admission_rules, (data.open, data.high, data.low, data.close), quantity_rules)
     _validate_packed_stateful_trails(packed)
     chandelier_atr = _grouped_chandelier_values(data, packed)
     outputs = np.empty((len(params_batch), OUTPUT_COLUMN_COUNT), dtype=np.float64)
@@ -403,6 +406,7 @@ def evaluate_compiled_stacked_batch(
     compute_sqn: bool = False,
     compute_max_drawdown_mtm: bool = False,
     admission_rules=None,
+    quantity_rules=None,
 ) -> CompiledBatchOutput:
     """Evaluate one stacked compiled batch with per-candidate data row indices."""
 
@@ -423,6 +427,7 @@ def evaluate_compiled_stacked_batch(
         len(stacked_data.timestamp_ns),
         compute_sharpe_daily,
     )
+    execution_quantity(profile, quantity_rules, admission_rules)
     if packed_config_arrays is None:
         if not params_batch:
             execution_admission(profile, profile.parameter_defaults, admission_rules)
@@ -435,7 +440,7 @@ def evaluate_compiled_stacked_batch(
             )
         if len(params_batch) != stacked_data.candidate_count:
             raise ValueError("Stacked compiled params_batch length must match data_index length.")
-        packed = _pack_config_arrays(profile, params_batch, trade_start_idx, admission_rules)
+        packed = _pack_config_arrays(profile, params_batch, trade_start_idx, admission_rules, quantity_rules)
         candidate_count = len(params_batch)
     else:
         packed = _validated_config_arrays(packed_config_arrays)
@@ -446,7 +451,7 @@ def evaluate_compiled_stacked_batch(
             raise ValueError("Stacked compiled params_batch length must match packed_config_arrays length.")
 
     _validate_admission_batch(profile, packed, admission_rules,
-        (stacked_data.open, stacked_data.high, stacked_data.low, stacked_data.close))
+        (stacked_data.open, stacked_data.high, stacked_data.low, stacked_data.close), quantity_rules)
     _validate_packed_stateful_trails(packed)
     _validate_stacked_chandelier(stacked_data, packed)
 
@@ -720,10 +725,20 @@ def _pack_admission_row(arrays, index, admission):
     arrays["admission_min_notional"][index] = math.nan if rules.minimum_notional is None else float(rules.minimum_notional)
 
 
-def _validate_admission_batch(profile, arrays, rules, prices):
+def _validate_admission_batch(profile, arrays, rules, prices, quantity_rules=None):
+    quantity = execution_quantity(profile, quantity_rules, rules)
     if profile.modes.get("entryAdmission") != ADMISSION_MODE:
         if np.any(arrays["admission_cap"] != 0):
             raise ValueError("Admission arrays cannot activate a legacy profile.")
+        if quantity is not None:
+            expected = math.nan if quantity.minimum_notional is None else float(quantity.minimum_notional)
+            if (not np.all(arrays["contract_size"] == float(quantity.base_step))
+                    or not np.all(arrays["admission_min_lots"] == quantity.minimum_lots)
+                    or not np.all(np.isnan(arrays["admission_min_notional"]) if math.isnan(expected) else arrays["admission_min_notional"] == expected)
+                    or not np.all(arrays["strict_boundary"]) or np.any(arrays["boundary_none"]) or np.any(arrays["rounding_code"] != 0)):
+                raise ValueError("Packed arrays disagree with quantity execution context.")
+        elif np.any(arrays["admission_min_lots"] != 0) or np.any(arrays["admission_min_notional"] != 0):
+            raise ValueError("Minimum arrays require explicit quantity execution context.")
         return
     _, rules = execution_admission(profile, profile.parameter_defaults, rules)
     cap = arrays["admission_cap"]
@@ -770,9 +785,11 @@ def _pack_config_arrays(
     params_batch: Sequence[Mapping[str, Any]],
     trade_start_idx: int,
     admission_rules=None,
+    quantity_rules=None,
 ) -> dict[str, np.ndarray]:
     count = len(params_batch)
     validated_admission = execution_admission(profile, profile.parameter_defaults, admission_rules)
+    quantity = execution_quantity(profile, quantity_rules, admission_rules)
     arrays = _empty_config_arrays(count)
     mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, int, bool, bool, bool, bool, int]] = {}
     start_ns_cache: dict[Any, int] = {}
@@ -807,6 +824,8 @@ def _pack_config_arrays(
         arrays["contract_size"][index] = float(params.get("contractSize", 0.01))
         if admission is not None:
             _pack_admission_row(arrays, index, admission)
+        elif quantity is not None:
+            _pack_admission_row(arrays, index, (0.0, quantity))
         arrays["trail_activation_rr"][index] = trail_params.trail_activation_rr
         arrays["trail_distance_r"][index] = trail_params.trail_distance_r
         arrays["chandelier_atr_mult"][index] = trail_params.chandelier_atr_mult
@@ -848,6 +867,7 @@ def pack_compiled_config_arrays_from_rows(
     trade_start_idx: int,
     admission_rules=None,
     profile=None,
+    quantity_rules=None,
 ) -> dict[str, np.ndarray]:
     """Pack compiled config arrays from typed row accessors.
 
@@ -861,12 +881,15 @@ def pack_compiled_config_arrays_from_rows(
         raise ValueError("row_count must be non-negative for compiled config packing.")
     validated_admission = (execution_admission(profile, profile.parameter_defaults, admission_rules)
                            if profile is not None else None)
+    quantity = execution_quantity(profile, quantity_rules, admission_rules)
     arrays = _empty_config_arrays(count)
     mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, int, bool, bool, bool, bool, int]] = {}
     start_ns_cache: dict[Any, int] = {}
     end_ns_cache: dict[Any, int] = {}
     for index in range(count):
         modes = get_modes(index)
+        if quantity is not None and (modes.get("boundary") != "strict_close" or modes.get("priceRounding", "none") != "none"):
+            raise ValueError("Packed quantity rows require strict-close without price rounding.")
         if profile is not None and modes.get("entryAdmission") != profile.modes.get("entryAdmission"):
             raise ValueError("Admission mode must match the profile across all packed rows.")
         if modes.get("entryAdmission") == ADMISSION_MODE:
@@ -914,6 +937,8 @@ def pack_compiled_config_arrays_from_rows(
         arrays["contract_size"][index] = float(get_value(index, "contractSize", 0.01))
         if admission is not None:
             _pack_admission_row(arrays, index, admission)
+        elif quantity is not None:
+            _pack_admission_row(arrays, index, (0.0, quantity))
         arrays["trail_activation_rr"][index] = trail_params.trail_activation_rr
         arrays["trail_distance_r"][index] = trail_params.trail_distance_r
         arrays["chandelier_atr_mult"][index] = trail_params.chandelier_atr_mult
@@ -1210,7 +1235,8 @@ def _compiled_loop_one(
     admission_active = admission_cap > 0
     minimum_lots = admission_min_lots_values[candidate_index]
     minimum_notional = admission_min_notional_values[candidate_index]
-    if admission_active and not math.isfinite(initial_capital):
+    quantity_active = not admission_active and minimum_lots > 0
+    if (admission_active or quantity_active) and not math.isfinite(initial_capital):
         _write_empty_result(outputs, candidate_index, 0.0)
         outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
         return
@@ -1379,6 +1405,16 @@ def _compiled_loop_one(
             sar_ep = math.nan
             sar_activation_index = -1
             pending_market_close = False
+
+        if pending_entry and quantity_active:
+            notional = abs(open_price * pending_size)
+            fee = notional * commission_rate
+            if not math.isfinite(notional) or not math.isfinite(fee) or not math.isfinite(balance - fee):
+                _write_empty_result(outputs, candidate_index, 0.0)
+                outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                return
+            if not math.isnan(minimum_notional) and notional < minimum_notional:
+                pending_entry = False
 
         if pending_entry and admission_active:
             notional = abs(open_price * pending_size)
@@ -1731,7 +1767,29 @@ def _compiled_loop_one(
                         and math.isfinite(stop) and stop > 0 and math.isfinite(risk) and risk > 0
                         and balance > 0 and math.isfinite(target) and target > 0 and stop_pct <= max_stop_pct)
                 order_size = 0.0
-                if allowed:
+                if quantity_active:
+                    if not math.isfinite(balance):
+                        _write_empty_result(outputs, candidate_index, 0.0)
+                        outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                        return
+                    if (math.isfinite(stop) and math.isfinite(risk) and risk > 0
+                            and stop_pct <= max_stop_pct and balance > 0
+                            and math.isfinite(risk_per_trade_pct) and risk_per_trade_pct > 0):
+                        risk_cash = balance * risk_per_trade_pct / 100.0
+                        raw_size = risk_cash / risk
+                        ratio = raw_size / contract_size
+                        if not math.isfinite(ratio) or ratio > 2**53:
+                            _write_empty_result(outputs, candidate_index, 0.0)
+                            outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                            return
+                        order_size = math.floor(ratio) * contract_size
+                        recovered = order_size / contract_size
+                        if not math.isfinite(order_size) or not math.isfinite(recovered) or recovered > 2**53:
+                            _write_empty_result(outputs, candidate_index, 0.0)
+                            outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                            return
+                        allowed = int(round(recovered)) >= minimum_lots
+                elif allowed:
                     risk_cash = balance * risk_per_trade_pct / 100.0
                     raw_size = risk_cash / risk if risk > 0.0 else 0.0
                     ratio = raw_size / contract_size
@@ -1760,6 +1818,8 @@ def _compiled_loop_one(
                 elif not (math.isfinite(order_size) and order_size > 0.0):
                     zero_size_entry_count += 1
                     flags = flags | GUARDRAIL_FLAG_ZERO_SIZE_ENTRY
+                elif quantity_active and not allowed:
+                    pass
                 else:
                     pending_entry = True
                     pending_direction = direction
@@ -1772,7 +1832,7 @@ def _compiled_loop_one(
                         pending_target = target
                     pending_size = order_size
 
-        if admission_active:
+        if admission_active or quantity_active:
             observed_equity = balance
             if position > 0:
                 observed_equity += (close - entry_price) * size

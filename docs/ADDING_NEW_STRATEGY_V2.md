@@ -37,6 +37,17 @@ and selected diagnostics as described in [Architecture](engine_v2/ARCHITECTURE.m
 and [Parquet inputs](PARQUET_INPUTS.md). Synthetic generic-engine coverage alone
 does not establish Pine parity or market performance for a new strategy.
 
+### Optional quantity-only portfolio execution
+
+Ticker Selector eligibility is generic and server-derived, evaluated across every
+validated variant: V2, declared Initial Capital, strict close, no price rounding,
+and either risk-bracket admission or supported risk/fixed-percent sizing with a
+declared fixed execution Contract Size. The latter uses the separate quantity-only
+policy in [Ticker portfolios](TICKER_PORTFOLIOS.md); it does not add a strategy cap,
+filter or stop. Do not add strategy-name branches or instrument rules to signals.
+An eligible new profile still needs its own certified strategy evidence and real
+quantity-context propagation tests. Capability alone is not certification.
+
 ## 1. Freeze the external execution contract
 
 Before coding, record the exact Pine/external source and execution properties:

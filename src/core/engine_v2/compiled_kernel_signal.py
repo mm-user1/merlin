@@ -40,7 +40,8 @@ from .compiled_kernel import (
     OUTPUT_ZERO_SIZE_ENTRY_COUNT,
     CompiledBatchOutput,
 )
-from .contracts import GUARDRAIL_FLAG_ZERO_SIZE_ENTRY
+from .contracts import GUARDRAIL_FLAG_ZERO_SIZE_ENTRY, GUARDRAIL_FLAG_EXECUTION_ERROR
+from .quantity import execution_quantity
 from .kernel import ExecutionData
 from .execution_modes import resolve_signal_reversal_mode_state
 from .profile import active_mode_values
@@ -227,9 +228,14 @@ def evaluate_compiled_signal_stacked_batch(
     compute_sharpe_daily: bool = False,
     compute_sqn: bool = False,
     compute_max_drawdown_mtm: bool = False,
+    quantity_rules=None,
+    admission_rules=None,
 ) -> CompiledBatchOutput:
     """Evaluate one stacked signal-reversal compiled batch."""
 
+    quantity = execution_quantity(profile, quantity_rules, admission_rules)
+    if admission_rules is not None:
+        raise ValueError("Signal execution does not support risk admission rules.")
     if not _base.compiled_batch_available():
         raise RuntimeError(_base.compiled_unavailable_reason() or REFERENCE_UNAVAILABLE_REASON)
     metric_month_ids = _base._validated_month_ids(
@@ -256,7 +262,7 @@ def evaluate_compiled_signal_stacked_batch(
             )
         if len(params_batch) != stacked_data.candidate_count:
             raise ValueError("Signal stacked compiled params_batch length must match data_index length.")
-        packed = _pack_signal_config_arrays(profile, params_batch)
+        packed = _pack_signal_config_arrays(profile, params_batch, quantity_rules)
         candidate_count = len(params_batch)
     else:
         packed = _validated_signal_config_arrays(packed_config_arrays)
@@ -266,6 +272,9 @@ def evaluate_compiled_signal_stacked_batch(
         if params_batch is not None and len(params_batch) != candidate_count:
             raise ValueError("Signal stacked compiled params_batch length must match packed_config_arrays length.")
 
+    if quantity is not None and (not np.all(packed["contract_size"] == float(quantity.base_step))
+            or not np.all(packed["strict_boundary"]) or np.any(packed["boundary_none"])):
+        raise ValueError("Signal packed arrays disagree with quantity execution context.")
     if candidate_count == 0:
         return CompiledBatchOutput(
             outputs=np.empty((0, OUTPUT_COLUMN_COUNT), dtype=np.float64),
@@ -309,6 +318,8 @@ def evaluate_compiled_signal_stacked_batch(
             packed["use_date_filter"],
             packed["strict_boundary"],
             packed["boundary_none"],
+            quantity.minimum_lots if quantity is not None else 0,
+            float(quantity.minimum_notional) if quantity is not None and quantity.minimum_notional is not None else math.nan,
             bool(compute_sharpe),
             bool(compute_sharpe_daily),
             bool(compute_sqn),
@@ -357,7 +368,9 @@ def _packed_signal_config_count(arrays: Mapping[str, np.ndarray]) -> int:
 def _pack_signal_config_arrays(
     profile: Any,
     params_batch: Sequence[Mapping[str, Any]],
+    quantity_rules=None,
 ) -> dict[str, np.ndarray]:
+    quantity = execution_quantity(profile, quantity_rules)
     count = len(params_batch)
     arrays = _empty_signal_config_arrays(count)
     mode_cache: dict[tuple[tuple[str, str], ...], tuple[bool, bool, bool]] = {}
@@ -383,7 +396,7 @@ def _pack_signal_config_arrays(
         arrays["initial_capital"][index] = float(params.get("initialCapital", 100.0))
         arrays["commission_pct"][index] = float(params.get("commissionPct", 0.0))
         arrays["position_pct"][index] = float(params.get("positionPct", 100.0))
-        arrays["contract_size"][index] = float(params.get("contractSize", 0.01))
+        arrays["contract_size"][index] = float(quantity.base_step) if quantity is not None else float(params.get("contractSize", 0.01))
         arrays["emergency_sl_pct"][index] = emergency_sl_pct
         arrays["emergency_sl_update_bars"][index] = emergency_sl_update_bars
         arrays["start_ns"][index] = _base._cached_timestamp_ns(
@@ -442,6 +455,8 @@ def _signal_stacked_batch_loop_impl(
     use_date_filter_values: np.ndarray,
     strict_boundary_values: np.ndarray,
     boundary_none_values: np.ndarray,
+    minimum_lots: int,
+    minimum_notional: float,
     compute_sharpe: bool,
     compute_sharpe_daily: bool,
     compute_sqn: bool,
@@ -479,6 +494,8 @@ def _signal_stacked_batch_loop_impl(
             use_date_filter_values,
             strict_boundary_values,
             boundary_none_values,
+            minimum_lots,
+            minimum_notional,
             compute_sharpe,
             compute_sharpe_daily,
             compute_sqn,
@@ -516,6 +533,8 @@ def _compiled_signal_loop_one(
     use_date_filter_values: np.ndarray,
     strict_boundary_values: np.ndarray,
     boundary_none_values: np.ndarray,
+    minimum_lots: int,
+    minimum_notional: float,
     compute_sharpe: bool,
     compute_sharpe_daily: bool,
     compute_sqn: bool,
@@ -525,6 +544,11 @@ def _compiled_signal_loop_one(
 ) -> None:
     n = close_values.shape[0]
     initial_capital = initial_capital_values[candidate_index]
+    quantity_active = minimum_lots > 0
+    if quantity_active and not math.isfinite(initial_capital):
+        _write_empty_result(outputs, candidate_index, 0.0)
+        outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+        return
     if n == 0:
         _write_empty_result(outputs, candidate_index, initial_capital)
         if compute_max_drawdown_mtm:
@@ -642,6 +666,16 @@ def _compiled_signal_loop_one(
                 emergency_counter = 0
             pending_market_close = False
 
+        if pending_entry and quantity_active:
+            notional = abs(open_price * pending_size)
+            fee = notional * commission_rate
+            if not math.isfinite(notional) or not math.isfinite(fee) or not math.isfinite(balance - fee):
+                _write_empty_result(outputs, candidate_index, 0.0)
+                outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                return
+            if not math.isnan(minimum_notional) and notional < minimum_notional:
+                pending_entry = False
+
         if pending_entry and position == 0:
             position = pending_direction
             size = pending_size
@@ -752,10 +786,28 @@ def _compiled_signal_loop_one(
                     raw_size = math.nan
                     if close > 0.0 and contract_size > 0.0:
                         raw_size = (balance * position_pct / 100.0 / close) / contract_size
+                    if quantity_active and balance > 0 and position_pct > 0 and close > 0 and (not math.isfinite(raw_size) or raw_size > 2**53):
+                        _write_empty_result(outputs, candidate_index, 0.0)
+                        outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                        return
                     order_size = math.floor(raw_size) * contract_size if math.isfinite(raw_size) else math.nan
+                    allowed = True
+                    if quantity_active and math.isfinite(order_size) and order_size > 0:
+                        recovered = order_size / contract_size
+                        if not math.isfinite(recovered) or recovered > 2**53:
+                            _write_empty_result(outputs, candidate_index, 0.0)
+                            outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                            return
+                        allowed = int(round(recovered)) >= minimum_lots
+                    elif quantity_active and math.isfinite(raw_size) and raw_size > 0 and not math.isfinite(order_size):
+                        _write_empty_result(outputs, candidate_index, 0.0)
+                        outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                        return
                     if not (math.isfinite(order_size) and order_size > 0.0):
                         zero_size_entry_count += 1
                         flags = flags | GUARDRAIL_FLAG_ZERO_SIZE_ENTRY
+                    elif not allowed:
+                        pass
                     else:
                         pending_entry = True
                         pending_direction = direction
@@ -796,6 +848,17 @@ def _compiled_signal_loop_one(
                 emergency_stop = math.nan
                 emergency_fill_index = -1
                 emergency_counter = 0
+
+        if quantity_active:
+            observed_equity = balance
+            if position > 0:
+                observed_equity += (close - entry_price) * size
+            elif position < 0:
+                observed_equity += (entry_price - close) * size
+            if not math.isfinite(balance) or not math.isfinite(observed_equity):
+                _write_empty_result(outputs, candidate_index, 0.0)
+                outputs[candidate_index, OUTPUT_FLAGS] = GUARDRAIL_FLAG_EXECUTION_ERROR
+                return
 
         if (compute_sharpe or compute_sharpe_daily or compute_max_drawdown_mtm) and i >= trade_start_idx:
             unrealized = 0.0

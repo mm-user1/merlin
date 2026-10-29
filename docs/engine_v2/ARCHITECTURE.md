@@ -107,6 +107,36 @@ Trial diagnostic saves replace only the requested scope, clearing omitted/None
 values while retaining other scopes. Equal parsed content causes no diagnostic
 UPDATE, including legacy NULL-to-NULL; JSON formatting alone is not rewritten.
 
+### Application quantity-only execution
+
+`quantity_rules` is an opt-in immutable instrument-rule context, separate from
+`admission_rules`. Compatible legacy position and signal-reversal profiles use it
+only in portfolio execution; ordinary strategy adapters remain unchanged without
+context. The application adapter, reference runner, both compiled families, Grid
+packers/Slow fallback, WFA actual OOS, spawned FT/Stress, manual tests and exports
+must apply it or reject an incompatible context. No worker reopens a pack.
+
+Sizing retains each family's original IEEE order and one floor. The already-rounded
+quantity recovers integer lots without another floor; minimum lots and actual-fill
+minimum notional refuse entries only. Existing stop/risk/width/zero-size guardrail
+precedence remains; finite exhausted balances are ordinary refusals. Nonfinite
+account state and positive unrepresentable lot ratios fail explicitly (compiled
+execution-error flag 256). Existing closes, S03 reversal sequencing, S06 trail
+timing and strict boundaries remain independent of entry minimums.
+
+Position packing reuses the existing cap/minimum arrays: cap zero plus positive
+minimum lots activates quantity checks only when the explicit validated context
+agrees. With neither context these arrays remain zero. Signal packing passes
+per-plan minimum scalars; no candidate/per-bar arrays or memory-estimate change.
+No output columns or cap diagnostics are added. Executed Contract Size is canonical
+at its declared default, and rules supply the effective step. Contract Size axes,
+ranges/options are rejected. Conditional rule semantics participate in plan/cache
+identity only for the new policy, preserving old no-context and S07 identities.
+
+Persistence uses the separate `quantity_execution` envelope and verified owned
+child identity, never inference from a strategy name or current pack. See
+[Ticker portfolios](../TICKER_PORTFOLIOS.md) for eligibility and replay boundaries.
+
 ### Opt-in reference admission and trace
 
 `run_reference_kernel(..., policy=EntryPolicy(...), trace=KernelTrace())` adds an

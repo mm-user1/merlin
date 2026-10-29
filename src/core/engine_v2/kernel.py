@@ -40,6 +40,7 @@ from .execution_modes import (
 )
 from .sizing import risk_position_size
 from .admission import ADMISSION_MODE, AdmissionRules, AdmissionEvent, positive_cap
+from .quantity import validate_kernel_quantity, check_lot_ratio, entry_notional_allowed
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class KernelConfig:
     tick_size: float = math.nan
     entry_admission: str | None = None
     admission_rules: AdmissionRules | None = None
+    quantity_rules: AdmissionRules | None = None
     max_entry_leverage: float = 8.0
 
 
@@ -531,6 +533,11 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
     """Run the deterministic Phase-1 reference execution loop."""
 
     _validate_price_rounding_config(config)
+    quantity_rules = validate_kernel_quantity(config)
+    if quantity_rules is not None:
+        if policy is not None:
+            raise ValueError("Quantity execution cannot be combined with EntryPolicy.")
+        config = replace(config, contract_size=float(quantity_rules.base_step))
     admission_active = config.entry_admission is not None
     if admission_active:
         if config.entry_admission != ADMISSION_MODE or policy is not None:
@@ -628,6 +635,10 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
 
         if pending_market_close and position.direction != 0:
             close_position(open_price, timestamp, "expiry", "open")
+
+        if pending_entry is not None and quantity_rules is not None:
+            if not entry_notional_allowed(quantity_rules, open_price, pending_entry.size, commission_rate, balance):
+                pending_entry = None
 
         if pending_entry is not None and policy is not None:
             order = pending_entry
@@ -867,6 +878,19 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
                     if not math.isfinite(lots_ratio) or not 0 <= lots_ratio <= 2**53:
                         raise ValueError("Unrepresentable planned quantity/lot count.")
                     order_size = math.floor(lots_ratio) * config.contract_size
+                elif quantity_rules is not None:
+                    # Preserve legacy refusal precedence before inspecting a positive lot ratio.
+                    order_size = 0.0
+                    if (math.isfinite(stop) and math.isfinite(risk) and risk > 0
+                            and stop_pct <= config.max_stop_pct and balance > 0
+                            and math.isfinite(config.risk_per_trade_pct) and config.risk_per_trade_pct > 0):
+                        risk_cash = balance * config.risk_per_trade_pct / 100.0
+                        raw_size = risk_cash / risk
+                        check_lot_ratio(raw_size / config.contract_size)
+                        order_size = risk_position_size(balance=balance, risk_distance=risk,
+                            risk_per_trade_pct=config.risk_per_trade_pct, contract_size=config.contract_size)
+                        if not math.isfinite(order_size):
+                            raise ValueError("Unrepresentable planned quantity.")
                 else:
                     order_size = risk_position_size(
                         balance=balance,
@@ -899,6 +923,8 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
                 elif not (math.isfinite(order_size) and order_size > 0.0):
                     guardrails.zero_size_entry_count += 1
                     guardrails.flag(GUARDRAIL_FLAG_ZERO_SIZE_ENTRY)
+                elif quantity_rules is not None and quantity_lots(order_size, config.contract_size) < quantity_rules.minimum_lots:
+                    pass
                 else:
                     order_stop = _rounded_stop(direction, stop, config)
                     order_target = _rounded_target(direction, target, config) if target_enabled else target
@@ -918,7 +944,7 @@ def run_reference_kernel(data: ExecutionData, config: KernelConfig, *,
         elif position.direction < 0:
             unrealized = (position.entry_price - close) * position.size
         equity_curve.append(balance + unrealized)
-        if policy is not None and not all(math.isfinite(x) for x in (balance, balance + unrealized)):
+        if (policy is not None or quantity_rules is not None) and not all(math.isfinite(x) for x in (balance, balance + unrealized)):
             raise ValueError("Nonfinite account capital or equity")
         balance_curve.append(balance)
         timestamps.append(timestamp)

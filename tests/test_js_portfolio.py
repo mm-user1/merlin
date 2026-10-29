@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 
-@pytest.mark.parametrize('filename', ['portfolio.test.cjs', 'portfolio_queue.test.cjs', 'portfolio_loading.test.cjs'])
+@pytest.mark.parametrize('filename', ['portfolio.test.cjs', 'portfolio_queue.test.cjs', 'portfolio_loading.test.cjs', 'quantity_execution.test.cjs'])
 def test_portfolio_production_handlers(tmp_path, filename):
     run_handler(tmp_path, filename)
 

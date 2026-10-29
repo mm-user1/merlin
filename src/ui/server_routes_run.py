@@ -1810,7 +1810,7 @@ def register_routes(app):
                 warmup_bars=warmup_bars,
             )
             ft_results = run_forward_test(
-                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 optuna_results=ft_candidates,
@@ -1879,7 +1879,7 @@ def register_routes(app):
                 st_source = "dsr"
 
             st_results, st_summary = run_stress_test(
-                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+                **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
                 csv_path=data_path,
                 strategy_id=strategy_id,
                 source_results=st_candidates,
@@ -1980,7 +1980,7 @@ def register_routes(app):
 
             oos_preparation = {} if prepared is not None else None
             oos_results_payload = run_period_test_for_trials(
-                admission_rules=prepared.admission_rules if prepared is not None else None,
+                admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
                 entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING,
                 df=df_oos,
                 strategy_id=strategy_id,

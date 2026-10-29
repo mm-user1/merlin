@@ -25,6 +25,7 @@ from .execution_modes import (
 from .price_rounding import PRICE_ROUNDING_NONE, PRICE_ROUNDING_TICK_OUTWARD, validate_tick_size
 from .profile import active_mode_values
 from .admission import AdmissionRules, AdmissionStrategyResult, execution_admission, summarize_entries
+from .quantity import execution_quantity
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,7 @@ def build_kernel_config(
     params: Mapping[str, Any],
     trade_start_idx: int = 0,
     admission_rules: AdmissionRules | None = None,
+    quantity_rules: AdmissionRules | None = None,
 ) -> KernelConfig:
     """Convert a parsed execution profile and params into kernel settings."""
 
@@ -118,6 +120,7 @@ def build_kernel_config(
     )
     trail_params = stateful_trail_params(trail_mode, params)
     admission = execution_admission(profile, params, admission_rules)
+    quantity = execution_quantity(profile, quantity_rules, admission_rules)
     return KernelConfig(
         initial_capital=float(params.get("initialCapital", 100.0)),
         commission_pct=float(params.get("commissionPct", 0.0)),
@@ -126,7 +129,8 @@ def build_kernel_config(
         max_stop_pct=float(params.get("stopMaxPct", float("inf"))),
         max_days=float(params.get("stopMaxDays", float("inf"))),
         risk_per_trade_pct=float(params.get("riskPerTrade", 2.0)),
-        contract_size=float(admission[1].base_step) if admission else float(params.get("contractSize", 0.01)),
+        contract_size=float(quantity.base_step) if quantity else float(admission[1].base_step) if admission else float(params.get("contractSize", 0.01)),
+        quantity_rules=quantity,
         entry_admission=modes.get("entryAdmission"),
         admission_rules=admission_rules if admission else None,
         max_entry_leverage=admission[0] if admission else 8.0,
@@ -156,6 +160,8 @@ def build_signal_kernel_config(
     profile: Any,
     params: Mapping[str, Any],
     trade_start_idx: int = 0,
+    quantity_rules: AdmissionRules | None = None,
+    admission_rules: AdmissionRules | None = None,
 ) -> SignalKernelConfig:
     """Convert a signal_reversal profile and params into kernel settings."""
 
@@ -163,12 +169,16 @@ def build_signal_kernel_config(
     mode_state = resolve_signal_reversal_mode_state(modes)
     stop_mode = mode_state.stop_mode
     boundary_mode = mode_state.boundary_mode
+    quantity = execution_quantity(profile, quantity_rules, admission_rules)
+    if admission_rules is not None:
+        raise ValueError("Signal execution does not support risk admission rules.")
 
     return SignalKernelConfig(
         initial_capital=float(params.get("initialCapital", 100.0)),
         commission_pct=float(params.get("commissionPct", 0.0)),
         position_pct=float(params.get("positionPct", 100.0)),
-        contract_size=float(params.get("contractSize", 0.01)),
+        contract_size=float(quantity.base_step) if quantity else float(params.get("contractSize", 0.01)),
+        quantity_rules=quantity,
         enable_long=_coerce_bool(params.get("enableLong"), True),
         enable_short=_coerce_bool(params.get("enableShort"), True),
         emergency_stop_enabled=stop_mode == "emergency_pct",
@@ -192,6 +202,7 @@ def run_v2_strategy(
     compute_max_drawdown_mtm: bool = False,
     admission_rules: AdmissionRules | None = None,
     entry_filter_context=MISSING,
+    quantity_rules: AdmissionRules | None = None,
 ) -> V2RunResult:
     """Run V2 execution and return an enriched Merlin strategy result."""
 
@@ -200,12 +211,13 @@ def run_v2_strategy(
     modes = active_mode_values(profile, params)
     topology = modes.get("topology")
     if topology == "signal_reversal":
-        config = build_signal_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx)
+        config = build_signal_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx,
+                                            quantity_rules=quantity_rules, admission_rules=admission_rules)
         kernel_result = run_signal_reversal_kernel(data, config)
         initial_balance = config.initial_capital
     elif topology is None:
         config = build_kernel_config(profile=profile, params=params, trade_start_idx=trade_start_idx,
-                                     admission_rules=admission_rules)
+                                     admission_rules=admission_rules, quantity_rules=quantity_rules)
         kernel_result = run_reference_kernel(data, config)
         initial_balance = config.initial_capital
     else:

@@ -373,6 +373,10 @@ complete current strategy matrix in general documentation.
 ## Ticker-selected portfolios
 
 Start/Queue can run a complete Parquet pool as one capability-gated portfolio job.
+The validated profile enables S07 risk admission and quantity-only execution for
+the five legacy S03/S06 V2 configurations. Quantity-only children use pinned Parquet
+steps/minimums without adding caps or filters; ordinary executions keep manual
+Contract Size. Saved owned-child context governs replay, including WFA carried capital.
 X selects from causal ordinary candles; Fixed without WFA and Fixed/Grid Calendar
 WFA execute actual carried capital. A mandatory PF set owns real account-period
 studies. Analytics provides inline periods and whole-run ranks; Results opens explicit

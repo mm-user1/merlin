@@ -54,14 +54,10 @@ def normalize_selector(value=None):
 
 def require_capability(strategy_config):
     from .engine_v2.profile import parse_execution_profile
-    if strategy_config.get("engine") != "v2":
-        raise ValueError("Ticker Selector requires a V2 strategy with pack-based risk-bracket execution.")
-    profile = parse_execution_profile(strategy_config)
-    if profile.modes.get("entryAdmission") != "risk_bracket_v1" or profile.modes.get("boundary") != "strict_close":
-        raise ValueError("Ticker Selector requires risk_bracket_v1 and strict-close boundaries.")
-    if "initialCapital" not in strategy_config.get("parameters", {}):
-        raise ValueError("Ticker Selector requires a declared initialCapital.")
-    return profile
+    from .engine_v2.quantity import selector_capability
+    if selector_capability(strategy_config) is None:
+        raise ValueError("Ticker Selector requires a qualified V2 strict-close profile with declared initialCapital and instrument quantity support.")
+    return parse_execution_profile(strategy_config)
 
 
 def normalize_pool(sources):

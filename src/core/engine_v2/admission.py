@@ -19,16 +19,18 @@ def uses_admission(config):
     return (config.get("execution") or {}).get("entryAdmission") == ADMISSION_MODE
 
 
-def run_strategy(strategy_class, frame, params, trade_start_idx=0, *, admission_rules=None, entry_filter_context=MISSING):
+def run_strategy(strategy_class, frame, params, trade_start_idx=0, *, admission_rules=None, entry_filter_context=MISSING, quantity_rules=None):
     """Application adapter; legacy strategies retain their existing run entry point."""
     from strategies import get_strategy_config
     strategy_id = getattr(strategy_class, "STRATEGY_ID", None)
     if strategy_id is None:
+        if quantity_rules is not None:
+            raise ValueError("Quantity execution requires a registered compatible V2 strategy.")
         validate_context((), entry_filter_context)
         return strategy_class.run(frame, params, trade_start_idx)
     config = get_strategy_config(strategy_id)
     validate_context(capability(config), entry_filter_context)
-    if not uses_admission(config):
+    if not uses_admission(config) and quantity_rules is None:
         return strategy_class.run(frame, params, trade_start_idx)
     import importlib
     from .profile import parse_execution_profile
@@ -36,10 +38,13 @@ def run_strategy(strategy_class, frame, params, trade_start_idx=0, *, admission_
     from core.grid_v2 import GridV2StrategyHooks
     hooks = GridV2StrategyHooks.from_strategy(importlib.import_module(strategy_class.__module__),
         config=config, entry_filter_context=entry_filter_context)
+    from .quantity import execution_quantity
+    execution_quantity(parse_execution_profile(config), quantity_rules, admission_rules)
     normalized = hooks.normalize_params(dict(params)) if hooks.normalize_params else dict(params)
     return run_v2_strategy(data=hooks.build_execution_data(frame, normalized),
         profile=parse_execution_profile(config), params=normalized, trade_start_idx=trade_start_idx,
-        admission_rules=admission_rules, entry_filter_context=entry_filter_context).strategy_result
+        admission_rules=admission_rules, entry_filter_context=entry_filter_context,
+        quantity_rules=quantity_rules).strategy_result
 
 
 def positive_cap(value: Any) -> float:

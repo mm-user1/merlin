@@ -782,6 +782,19 @@ operational database. See the [V1](../docs/ADDING_NEW_STRATEGY.md) and
 
 ### Ticker portfolios
 
+Quantity-only preservation is covered by `v2/test_v2_quantity_execution.py`
+(all five configurations/12 variants, exact neutral-rule comparisons, Grid packers
+and conditional identity), `v2/test_v2_quantity_edges.py` (independent arithmetic,
+refusals, close independence, exhausted/nonfinite capital), `test_quantity_workers.py`
+(real spawned workers with locked sources), and `server/test_quantity_portfolio.py`
+(Fixed/WFA actual carry, FT/Stress, ownership, saved/manual replay and relocation).
+`test_js_portfolio.py` includes the actual Start/form/Queue/Results quantity handlers;
+browser appearance and restoration still require the separate owner check.
+Keep all V2 historical identity and baseline tests; do not regenerate frozen oracles.
+Because `engine_v2/kernel.py` is shared with Pattern Lab, include its scoped bracket,
+consistency, sequential evidence, LF portability and account execution/verification/
+integration suites. New source identities are truthful; sealed old evidence is immutable.
+
 `tests/server/test_portfolio_replay.py` covers stored Fixed portfolio allocations
 below/above editor bounds, actual carry, manual-source execution and fresh-process
 reconstruction against an explicitly selected external DB. It also checks ordinary

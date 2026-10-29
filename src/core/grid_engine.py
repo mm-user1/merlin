@@ -515,6 +515,15 @@ def _settings_from_config(config: OptimizationConfig) -> GridSettings:
 def _normalize_fixed_config(config: OptimizationConfig) -> None:
     from .parameter_mode import normalize_parameter_mode
     from strategies import get_strategy_config
+    if config.quantity_rules is not None:
+        from .engine_v2.quantity import execution_quantity
+        from .engine_v2.profile import parse_execution_profile
+        spec = get_strategy_config(config.strategy_id)
+        execution_quantity(parse_execution_profile(spec), config.quantity_rules, config.admission_rules)
+        if ("contractSize" in (config.enabled_params or {}) or "contractSize" in (config.param_ranges or {})
+                or "contractSize_options" in config.fixed_params):
+            raise ValueError("Contract Size is inactive under instrument quantity rules.")
+        config.fixed_params["contractSize"] = spec["parameters"]["contractSize"]["default"]
     payload = dict(vars(config))
     if payload.get("parameterMode") is None:
         payload.pop("parameterMode", None)
@@ -545,6 +554,7 @@ def _grid_v2_settings_from_config(config: OptimizationConfig):
     return GridV2Settings(
         entry_filter_config=tuple(effective_config(config.entryFilters)) if getattr(config, "entryFilters", None) is not None else (),
         admission_rules=getattr(config, "admission_rules", None),
+        quantity_rules=getattr(config, "quantity_rules", None),
         top_n=max(0, int(getattr(config, "grid_top_candidates", 10) or 10)),
         max_signal_cache_mb=_grid_v2_max_cache_mb_from_config(config),
         worker_multiplier=1,
@@ -595,6 +605,10 @@ def _grid_v2_strategy_config_with_range_overrides(
 
     config_copy: Dict[str, Any] = deepcopy(dict(strategy_config))
     param_ranges = getattr(config, "param_ranges", {}) or {}
+    if getattr(config, "quantity_rules", None) is not None and (
+            "contractSize" in param_ranges or "contractSize" in (getattr(config, "enabled_params", {}) or {})
+            or "contractSize_options" in config.fixed_params):
+        raise ValueError("Contract Size is inactive under instrument quantity rules.")
     if (strategy_config.get("execution") or {}).get("entryAdmission") and "maxEntryLeverage" in param_ranges:
         raise ValueError("maxEntryLeverage is fixed and cannot have an optimization range.")
     if not param_ranges:
@@ -1590,6 +1604,7 @@ def _grid_v2_slow_result(
         profile=plan.profile,
         params=params,
         admission_rules=plan.settings.admission_rules,
+        quantity_rules=plan.settings.quantity_rules,
         entry_filter_context=hooks.entry_filter_context,
         trade_start_idx=trade_start_idx,
         compute_sharpe_daily=compute_sharpe_daily,
@@ -1759,6 +1774,19 @@ def _run_grid_v2_optimization(
         config,
     )
     from .engine_v2.admission import uses_admission, read_admission_envelope, positive_cap
+    from .engine_v2.quantity import execution_quantity, read_quantity_envelope
+    from .engine_v2.profile import parse_execution_profile
+    quantity = execution_quantity(parse_execution_profile(strategy_config), config.quantity_rules, config.admission_rules)
+    if quantity is not None or config.quantity_execution is not None:
+        from .data_input import validate_pin
+        if quantity is None or prepared_frame is None or config.data_input is None:
+            raise ValueError("Quantity execution requires prepared Parquet input and validated rules.")
+        pinned = read_quantity_envelope(config.quantity_execution)
+        if pinned != quantity or pinned.instrument_id != validate_pin(config.data_input)["instrument_id"]:
+            raise ValueError("Prepared quantity rules disagree with pinned execution context.")
+        if "maxEntryLeverage" in config.fixed_params:
+            raise ValueError("Quantity execution does not accept maxEntryLeverage.")
+        config.fixed_params["contractSize"] = strategy_config["parameters"]["contractSize"]["default"]
     if uses_admission(strategy_config):
         from .data_input import validate_pin
         if prepared_frame is None or config.data_input is None:
@@ -2221,6 +2249,8 @@ def run_grid_optimization(
             **({"prepared_frame": prepared_frame} if prepared_frame is not None else {}),
         )
 
+    if config.quantity_rules is not None or config.quantity_execution is not None:
+        raise ValueError("Quantity execution requires a compatible V2 Grid strategy.")
     if prepared_frame is not None:
         raise ValueError("Prepared Parquet inputs require Backtester V2.")
 

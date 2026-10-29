@@ -84,6 +84,8 @@ class OptimizationConfig:
     v2_runtime: Optional[Dict[str, Any]] = None
     data_input: Optional[Dict[str, Any]] = None
     admission_rules: Any = None
+    quantity_rules: Any = None
+    quantity_execution: Optional[Dict[str, Any]] = None
     entry_admission: Optional[Dict[str, Any]] = None
     entryFilters: Any = None
     entry_filter_inputs: Any = None
@@ -3445,6 +3447,8 @@ def run_optimization(config: OptimizationConfig, *, prepared_frame=None) -> Tupl
         from .grid_engine import run_grid_optimization
 
         return run_grid_optimization(config, **({"prepared_frame": prepared_frame} if prepared_frame is not None else {}))
+    if config.quantity_rules is not None or config.quantity_execution is not None:
+        raise ValueError("Quantity execution requires Grid.")
     if prepared_frame is not None:
         raise ValueError("Prepared Parquet optimization requires Grid.")
     if optimizer_mode != "optuna":

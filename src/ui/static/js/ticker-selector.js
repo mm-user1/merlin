@@ -4,8 +4,7 @@
   let retained = structuredClone(defaults);
   const el = id => document.getElementById(id);
   function capable() {
-    const c = window.currentStrategyConfig;
-    return c?.engine === 'v2' && c?.execution?.entryAdmission === 'risk_bracket_v1' && c?.execution?.boundary === 'strict_close';
+    return ['risk_bracket_v1', 'instrument_rules_v1'].includes(window.currentStrategyConfig?.tickerSelectorCapability?.policy);
   }
   function sync() {
     const root = el('tickerSelectorEditor');
@@ -14,8 +13,23 @@
     const enabled = el('enableTickerSelector').checked;
     el('tickerSelectorSettings').hidden = !enabled;
     el('tickerSelectorError').textContent = enabled && !capable()
-      ? 'Ticker Selector requires a V2 pack-based risk-bracket strategy. Turn it Off or choose a supported strategy.' : '';
+      ? 'Ticker Selector requires a supported V2 instrument-rule strategy. Turn it Off or choose a supported strategy.' : '';
     root.querySelectorAll('input, select').forEach(control => { control.disabled = control.id !== 'enableTickerSelector' && !capable(); });
+    const contract = el('backtest_contractSize');
+    if (contract) {
+      const fromRules = enabled && window.currentStrategyConfig?.tickerSelectorCapability?.policy === 'instrument_rules_v1';
+      contract.disabled = fromRules;
+      contract.style.flexShrink = '0';
+      const label = contract.parentElement.querySelector('label');
+      if (label) label.style.flexShrink = '0';
+      let note = el('quantityRulesHint');
+      if (!note) {
+        note = document.createElement('span'); note.id = 'quantityRulesHint';
+        note.className = 'help-text'; note.style.marginLeft = '8px'; note.style.fontSize = '12px'; note.style.minWidth = '0';
+        note.textContent = 'From PQ instrument rules'; note.title = 'From Parquet instrument rules'; contract.parentElement.appendChild(note);
+      }
+      note.hidden = !fromRules;
+    }
   }
   function read() {
     if (!el('enableTickerSelector')) return structuredClone(defaults);

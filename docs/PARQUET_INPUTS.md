@@ -214,6 +214,23 @@ of the old saved execution. Missing/malformed/unknown context blocks reconstruct
 for a current admission profile; stored tables remain readable offline. FT/Stress
 spawned workers receive frame/rules explicitly and never reopen the pack.
 
+## Quantity-only portfolio rules
+
+Quantity-only portfolios reuse the same instrument validation, exact base-unit
+conversion and source snapshot through `PreparedInput.quantity_rules` and a separate
+version-1 `quantity_execution` envelope (`mode="instrument_rules_v1"`). This does
+not opt a legacy strategy into risk admission or Entry Filters. Preparation uses
+the same target read session with filters absent; spawned FT/Stress workers receive
+RAM frames/rules only. Quantity-only Preview reads neither metadata nor candles.
+
+Saved quantity replay additionally validates actual database portfolio ownership,
+profile, instrument and effective rule semantics. Present-null/unknown context is
+invalid; old ordinary records remain ordinary. Manual tests from these owned children
+verify the parent's quantity semantics before preparing a new interval. Changed
+relevant rules refuse reconstruction; append-only history outside consumed bounds
+and equivalent decimal spellings remain compatible. Relocation changes only the
+locator; offline tables do not require a pack. See [Ticker portfolios](TICKER_PORTFOLIOS.md).
+
 ## Locations, locks and explicit collection
 
 Generic test/WFA metric callers now use execution initial capital for CSV and

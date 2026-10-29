@@ -2607,6 +2607,7 @@ function syncOptimizerModeUI() {
 
   if (typeof syncParameterTieControls === 'function') syncParameterTieControls();
   syncFixedControls();
+  window.TickerSelector?.sync();
   if (effectiveGrid) {
     scheduleGridPreviewUpdate();
   }

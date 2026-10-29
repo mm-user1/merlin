@@ -12,7 +12,7 @@ from uuid import uuid4
 import pandas as pd
 
 from .data_input import prepare_input, timeframe_label
-from .entry_filters import effective_config
+from .entry_filters import effective_config, MISSING
 from .engine_v2.admission import aggregate_entries
 from .grid_engine import run_grid_optimization, _grid_v2_settings_from_config
 from .grid_v2 import GridV2PlanReuseCache
@@ -59,6 +59,10 @@ def run_portfolio(config, selector, sources, *, wfa=None, cancelled=lambda: Fals
                   progress=lambda message: None, queue_number=None, publish=True):
     from .storage import _prepare_study_config_payload
     selector, pool, periods = plan_request(config, selector, sources, wfa)
+    from strategies import get_strategy_config
+    from .engine_v2.quantity import selector_capability, QUANTITY_MODE
+    strategy_config = get_strategy_config(config.strategy_id)
+    quantity_only = selector_capability(strategy_config)["policy"] == QUANTITY_MODE
     started = time.time()
     identifier = str(uuid4())
     total = positive_capital(config.fixed_params["initialCapital"])
@@ -66,7 +70,7 @@ def run_portfolio(config, selector, sources, *, wfa=None, cancelled=lambda: Fals
     minutes = pool[0]["timeframe_minutes"]
     step = pd.Timedelta(minutes=minutes)
     request = {key: deepcopy(value) for key, value in vars(config).items()
-               if key not in {"admission_rules", "entry_filter_context"} and not key.startswith("_")}
+               if key not in {"admission_rules", "quantity_rules", "quantity_execution", "entry_filter_context"} and not key.startswith("_")}
     record = {"version": 1, "id": identifier, "selector": selector, "request": request,
               "pool": pool, "periods": periods, "initialCapital": total, "referenceCapital": reference,
               "wfa": asdict(wfa) if wfa else None, "status": "complete", "requestedStart": config.fixed_params["start"],
@@ -96,8 +100,8 @@ def run_portfolio(config, selector, sources, *, wfa=None, cancelled=lambda: Fals
                 prepared[account["id"]] = prepare_input(row["source"], date_filter=True,
                     start=period["windows"][0]["isStart"] if wfa else period["start"],
                     end=(pd.Timestamp(period["end"]) - step).isoformat(), warmup_bars=config.warmup_bars,
-                    cancelled=cancelled, admission_params=config.fixed_params,
-                    entry_filters=effective_config(config.entryFilters))
+                    cancelled=cancelled, admission_params=None if quantity_only else config.fixed_params,
+                    entry_filters=MISSING if quantity_only else effective_config(config.entryFilters), quantity_only=quantity_only)
             except (ValueError, OSError) as exc:
                 if cancelled() or role == "funded":
                     raise ValueError(f"Period {period['id']} {row['instrument']} preparation: {exc}") from exc
@@ -118,8 +122,12 @@ def run_portfolio(config, selector, sources, *, wfa=None, cancelled=lambda: Fals
                 data = prepared[account["id"]]
                 child_config = deepcopy(config)
                 child_config.data_input, child_config.entry_admission = data.facts, data.entry_admission
-                child_config.fixed_params['maxEntryLeverage'] = data.entry_admission['maxEntryLeverage']
+                if quantity_only:
+                    child_config.fixed_params['contractSize'] = strategy_config['parameters']['contractSize']['default']
+                else:
+                    child_config.fixed_params['maxEntryLeverage'] = data.entry_admission['maxEntryLeverage']
                 child_config.admission_rules = data.admission_rules
+                child_config.quantity_rules, child_config.quantity_execution = data.quantity_rules, data.quantity_execution
                 child_config.entry_filter_context, child_config.entry_filter_inputs = data.entry_filter_context, data.entry_filter_inputs
                 child_config.fixed_params.update(start=data.facts["bounds"]["evaluation_start"], end=data.facts["bounds"]["evaluation_end"])
                 child_config.csv_original_name = f"{account['instrument']}, {timeframe_label(minutes)}"

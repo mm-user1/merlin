@@ -194,6 +194,8 @@ class PreparedInput:
     entry_admission: dict | None = None
     entry_filter_context: object = MISSING
     entry_filter_inputs: dict | None = None
+    quantity_rules: object = None
+    quantity_execution: dict | None = None
 
     def window(self, start, end, warmup_bars):
         return prepare_dataset_with_warmup(self.frame, start, end, warmup_bars)
@@ -273,15 +275,34 @@ def _with_admission(session, prepared, admission_params):
                    entry_admission=admission_envelope(rules, admission_params.get("maxEntryLeverage", 8)))
 
 
-def prepare_input(source, *, cancelled=None, admission_params=None, entry_filters=MISSING, **range_options):
+def _with_quantity(session, prepared, enabled):
+    if not enabled:
+        return prepared
+    from .engine_v2.quantity import quantity_envelope
+    rules = _admission_rules(session, prepared.facts["source"]["instrument_id"])
+    return replace(prepared, quantity_rules=rules, quantity_execution=quantity_envelope(rules))
+
+
+def _replay_quantity(session, prepared, saved):
+    from .engine_v2.quantity import read_quantity_envelope
+    rules = read_quantity_envelope(saved)
+    current = _admission_rules(session, prepared.facts["source"]["instrument_id"])
+    if rules.semantic() != current.semantic():
+        raise DataInputError("Effective instrument quantity rules changed; saved execution replay refused.")
+    return replace(prepared, quantity_rules=rules, quantity_execution=deepcopy(saved))
+
+
+def prepare_input(source, *, cancelled=None, admission_params=None, entry_filters=MISSING, quantity_only=False, **range_options):
     source = normalize_source(source)
+    if quantity_only and (admission_params is not None or entry_filters is not MISSING):
+        raise DataInputError("Quantity-only preparation cannot carry risk admission or entry filters.")
     if entry_filters is not MISSING:
         from .entry_filter_input import prepare_bundle
         return prepare_bundle(source["pack_root"],
             lambda session: _with_admission(session, _prepare(session, source, **range_options), admission_params),
             entry_filters, cancelled=cancelled)
     with pack_session(source["pack_root"], cancelled=cancelled) as session:
-        return _with_admission(session, _prepare(session, source, **range_options), admission_params)
+        return _with_quantity(session, _with_admission(session, _prepare(session, source, **range_options), admission_params), quantity_only)
 
 
 def validate_pin(pin):
@@ -323,11 +344,15 @@ def _replay(session, pin, source):
 
 
 def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None,
-                 entry_filters=MISSING, entry_filter_inputs=MISSING, filter_root_overrides=None):
+                 entry_filters=MISSING, entry_filter_inputs=MISSING, filter_root_overrides=None, quantity_execution=MISSING):
     source = validate_pin(pin)
+    if quantity_execution is not MISSING and (entry_admission is not None or entry_filters is not MISSING):
+        raise DataInputError("Conflicting quantity execution context.")
     root = root_override if root_override is not None else source["pack_root"]
     def load(session):
         prepared = _replay(session, pin, source)
+        if quantity_execution is not MISSING:
+            return _replay_quantity(session, prepared, quantity_execution)
         if entry_admission is None:
             return prepared
         from .engine_v2.admission import read_admission_envelope
@@ -346,11 +371,16 @@ def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=Non
 
 
 def prepare_manual_input(pin, *, root_override=None, cancelled=None, admission_params=None,
-                         entry_filters=MISSING, parent_filter_inputs=None, filter_root_overrides=None, **range_options):
+                         entry_filters=MISSING, parent_filter_inputs=None, filter_root_overrides=None, quantity_execution=MISSING, **range_options):
     source = validate_pin(pin)
+    if quantity_execution is not MISSING and (admission_params is not None or entry_filters is not MISSING):
+        raise DataInputError("Conflicting quantity execution context.")
     source["pack_root"] = str(Path(root_override or source["pack_root"]).resolve())
     def load(session):
-        _replay(session, pin, source)
+        parent = _replay(session, pin, source)
+        if quantity_execution is not MISSING:
+            _replay_quantity(session, parent, quantity_execution)
+            return _with_quantity(session, _prepare(session, source, **range_options), True)
         return _with_admission(session, _prepare(session, source, **range_options), admission_params)
     if entry_filters is not MISSING:
         from .entry_filter_input import prepare_bundle, validate_envelope

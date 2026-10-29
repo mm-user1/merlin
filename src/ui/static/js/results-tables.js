@@ -769,6 +769,17 @@ async function showParameterDetails(result) {
 
   const filterConfig = ResultsState.activeTab === 'manual_tests'
     ? ResultsState.activeManualTest?.config || {} : ResultsState.savedConfig || {};
+  const quantity = filterConfig.quantity_execution;
+  if (Object.hasOwn(filterConfig, 'quantity_execution')) {
+    const card = document.createElement('div'); card.className = 'param-group-card';
+    const heading = document.createElement('div'); heading.className = 'param-group-title'; heading.textContent = 'Quantity rules';
+    const detail = document.createElement('div'); detail.className = 'param-item'; detail.style.whiteSpace = 'pre-line';
+    const r = quantity?.rules;
+    detail.textContent = quantity?.version === 1 && quantity?.mode === 'instrument_rules_v1' && r
+      ? `From Parquet instrument rules · ${r.instrument_id}\nBase-unit step: ${r.base_step} · Minimum quantity: ${r.base_minimum}\nMinimum lots: ${r.minimum_lots} · Minimum notional: ${r.minimum_notional ?? 'None'}`
+      : 'Unavailable: invalid saved quantity rules';
+    card.append(heading, detail); content.appendChild(card);
+  }
   if (window.EntryFilters) {
     const filterCard = document.createElement('div'); filterCard.className = 'param-group-card';
     const heading = document.createElement('div'); heading.className = 'param-group-title'; heading.textContent = 'Entry Filters';
@@ -785,6 +796,7 @@ async function showParameterDetails(result) {
 
   orderedKeys.forEach((key) => {
     if (['dateFilter', 'start', 'end'].includes(key)) return;
+    if (key === 'contractSize' && Object.hasOwn(filterConfig, 'quantity_execution')) return;
     const def = paramDefs[key];
     const group = (def && def.group) || 'Other';
     if (!groups[group]) {

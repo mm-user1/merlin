@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import pandas as pd
@@ -15,7 +15,9 @@ from .contracts import (
     GuardrailSummary,
     StandingState,
 )
-from .kernel import ExecutionData, KernelResult
+from .kernel import ExecutionData, KernelResult, quantity_lots
+from .admission import AdmissionRules
+from .quantity import validate_kernel_quantity, check_lot_ratio, entry_notional_allowed
 
 
 EMERGENCY_SL_EXIT_REASON = "Emergency SL"
@@ -27,6 +29,7 @@ class SignalKernelConfig:
     commission_pct: float = 0.0
     position_pct: float = 100.0
     contract_size: float = 0.01
+    quantity_rules: AdmissionRules | None = None
     enable_long: bool = True
     enable_short: bool = True
     emergency_stop_enabled: bool = False
@@ -180,6 +183,9 @@ def run_signal_reversal_kernel(data: ExecutionData, config: SignalKernelConfig) 
     """Run a next-open signal-reversal reference execution loop."""
 
     _validate_config(config)
+    quantity_rules = validate_kernel_quantity(config)
+    if quantity_rules is not None:
+        config = replace(config, contract_size=float(quantity_rules.base_step))
     length = len(data.timestamps)
     guardrails = _GuardrailAccumulator()
     if length == 0:
@@ -240,6 +246,10 @@ def run_signal_reversal_kernel(data: ExecutionData, config: SignalKernelConfig) 
                 close_position(open_price, timestamp)
             else:
                 pending_market_close = False
+
+        if pending_entry is not None and quantity_rules is not None:
+            if not entry_notional_allowed(quantity_rules, open_price, pending_entry.size, commission_rate, balance):
+                pending_entry = None
 
         if pending_entry is not None and position.direction == 0:
             order = pending_entry
@@ -319,10 +329,16 @@ def run_signal_reversal_kernel(data: ExecutionData, config: SignalKernelConfig) 
                     raw_size = math.nan
                     if close > 0.0 and config.contract_size > 0.0:
                         raw_size = (balance * config.position_pct / 100.0 / close) / config.contract_size
+                    if quantity_rules is not None and balance > 0 and config.position_pct > 0 and close > 0:
+                        check_lot_ratio(raw_size)
                     order_size = math.floor(raw_size) * config.contract_size if math.isfinite(raw_size) else math.nan
+                    if quantity_rules is not None and math.isfinite(raw_size) and raw_size > 0 and not math.isfinite(order_size):
+                        raise ValueError("Unrepresentable planned quantity.")
                     if not (math.isfinite(order_size) and order_size > 0.0):
                         guardrails.zero_size_entry_count += 1
                         guardrails.flag(GUARDRAIL_FLAG_ZERO_SIZE_ENTRY)
+                    elif quantity_rules is not None and quantity_lots(order_size, config.contract_size) < quantity_rules.minimum_lots:
+                        pass
                     else:
                         pending_entry = _PendingEntry(direction=direction, size=float(order_size))
 
@@ -338,6 +354,8 @@ def run_signal_reversal_kernel(data: ExecutionData, config: SignalKernelConfig) 
         elif position.direction < 0:
             unrealized = (position.entry_price - close) * position.size
         equity_curve.append(balance + unrealized)
+        if quantity_rules is not None and not all(math.isfinite(x) for x in (balance, balance + unrealized)):
+            raise ValueError("Nonfinite quantity-execution account capital or equity.")
         balance_curve.append(balance)
         timestamps.append(timestamp)
 

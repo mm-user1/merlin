@@ -145,18 +145,27 @@ def replay_config(config, *, cancelled=None):
         options = dict(entry_filters=effective, entry_filter_inputs=config["entry_filter_inputs"],
                        filter_root_overrides=overrides)
     return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled,
+                        quantity_execution=config.get("quantity_execution", MISSING),
                         entry_admission=config.get("entry_admission"),
                         admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"), **options)
 
 
 def execution_input(study, manual=None):
     if __package__:
-        from .server_services import _resolve_csv_path
+        from .server_services import _resolve_csv_path, _resolve_stored_execution_context
     else:
-        from server_services import _resolve_csv_path
+        from server_services import _resolve_csv_path, _resolve_stored_execution_context
     config = study.get("config_json") or {}
     if manual is not None:
+        parent_config = config
         config = (manual.get("results_json") or {}).get("config") or {}
+        if "quantity_execution" in parent_config or "quantity_execution" in config:
+            from core.engine_v2.quantity import read_quantity_envelope
+            _resolve_stored_execution_context(study)
+            parent_rules = read_quantity_envelope(parent_config.get("quantity_execution"))
+            manual_rules = read_quantity_envelope(config.get("quantity_execution"))
+            if parent_rules.semantic() != manual_rules.semantic():
+                raise DataInputError("Manual quantity context disagrees with its owned parent.")
     prepared = replay_config(config)
     if prepared is not None:
         return "", prepared
@@ -210,6 +219,8 @@ def replay_oos_input(study, trial):
     frame, idx = prepare_dataset_with_warmup(
         prepared.frame, dates["start"], dates["end"], facts["warmup_bars"]
     )
+    if prepared.quantity_rules is not None:
+        raise DataInputError("Quantity portfolios do not support standalone holdout replay.")
     if (frame.empty or idx != facts["trade_start_idx"] or not 0 <= idx < len(frame)
             or frame.index[0] != dates["preparation_start"]
             or frame.index[-1] != dates["preparation_end"]):
@@ -280,6 +291,14 @@ def register_routes(app):
         try:
             if "data_input" not in config:
                 raise DataInputError("This result has no Parquet input pin.")
+            parent_config = saved["study"].get("config_json") or {}
+            _resolve_stored_execution_context(saved["study"])
+            if manual is not None and ("quantity_execution" in parent_config or "quantity_execution" in config):
+                from core.engine_v2.quantity import read_quantity_envelope
+                parent_rules = read_quantity_envelope(parent_config.get("quantity_execution"))
+                manual_rules = read_quantity_envelope(config.get("quantity_execution"))
+                if parent_rules.semantic() != manual_rules.semantic():
+                    raise DataInputError("Manual quantity context differs from its owned parent.")
             raw_root = body.get("packRoot")
             if not isinstance(raw_root, str) or not raw_root.strip():
                 raise DataInputError("packRoot must be a nonblank path string.")
@@ -287,6 +306,7 @@ def register_routes(app):
             dependency = body.get("dependency", "target")
             if dependency == "target":
                 replay_input(config["data_input"], root_override=str(root),
+                    quantity_execution=config.get("quantity_execution", MISSING),
                     entry_admission=config.get("entry_admission"),
                     admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
                 updated = {**config, "data_input_root_override": str(root)}
@@ -355,7 +375,7 @@ def register_routes(app):
             else:
                 csv_path, prepared = execution_input(study, manual)
                 if prepared is not None:
-                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context}
+                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context}
             params = context.params_for(trial.get("params") or {}, operation_start=start, operation_end=end)
             equity, timestamps, error = _run_equity_export(
                 strategy_id=study["strategy_id"], csv_path=csv_path, params=params,

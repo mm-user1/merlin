@@ -551,6 +551,8 @@ class WalkForwardEngine:
                 self.base_config_template.setdefault("entryFilters", {"version": 1, "enabled": False, "items": []})
             if prepared_input.entry_admission is not None:
                 self.base_config_template["entry_admission"] = deepcopy(prepared_input.entry_admission)
+            if prepared_input.quantity_execution is not None:
+                self.base_config_template["quantity_execution"] = deepcopy(prepared_input.quantity_execution)
         self._grid_v2_plan_cache = None
 
         from strategies import get_strategy, get_strategy_config
@@ -564,6 +566,16 @@ class WalkForwardEngine:
             str(strategy_config.get("engine", "v1") or "v1").strip().lower()
             == "v2"
         )
+        quantity = prepared_input.quantity_rules if prepared_input is not None else None
+        if quantity is not None or "quantity_execution" in self.base_config_template:
+            from .engine_v2.quantity import execution_quantity, read_quantity_envelope
+            from .engine_v2.profile import parse_execution_profile
+            if quantity is None or not self._is_v2_strategy:
+                raise ValueError("Quantity WFA requires prepared compatible V2 input.")
+            execution_quantity(parse_execution_profile(strategy_config), quantity, prepared_input.admission_rules)
+            if read_quantity_envelope(self.base_config_template.get("quantity_execution")) != quantity:
+                raise ValueError("Prepared WFA quantity rules disagree with saved context.")
+            self.base_config_template["fixed_params"]["contractSize"] = strategy_config["parameters"]["contractSize"]["default"]
         if self._is_v2_strategy:
             from .engine_v2.profile import parse_execution_profile
 
@@ -1065,6 +1077,7 @@ class WalkForwardEngine:
         from .engine_v2.admission import run_strategy
         return run_strategy(self.strategy_class, df_prepared, run_params, trade_start_idx,
             admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None,
+            quantity_rules=self.prepared_input.quantity_rules if self.prepared_input is not None else None,
             entry_filter_context=self.prepared_input.entry_filter_context if self.prepared_input is not None else MISSING)
 
     def _window_execution_params(
@@ -1289,7 +1302,7 @@ class WalkForwardEngine:
                 ft_start_date=training_end.strftime("%Y-%m-%d"),
                 ft_end_date=is_end.strftime("%Y-%m-%d"),
                 n_workers=worker_count,
-                **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
+                **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "quantity_rules": self.prepared_input.quantity_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
             )
             module_status["forward_test"]["ran"] = True
             ft_passed_results = filter_ft_passed_results(ft_results)
@@ -1357,7 +1370,7 @@ class WalkForwardEngine:
                         fixed_params=fixed_params,
                         config_json=strategy_config_json,
                         n_workers=worker_count,
-                        **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
+                        **({"prepared_frame": self.prepared_input.frame, "admission_rules": self.prepared_input.admission_rules, "quantity_rules": self.prepared_input.quantity_rules, "entry_filter_context": self.prepared_input.entry_filter_context} if self.prepared_input is not None else {}),
                     )
                     module_status["stress_test"]["ran"] = True
                 except Exception as exc:
@@ -3184,8 +3197,10 @@ class WalkForwardEngine:
             entry_filter_inputs=self.prepared_input.entry_filter_inputs if self.prepared_input is not None else None,
             data_input=self.prepared_input.facts if self.prepared_input is not None else None,
             admission_rules=self.prepared_input.admission_rules if self.prepared_input is not None else None,
+            quantity_rules=self.prepared_input.quantity_rules if self.prepared_input is not None else None,
             entry_filter_context=self.prepared_input.entry_filter_context if self.prepared_input is not None else MISSING,
             entry_admission=self.prepared_input.entry_admission if self.prepared_input is not None else None,
+            quantity_execution=self.prepared_input.quantity_execution if self.prepared_input is not None else None,
             csv_file=csv_buffer,
             strategy_id=self.config.strategy_id,
             enabled_params=deepcopy(self.base_config_template["enabled_params"]),

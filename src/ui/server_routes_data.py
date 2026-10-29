@@ -592,6 +592,7 @@ def register_routes(app):
                     date_filter=True, start=start_date, end=end_date,
                     warmup_bars=execution_context.warmup_bars,
                     admission_params=execution_context.base_params if "entry_admission" in config else None,
+                    quantity_execution=config.get("quantity_execution", MISSING),
                     **filter_options)
             except (ValueError, OSError) as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
@@ -600,6 +601,8 @@ def register_routes(app):
         elif data_source == "original_parquet":
             return jsonify({"error": "Original Parquet input pin is missing."}), HTTPStatus.BAD_REQUEST
         else:
+            if "quantity_execution" in config:
+                return jsonify(error="Quantity portfolio manual tests require the owned Parquet source."), HTTPStatus.BAD_REQUEST
             if data_source == "original_csv":
                 csv_path = study.get("csv_file_path")
                 if not csv_path:
@@ -713,7 +716,7 @@ def register_routes(app):
 
         try:
             results_payload = run_period_test_for_trials(
-                admission_rules=prepared.admission_rules if prepared is not None else None,
+                admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
                 entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING,
                 diagnostic_scope="manual",
                 df=df,
@@ -774,6 +777,8 @@ def register_routes(app):
                                               entry_filter_inputs=prepared.entry_filter_inputs)
             if prepared.entry_admission is not None:
                 results_json["config"].update(entry_admission=prepared.entry_admission, fixed_params=fixed_params)
+            if prepared.quantity_execution is not None:
+                results_json["config"].update(quantity_execution=prepared.quantity_execution, fixed_params=fixed_params)
 
         trials_tested_csv = ",".join(str(int(n)) for n in trial_numbers)
         test_id = save_manual_test_to_db(
@@ -856,7 +861,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -911,7 +916,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -1044,7 +1049,7 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=params,
@@ -1342,7 +1347,7 @@ def register_routes(app):
         )
 
         equity_curve, timestamps, error = _run_equity_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1449,7 +1454,7 @@ def register_routes(app):
         )
 
         trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
+            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
             params=merged_params,
@@ -1557,7 +1562,7 @@ def register_routes(app):
             try:
                 from core.engine_v2.admission import run_strategy
                 result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
-                    admission_rules=prepared.admission_rules if prepared is not None else None,
+                    admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
                     entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING)
             except Exception as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
@@ -1785,6 +1790,8 @@ def register_routes(app):
                         group_order.append(group)
 
             payload = config
+            from core.engine_v2.quantity import selector_capability
+            payload["tickerSelectorCapability"] = selector_capability(config)
             if strategy_context.is_v2:
                 runtime = _normalize_v2_request_runtime(
                     strategy_context,

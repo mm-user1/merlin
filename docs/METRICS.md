@@ -20,6 +20,11 @@ must match the canonical reference for every metric they advertise.
 
 ## Entry admission diagnostics
 
+Quantity-only `instrument_rules_v1` execution supplies no leverage diagnostics.
+Its minimum-lot/notional refusals do not increment leverage skips or fabricate
+zero-cap metrics. Selected, no-trade and depleted portfolio/WFA results retain
+unavailable diagnostics (`N/A` in the existing card), including mixed projections.
+
 Only `risk_bracket_v1` produces authoritative selected-run entry diagnostics:
 
 ```json

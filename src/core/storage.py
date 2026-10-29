@@ -2688,6 +2688,7 @@ def save_grid_study_to_db(
 
     config_payload["grid_settings"] = _safe_dict(grid_settings)
     config_payload["grid_settings"].pop("admission_rules", None)
+    config_payload["grid_settings"].pop("quantity_rules", None)
     config_payload["grid_summary"] = json_safe(grid_summary)
 
     grid_section = (grid_summary.get("grid") or {}) if isinstance(grid_summary, dict) else {}
@@ -4674,6 +4675,15 @@ def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
         from .entry_filter_input import saved_effective
         saved_effective(payload, required=True)
     payload.pop("admission_rules", None)
+    payload.pop("quantity_rules", None)
+    if not isinstance(config, dict) and payload.get("quantity_execution") is None:
+        payload.pop("quantity_execution", None)
+    if "quantity_execution" in payload:
+        from .engine_v2.quantity import read_quantity_envelope
+        read_quantity_envelope(payload["quantity_execution"])
+        if (payload.get("entry_admission") is not None or payload.get("entryFilters") is not None
+                or "maxEntryLeverage" in (payload.get("fixed_params") or {})):
+            raise ValueError("Quantity-only execution cannot carry admission/filter metadata.")
     if not isinstance(config, dict) and payload.get("entry_admission") is None:
         payload.pop("entry_admission", None)
     if "entry_admission" in payload:

@@ -10,6 +10,16 @@ This is an evidence registry, not the current engine specification. Read the
 tolerances, hashes, residuals, and dates below are preserved certification
 evidence.
 
+The T09 quantity-only extension has synthetic instrument-rule coverage for all
+12 execution variants across the five S03/S06 V2 configurations. Neutral-rule tests
+compare exact outputs within each backend against its existing no-context path;
+non-neutral cases check quantities, fees, minimum refusals, closes and error flags.
+Real portfolio/WFA, compiled packers, spawned workers and owned replay are covered
+separately. This extends quantity handling, not Pine signal/timing certification:
+existing external baselines and frozen oracle hashes remain unchanged. Shared
+kernel source changes produce truthful new Pattern Lab implementation identities;
+sealed artifacts retain original-checkout reproduction and generation refusal.
+
 Phase 1.5 adds a shared balance-based V2 metric parity layer, deterministic run
 checks, prefix/window-start anti-repainting checks, and an opt-in
 TradingView-compatible outward tick-rounding mode for computed order levels.

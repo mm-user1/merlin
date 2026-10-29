@@ -682,7 +682,7 @@ def _execute_backtest_request(
     try:
         from core.engine_v2.admission import run_strategy
         result = run_strategy(strategy_class, df, payload, trade_start_idx,
-                              admission_rules=prepared.admission_rules if prepared is not None else None,
+                              admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
                               entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING)
     except ValueError as exc:
         return None, (str(exc), HTTPStatus.BAD_REQUEST)
@@ -710,6 +710,7 @@ def _run_trade_export(
     prepared_frame=None,
     prepared_trade_start_idx=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Tuple[Optional[List[Any]], Optional[str]]:
     from strategies import get_strategy, get_strategy_config
@@ -749,7 +750,7 @@ def _run_trade_export(
 
     try:
         from core.engine_v2.admission import run_strategy
-        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context)
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context, quantity_rules=quantity_rules)
     except Exception as exc:
         return None, str(exc)
 
@@ -765,6 +766,7 @@ def _run_equity_export(
     prepared_frame=None,
     prepared_trade_start_idx=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
     from strategies import get_strategy, get_strategy_config
@@ -804,7 +806,7 @@ def _run_equity_export(
 
     try:
         from core.engine_v2.admission import run_strategy
-        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context)
+        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context, quantity_rules=quantity_rules)
     except Exception as exc:
         return None, None, str(exc)
 
@@ -1129,6 +1131,29 @@ def _resolve_stored_execution_context(
     else:
         config = raw_config if isinstance(raw_config, dict) else {}
     execution_capital = None
+    from core.engine_v2.admission import uses_admission
+    from core.engine_v2.quantity import execution_quantity, read_quantity_envelope
+    if "quantity_execution" in config or context.is_v2 and not uses_admission(context.config):
+        from core.storage import get_db_connection
+        try:
+            with get_db_connection() as conn:
+                quantity_owner = conn.execute("SELECT portfolio_id, account_id FROM portfolio_accounts WHERE study_id=?",
+                                              (study.get("study_id"),)).fetchone()
+            if quantity_owner is not None or "quantity_execution" in config:
+                identity = config.get("portfolio")
+                if quantity_owner is None or not isinstance(identity, dict) or (
+                        quantity_owner["portfolio_id"], quantity_owner["account_id"]) != (identity.get("id"), identity.get("account")):
+                    raise ValueError("Quantity execution requires matching stored portfolio ownership.")
+                rules = read_quantity_envelope(config.get("quantity_execution"))
+                execution_quantity(context.profile, rules)
+                from core.data_input import validate_pin
+                if rules.instrument_id != validate_pin(config.get("data_input"))["instrument_id"]:
+                    raise ValueError("Quantity instrument disagrees with saved input.")
+                if any(k in config for k in ("entry_admission", "entryFilters", "entry_filter_inputs")) or "maxEntryLeverage" in (config.get("fixed_params") or {}):
+                    raise ValueError("Quantity child contains conflicting admission/filter metadata.")
+        except (TypeError, ValueError) as exc:
+            raise _validation_error(code="V2_STORED_QUANTITY_UNAVAILABLE", strategy_id=strategy_id,
+                path="config_json.quantity_execution", message=f"{exc} A new study is required.") from exc
     if context.is_v2 and config.get("parameterMode") == "fixed" and "portfolio" in config:
         from core.storage import get_db_connection
         from core.portfolio import positive_capital
@@ -2022,6 +2047,9 @@ def _derive_grid_preview(config: Dict[str, Any], study: Dict[str, Any]) -> Dict[
             from core.engine_v2.admission import read_admission_envelope
             config_obj.admission_rules = read_admission_envelope(config.get("entry_admission"),
                 (config.get("fixed_params") or {}).get("maxEntryLeverage"))
+        if "quantity_execution" in config:
+            from core.engine_v2.quantity import read_quantity_envelope
+            config_obj.quantity_rules = read_quantity_envelope(config["quantity_execution"])
         return preview_grid_parameter_space(config_obj)
     except V2ValidationError as exc:
         raise _grid_settings_error(

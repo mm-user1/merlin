@@ -247,6 +247,7 @@ async function loadStrategyConfig(strategyId) {
     updateStrategyInfo(config);
     generateBacktestForm(config);
     generateOptimizerForm(config);
+    window.TickerSelector?.sync();
 
     if (request !== strategyConfigRequest || requestedStrategyId !== window.currentStrategyId) {
       if (window.currentStrategyConfig === provisionalConfig) {

@@ -28,14 +28,27 @@ logger = logging.getLogger(__name__)
 _prepared_worker_frame = None
 _prepared_worker_rules = None
 _prepared_worker_filters = MISSING
+_prepared_worker_quantity = None
 
 
-def _initialize_prepared_worker(frame, admission_rules=None, entry_filter_context=MISSING):
+def _initialize_prepared_worker(frame, admission_rules=None, entry_filter_context=MISSING, quantity_rules=None):
     """One RAM payload per spawned worker, never a pack locator or lock."""
-    global _prepared_worker_frame, _prepared_worker_rules, _prepared_worker_filters
+    global _prepared_worker_frame, _prepared_worker_rules, _prepared_worker_filters, _prepared_worker_quantity
     _prepared_worker_frame = frame
     _prepared_worker_rules = admission_rules
     _prepared_worker_filters = entry_filter_context
+    _prepared_worker_quantity = quantity_rules
+
+
+def _validate_quantity_worker(strategy_id, frame, rules, admission_rules, filters):
+    if rules is None:
+        return
+    if frame is None or filters is not MISSING:
+        raise ValueError("Quantity workers require prepared input without Entry Filters; packs are never reopened.")
+    from strategies import get_strategy_config
+    from core.engine_v2.profile import parse_execution_profile
+    from core.engine_v2.quantity import execution_quantity
+    execution_quantity(parse_execution_profile(get_strategy_config(strategy_id)), rules, admission_rules)
 
 FT_REJECT_ACTION_NO_TRADE = "no_trade"
 FT_REJECT_ACTION_COOLDOWN_REOPTIMIZE = "cooldown_reoptimize"
@@ -258,6 +271,7 @@ def _ft_worker_entry(
     ft_period_days: int,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Optional[Dict[str, Any]]:
     """
@@ -306,6 +320,7 @@ def _ft_worker_entry(
         from .engine_v2.admission import run_strategy, result_diagnostics
         result = run_strategy(strategy_class, df_ft_with_warmup, run_params, trade_start_idx,
             admission_rules=admission_rules if prepared_frame is not None else _prepared_worker_rules,
+            quantity_rules=quantity_rules if prepared_frame is not None or quantity_rules is not None else _prepared_worker_quantity,
             entry_filter_context=entry_filter_context if prepared_frame is not None else _prepared_worker_filters)
 
         capital = resolve_execution_capital(strategy_id, run_params)
@@ -948,11 +963,13 @@ def run_forward_test(
     n_workers: int,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> List[FTResult]:
     """
     Run forward test for top-K optuna results.
     """
+    _validate_quantity_worker(strategy_id, prepared_frame, quantity_rules, admission_rules, entry_filter_context)
     if not config.enabled:
         return []
 
@@ -982,7 +999,7 @@ def run_forward_test(
     ctx = mp.get_context("spawn")
     results: List[FTResult] = []
 
-    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules, entry_filter_context)}
+    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules, entry_filter_context, quantity_rules)}
                     if prepared_frame is not None else {})
     with ctx.Pool(processes=max_workers, **pool_options) as pool:
         worker_args = [
@@ -1122,6 +1139,7 @@ def _run_is_backtest(
     warmup_bars: int,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Optional[Dict[str, Any]]:
     from .backtest_engine import align_date_bounds, load_data, prepare_dataset_with_warmup
@@ -1149,6 +1167,7 @@ def _run_is_backtest(
         from .engine_v2.admission import run_strategy
         result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
             admission_rules=admission_rules if prepared_frame is not None else _prepared_worker_rules,
+            quantity_rules=quantity_rules if prepared_frame is not None or quantity_rules is not None else _prepared_worker_quantity,
             entry_filter_context=entry_filter_context if prepared_frame is not None else _prepared_worker_filters)
 
         capital = resolve_execution_capital(strategy_id, params)
@@ -1183,6 +1202,7 @@ def _perturbation_worker(
     perturbed_value: Any,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Optional[Dict[str, Any]]:
     try:
@@ -1197,6 +1217,7 @@ def _perturbation_worker(
             warmup_bars=warmup_bars,
             prepared_frame=prepared_frame,
             admission_rules=admission_rules,
+            quantity_rules=quantity_rules,
             entry_filter_context=entry_filter_context,
         )
         if metrics_payload is None:
@@ -1227,8 +1248,10 @@ def run_perturbations_parallel(
     n_workers: int,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> List[dict]:
+    _validate_quantity_worker(strategy_id, prepared_frame, quantity_rules, admission_rules, entry_filter_context)
     if not perturbations:
         return []
 
@@ -1252,7 +1275,7 @@ def run_perturbations_parallel(
     ]
 
     results: List[dict] = []
-    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules, entry_filter_context)}
+    pool_options = ({"initializer": _initialize_prepared_worker, "initargs": (prepared_frame, admission_rules, entry_filter_context, quantity_rules)}
                     if prepared_frame is not None else {})
     with ctx.Pool(processes=max_workers, **pool_options) as pool:
         for payload in pool.starmap(_perturbation_worker, worker_args):
@@ -1502,8 +1525,10 @@ def run_stress_test(
     n_workers: int = 6,
     prepared_frame=None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
 ) -> Tuple[List[StressTestResult], dict]:
+    _validate_quantity_worker(strategy_id, prepared_frame, quantity_rules, admission_rules, entry_filter_context)
     if not config.enabled:
         return [], {}
 
@@ -1529,6 +1554,7 @@ def run_stress_test(
             warmup_bars=int(config.warmup_bars),
             prepared_frame=prepared_frame,
             admission_rules=admission_rules,
+            quantity_rules=quantity_rules,
             entry_filter_context=entry_filter_context,
         )
 
@@ -1610,6 +1636,7 @@ def run_stress_test(
             n_workers=int(n_workers or 1),
             prepared_frame=prepared_frame,
             admission_rules=admission_rules,
+            quantity_rules=quantity_rules,
             entry_filter_context=entry_filter_context,
         )
 

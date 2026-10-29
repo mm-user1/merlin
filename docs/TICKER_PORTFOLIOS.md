@@ -1,8 +1,10 @@
 # Ticker selection and carried portfolios
 
 Enable **Ticker Selector** in Start → Post Process to run one portfolio over the
-selected Parquet pool. It requires a V2 strategy with `risk_bracket_v1`, strict-close
-boundaries and declared execution capital. S07 currently qualifies. Initial Capital
+selected Parquet pool. Capability is derived from the validated V2 profile across
+all variants: declared Initial Capital, strict-close boundaries, no price rounding,
+and either `risk_bracket_v1` or supported risk/fixed-percent sizing with a declared
+fixed execution Contract Size. S07 and the five S03/S06 V2 configurations qualify. Initial Capital
 is the total portfolio capital. Fixed works without WFA; Fixed/Grid also support
 Calendar Months WFA. CSV, V1, day/Adaptive WFA, Grid without WFA, standalone OOS
 holdout and DSR are unsupported combinations. Fixed retains its FT/Stress prohibition.
@@ -43,6 +45,31 @@ Locks are released before execution. Job-local monthly reuse avoids repeated rea
 The live-instrument pool cannot represent delisted instruments and may have survivorship bias.
 
 ## Funding and saved results
+
+Legacy S03/S06 portfolio executions use `instrument_rules_v1` quantity policy.
+Validated Parquet rules supply the effective base-unit step, minimum lots and
+minimum notional. The existing IEEE sizing expression floors once; minimum checks
+can refuse a new entry, including at its actual next-open price. They cannot prevent
+a close or add a leverage cap, filter, stop or new rejection counter. Ordinary
+CSV/Parquet executions retain their manual Contract Size; S07 retains risk admission.
+
+Start disables Contract Size while this selector capability is active and displays
+**From PQ instrument rules** (full wording in its tooltip). Its manual value remains in the editor/Queue;
+turning the selector Off restores editing. Executed children instead store the
+declared default as an inert parameter; the separate rules alone govern quantities.
+Preview remains parameter space and reads no quantity-rule metadata or candles.
+Results Parameters displays the child's saved effective rules; leverage diagnostics
+remain unavailable, including flat and refused windows.
+
+Each quantity-only child saves `quantity_execution={version:1,
+mode:"instrument_rules_v1",rules:...}`. It contains the validated rule snapshot,
+independently of `entry_admission`; transient rule objects and risk/filter/cap fields
+are not serialized. Exact replay requires matching `portfolio_accounts` ownership
+and saved identity for both Fixed and Grid/WFA children. Missing/invalid context,
+changed consumed rule semantics, or an envelope on an unowned study fails clearly.
+Manual tests must originate from a validated owned quantity child and verify its
+source semantics before preparing their own interval. Saved tables remain readable
+offline; relocation preserves original pins. No historical rows are migrated.
 
 Every period allocates actual total / Top N to each place; missing eligible tickers
 leave genuine idle cash. WFA selects at constant reference IS capital = original

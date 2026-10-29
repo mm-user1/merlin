@@ -162,6 +162,7 @@ class GridV2Settings:
     manual_percents: tuple[tuple[str, float], ...] = ()
     enabled_tie_groups: tuple[str, ...] = ()
     admission_rules: Any = None
+    quantity_rules: Any = None
     entry_filter_config: tuple = ()
 
     @property
@@ -1118,6 +1119,15 @@ def _grid_v2_plan_prelude(
     defaults = _parameter_defaults(params_spec)
     fixed_params = dict(defaults)
     fixed_params.update(dict(base_params or {}))
+    from .engine_v2.quantity import execution_quantity, selector_capability
+    quantity = execution_quantity(profile, settings.quantity_rules, settings.admission_rules)
+    if quantity is not None:
+        if selector_capability(config_copy) is None:
+            raise ValueError("Quantity execution requires fixed declared Contract Size.")
+        if "contractSize" in (settings.enabled_axes or ()) or "contractSize_options" in supplied:
+            raise ValueError("Contract Size is inactive under instrument quantity rules.")
+        fixed_params["contractSize"] = defaults["contractSize"]
+        config_copy["_quantity_rules"] = quantity.semantic()
     if profile.modes.get("entryAdmission") == "risk_bracket_v1":
         from .engine_v2.admission import execution_admission
         if "maxEntryLeverage" in (settings.enabled_axes or ()) or "maxEntryLeverage_options" in supplied:
@@ -1460,6 +1470,7 @@ def _grid_v2_planning_identity_payload(prelude: _GridV2PlanPrelude) -> dict[str,
     planning = prelude.planning
     return {
         **({"entry_filters": list(prelude.settings.entry_filter_config)} if prelude.settings.entry_filter_config else {}),
+        **({"quantity_rules": prelude.settings.quantity_rules.semantic()} if prelude.settings.quantity_rules is not None else {}),
         **({"entry_admission_rules": prelude.settings.admission_rules.semantic()}
            if prelude.profile.modes.get("entryAdmission") == "risk_bracket_v1" else {}),
         **({"grid_v2_parameter_ties_v1": {"groups": list(prelude.settings.enabled_tie_groups), "pairs": prelude.parameter_ties}} if prelude.parameter_ties else {}),
@@ -2465,6 +2476,7 @@ def execute_grid_v2_candidates(
                     row_params_batch: list[Mapping[str, Any]] | None = None
                     compiled_config_packing = "mapping"
                     batch = evaluate_compiled_signal_stacked_batch(
+                        quantity_rules=plan.settings.quantity_rules,
                         stacked_data=stacked_data,
                         profile=plan.profile,
                         params_batch=params_batch,
@@ -2506,6 +2518,7 @@ def execute_grid_v2_candidates(
                         ]
                         compiled_config_packing = "mapping"
                     batch = evaluate_compiled_stacked_batch(
+                        quantity_rules=plan.settings.quantity_rules,
                         admission_rules=plan.settings.admission_rules,
                         stacked_data=stacked_data,
                         profile=plan.profile,
@@ -2560,6 +2573,7 @@ def execute_grid_v2_candidates(
                         run = run_v2_strategy(
                             entry_filter_context=hooks.entry_filter_context,
                             admission_rules=plan.settings.admission_rules,
+                            quantity_rules=plan.settings.quantity_rules,
                             data=data,
                             profile=plan.profile,
                             params=_normalized_candidate_params(hooks, params),
@@ -3560,6 +3574,7 @@ def _semantic_payload(
         if name in params and profile.parameter_roles.get(name) != "runtime"
     }
     return {
+        **({"quantity_rules": config["_quantity_rules"]} if "_quantity_rules" in config else {}),
         "engine": GRID_V2_ENGINE_VERSION,
         "semantic_identity_schema_version": GRID_V2_SEMANTIC_IDENTITY_SCHEMA_VERSION,
         "strategy": {
@@ -3602,6 +3617,7 @@ def _semantic_identity_tuple(
         str(variant.name),
         modes,
         active_params,
+        *((_stable_json(config["_quantity_rules"]),) if "_quantity_rules" in config else ()),
     )
 
 
@@ -4164,14 +4180,14 @@ def _pack_table_config_arrays(
     table = plan.candidate_table
     indices = np.asarray(tuple(int(index) for index in candidate_indices), dtype=np.int64)
     arrays = _empty_config_arrays(int(indices.shape[0]))
-    if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1":
+    if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1" or plan.settings.quantity_rules is not None:
         from .engine_v2.compiled_kernel import pack_compiled_config_arrays_from_rows
         # Typed accessors retain table semantics without materializing full candidates.
         return pack_compiled_config_arrays_from_rows(row_count=len(indices),
             get_value=lambda row, name, default: table.param_value_for_index(int(indices[row]), name)
                 if table.has_param_for_index(int(indices[row]), name) else default,
             get_modes=lambda row: table.modes_for_index(int(indices[row])), trade_start_idx=trade_start_idx,
-            profile=plan.profile, admission_rules=plan.settings.admission_rules)
+            profile=plan.profile, admission_rules=plan.settings.admission_rules, quantity_rules=plan.settings.quantity_rules)
     if indices.size == 0:
         return arrays
 
@@ -4640,6 +4656,7 @@ def _slow_enrich_selected(
     run = run_v2_strategy(
         entry_filter_context=hooks.entry_filter_context,
         admission_rules=plan.settings.admission_rules,
+        quantity_rules=plan.settings.quantity_rules,
         data=data,
         profile=plan.profile,
         params=normalized_params,

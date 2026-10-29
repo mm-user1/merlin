@@ -125,6 +125,7 @@ def run_period_test_for_trials(
     ] = None,
     preparation_facts: Optional[Dict[str, Any]] = None,
     admission_rules=None,
+    quantity_rules=None,
     entry_filter_context=MISSING,
     diagnostic_scope="oos_test",
 ) -> List[Dict[str, Any]]:
@@ -159,7 +160,7 @@ def run_period_test_for_trials(
             params["end"] = end_ts
 
         from .engine_v2.admission import run_strategy, result_diagnostics
-        result = run_strategy(strategy_class, df_prepared, params, trade_start_idx, admission_rules=admission_rules,
+        result = run_strategy(strategy_class, df_prepared, params, trade_start_idx, admission_rules=admission_rules, quantity_rules=quantity_rules,
                               entry_filter_context=entry_filter_context)
         test_metrics = build_test_metrics(result, resolve_execution_capital(strategy_id, params))
         original_metrics = original_metrics_resolver(trial)
