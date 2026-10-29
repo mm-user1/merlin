@@ -880,6 +880,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
         if (AnalyticsState.studyEquityPendingStudyId !== studyId) return;
         AnalyticsState.studyEquityPendingStudyId = null;
         AnalyticsState.studyEquityAbortController = null;
+        if (window.AnalyticsPortfolio?.leaving()) renderSummaryCards();
         renderSelectedStudyChart();
       });
   }
@@ -2468,7 +2469,6 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       item.addEventListener('click', async () => {
         if (AnalyticsState.dbSwitchInProgress || db.active) return;
         AnalyticsState.dbSwitchInProgress = true;
-        window.AnalyticsPortfolio?.reset();
         try {
           await switchDatabaseRequest(db.name);
           AnalyticsState.checkedStudyIds = new Set();

@@ -78,6 +78,10 @@ Current detail refreshes the shared checked/shown/total counters; total includes
 saved comparison entries even when hidden. Only current replies can finish loading.
 Actual empty/unavailable/error results clear stale visuals, and failed detail can
 be retried by revisiting its scope. Valid result N/A values retain their meaning.
+On exit to an uncached ordinary study, its current cards and chart become ready
+together, including current metrics when the curve is empty or unavailable. A
+rejected database-switch request preserves the current portfolio scope and saved
+outer checks; confirmed switching still invalidates old replies at summary reset.
 
 Use ↗ on an executed ticker row to open Results, then **Back to portfolio**. WFA shows
 selected IS and actual OOS parameters/capital; Fixed without WFA has one reference result.

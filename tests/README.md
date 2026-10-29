@@ -800,6 +800,10 @@ detail/projection promises cover stale responses, PF exit/reset, retryable error
 empty/unavailable results, keyboard navigation and asynchronous counters. The shared
 DOM shim models events/selectors, not browser layout: actual main-area scrolling,
 short destinations and user scrolling during requests need the separate browser gate.
+The adjacent `portfolio_navigation.test.cjs` cases assert cached/uncached single-study
+exit completion, current errors/empty curves, superseding selections, and rejected
+database switches with successful retries and old-reply invalidation. They run via
+the same `test_js_portfolio.py` wrapper and real coordinator completion handlers.
 Use `tools/run_tests.py --keep-temp --` with an external
 MERLIN_TEST_ROOT. Packs are import-built synthetic fixtures; no production data is needed.
 The Node executable may be supplied with MERLIN_NODE_EXECUTABLE. Keep JUnit, failed
