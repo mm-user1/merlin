@@ -2879,6 +2879,8 @@
       user-select: none;
     }
 
+    .analytics-toggle-option[hidden] { display: none; }
+
     .analytics-toggle-option input[type="checkbox"],
     .analytics-auto-select input[type="checkbox"] {
       width: 14px;
@@ -3707,3 +3709,18 @@
 .entry-filter-item select { width: 100%; }
 .entry-filter-item pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .entry-filters-editor .csv-browser-error:empty { display: none; }
+/* Portfolio periods share the existing Study Sets hierarchy and table. */
+.portfolio-expand, .portfolio-expand:hover, .portfolio-expand:active {
+  background: transparent; border: 0; color: inherit; padding: 0; margin-right: 6px;
+  width: 14px; height: 16px; line-height: 16px; font-size: 12px; vertical-align: middle;
+  border-radius: 0; box-shadow: none; cursor: pointer;
+}
+.portfolio-period-row { cursor: pointer; }
+.portfolio-period-row:hover { background: #e8f4ff; }
+.portfolio-period-row.analytics-set-focused { background: #d4e9ff; }
+.portfolio-period-row.analytics-set-focused > td:first-child { border-left: 3px solid #3498db; }
+.portfolio-period-row td:nth-child(2) { padding-left: 30px; }
+#tickerSelectorEditor { margin-top: 10px; }
+#tickerSelectorEditor .selector-toggle { margin-bottom: 8px; }
+#tickerSelectorSettings .form-group:not(.vertical) > label { flex: 0 0 120px; min-width: 0; }
+#tickerSelectorSettings select { flex: 1; min-width: 0; max-width: 240px; }

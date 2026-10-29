@@ -369,3 +369,14 @@ complete current strategy matrix in general documentation.
   [baseline documents](README.md#baseline-evidence).
 - Benchmark methodology and historical measurements live in
   [Performance](engine_v2/PERFORMANCE.md).
+
+## Ticker-selected portfolios
+
+Start/Queue can run a complete Parquet pool as one capability-gated portfolio job.
+X selects from causal ordinary candles; Fixed without WFA and Fixed/Grid Calendar
+WFA execute actual carried capital. A mandatory PF set owns real account-period
+studies. Analytics provides inline periods and whole-run ranks; Results opens explicit
+account IDs with pinned replay and separate manual tests. Owned children are excluded
+from ordinary study lists and All Studies. This is Merlin execution, independent of
+Pattern Lab's research account loop and Strategy Lab's research workflows.
+See [Ticker portfolios](TICKER_PORTFOLIOS.md) for supported settings and boundaries.

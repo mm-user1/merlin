@@ -482,6 +482,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _ensure_wfa_schema_updated(conn)
     ensure_study_sets_tables(conn=conn)
     ensure_analytics_group_cache_tables(conn=conn)
+    from .portfolio_storage import create_schema
+    create_schema(conn)
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -514,6 +516,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ensure("studies", "oos_test_start_date", "TEXT")
     ensure("studies", "oos_test_end_date", "TEXT")
     ensure("studies", "oos_test_source_module", "TEXT")
+    ensure("wfa_windows", "oos_execution_capital", "REAL")
     ensure("studies", "stitched_oos_equity_curve", "TEXT")
     ensure("studies", "stitched_oos_timestamps_json", "TEXT")
     ensure("studies", "stitched_oos_window_ids_json", "TEXT")
@@ -1191,7 +1194,7 @@ def _backfill_stitched_oos_metadata_with_conn(
             stitched_oos_point_count,
             stitched_oos_consistency_full,
             stitched_oos_consistency_recent
-        FROM studies
+        FROM ordinary_studies
         WHERE {" AND ".join(where_clauses)}
         """,
         tuple(params),
@@ -1259,7 +1262,7 @@ def _load_all_wfa_study_ids_with_conn(conn: sqlite3.Connection) -> List[str]:
     rows = conn.execute(
         """
         SELECT study_id
-        FROM studies
+        FROM ordinary_studies
         WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
         ORDER BY study_id ASC
         """
@@ -1289,7 +1292,7 @@ def _load_study_curve_rows_by_id_with_conn(
                 study_id,
                 stitched_oos_equity_curve,
                 stitched_oos_timestamps_json
-            FROM studies
+            FROM ordinary_studies
             WHERE study_id IN ({placeholders})
               AND LOWER(COALESCE(optimization_mode, '')) = 'wfa'
             """,
@@ -1761,7 +1764,7 @@ def _validate_wfa_study_ids(conn: sqlite3.Connection, study_ids: Sequence[str]) 
     rows = conn.execute(
         f"""
         SELECT study_id
-        FROM studies
+        FROM ordinary_studies
         WHERE study_id IN ({placeholders})
           AND LOWER(COALESCE(optimization_mode, '')) = 'wfa'
         """,
@@ -1869,7 +1872,8 @@ def _list_study_sets_with_conn(conn: sqlite3.Connection) -> List[Dict[str, Any]]
 def list_study_sets(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     _ = db_path
     with get_db_connection() as conn:
-        return _list_study_sets_with_conn(conn)
+        from .portfolio_storage import enrich_sets
+        return enrich_sets(conn, _list_study_sets_with_conn(conn))
 
 
 def list_study_sets_with_analytics_cache(
@@ -1902,6 +1906,8 @@ def list_study_sets_with_analytics_cache(
                 }
             )
 
+        from .portfolio_storage import enrich_sets
+        enrich_sets(conn, enriched_sets)
         conn.commit()
         return {
             "sets": enriched_sets,
@@ -2025,6 +2031,8 @@ def update_study_set(
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
         ensure_analytics_group_cache_tables(conn=conn)
+        if study_ids is not None and conn.execute("SELECT 1 FROM portfolios WHERE set_id=?", (set_id_int,)).fetchone():
+            raise ValueError("Portfolio membership is owned and cannot be edited.")
         current = _load_study_set_by_id(conn, set_id_int)
         if current is None:
             raise ValueError("Study set not found.")
@@ -2083,6 +2091,8 @@ def delete_study_set(set_id: int, db_path: Optional[Path] = None) -> bool:
     with get_db_connection() as conn:
         ensure_study_sets_tables(conn=conn)
         ensure_analytics_group_cache_tables(conn=conn)
+        from .portfolio_storage import delete_owned_set
+        delete_owned_set(conn, int(set_id))
         cursor = conn.execute("DELETE FROM study_sets WHERE id = ?", (int(set_id),))
         conn.commit()
         return cursor.rowcount > 0
@@ -2095,6 +2105,9 @@ def delete_study_sets(set_ids: Any, db_path: Optional[Path] = None) -> int:
         ensure_study_sets_tables(conn=conn)
         ensure_analytics_group_cache_tables(conn=conn)
         _ensure_study_set_ids_exist(conn, normalized_ids)
+        from .portfolio_storage import delete_owned_set
+        for set_id in normalized_ids:
+            delete_owned_set(conn, set_id)
         conn.executemany(
             "DELETE FROM study_sets WHERE id = ?",
             [(set_id,) for set_id in normalized_ids],
@@ -2585,6 +2598,7 @@ def save_grid_study_to_db(
     csv_file_path: str,
     start_time: float,
     score_config: Optional[Dict] = None,
+    connection=None,
 ) -> str:
     """Persist selected slow-validated Grid candidates.
 
@@ -2613,7 +2627,8 @@ def save_grid_study_to_db(
     def dumps(value: Any) -> str:
         return json.dumps(json_safe(value), separators=(",", ":"), sort_keys=True)
 
-    init_database()
+    if connection is None:
+        init_database()
 
     study_id = generate_study_id()
     fixed = getattr(config, "fixed_params", {}) or {}
@@ -2686,9 +2701,11 @@ def save_grid_study_to_db(
     except (TypeError, ValueError):
         coverage_pct = None
 
-    with get_db_connection() as conn:
+    from contextlib import nullcontext
+    with (nullcontext(connection) if connection is not None else get_db_connection()) as conn:
         try:
-            conn.execute("BEGIN TRANSACTION")
+            if connection is None:
+                conn.execute("BEGIN TRANSACTION")
             _ensure_columns(conn)
             conn.execute(
                 """
@@ -2850,9 +2867,11 @@ def save_grid_study_to_db(
                 (int(getattr(result, "candidate_id", None) or getattr(result, "optuna_trial_number", None) or index),
                  getattr(result, "entry_diagnostics", None))
                 for index, result in enumerate(trial_results or [], 1)])
-            conn.execute("COMMIT")
+            if connection is None:
+                conn.execute("COMMIT")
         except Exception as exc:
-            conn.execute("ROLLBACK")
+            if connection is None:
+                conn.execute("ROLLBACK")
             raise RuntimeError(f"Failed to save Grid study to database: {exc}")
 
     return study_id
@@ -2864,9 +2883,11 @@ def save_wfa_study_to_db(
     csv_file_path: str,
     start_time: float,
     score_config: Optional[Dict] = None,
+    *, connection=None,
 ) -> str:
     config_payload = _prepare_study_config_payload(config)
-    init_database()
+    if connection is None:
+        init_database()
 
     study_id = generate_study_id()
     csv_display_name = _get_csv_display_name(config, csv_file_path)
@@ -2912,9 +2933,11 @@ def save_wfa_study_to_db(
         except (TypeError, ValueError):
             optimization_time_seconds = None
 
-    with get_db_connection() as conn:
+    from contextlib import nullcontext
+    with (nullcontext(connection) if connection is not None else get_db_connection()) as conn:
         try:
-            conn.execute("BEGIN TRANSACTION")
+            if connection is None:
+                conn.execute("BEGIN TRANSACTION")
 
             def _tri_state(value: Optional[bool]) -> Optional[int]:
                 if value is None:
@@ -3419,6 +3442,9 @@ def save_wfa_study_to_db(
 
             for window in wf_result.windows:
                 window_key = f"{study_id}_w{window.window_id}"
+                if getattr(window, "oos_execution_capital", None) is not None:
+                    conn.execute("UPDATE wfa_windows SET oos_execution_capital = ? WHERE window_id = ?",
+                                 (window.oos_execution_capital, window_key))
                 diagnostics = getattr(window, "entry_diagnostics", None)
                 if diagnostics is not None:
                     conn.execute("UPDATE wfa_windows SET entry_diagnostics_json = ? WHERE window_id = ?",
@@ -3428,9 +3454,11 @@ def save_wfa_study_to_db(
                 _save_window_trials(conn, window_key, "forward_test", window.forward_test_trials)
                 _save_window_trials(conn, window_key, "stress_test", window.stress_test_trials)
 
-            conn.execute("COMMIT")
+            if connection is None:
+                conn.execute("COMMIT")
         except Exception as exc:
-            conn.execute("ROLLBACK")
+            if connection is None:
+                conn.execute("ROLLBACK")
             raise RuntimeError(f"Failed to save WFA study to database: {exc}")
 
     return study_id
@@ -3597,7 +3625,7 @@ def list_studies() -> List[Dict]:
                 study_id, study_name, strategy_id, optimization_mode,
                 created_at, completed_at, completed_trials, best_value,
                 csv_file_name
-            FROM studies
+            FROM ordinary_studies
             ORDER BY created_at DESC
             """
         )
@@ -4603,6 +4631,8 @@ def delete_manual_test(study_id: str, test_id: int) -> bool:
 
 def delete_study(study_id: str) -> bool:
     with get_db_connection() as conn:
+        if conn.execute("SELECT 1 FROM portfolio_accounts WHERE study_id=?", (study_id,)).fetchone():
+            raise ValueError("Owned portfolio accounts cannot be deleted separately; delete the whole portfolio set.")
         invalidate_analytics_group_cache_for_study(study_id, conn=conn)
         cursor = conn.execute("DELETE FROM studies WHERE study_id = ?", (study_id,))
         conn.commit()
@@ -4632,6 +4662,8 @@ def _prepare_study_config_payload(config: Any) -> Dict[str, Any]:
     payload = _safe_dict(config)
     if not isinstance(config, dict) and payload.get("parameterMode") is None:
         payload.pop("parameterMode", None)
+    if not isinstance(config, dict) and payload.get("portfolio") is None:
+        payload.pop("portfolio", None)
     from .parameter_mode import parameter_mode
     parameter_mode(payload)
     payload.pop("entry_filter_context", None)

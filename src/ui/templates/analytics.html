@@ -77,6 +77,16 @@
           <div class="settings-list" id="analyticsWfaSettings"></div>
         </div>
       </div>
+
+      <div class="collapsible open" id="portfolioSelectorSettings" hidden>
+        <div class="collapsible-header">
+          <span class="collapsible-icon">&#9660;</span>
+          <span class="collapsible-title">Ticker Selector Settings</span>
+        </div>
+        <div class="collapsible-content">
+          <div class="settings-list"></div>
+        </div>
+      </div>
     </div>
 
     <div class="main-area">
@@ -127,6 +137,10 @@
           </div>
           <div class="analytics-filter-bar" id="analyticsFiltersBar"></div>
           <div class="analytics-controls-right">
+            <label class="analytics-toggle-option" hidden>
+              <input type="checkbox" id="portfolioShowUnselected" />
+              <span>Show Unselected</span>
+            </label>
             <label class="analytics-toggle-option">
               <input type="checkbox" id="analyticsGroupDates" checked />
               <span>Group Dates</span>
@@ -206,6 +220,7 @@
   <script src="/static/js/analytics-sets-view.js"></script>
   <script src="/static/js/analytics-sets.js"></script>
   <script src="/static/js/analytics-table.js"></script>
+    <script src="/static/js/analytics-portfolio.js"></script>
   <script src="/static/js/analytics.js"></script>
 </body>
 </html>

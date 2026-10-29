@@ -269,3 +269,19 @@ Updates retain the pack's roster. See the provider/pack guide for roster schema,
 options, evidence, `recover_pack` and `abort_update`. Do not edit generated metadata
 or copy arbitrary files into a live pack to resolve an error. No downloader UI or
 automatic acquisition is part of Merlin execution.
+
+## Ticker portfolio slices
+
+[Ticker portfolios](TICKER_PORTFOLIOS.md) rank each pool member over prior complete
+months with per-month 99% complete ranking-bar coverage. A verified later listing
+means ineligible; unexplained missing history fails preparation. Execution admission
+remains stricter and covers only each funded account-period's actual IS/FT/OOS/Fixed
+slice plus warmup and independent filter dependencies. Unconsumed execution gaps do
+not require preparing the whole ticker history. All funded inputs are admitted before
+numerical work; optional comparison defects are recorded separately.
+
+Ranking pins/listing evidence and execution/filter/rule pins are separate. Account
+replay validates its consumed histories, accepts unrelated appended data, and never
+re-ranks or opens unrelated ranking inputs. Saved Analytics/Results displays offline.
+The current live-instrument pool may introduce survivorship bias; no collector or
+storage/locking policy changes accompany this application feature.

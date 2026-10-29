@@ -599,7 +599,7 @@ function renderManualTestTable(results) {
 
   (results || []).forEach((entry, index) => {
     const trialNumber = entry.trial_number;
-    const baseTrial = trialMap[trialNumber] || {};
+    const baseTrial = trialMap[trialNumber] || {trial_number:trialNumber,params:entry.params || {}};
     const metrics = entry.test_metrics || {};
     const mapped = {
       ...baseTrial,
@@ -754,6 +754,18 @@ async function showParameterDetails(result) {
 
   const params = result.params || result.best_params || {};
   content.innerHTML = '';
+
+  const portfolio = ResultsState.savedConfig?.portfolio;
+  if (portfolio) {
+    const card = document.createElement('div'); card.className = 'param-group-card';
+    const header = document.createElement('div'); header.className = 'param-group-title'; header.textContent = 'Portfolio';
+    const detail = document.createElement('div'); detail.className = 'param-item'; detail.style.whiteSpace = 'pre-line';
+    const selector = portfolio.selector;
+    detail.textContent = `Period ${portfolio.period} · ${portfolio.role}${portfolio.rank ? ' · #'+portfolio.rank : ''}\n`
+      + `${selector.method} v${selector.methodVersion} · Top ${selector.topN} · Every ${selector.rebalanceMonths}m · Lookback ${selector.params.lookbackMonths}m / ${selector.params.timeframeMinutes}m\n`
+      + `Original total: ${portfolio.initialCapital} · IS reference: ${portfolio.referenceCapital} · Execution capital: ${params.initialCapital ?? portfolio.openingCapital}`;
+    card.append(header,detail); content.appendChild(card);
+  }
 
   const filterConfig = ResultsState.activeTab === 'manual_tests'
     ? ResultsState.activeManualTest?.config || {} : ResultsState.savedConfig || {};

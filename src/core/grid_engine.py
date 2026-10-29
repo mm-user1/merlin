@@ -518,7 +518,8 @@ def _normalize_fixed_config(config: OptimizationConfig) -> None:
     payload = dict(vars(config))
     if payload.get("parameterMode") is None:
         payload.pop("parameterMode", None)
-    normalized = normalize_parameter_mode(payload, get_strategy_config(config.strategy_id))
+    normalized = normalize_parameter_mode(payload, get_strategy_config(config.strategy_id),
+        execution_capital=getattr(config, "_portfolio_execution_capital", None))
     if normalized.get("parameterMode") == "fixed":
         for name, value in normalized.items():
             setattr(config, name, value)
@@ -1573,6 +1574,7 @@ def _grid_v2_slow_result(
     compute_sharpe_daily: bool = False,
     validation_tolerances: Optional[Mapping[str, float]] = None,
     fail_on_error: bool = True,
+    retain_execution: bool = False,
 ) -> OptimizationResult:
     candidate_index = int(row.candidate_id) - 1
     if hasattr(plan, "candidate_table"):
@@ -1621,6 +1623,8 @@ def _grid_v2_slow_result(
         optuna_trial_number=int(row.candidate_id),
     )
     result.entry_diagnostics = result_diagnostics(run.strategy_result, "is")
+    if retain_execution:
+        result.portfolio_execution = run.strategy_result
     generation_mode = str(
         plan.per_block_counts.get(row.grid_mode_name, {}).get(
             "generation_mode", "full_enumeration_v2"
@@ -1930,6 +1934,7 @@ def _run_grid_v2_optimization(
             compute_sharpe_daily=fast_metric_request.compute_sharpe_daily,
             validation_tolerances=GridSettings().validation_tolerances,
             fail_on_error=bool(getattr(config, "grid_strict_validation", True)),
+            retain_execution=bool(getattr(config, "_portfolio_capture", False)),
         )
         for result in selected_fast
     ]

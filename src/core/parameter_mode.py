@@ -12,7 +12,7 @@ def parameter_mode(payload: Mapping[str, Any]) -> str:
     return value
 
 
-def normalize_parameter_mode(payload: Mapping[str, Any], strategy_config: Mapping[str, Any]) -> dict:
+def normalize_parameter_mode(payload: Mapping[str, Any], strategy_config: Mapping[str, Any], *, execution_capital=None) -> dict:
     """Refuse active search intent and normalize inert values before parsing them."""
     mode = parameter_mode(payload)
     if mode != "fixed":
@@ -71,7 +71,7 @@ def normalize_parameter_mode(payload: Mapping[str, Any], strategy_config: Mappin
         constraints=[], filter_min_profit=False,
     )
     params, modes = resolve_fixed_scalars(strategy_config, fixed,
-        payload.get("grid_v2_enabled_tie_groups", []))
+        payload.get("grid_v2_enabled_tie_groups", []), execution_capital=execution_capital)
     for requested in (payload.get("grid_enabled_modes"), payload.get("gridEnabledModes"), grid.get("enabled_modes")):
         if requested and requested != modes:
             refuse(f"grid_enabled_modes conflicts with scalar selector; expected {modes}.")
@@ -79,7 +79,7 @@ def normalize_parameter_mode(payload: Mapping[str, Any], strategy_config: Mappin
     return result
 
 
-def resolve_fixed_scalars(config, supplied, ties):
+def resolve_fixed_scalars(config, supplied, ties, *, execution_capital=None):
     from .engine_v2.profile import parse_execution_profile, canonical_selector_key
     from .engine_v2.parameter_ties import enabled_parameter_ties
     from .grid_v2 import _coerce_value, _canonicalize_globally_inactive_params, _selector_values_by_variant, _inactive_dependency_children
@@ -115,6 +115,10 @@ def resolve_fixed_scalars(config, supplied, ties):
         params[target] = params[source]
     for name, spec in specs.items():
         if profile.parameter_roles.get(name) == "runtime":
+            continue
+        if name == "initialCapital" and execution_capital is not None:
+            from .portfolio import positive_capital
+            params[name] = positive_capital(execution_capital)
             continue
         try:
             value = _coerce_value(params[name], spec.get("type", "float"))

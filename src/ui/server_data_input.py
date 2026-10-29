@@ -314,8 +314,10 @@ def register_routes(app):
         if not saved:
             return jsonify(error="Study not found."), 404
         study = saved["study"]
+        body = request.get_json(silent=True) or {}
+        owned_manual = (study.get('config_json') or {}).get('portfolio') and study.get('optimization_mode') == 'wfa' and body.get('module') == 'manual_tests'
         trial = storage.get_study_trial(study_id, trial_number)
-        if not trial or study.get("optimization_mode") not in {"grid", "optuna"}:
+        if not owned_manual and (not trial or study.get("optimization_mode") not in {"grid", "optuna"}):
             return jsonify(error="Trial not found."), 404
         body = request.get_json(silent=True) or {}
         module = body.get("module", "optuna")
@@ -339,6 +341,8 @@ def register_routes(app):
                 selected = next((r for r in results.get("results", []) if r.get("trial_number") == trial_number), None)
                 if selected is None:
                     raise DataInputError("Trial is absent from this manual test.")
+                if owned_manual:
+                    trial = selected
                 start, end = manual.get("start_date"), manual.get("end_date")
             elif module not in {"optuna", "grid", "dsr", "stress_test"}:
                 raise DataInputError("Unknown result module.")

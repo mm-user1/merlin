@@ -105,6 +105,7 @@ class OptimizationConfig:
     dispatcher_duplicate_cycle_limit: int = 18
     optimization_mode: str = "optuna"
     parameterMode: Optional[str] = None
+    portfolio: Optional[Dict[str, Any]] = None
     objectives: List[str] = field(default_factory=list)
     primary_objective: Optional[str] = None
     constraints: List[Dict[str, Any]] = field(default_factory=list)

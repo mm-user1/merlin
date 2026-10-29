@@ -1806,6 +1806,7 @@ async function loadQueueItemIntoForm(itemId, options = {}) {
   applyQueueUiSnapshot(item.uiSnapshot);
   if (item.config) applyQueueParameterMode(item.config);
   window.EntryFilters?.restore(item.config?.entryFilters);
+  window.TickerSelector?.restore(item.tickerSelector);
   if (typeof applyQueueParameterTies === 'function') applyQueueParameterTies(item);
 
   await applyQueueDatabaseTarget(item.dbTarget);
@@ -2161,6 +2162,7 @@ function collectQueueItem() {
     mode,
     strategyId: window.currentStrategyId,
     strategyConfig: clonePreset(window.currentStrategyConfig || {}),
+    tickerSelector: window.TickerSelector?.read(),
     sources,
     warmupBars: Number(document.getElementById('warmupBars')?.value) || 1000,
     config,
@@ -2218,6 +2220,12 @@ function collectQueueItem() {
 }
 
 function generateQueueLabel(item) {
+  if (item.tickerSelector?.enabled) {
+    const selector = item.tickerSelector;
+    const tf = item.sources?.[0]?.timeframe_minutes;
+    const wfa = item.mode === 'wfa' ? ` · WFA ${item.wfa?.isPeriodMonths}m/${item.wfa?.oosPeriodMonths}m` : '';
+    return `#${item.index || '?'} · PF ${item.strategyConfig?.name || item.strategyId} · ${tf}m · X Top ${selector.topN} / ${selector.rebalanceMonths}m${wfa} · ${item.config?.parameterMode === 'fixed' ? 'Fixed' : 'Grid'}`;
+  }
   const index = item.index || '?';
 
   const strategyName = item.strategyConfig?.name || item.strategyId || '???';
@@ -2835,6 +2843,38 @@ async function runQueue() {
       updateOptimizationState(buildStateForItem(item, 'running'));
       setQueueItemState(item.id, 'running');
       await persistItemProgress(item.id, { lastError: '' });
+
+      if (item.tickerSelector?.enabled) {
+        inFlightRunId = generateOptimizationRunId('portfolio');
+        setActiveOptimizationRunId(inFlightRunId);
+        if (optunaProgressText) optunaProgressText.textContent = 'Portfolio preparation and execution';
+        try {
+          const result = await window.TickerSelector.execute(item, signal, inFlightRunId);
+          fullySucceededItems += 1;
+          await finalizeQueueItem(item.id, 'completed', {portfolioId:result.portfolio_id,
+            sourceCursor:getQueueSources(item).length, successCount:1, failureCount:0,
+            studySet:{...buildQueueStudySetState(item),createdSetId:result.set_id,createdSetName:result.name,status:'created'}});
+          if (optimizerResultsEl) optimizerResultsEl.textContent = `${result.name}: ${result.status}`;
+        } catch (error) {
+          if (error.name === 'AbortError') {
+            aborted = true;
+            setQueueItemState(item.id, 'skipped');
+            if (!cancelNotified && inFlightRunId) {
+              cancelNotified = true;
+              await requestServerCancelBestEffort(inFlightRunId);
+            }
+            break;
+          }
+          failedItems += 1;
+          sourceErrors.push(error.message);
+          await finalizeQueueItem(item.id, 'failed', {lastError:error.message, successCount:0, failureCount:1});
+        } finally {
+          inFlightRunId = '';
+          setActiveOptimizationRunId('');
+        }
+        if (queueStopRequested) { stopAfterCurrent = true; break; }
+        continue;
+      }
 
       const sources = getQueueSources(item);
       const totalSources = sources.length;

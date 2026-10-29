@@ -450,6 +450,20 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
         study = study_data.get("study") or {}
         config = study.get("config_json") or {}
+        if config.get("portfolio"):
+            from core.portfolio_storage import account_context
+            context = account_context(study_id)
+            study_data["portfolio"] = context
+            if context and study.get("optimization_mode") == "wfa":
+                metrics = context["metrics"]
+                study_data["stitched_oos"] = {
+                    "equity_curve": metrics["curve"], "timestamps": metrics["timestamps"],
+                    "final_net_profit_pct": metrics["profit_pct"], "max_drawdown_pct": metrics["max_drawdown_pct"],
+                    "total_trades": metrics["total_trades"], "winning_trades": metrics["winning_trades"],
+                    "wfe": metrics["wfe"], "oos_win_rate": metrics["oos_win_rate"],
+                    "median_window_profit": metrics["oos_profit_median"], "median_window_wr": metrics["oos_wr_median"],
+                    "entry_diagnostics": metrics["entry_diagnostics"], "consistency_recent": metrics["consistency_score"],
+                    "consistency_full": metrics["consistency_score_full"]}
         if "data_input" in config:
             from core.data_input import source_label
             try:
@@ -473,7 +487,10 @@ def register_routes(app):
 
     @app.delete("/api/studies/<string:study_id>")
     def delete_study_endpoint(study_id: str) -> object:
-        deleted = delete_study(study_id)
+        try:
+            deleted = delete_study(study_id)
+        except ValueError as exc:
+            return jsonify(error=str(exc)), HTTPStatus.BAD_REQUEST
         if not deleted:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
         return ("", HTTPStatus.NO_CONTENT)
@@ -532,7 +549,7 @@ def register_routes(app):
 
         if data_source not in {"original_csv", "original_parquet", "new_csv"}:
             return jsonify({"error": "dataSource must be 'original_csv' or 'new_csv'."}), HTTPStatus.BAD_REQUEST
-        if source_tab not in {"optuna", "forward_test", "dsr", "stress_test"}:
+        if source_tab not in {"optuna", "forward_test", "dsr", "stress_test", "portfolio_window"}:
             return (
                 jsonify({"error": "sourceTab must be 'optuna', 'forward_test', 'dsr', or 'stress_test'."}),
                 HTTPStatus.BAD_REQUEST,
@@ -546,8 +563,11 @@ def register_routes(app):
         if not study_data:
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
         study = study_data["study"]
-        if study.get("optimization_mode") not in {"optuna", "grid"}:
+        owned_window = source_tab == "portfolio_window" and study.get("optimization_mode") == "wfa" and (study.get("config_json") or {}).get("portfolio")
+        if study.get("optimization_mode") not in {"optuna", "grid"} and not owned_window:
             return jsonify({"error": "Manual tests are supported only for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
+        if source_tab == "portfolio_window" and not owned_window:
+            return jsonify(error="An owned WFA account window is required."), HTTPStatus.BAD_REQUEST
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
             return error_response
@@ -609,6 +629,23 @@ def register_routes(app):
         warmup_bars = execution_context.warmup_bars
 
         trials = study_data.get("trials") or []
+        manual_origin = None
+        if owned_window:
+            number, period = payload.get("windowNumber"), payload.get("period", "oos")
+            selected = next((w for w in study_data.get("windows", []) if w["window_number"] == number), None)
+            if selected is None or period not in {"is", "oos"} or trial_numbers != [number]:
+                return jsonify(error="Select one saved IS/OOS account window."), HTTPStatus.BAD_REQUEST
+            from core.portfolio import positive_capital
+            try:
+                params = dict(selected["best_params"])
+                capital = positive_capital(selected["oos_execution_capital"] if period == "oos" else params["initialCapital"])
+                params["initialCapital"] = capital
+                fixed_params = {**fixed_params, "initialCapital": capital}
+                manual_origin = {"windowNumber": number, "period": period, "initialCapital": capital}
+                trials = [{**{k[len(period)+1:]: v for k,v in selected.items() if k.startswith(period+'_')},
+                           "trial_number": number, "params": params}]
+            except (KeyError, ValueError) as exc:
+                return jsonify(error=str(exc)), HTTPStatus.BAD_REQUEST
         trial_map = {int(t.get("trial_number")): t for t in trials}
         missing = [n for n in trial_numbers if int(n) not in trial_map]
         if missing:
@@ -722,6 +759,11 @@ def register_routes(app):
             },
             "results": results_payload,
         }
+        if manual_origin:
+            results_json["config"]["portfolio_source"] = manual_origin
+            results_json["config"]["fixed_params"] = fixed_params
+            for item in results_payload:
+                item['params'] = trial_map[item['trial_number']]['params']
 
         if "parameterMode" in config:
             results_json["config"]["parameterMode"] = config["parameterMode"]
@@ -962,7 +1004,8 @@ def register_routes(app):
             return jsonify({"error": "Study not found."}), HTTPStatus.NOT_FOUND
 
         study = study_data["study"]
-        if study.get("optimization_mode") not in {"optuna", "grid"}:
+        owned_wfa = study.get("optimization_mode") == "wfa" and (study.get("config_json") or {}).get("portfolio")
+        if study.get("optimization_mode") not in {"optuna", "grid"} and not owned_wfa:
             return jsonify({"error": "Manual trade export is only supported for Optuna/Grid studies."}), HTTPStatus.BAD_REQUEST
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
@@ -976,7 +1019,7 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        trial = get_study_trial(study_id, trial_number)
+        trial = next((r for r in test['results_json']['results'] if r['trial_number'] == trial_number),None) if owned_wfa else get_study_trial(study_id, trial_number)
         if not trial:
             return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
         trials_tested_csv = test.get("trials_tested_csv") or ""
@@ -1252,6 +1295,12 @@ def register_routes(app):
         actual_start = start
         actual_end = end
         is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos and (study.get("config_json") or {}).get("portfolio"):
+            from core.portfolio import positive_capital
+            try:
+                params = {**params, "initialCapital": positive_capital(window.get("oos_execution_capital"))}
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         if is_window_oos:
             try:
                 capital = resolve_execution_capital(study.get("strategy_id"), execution_context.params_for(params))
@@ -1361,6 +1410,12 @@ def register_routes(app):
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
         is_window_oos = (period or "").lower() == "oos" and (not module_type or module_type == "oos_result")
+        if is_window_oos and (study.get("config_json") or {}).get("portfolio"):
+            from core.portfolio import positive_capital
+            try:
+                params = {**params, "initialCapital": positive_capital(window.get("oos_execution_capital"))}
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         if is_window_oos and str(window.get("window_status") or "").lower() == "no_trade":
             trades = []
             module_label = module_type or "window"
@@ -1467,9 +1522,14 @@ def register_routes(app):
         adaptive_mode = bool(study.get("adaptive_mode"))
         all_trades = []
         for window in windows:
+            if str(window.get("window_status") or "").lower() == "no_trade":
+                continue
             start_raw, end_raw, error = _resolve_wfa_period(window, "oos")
             if error:
                 continue
+            if (study.get("config_json") or {}).get("portfolio"):
+                start_raw = window.get("trade_start_ts") or start_raw
+                end_raw = window.get("trade_end_ts") or end_raw
             start, end = align_date_bounds(df.index, start_raw, end_raw)
             if start is None or end is None:
                 continue
@@ -1479,6 +1539,13 @@ def register_routes(app):
                 operation_start=start,
                 operation_end=end,
             )
+
+            if (study.get("config_json") or {}).get("portfolio"):
+                from core.portfolio import positive_capital
+                try:
+                    params["initialCapital"] = positive_capital(window.get("oos_execution_capital"))
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
             try:
                 df_prepared, trade_start_idx = prepare_dataset_with_warmup(

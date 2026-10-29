@@ -262,6 +262,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
 
   function getStudyMap() {
     const map = new Map();
+    window.AnalyticsPortfolio?.rows().forEach(study => map.set(String(study.study_id),study));
     AnalyticsState.studies.forEach((study) => {
       map.set(String(study.study_id || ''), study);
     });
@@ -376,6 +377,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function getTotalWfaStudyCount() {
+    if (window.AnalyticsPortfolio?.active()) return window.AnalyticsPortfolio.rows().length;
     const researchCount = toFiniteNumber(AnalyticsState.researchInfo?.wfa_studies);
     if (researchCount !== null) {
       return Math.max(0, Math.round(researchCount));
@@ -506,6 +508,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   function handleSetsStateChange(eventPayload) {
     const previousFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
     syncSetStateFromModule();
+    window.AnalyticsPortfolio?.setsChanged(AnalyticsState, eventPayload);
     const nextFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
 
     if (nextFocusedSetId > 0) {
@@ -2260,6 +2263,10 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
 
   function updateVisualsForSelection() {
     renderResearchInfo();
+    if (window.AnalyticsPortfolio?.active()) {
+      hideFocusSidebar(); renderTableHeaderMeta(); showMessage('');
+    }
+    if (window.AnalyticsPortfolio?.visuals(AnalyticsState)) return;
     reconcileCompareStateToCurrentContext();
     renderTableHeaderMeta();
     if (window.AnalyticsSets && typeof window.AnalyticsSets.setFocusedStudyId === 'function') {
@@ -2298,6 +2305,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       { key: 'IS / OOS', val: isOosPeriods.length ? isOosPeriods.join(', ') : MISSING_TEXT },
       { key: 'Data Periods', val: `${dataPeriods.length} periods` },
       { key: 'Entry Filters', val: window.EntryFilters?.consensus(filterPopulation || []) || '?' },
+      { key: 'Ticker Selector', val: window.AnalyticsPortfolio?.describe(AnalyticsState) || 'Off' },
     ];
   }
 
@@ -2333,7 +2341,8 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
     const sortColumn = AnalyticsState.sortState.sortColumn;
     const sortDirection = AnalyticsState.sortState.sortDirection;
     if (!sortColumn || !sortDirection) {
-      subtitle.textContent = 'Sorted by date added (newest first)';
+      subtitle.textContent = window.AnalyticsPortfolio?.active()
+        ? 'Sorted by place and ticker' : 'Sorted by date added (newest first)';
       return;
     }
 
@@ -2505,7 +2514,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       return;
     }
     const previousFocusedStudyId = String(AnalyticsState.focusedStudyId || '').trim() || null;
-    clearSetFocus({ clearCompare: true, update: false });
+    if (!window.AnalyticsPortfolio?.active()) clearSetFocus({ clearCompare: true, update: false });
     if (AnalyticsState.compareDomain === 'set') {
       clearCompareState({ update: false });
     }
@@ -2536,6 +2545,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function moveFocusedSet(direction) {
+    if (window.AnalyticsSets?.moveInlineFocus(direction)) return true;
     const step = Number(direction);
     if (!Number.isInteger(step) || step === 0 || AnalyticsState.focusedSetId === null) return false;
     const orderedSetIds = (window.AnalyticsSets && typeof window.AnalyticsSets.getVisibleSetIds === 'function'
@@ -2602,6 +2612,14 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function renderTableWithCurrentState() {
+    if (window.AnalyticsPortfolio?.renderTable(AnalyticsState, {selection:onTableSelectionChange,
+      focus:onTableFocusToggle, sort:onTableSortChange, view:onTableViewChange})) {
+      renderResearchInfo();
+      hideFocusSidebar();
+      renderTableHeaderMeta();
+      showMessage('');
+      return;
+    }
     const setVisibleStudyIds = getSetVisibleStudyIds();
     refreshFiltersForCurrentContext(setVisibleStudyIds);
 
@@ -2741,6 +2759,14 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       syncSetStateFromModule();
     }
 
+    window.AnalyticsPortfolio?.reset();
+    const backroute = new URLSearchParams(window.location.search);
+    const portfolio = AnalyticsState.sets.find(s=>s.portfolio_id === backroute.get('portfolio'));
+    if (portfolio) {
+      const period = Number(backroute.get('period'));
+      if (portfolio.periods.some(p=>p.id===period)) window.AnalyticsSets.handlePeriodGesture(portfolio.id,period,{altKey:true});
+      else window.AnalyticsSets.setFocusedSetId(portfolio.id);
+    }
     renderTableSubtitle();
     renderTableWithCurrentState();
   }

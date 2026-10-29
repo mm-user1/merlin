@@ -411,6 +411,8 @@ class WindowResult:
 
     entry_diagnostics: Optional[Dict[str, Any]] = None
 
+    oos_execution_capital: Optional[float] = None
+
     # Grid WFA replay prerequisites (None for non-Grid or DSR-disabled windows)
     grid_dsr_enabled: Optional[bool] = None
     grid_dsr_top_k: Optional[int] = None
@@ -789,193 +791,10 @@ class WalkForwardEngine:
         compact_stitch_windows: List[StitchWindow] = []
 
         for window in windows:
-            print(f"\n--- Window {window.window_id}/{len(windows)} ---")
-
-            print(
-                "IS optimization: dates "
-                f"{window.is_start.date()} to {window.is_end.date()}"
-            )
-
-            execution_plan = self._resolve_window_execution_plan(
-                df=df,
-                window_id=window.window_id,
-                is_start=window.is_start,
-                is_end=window.is_end,
-                oos_start=window.oos_start,
-                oos_budget_end=window.oos_end,
-            )
-            is_pipeline = execution_plan.pipeline
-            print(f"Best param ID: {is_pipeline.param_id}")
-
-            is_result = self._run_period_backtest(
-                df=df,
-                start=execution_plan.final_is_start,
-                end=execution_plan.final_is_end,
-                params=is_pipeline.best_params,
-            )
-            capital = resolve_execution_capital(self.config.strategy_id, is_pipeline.best_params)
-            is_basic = metrics.calculate_basic(is_result, initial_balance=capital)
-            is_adv = metrics.calculate_advanced(
-                is_result,
-                initial_balance=capital,
-                compute_sharpe_daily=True,
-            )
-
-            if execution_plan.window_status == "no_trade":
-                print(
-                    "OOS validation skipped: "
-                    f"{execution_plan.no_trade_reason or 'no_trade'}"
-                )
-                prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end, capital, admission=self.prepared_input is not None and self.prepared_input.admission_rules is not None)
-                trade_end = None
-            else:
-                trade_start = execution_plan.trade_start or window.oos_start
-                print(
-                    "OOS validation: dates "
-                    f"{trade_start.date()} to {window.oos_end.date()}"
-                )
-                live_oos_result = self._run_period_backtest(
-                    df=df,
-                    start=trade_start,
-                    end=window.oos_end,
-                    params=is_pipeline.best_params,
-                )
-                prefixed_oos_result = self._prepend_flat_prefix(
-                    live_oos_result,
-                    scheduled_start=window.oos_start,
-                    live_start=trade_start,
-                    initial_balance=capital,
-                )
-                trade_end = window.oos_end
-
-            oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=capital)
-            oos_daily_available = self._should_compute_oos_daily(
-                execution_plan,
-                window.oos_start,
-            )
-            oos_adv = metrics.calculate_advanced(
-                prefixed_oos_result,
-                initial_balance=capital,
-                compute_sharpe_daily=oos_daily_available,
-            )
-
-            if oos_basic.total_trades == 0:
-                print(
-                    "Warning: Window "
-                    f"{window.window_id} produced no OOS trades. "
-                    + ("The fixed configuration made no trades in this OOS window."
-                       if self.base_config_template.get("parameterMode") == "fixed"
-                       else "This may indicate overfitting, FT rejection, or unsuitable parameters.")
-                )
-
-            dense_curve = list(prefixed_oos_result.balance_curve or [])
-            dense_timestamps = list(prefixed_oos_result.timestamps or [])
-            dense_stitch_windows.append(
-                StitchWindow(
-                    window_id=window.window_id,
-                    oos_equity_curve=dense_curve,
-                    oos_timestamps=dense_timestamps,
-                    oos_total_trades=oos_basic.total_trades,
-                    oos_start=window.oos_start,
-                )
-            )
-
-            compact_equity, compact_timestamps = self._build_compact_oos_curve(
-                prefixed_oos_result,
-                WindowSplit(
-                    window_id=window.window_id,
-                    is_start=execution_plan.final_is_start,
-                    is_end=execution_plan.final_is_end,
-                    oos_start=window.oos_start,
-                    oos_end=window.oos_end,
-                ),
-            )
-            compact_stitch_windows.append(
-                StitchWindow(
-                    window_id=window.window_id,
-                    oos_equity_curve=compact_equity,
-                    oos_timestamps=compact_timestamps,
-                    oos_total_trades=oos_basic.total_trades,
-                    oos_start=window.oos_start,
-                )
-            )
-
-            window_results.append(
-                WindowResult(
-                    entry_diagnostics=self._window_admission(is_result, prefixed_oos_result),
-                    window_id=window.window_id,
-                    is_start=execution_plan.final_is_start,
-                    is_end=execution_plan.final_is_end,
-                    oos_start=window.oos_start,
-                    oos_end=window.oos_end,
-                    best_params=is_pipeline.best_params,
-                    param_id=is_pipeline.param_id,
-                    is_net_profit_pct=is_basic.net_profit_pct,
-                    is_max_drawdown_pct=is_basic.max_drawdown_pct,
-                    is_total_trades=is_basic.total_trades,
-                    is_best_trial_number=is_pipeline.best_trial_number,
-                    is_equity_curve=None,
-                    is_timestamps=None,
-                    oos_net_profit_pct=oos_basic.net_profit_pct,
-                    oos_max_drawdown_pct=oos_basic.max_drawdown_pct,
-                    oos_total_trades=oos_basic.total_trades,
-                    oos_equity_curve=[],
-                    oos_timestamps=[],
-                    oos_winning_trades=oos_basic.winning_trades,
-                    is_pareto_optimal=is_pipeline.is_pareto_optimal,
-                    constraints_satisfied=is_pipeline.constraints_satisfied,
-                    best_params_source=is_pipeline.best_params_source,
-                    available_modules=is_pipeline.available_modules,
-                    optuna_is_trials=is_pipeline.optuna_is_trials,
-                    dsr_trials=is_pipeline.dsr_trials,
-                    forward_test_trials=is_pipeline.forward_test_trials,
-                    stress_test_trials=is_pipeline.stress_test_trials,
-                    module_status=is_pipeline.module_status,
-                    selection_chain=is_pipeline.selection_chain,
-                    optimization_start=is_pipeline.optimization_start,
-                    optimization_end=is_pipeline.optimization_end,
-                    ft_start=is_pipeline.ft_start,
-                    ft_end=is_pipeline.ft_end,
-                    is_win_rate=is_basic.win_rate,
-                    is_max_consecutive_losses=is_basic.max_consecutive_losses,
-                    is_romad=is_adv.romad,
-                    is_sharpe_ratio=is_adv.sharpe_ratio,
-                    is_sharpe_daily=is_adv.sharpe_daily,
-                    is_sharpe_daily_observations=is_adv.sharpe_daily_observations,
-                    is_sharpe_daily_active_days=is_adv.sharpe_daily_active_days,
-                    is_profit_factor=is_adv.profit_factor,
-                    is_sqn=is_adv.sqn,
-                    is_ulcer_index=is_adv.ulcer_index,
-                    is_consistency_score=is_adv.consistency_score,
-                    is_composite_score=getattr(is_pipeline.best_result, "score", None),
-                    oos_win_rate=oos_basic.win_rate,
-                    oos_max_consecutive_losses=oos_basic.max_consecutive_losses,
-                    oos_romad=oos_adv.romad,
-                    oos_sharpe_ratio=oos_adv.sharpe_ratio,
-                    oos_sharpe_daily=oos_adv.sharpe_daily,
-                    oos_sharpe_daily_observations=oos_adv.sharpe_daily_observations,
-                    oos_sharpe_daily_active_days=oos_adv.sharpe_daily_active_days,
-                    oos_profit_factor=oos_adv.profit_factor,
-                    oos_sqn=oos_adv.sqn,
-                    oos_ulcer_index=oos_adv.ulcer_index,
-                    oos_consistency_score=oos_adv.consistency_score,
-                    trade_start=execution_plan.trade_start,
-                    trade_end=trade_end,
-                    entry_delay_days=execution_plan.entry_delay_days,
-                    ft_retry_attempts_used=execution_plan.ft_retry_attempts_used,
-                    remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
-                    window_status=execution_plan.window_status,
-                    no_trade_reason=execution_plan.no_trade_reason,
-                    grid_dsr_enabled=is_pipeline.grid_dsr_enabled,
-                    grid_dsr_top_k=is_pipeline.grid_dsr_top_k,
-                    grid_dsr_n_trials=is_pipeline.grid_dsr_n_trials,
-                    grid_dsr_mean_sharpe=is_pipeline.grid_dsr_mean_sharpe,
-                    grid_dsr_var_sharpe=is_pipeline.grid_dsr_var_sharpe,
-                    grid_dsr_sr0=is_pipeline.grid_dsr_sr0,
-                    grid_valid_candidate_count=is_pipeline.grid_valid_candidate_count,
-                    grid_selected_candidate_count=is_pipeline.grid_selected_candidate_count,
-                )
-            )
+            result, _, dense, compact = self.run_window(df, window)
+            window_results.append(result)
+            dense_stitch_windows.append(dense)
+            compact_stitch_windows.append(compact)
 
         stitched_oos = self._build_stitched_oos_equity(
             window_results,
@@ -1007,6 +826,206 @@ class WalkForwardEngine:
             )
 
         return wf_result, study_id
+
+    def run_window(self, df, window, *, oos_capital=None):
+        """Execute one assigned window; an OOS override never changes IS lineage."""
+        window_results, dense_stitch_windows, compact_stitch_windows = [], [], []
+        print(f"\n--- Window {window.window_id} ---")
+
+        print(
+            "IS optimization: dates "
+            f"{window.is_start.date()} to {window.is_end.date()}"
+        )
+
+        execution_plan = self._resolve_window_execution_plan(
+            df=df,
+            window_id=window.window_id,
+            is_start=window.is_start,
+            is_end=window.is_end,
+            oos_start=window.oos_start,
+            oos_budget_end=window.oos_end,
+        )
+        is_pipeline = execution_plan.pipeline
+        print(f"Best param ID: {is_pipeline.param_id}")
+
+        is_result = self._run_period_backtest(
+            df=df,
+            start=execution_plan.final_is_start,
+            end=execution_plan.final_is_end,
+            params=is_pipeline.best_params,
+        )
+        capital = resolve_execution_capital(self.config.strategy_id, is_pipeline.best_params)
+        is_basic = metrics.calculate_basic(is_result, initial_balance=capital)
+        is_adv = metrics.calculate_advanced(
+            is_result,
+            initial_balance=capital,
+            compute_sharpe_daily=True,
+        )
+
+        oos_params = deepcopy(is_pipeline.best_params)
+        if oos_capital is not None:
+            from .portfolio import positive_capital
+            oos_params["initialCapital"] = positive_capital(oos_capital)
+            capital = oos_params["initialCapital"]
+
+        if execution_plan.window_status == "no_trade":
+            print(
+                "OOS validation skipped: "
+                f"{execution_plan.no_trade_reason or 'no_trade'}"
+            )
+            prefixed_oos_result = self._build_flat_result(window.oos_start, window.oos_end, capital, admission=self.prepared_input is not None and self.prepared_input.admission_rules is not None)
+            trade_end = None
+        else:
+            trade_start = execution_plan.trade_start or window.oos_start
+            print(
+                "OOS validation: dates "
+                f"{trade_start.date()} to {window.oos_end.date()}"
+            )
+            live_oos_result = self._run_period_backtest(
+                df=df,
+                start=trade_start,
+                end=window.oos_end,
+                params=oos_params,
+            )
+            prefixed_oos_result = self._prepend_flat_prefix(
+                live_oos_result,
+                scheduled_start=window.oos_start,
+                live_start=trade_start,
+                initial_balance=capital,
+            )
+            trade_end = window.oos_end
+
+        oos_basic = metrics.calculate_basic(prefixed_oos_result, initial_balance=capital)
+        oos_daily_available = self._should_compute_oos_daily(
+            execution_plan,
+            window.oos_start,
+        )
+        oos_adv = metrics.calculate_advanced(
+            prefixed_oos_result,
+            initial_balance=capital,
+            compute_sharpe_daily=oos_daily_available,
+        )
+
+        if oos_basic.total_trades == 0:
+            print(
+                "Warning: Window "
+                f"{window.window_id} produced no OOS trades. "
+                + ("The fixed configuration made no trades in this OOS window."
+                   if self.base_config_template.get("parameterMode") == "fixed"
+                   else "This may indicate overfitting, FT rejection, or unsuitable parameters.")
+            )
+
+        dense_curve = list(prefixed_oos_result.balance_curve or [])
+        dense_timestamps = list(prefixed_oos_result.timestamps or [])
+        dense_stitch_windows.append(
+            StitchWindow(
+                window_id=window.window_id,
+                oos_equity_curve=dense_curve,
+                oos_timestamps=dense_timestamps,
+                oos_total_trades=oos_basic.total_trades,
+                oos_start=window.oos_start,
+            )
+        )
+
+        compact_equity, compact_timestamps = self._build_compact_oos_curve(
+            prefixed_oos_result,
+            WindowSplit(
+                window_id=window.window_id,
+                is_start=execution_plan.final_is_start,
+                is_end=execution_plan.final_is_end,
+                oos_start=window.oos_start,
+                oos_end=window.oos_end,
+            ),
+        )
+        compact_stitch_windows.append(
+            StitchWindow(
+                window_id=window.window_id,
+                oos_equity_curve=compact_equity,
+                oos_timestamps=compact_timestamps,
+                oos_total_trades=oos_basic.total_trades,
+                oos_start=window.oos_start,
+            )
+        )
+
+        window_results.append(
+            WindowResult(
+                entry_diagnostics=self._window_admission(is_result, prefixed_oos_result),
+                window_id=window.window_id,
+                is_start=execution_plan.final_is_start,
+                is_end=execution_plan.final_is_end,
+                oos_start=window.oos_start,
+                oos_end=window.oos_end,
+                best_params=is_pipeline.best_params,
+                param_id=is_pipeline.param_id,
+                is_net_profit_pct=is_basic.net_profit_pct,
+                is_max_drawdown_pct=is_basic.max_drawdown_pct,
+                is_total_trades=is_basic.total_trades,
+                is_best_trial_number=is_pipeline.best_trial_number,
+                is_equity_curve=None,
+                is_timestamps=None,
+                oos_net_profit_pct=oos_basic.net_profit_pct,
+                oos_max_drawdown_pct=oos_basic.max_drawdown_pct,
+                oos_total_trades=oos_basic.total_trades,
+                oos_equity_curve=[],
+                oos_timestamps=[],
+                oos_winning_trades=oos_basic.winning_trades,
+                is_pareto_optimal=is_pipeline.is_pareto_optimal,
+                constraints_satisfied=is_pipeline.constraints_satisfied,
+                best_params_source=is_pipeline.best_params_source,
+                available_modules=is_pipeline.available_modules,
+                optuna_is_trials=is_pipeline.optuna_is_trials,
+                dsr_trials=is_pipeline.dsr_trials,
+                forward_test_trials=is_pipeline.forward_test_trials,
+                stress_test_trials=is_pipeline.stress_test_trials,
+                module_status=is_pipeline.module_status,
+                selection_chain=is_pipeline.selection_chain,
+                optimization_start=is_pipeline.optimization_start,
+                optimization_end=is_pipeline.optimization_end,
+                ft_start=is_pipeline.ft_start,
+                ft_end=is_pipeline.ft_end,
+                is_win_rate=is_basic.win_rate,
+                is_max_consecutive_losses=is_basic.max_consecutive_losses,
+                is_romad=is_adv.romad,
+                is_sharpe_ratio=is_adv.sharpe_ratio,
+                is_sharpe_daily=is_adv.sharpe_daily,
+                is_sharpe_daily_observations=is_adv.sharpe_daily_observations,
+                is_sharpe_daily_active_days=is_adv.sharpe_daily_active_days,
+                is_profit_factor=is_adv.profit_factor,
+                is_sqn=is_adv.sqn,
+                is_ulcer_index=is_adv.ulcer_index,
+                is_consistency_score=is_adv.consistency_score,
+                is_composite_score=getattr(is_pipeline.best_result, "score", None),
+                oos_win_rate=oos_basic.win_rate,
+                oos_max_consecutive_losses=oos_basic.max_consecutive_losses,
+                oos_romad=oos_adv.romad,
+                oos_sharpe_ratio=oos_adv.sharpe_ratio,
+                oos_sharpe_daily=oos_adv.sharpe_daily,
+                oos_sharpe_daily_observations=oos_adv.sharpe_daily_observations,
+                oos_sharpe_daily_active_days=oos_adv.sharpe_daily_active_days,
+                oos_profit_factor=oos_adv.profit_factor,
+                oos_sqn=oos_adv.sqn,
+                oos_ulcer_index=oos_adv.ulcer_index,
+                oos_consistency_score=oos_adv.consistency_score,
+                trade_start=execution_plan.trade_start,
+                trade_end=trade_end,
+                entry_delay_days=execution_plan.entry_delay_days,
+                ft_retry_attempts_used=execution_plan.ft_retry_attempts_used,
+                remaining_oos_days_at_entry=execution_plan.remaining_oos_days_at_entry,
+                window_status=execution_plan.window_status,
+                no_trade_reason=execution_plan.no_trade_reason,
+                grid_dsr_enabled=is_pipeline.grid_dsr_enabled,
+                grid_dsr_top_k=is_pipeline.grid_dsr_top_k,
+                grid_dsr_n_trials=is_pipeline.grid_dsr_n_trials,
+                grid_dsr_mean_sharpe=is_pipeline.grid_dsr_mean_sharpe,
+                grid_dsr_var_sharpe=is_pipeline.grid_dsr_var_sharpe,
+                grid_dsr_sr0=is_pipeline.grid_dsr_sr0,
+                grid_valid_candidate_count=is_pipeline.grid_valid_candidate_count,
+                grid_selected_candidate_count=is_pipeline.grid_selected_candidate_count,
+            )
+        )
+
+        window_results[0].oos_execution_capital = capital if oos_capital is not None else None
+        return window_results[0], prefixed_oos_result, dense_stitch_windows[0], compact_stitch_windows[0]
 
     def _resolve_trading_bounds(self, df: pd.DataFrame) -> Tuple[pd.Timestamp, pd.Timestamp]:
         fixed_params = self.base_config_template.get("fixed_params", {})
@@ -3238,6 +3257,8 @@ class WalkForwardEngine:
         )
 
         if optimizer_mode == "grid":
+            if "portfolio_reference_capital" in self.base_config_template:
+                base_config._portfolio_execution_capital = self.base_config_template["portfolio_reference_capital"]
             grid_v2_plan_cache = None
             if supports_grid_v2(base_config.strategy_id):
                 if self._grid_v2_plan_cache is None:

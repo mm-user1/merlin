@@ -973,7 +973,6 @@
           <div class="content">
             <div class="wf-section" style="margin-top: 0; margin-bottom: 16px; padding: 20px; border: 2px solid #3498db; border-radius: 8px; background-color: #f8f9fa;">
               <h3 style="color: #3498db; margin-bottom: 12px;">Post Process</h3>
-
               <div class="form-group vertical" style="align-items: flex-start;">
                 <label style="margin-bottom: 8px;">
                   <input type="checkbox" id="enableDSR" />
@@ -1074,6 +1073,21 @@
                     <option value="romad_retention">RoMaD Retention</option>
                   </select>
                 </div>
+              </div>
+
+              <div id="tickerSelectorEditor" hidden>
+                <div class="form-group vertical">
+                  <label class="selector-toggle"><input type="checkbox" id="enableTickerSelector" /> <strong>Enable Ticker Selector</strong></label>
+                </div>
+                <div id="tickerSelectorSettings" hidden>
+                  <div class="form-group"><label for="selectorMethod">Method:</label><select id="selectorMethod"><option>X — Mean Candle Range</option></select></div>
+                  <div class="form-group"><label for="selectorTopN">Top N:</label><input id="selectorTopN" type="number" min="1" step="1" value="8" /></div>
+                  <div class="form-group"><label for="selectorRebalance">Rebalance Every<br />(months):</label><input id="selectorRebalance" type="number" min="1" step="1" value="1" /></div>
+                  <div class="form-group vertical"><label><input id="selectorUnselected" type="checkbox" /> Evaluate Unselected Tickers</label></div>
+                  <div class="form-group"><label for="selectorLookback">Lookback (months):</label><input id="selectorLookback" type="number" min="1" step="1" value="4" /></div>
+                  <div class="form-group"><label for="selectorTimeframe">Ranking Timeframe:</label><input id="selectorTimeframe" type="text" value="30m" /></div>
+                </div>
+                <div id="tickerSelectorError" role="alert"></div>
               </div>
             </div>
 
@@ -1339,6 +1353,7 @@
   <script src="/static/js/ui-handlers.js"></script>
   <script src="/static/js/parquet-input.js"></script>
   <script src="/static/js/entry-filters.js"></script>
+  <script src="/static/js/ticker-selector.js"></script>
   <script src="/static/js/presets.js"></script>
   <script src="/static/js/post-process-ui.js"></script>
   <script src="/static/js/oos-test-ui.js"></script>

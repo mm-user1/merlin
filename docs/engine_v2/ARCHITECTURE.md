@@ -516,3 +516,20 @@ manual/replay/export paths remain compatible; no record is silently converted
 to Grid. Unknown/removed strategies remain viewable from stored facts but
 cannot execute without current registry authority. Corrupt or unsupported
 versioned runtime metadata blocks strict execution rather than downgrading.
+
+## Carried portfolio coordination
+
+The [ticker portfolio coordinator](../TICKER_PORTFOLIOS.md) reuses qualified
+risk_bracket_v1/strict_close V2 profiles without strategy-name branches. It builds one
+data-independent calendar, admits consumed slices, then executes sequential account
+jobs with the existing Grid plan cache and one worker layer. WFA `run_window` is the
+shared per-window extraction; ordinary WFA still constructs and runs its own calendar.
+IS reference capital is constant; actual OOS overrides are finite positive internal
+values independent of scalar editor bounds. Chosen IS params are not rewritten.
+
+Connection-aware Grid/WFA saves participate in one final portfolio transaction;
+ordinary callers still own their transactions. Additive parent/ownership tables and
+an ordinary_studies view keep portfolio children out of ordinary enumeration while
+retaining explicit child Results/replay. Nullable WFA OOS execution capital supports
+exact replay/export. Pure saved-fact projection owns PF metrics, not another kernel.
+No reference/Numba ABI, historical metrics, Pattern Lab or Strategy Lab contract changes.

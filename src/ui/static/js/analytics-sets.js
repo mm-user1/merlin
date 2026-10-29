@@ -90,6 +90,10 @@
     onStateChange: null,
     onCompareToggle: null,
     bound: false,
+    expandedPortfolios: new Set(),
+    checkedPeriods: new Map(),
+    focusedPeriod: null,
+    periodAnchor: null,
   };
 
   function escapeHtml(value) {
@@ -165,6 +169,7 @@
 
   function cloneMetrics(rawMetrics) {
     if (!rawMetrics || typeof rawMetrics !== 'object') return null;
+    if (rawMetrics.portfolio) return {...rawMetrics};
     return {
       ann_profit_pct: toFiniteNumber(rawMetrics.ann_profit_pct),
       profit_pct: toFiniteNumber(rawMetrics.profit_pct),
@@ -193,6 +198,7 @@
           ? setItem.study_ids.map((value) => String(value || '').trim()).filter(Boolean)
           : [];
         return {
+          ...setItem,
           id,
           name: String(setItem?.name || '').trim(),
           sort_order: Number.isFinite(Number(setItem?.sort_order)) ? Number(setItem.sort_order) : 0,
@@ -654,6 +660,13 @@
   }
 
   function computeMetrics(studies, curveMetrics) {
+    if (curveMetrics?.portfolio) {
+      const c = Object.fromEntries(Object.entries(curveMetrics).map(([k,v])=>[k,v === null ? undefined : v]));
+      return {annProfitPct:c.ann_profit_pct, profitPct:c.profit_pct, maxDdPct:c.max_drawdown_pct,
+        consistencyFull:c.consistency_score_full, consistencyRecent:c.consistency_score,
+        profitablePct:c.profitable_pct, profitableText:c.profitable_pct == null ? 'N/A' : `${c.profitable_pct.toFixed(1)}%`,
+        wfePct:c.wfe, oosWinsPct:c.oos_win_rate};
+    }
     const list = Array.isArray(studies) ? studies : [];
     const nonCurve = computeNonCurveMetrics(list);
     const curve = curveMetrics && typeof curveMetrics === 'object' ? curveMetrics : null;
@@ -953,6 +966,8 @@
     if (normalized === null || !hasSet(normalized)) return;
     if (checked) state.checkedSetIds.add(normalized);
     else state.checkedSetIds.delete(normalized);
+    const item = getSetById(normalized);
+    if (item?.kind === 'portfolio') state.checkedPeriods.set(normalized, new Set(checked ? item.periods.map(p => p.id) : []));
   }
 
   function applyRangeSelection(targetSetId) {
@@ -1132,9 +1147,11 @@
     if (state.moveMode || state.batchMode) return;
     closeTransientMenus();
     const normalized = normalizeSetId(setId);
+    const wasPeriod = state.focusedPeriod !== null;
+    state.focusedPeriod = null;
     if (normalized === null || !hasSet(normalized)) return;
 
-    if (state.focusedSetId === normalized) {
+    if (state.focusedSetId === normalized && !wasPeriod) {
       clearFocusedSetForModeChange('setFocusClearedToAll', 'setFocusClearedToCheckboxes');
       return;
     }
@@ -1572,7 +1589,7 @@
 
     visibleRows.forEach(({ setItem, metrics }) => {
       const checked = state.checkedSetIds.has(setItem.id) ? ' checked' : '';
-      const focusedClass = state.focusedSetId === setItem.id ? ' analytics-set-focused' : '';
+      const focusedClass = state.focusedSetId === setItem.id && state.focusedPeriod === null ? ' analytics-set-focused' : '';
       const batchSelectedClass = state.batchMode && state.batchSelectedSetIds.has(setItem.id)
         ? ' analytics-set-batch-selected'
         : '';
@@ -1586,7 +1603,7 @@
       rows.push(`
         <tr class="analytics-set-row${focusedClass}${batchSelectedClass}${movingClass}${focusedStudyMatchClass}" data-set-id="${setItem.id}"${colorTokenAttr}>
           <td class="col-check"><input type="checkbox" class="analytics-set-check" data-set-id="${setItem.id}"${checked} /></td>
-          <td title="${encodedName}">${encodedName} (${setItem.study_ids.length})</td>
+          <td title="${encodedName}">${setItem.kind === 'portfolio' ? `<button type="button" class="portfolio-expand" data-expand-set="${setItem.id}" aria-expanded="${state.expandedPortfolios.has(setItem.id)}">${state.expandedPortfolios.has(setItem.id) ? '▼' : '▶'}</button>` : ''}${encodedName} (${setItem.kind === 'portfolio' ? setItem.period_count : setItem.study_ids.length})</td>
           <td class="${getSignedClass(metrics.annProfitPct)}">${escapeHtml(formatSignedPercent(metrics.annProfitPct, 1))}</td>
           <td class="${getSignedClass(metrics.profitPct)}">${escapeHtml(formatSignedPercent(metrics.profitPct, 1))}</td>
           <td class="${getMaxDdClass(metrics.maxDdPct)}">${escapeHtml(formatNegativePercent(metrics.maxDdPct, 1))}</td>
@@ -1596,6 +1613,19 @@
           <td title="Recent / Full signed R² for the aggregated portfolio curve">${renderConsistencyPair(metrics.consistencyRecent, metrics.consistencyFull, 2)}</td>
         </tr>
       `);
+      if (setItem.kind === 'portfolio' && state.expandedPortfolios.has(setItem.id)) {
+        setItem.periods.forEach(period => {
+          const m = Object.fromEntries(Object.entries(period.metrics || {}).map(([k,v])=>[k,v === null ? undefined : v]));
+          const selected = state.checkedPeriods.get(setItem.id)?.has(period.id);
+          rows.push(`<tr class="portfolio-period-row${state.focusedSetId === setItem.id && state.focusedPeriod === period.id ? ' analytics-set-focused' : ''}" data-parent-set="${setItem.id}" data-period="${period.id}">
+            <td><input type="checkbox" ${selected ? 'checked' : ''} /></td>
+            <td class="portfolio-period-name">P${period.id} · ${escapeHtml(period.start.slice(0,10))}–${escapeHtml(period.displayEnd || period.end.slice(0,10))} (${period.funded_count})</td>
+            <td>${formatSignedPercent(m.ann_profit_pct)}</td><td>${formatSignedPercent(m.profit_pct)}</td>
+            <td>${formatNegativePercent(m.max_drawdown_pct)}</td><td>${formatUnsignedPercent(m.profitable_pct)}</td>
+            <td>${formatUnsignedPercent(m.wfe)}</td><td>${formatUnsignedPercent(m.oos_win_rate)}</td>
+            <td>${renderConsistencyPair(m.consistency_score, m.consistency_score_full, 2)}</td></tr>`);
+        });
+      }
     });
 
     tableWrap.innerHTML = `
@@ -1660,6 +1690,11 @@
 
       const checkbox = row.querySelector('input.analytics-set-check');
       if (checkbox) {
+        const item = getSetById(setId);
+        if (item?.kind === 'portfolio') {
+          const count = state.checkedPeriods.get(setId)?.size || 0;
+          checkbox.indeterminate = count > 0 && count < item.periods.length;
+        }
         checkbox.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -1699,6 +1734,17 @@
         handleCheckboxToggle(setId, event);
         });
     });
+
+    tableWrap.querySelectorAll('[data-expand-set]').forEach(button => button.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      const id = Number(button.dataset.expandSet);
+      if (state.expandedPortfolios.has(id)) state.expandedPortfolios.delete(id); else state.expandedPortfolios.add(id);
+      render();
+    }));
+    tableWrap.querySelectorAll('.portfolio-period-row').forEach(row => row.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      handlePeriodGesture(Number(row.dataset.parentSet), Number(row.dataset.period), event);
+    }));
 
     applyFocusedStudyMembershipClasses();
     applyCompareMarkers();
@@ -1782,6 +1828,9 @@
     const prevBatchMode = state.batchMode;
 
     state.sets = cloneSetList(newSets);
+    if (!preserveSelection) {
+      state.checkedPeriods.clear(); state.focusedPeriod = null; state.expandedPortfolios.clear();
+    }
     if (window.AnalyticsSetsView && typeof window.AnalyticsSetsView.updateSets === 'function') {
       window.AnalyticsSetsView.updateSets(state.sets, { emitChange: false });
     }
@@ -2010,6 +2059,7 @@
     if (state.focusedSetId === null) return;
     closeTransientMenus();
     state.focusedSetId = null;
+    state.focusedPeriod = null;
     state.forceAllStudies = false;
     resolveViewMode();
     render();
@@ -2018,6 +2068,7 @@
 
   function setFocusedSetId(setId, options = {}) {
     if (state.batchMode) return;
+    state.focusedPeriod = null;
     const normalized = normalizeSetId(setId);
     if (normalized === null) {
       if (state.focusedSetId === null) return;
@@ -2051,8 +2102,62 @@
     return state.moveMode;
   }
 
+  function getPortfolioScope() {
+    const item = getSetById(state.focusedSetId);
+    return item?.kind === 'portfolio' ? {id:item.portfolio_id, setId:item.id, period:state.focusedPeriod, name:item.name} : null;
+  }
+
+  function moveInlineFocus(direction) {
+    if (!state.sets.some(s=>s.kind === 'portfolio')) return false;
+    const order = getVisibleOrderedSetIds().flatMap(id=>[
+      {id,period:null}, ...(state.expandedPortfolios.has(id) ? (getSetById(id)?.periods || []).map(p=>({id,period:p.id})) : [])
+    ]);
+    const index = order.findIndex(x=>x.id === state.focusedSetId && x.period === state.focusedPeriod);
+    const target = order[index + direction];
+    if (index < 0 || !target) return false;
+    state.focusedSetId = target.id; state.focusedPeriod = target.period; state.forceAllStudies = false;
+    resolveViewMode(); render(); emitStateChange({reason:'inlineFocus',syncCheckedStudyIds:null});
+    scrollSetIntoView(target.id, target.period);
+    return true;
+  }
+
+  function getCheckedPortfolioPeriods() {
+    if (state.viewMode === VIEW_MODES.ALL) return [];
+    return state.sets.filter(s => s.kind === 'portfolio' && state.checkedSetIds.has(s.id)).map(s => ({
+      id:s.portfolio_id, periods:Array.from(state.checkedPeriods.get(s.id) || new Set(s.periods.map(p => p.id)))
+    }));
+  }
+
+  function handlePeriodGesture(setId, period, event) {
+    if (state.moveMode || state.batchMode) return;
+    const item = getSetById(setId);
+    if (item?.kind !== 'portfolio' || !item.periods.some(p => p.id === period)) return;
+    state.forceAllStudies = false;
+    if (event.altKey) {
+      if (state.focusedSetId === setId && state.focusedPeriod === period) {
+        state.focusedSetId = null; state.focusedPeriod = null;
+      } else { state.focusedSetId = setId; state.focusedPeriod = period; }
+    } else {
+      const checked = new Set(state.checkedPeriods.get(setId) || []);
+      const value = !checked.has(period);
+      const ids = item.periods.map(p => p.id);
+      let affected = [period];
+      if (event.ctrlKey) affected = ids;
+      else if (event.shiftKey && state.periodAnchor?.setId === setId) {
+        const a = ids.indexOf(state.periodAnchor.period), b = ids.indexOf(period);
+        affected = ids.slice(Math.min(a,b),Math.max(a,b)+1);
+      }
+      affected.forEach(id => value ? checked.add(id) : checked.delete(id));
+      state.checkedPeriods.set(setId, checked);
+      if (checked.size) state.checkedSetIds.add(setId); else state.checkedSetIds.delete(setId);
+      state.periodAnchor = {setId, period};
+    }
+    resolveViewMode(); render(); emitStateChange({reason:'portfolioPeriod',syncCheckedStudyIds:null});
+  }
+
   function getSets() {
     return state.sets.map((setItem) => ({
+      ...setItem,
       id: setItem.id,
       name: setItem.name,
       sort_order: setItem.sort_order,
@@ -2071,8 +2176,9 @@
     return getVisibleOrderedSetIds().slice();
   }
 
-  function scrollSetIntoView(setId) {
-    const row = findSetRow(setId);
+  function scrollSetIntoView(setId, period = null) {
+    const row = period === null ? findSetRow(setId)
+      : getDom().tableWrap?.querySelector(`tr[data-parent-set="${setId}"][data-period="${period}"]`);
     if (!row) return;
     const container = row.closest('.analytics-sets-table-wrap');
     if (!(container instanceof HTMLElement)) return;
@@ -2094,6 +2200,10 @@
   }
 
   window.AnalyticsSets = {
+    moveInlineFocus,
+    getPortfolioScope,
+    getCheckedPortfolioPeriods,
+    handlePeriodGesture,
     init,
     updateStudies,
     updateCheckedStudyIds,

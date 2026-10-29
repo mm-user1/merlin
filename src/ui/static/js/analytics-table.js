@@ -232,6 +232,10 @@
   }
 
   function withDerivedFields(study) {
+    if (study.portfolio_id) {
+      return {...Object.fromEntries(Object.entries(study).map(([key,value])=>[key,value === null ? undefined : value])),
+        _study_name_display:study.study_name, _default_order_ms:null};
+    }
     const createdEpoch = toFiniteNumber(study?.created_at_epoch);
     const completedEpoch = toFiniteNumber(study?.completed_at_epoch);
     const createdMs = createdEpoch === null ? parseTimestampMs(study?.created_at) : createdEpoch * 1000;
@@ -250,7 +254,15 @@
     };
   }
 
+  function comparePortfolioNames(left, right, direction) {
+    const a = left.portfolioRank, b = right.portfolioRank;
+    if ((a != null) !== (b != null)) return a != null ? -1 : 1;
+    const cmp = a != null ? a - b : String(left.study_name).localeCompare(String(right.study_name), undefined, {numeric:true});
+    return direction === 'desc' ? -cmp : cmp;
+  }
+
   function compareDefaultRows(leftStudy, rightStudy) {
+    if (leftStudy.portfolio_id && rightStudy.portfolio_id) return comparePortfolioNames(leftStudy, rightStudy, 'asc');
     const leftTs = leftStudy?._default_order_ms;
     const rightTs = rightStudy?._default_order_ms;
 
@@ -348,6 +360,7 @@
     }
 
     if (sortColumn === 'study_name') {
+      if (leftStudy.portfolio_id && rightStudy.portfolio_id) return comparePortfolioNames(leftStudy, rightStudy, sortDirection);
       const cmp = compareStudyNameRows(leftStudy, rightStudy);
       if (cmp !== 0) return sortDirection === 'asc' ? cmp : -cmp;
       return compareDefaultRows(leftStudy, rightStudy);
@@ -518,11 +531,11 @@
   }
 
   function getEligibleRowCheckboxes() {
-    return getRowCheckboxes().filter((checkbox) => isStudyRowEligible(checkbox.closest('tr.analytics-study-row')));
+    return getRowCheckboxes().filter((checkbox) => !checkbox.disabled && isStudyRowEligible(checkbox.closest('tr.analytics-study-row')));
   }
 
   function getVisibleRowCheckboxes() {
-    return getRowCheckboxes().filter((checkbox) => isStudyRowVisible(checkbox.closest('tr.analytics-study-row')));
+    return getRowCheckboxes().filter((checkbox) => !checkbox.disabled && isStudyRowVisible(checkbox.closest('tr.analytics-study-row')));
   }
 
   function getGroupCheckboxes() {
@@ -863,7 +876,7 @@
   function buildStudyRowHtml(study, groupId, eligible, visible, nextChecked) {
     const studyId = String(study.study_id || '');
     const encodedStudyId = encodeStudyId(studyId);
-    const checked = tableState.autoSelect ? eligible : tableState.checkedSet.has(studyId);
+    const checked = !study.unavailable && (tableState.autoSelect ? eligible : tableState.checkedSet.has(studyId));
     const styleHidden = visible ? '' : ' style="display:none;"';
 
     if (checked) nextChecked.add(studyId);
@@ -892,11 +905,12 @@
     const oosProfitClass = (toFiniteNumber(study.median_window_profit) || 0) >= 0 ? 'val-positive' : 'val-negative';
 
     const strategyText = escapeHtml(study.strategy || 'Unknown');
-    const studyNameText = escapeHtml(study._study_name_display || fallbackStudyName(study));
+    const studyNameText = escapeHtml(study.portfolio_id ? study.study_name : (study._study_name_display || fallbackStudyName(study)));
+    const resultLink = study.resultStudyId ? ` <a href="/results?study=${encodeURIComponent(study.resultStudyId)}" title="Open account Results">↗</a>` : '';
     const studyNameTitle = escapeHtml(study.study_name || '');
     const wfaModeText = escapeHtml(study.wfa_mode || 'Unknown');
     const isOosText = escapeHtml(study.is_oos || 'N/A');
-    const totalTradesText = escapeHtml(formatInteger(study.total_trades, '0'));
+    const totalTradesText = escapeHtml(formatInteger(study.total_trades, study.unavailable ? 'N/A' : '0'));
     const oosWinsText = escapeHtml(formatOosWins(study));
 
     return `
@@ -914,11 +928,12 @@
             data-group="${groupId}"
             data-study-id="${encodedStudyId}"
             ${checked ? 'checked' : ''}
+            ${study.unavailable ? 'disabled' : ''}
           />
         </td>
         <td class="analytics-row-number"></td>
         <td>${strategyText}</td>
-        <td title="${studyNameTitle}">${studyNameText}</td>
+        <td title="${studyNameTitle}">${studyNameText}${resultLink}</td>
         <td>${wfaModeText}</td>
         <td>${isOosText}</td>
         <td class="${annProfitCell.className || ''}"${annProfitTitleAttr}>${annProfitText}</td>
@@ -1037,6 +1052,7 @@
   }
 
   function formatOosWins(study) {
+    if (study.portfolio_id && study.profitable_windows_pct == null) return 'N/A';
     const profitable = Math.max(0, Math.round(toFiniteNumber(study.profitable_windows) || 0));
     const total = Math.max(0, Math.round(toFiniteNumber(study.total_windows) || 0));
     const pct = toFiniteNumber(study.profitable_windows_pct);
@@ -1155,6 +1171,8 @@
         return;
       }
 
+      if (rowCheckbox.disabled || target.closest('a')) return;
+
       if (clickedRowCheckbox && !event.ctrlKey && !event.shiftKey) {
         // Allow native checkbox toggle; change handler will sync state.
         return;
@@ -1211,7 +1229,7 @@
 
   function setAllChecked(checked) {
     getRowCheckboxes().forEach((checkbox) => {
-      checkbox.checked = Boolean(checked);
+      checkbox.checked = !checkbox.disabled && Boolean(checked);
     });
     syncHierarchyCheckboxes();
     tableState.checkedSet = new Set(getCheckedStudyIds());

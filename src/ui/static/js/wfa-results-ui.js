@@ -857,7 +857,9 @@
 
       oosRow.addEventListener('click', async () => {
         selectRow(oosRow);
-        showParameterDetails(window);
+        showParameterDetails(window.oos_execution_capital == null ? window : {
+          ...window, best_params: {...window.best_params, initialCapital:window.oos_execution_capital}
+        });
         setWfaSelection({ windowNumber, period: 'oos' });
         if (typeof setComparisonLine === 'function') {
           setComparisonLine('');

@@ -779,3 +779,19 @@ and authorization. Normalization cases are ordinarily collected without importin
 this opt-in module. Ordinary full runs use synthetic SQLite data and require no
 operational database. See the [V1](../docs/ADDING_NEW_STRATEGY.md) and
 [V2](../docs/ADDING_NEW_STRATEGY_V2.md) guides for strategy-specific test obligations.
+
+### Ticker portfolios
+
+Focused deterministic coverage lives in `test_ticker_selector.py`, `test_portfolio.py`,
+`server/test_portfolio.py` and `test_js_portfolio.py` (actual Analytics set/table handlers
+under a small Node DOM shim). Use `tools/run_tests.py --keep-temp --` with an external
+MERLIN_TEST_ROOT. Packs are import-built synthetic fixtures; no production data is needed.
+The Node executable may be supplied with MERLIN_NODE_EXECUTABLE. Keep JUnit, failed
+attempts and actual commands. Windows symlink boundary cases require host privilege;
+report WinError 1314 as a host limitation, never a passing security check.
+
+Relevant preservation includes WFA/Adaptive, execution capital, storage/Analytics,
+Parquet workers/routes, admission/filters, FT/Stress, Fixed and Grid plan reuse/storage,
+Results/trades/export and Start/Queue JavaScript suites. The portfolio guide documents
+the contracts. Owner browser verification of actual layout, focus, inline periods,
+Queue execution and Results remains separate from the handler harness.

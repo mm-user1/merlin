@@ -2629,6 +2629,7 @@ function syncFixedControls() {
   });
   document.querySelectorAll('input.select-option-checkbox').forEach((control) => controls.add(control));
   controls.forEach((control) => {
+    if (document.getElementById('tickerSelectorEditor')?.contains?.(control)) return;
     if (control.id === 'gridStrictValidation' || control.id?.startsWith('grid-tie-')) return;
     if (!fixedDisabledControls.has(control)) fixedDisabledControls.set(control, control.disabled);
     control.disabled = true;
@@ -2653,6 +2654,11 @@ async function submitOptimization(event) {
   const queuePendingCount = queueLoaded && typeof getQueuePendingCount === 'function'
     ? getQueuePendingCount()
     : queue.items.length;
+  if (queuePendingCount === 0 && window.TickerSelector?.read().enabled) {
+    const item = collectQueueItem();
+    if (item) { await addToQueue(item); await runQueue(); }
+    return;
+  }
   if (queueLoaded && queuePendingCount > 0 && typeof runQueue === 'function') {
     await runQueue();
     return;

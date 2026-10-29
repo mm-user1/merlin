@@ -380,6 +380,100 @@ def register_routes(app):
 
 
 
+    @app.post("/api/portfolio")
+    def run_portfolio_endpoint():
+        from core.portfolio import run_portfolio
+        from core.walkforward_engine import WFConfig
+        if __package__:
+            from .server_data_input import resolve_root, request_filters
+        else:
+            from server_data_input import resolve_root, request_filters
+        data = request.form
+        run_id = _resolve_request_run_id(data)
+        try:
+            context = _resolve_strategy_id_from_request()
+            _require_valid_v2_context(context)
+            payload = json.loads(data.get("config", "{}"))
+            payload, runtime = _normalize_v2_optimizer_payload(context, payload,
+                warmup_members=[("warmupBars", "warmupBars", data.get("warmupBars", "1000"))], missing_date_filter=False)
+            payload = _normalize_parameter_mode_payload(context, payload)
+            if (payload.get("oosTest") or {}).get("enabled"):
+                raise ValueError("Ticker Selector cannot be combined with standalone OOS holdout.")
+            request_filters(data, context)
+            sources = json.loads(data.get("sources", "[]"))
+            if not isinstance(sources, list):
+                raise ValueError("Portfolio sources must be an array.")
+            for source in sources:
+                if not isinstance(source, dict) or source.get("type") != "parquet":
+                    raise ValueError("Portfolio supports Parquet sources only.")
+                source["pack_root"] = str(resolve_root(source.get("pack_root", "")))
+            config = _build_optimization_config("", payload, strategy_id=context.strategy_id,
+                warmup_bars=runtime.values["warmupBars"])
+            config.v2_runtime = build_v2_runtime_metadata(runtime.values, runtime.diagnostics, strategy_id=context.strategy_id)
+            selector = json.loads(data.get("tickerSelector", "null"))
+            wfa = None
+            if data.get("wf_enabled") == "true":
+                unit, is_months, oos_months = validate_wfa_period_settings(data.get("wf_period_unit"),
+                    is_period_months=data.get("wf_is_period_months"), oos_period_months=data.get("wf_oos_period_months"),
+                    adaptive_mode=data.get("wf_adaptive_mode") == "true")
+                if unit != "months" or data.get("wf_adaptive_mode") == "true":
+                    raise ValueError("Ticker Selector supports Calendar Months WFA only.")
+                post = payload.get("postProcess") or {}
+                if post.get("dsrEnabled"):
+                    raise ValueError("V2 Grid DSR is unavailable in Phase 2.5.")
+                ft = PostProcessConfig(enabled=True, ft_period_days=int(post.get("ftPeriodDays", 15)),
+                    top_k=int(post.get("topK", 10)), sort_metric=str(post.get("sortMetric", "profit_degradation")),
+                    ft_threshold_pct=_parse_ft_threshold_pct(post), ft_reject_action=normalize_ft_reject_action(post.get("ftRejectAction")),
+                    ft_reject_cooldown_days=_parse_ft_reject_days(post, "ftRejectCooldownDays", 5),
+                    ft_reject_max_attempts=_parse_ft_reject_attempts(post),
+                    ft_reject_min_remaining_oos_days=_parse_ft_reject_days(post, "ftRejectMinRemainingOosDays", 10),
+                    warmup_bars=config.warmup_bars) if post.get("enabled") else None
+                stress = post.get("stressTest") or {}
+                threshold = float(stress.get("failureThreshold", .7))
+                st = StressTestConfig(enabled=True, top_k=int(stress.get("topK", 5)),
+                    failure_threshold=threshold / 100 if threshold > 1 else threshold,
+                    sort_metric=str(stress.get("sortMetric", "profit_retention")), warmup_bars=config.warmup_bars) if stress.get("enabled") else None
+                wfa = WFConfig(is_period_days=None, oos_period_days=None, period_unit="months",
+                    is_period_months=is_months, oos_period_months=oos_months, strategy_id=context.strategy_id,
+                    warmup_bars=config.warmup_bars, post_process=ft, stress_test_config=st,
+                    store_top_n_trials=int(data.get("wf_store_top_n_trials", 50)))
+            from core.portfolio import plan_request
+            plan_request(config, selector, sources, wfa)
+            error = _apply_db_target_from_form(data)
+            if error is not None:
+                return error
+            _clear_cancelled_run(run_id)
+            def progress(message):
+                _set_optimization_state({"run_id": run_id, "status": "running", "stage": "portfolio", "message": message})
+            result = run_portfolio(config, selector, sources, wfa=wfa,
+                cancelled=lambda: _is_run_cancelled(run_id), progress=progress, queue_number=data.get("queueNumber"))
+            _set_optimization_state({"run_id": run_id, "status": "completed", "message": result["status"]})
+            return jsonify({"portfolio_id": result["id"], "set_id": result["setId"], "status": result["status"], "name": result["name"]})
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            _set_optimization_state({"run_id": run_id, "status": "error", "message": str(exc)})
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        except Exception as exc:
+            app.logger.exception("Portfolio execution failed")
+            _set_optimization_state({"run_id": run_id, "status": "error", "message": str(exc)})
+            return jsonify({"error": str(exc)}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.before_request
+    def require_portfolio_operation_for_selector():
+        if request.path not in {'/api/optimize', '/api/walkforward'} or request.method != 'POST':
+            return None
+        values = (request.get_json(silent=True) or {}) if request.is_json else request.form
+        if 'tickerSelector' not in values:
+            return None
+        try:
+            from core.ticker_selector import normalize_selector
+            raw = values['tickerSelector']
+            selector = normalize_selector(json.loads(raw) if isinstance(raw,str) else raw)
+            if selector.get('enabled'):
+                raise ValueError('Enabled Ticker Selector requires the portfolio operation with the complete source pool.')
+        except (ValueError, TypeError) as exc:
+            return jsonify(error=str(exc)), HTTPStatus.BAD_REQUEST
+        return None
+
     @app.post("/api/walkforward")
     def run_walkforward_optimization() -> object:
         """Run Walk-Forward Analysis"""

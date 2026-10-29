@@ -43,6 +43,7 @@ tracked repository.
 | --- | --- |
 | [V2 architecture](engine_v2/ARCHITECTURE.md) | Stable current execution, profile, Grid, runtime, WFA, and persistence contracts |
 | [Fixed entry filters](ENTRY_FILTERS.md) | Opt-in capability, causal F06, explicit context, saved pins, editor and Analytics selection |
+| [Ticker portfolios](TICKER_PORTFOLIOS.md) | Causal X selection, actual carried capital, atomic ownership, B2 navigation and replay |
 | [V2 certification](engine_v2/CERTIFICATION.md) | Evidence: certified profiles, external parity, tolerances, hashes, and preservation results |
 | [V2 performance](engine_v2/PERFORMANCE.md) | Historical benchmark protocols, measurements, and conclusions |
 

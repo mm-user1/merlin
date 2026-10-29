@@ -348,7 +348,7 @@ def register_routes(app):
                         study_id,
                         stitched_oos_equity_curve,
                         stitched_oos_timestamps_json
-                    FROM studies
+                    FROM ordinary_studies
                     WHERE study_id IN ({placeholders})
                       AND LOWER(COALESCE(optimization_mode, '')) = 'wfa'
                     """,
@@ -621,7 +621,7 @@ def register_routes(app):
             study_row = conn.execute(
                 """
                 SELECT study_id, optimization_mode
-                FROM studies
+                FROM ordinary_studies
                 WHERE study_id = ?
                 """,
                 (normalized_study_id,),
@@ -689,7 +689,7 @@ def register_routes(app):
         with get_db_connection() as conn:
             backfill_stitched_oos_metadata(conn=conn)
             conn.commit()
-            total_studies_row = conn.execute("SELECT COUNT(*) AS count FROM studies").fetchone()
+            total_studies_row = conn.execute("SELECT COUNT(*) AS count FROM ordinary_studies").fetchone()
             total_studies = int(total_studies_row["count"] if total_studies_row else 0)
 
             cursor = conn.execute(
@@ -753,7 +753,7 @@ def register_routes(app):
                     stitched_oos_start_ts,
                     stitched_oos_end_ts,
                     stitched_oos_point_count
-                FROM studies
+                FROM ordinary_studies
                 WHERE LOWER(COALESCE(optimization_mode, '')) = 'wfa'
                 """
             )

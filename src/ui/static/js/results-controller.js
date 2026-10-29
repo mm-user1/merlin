@@ -131,7 +131,21 @@ function updateTabsVisibility() {
   const tabsContainer = document.getElementById('resultsTabs');
   const manualBtn = document.getElementById('manualTestBtn');
 
+  if (ResultsState.mode === 'wfa' && ResultsState.portfolio) {
+    if (tabsContainer) tabsContainer.style.display = 'flex';
+    tabs.forEach(tab => {
+      const id = tab.dataset.tab;
+      tab.style.display = id === 'optuna' || (id === 'manual_tests' && ResultsState.manualTests.length) ? 'inline-flex' : 'none';
+      if (id === 'optuna') { tab.dataset.ordinaryLabel ??= tab.textContent; tab.textContent = 'Account windows'; }
+      tab.classList.toggle('active', id === ResultsState.activeTab);
+    });
+    if (manualBtn) manualBtn.style.display = ResultsState.activeTab !== 'manual_tests' ? 'inline-flex' : 'none';
+    return;
+  }
+
   const isCandidateStudy = ['optuna', 'grid'].includes(ResultsState.mode);
+  const baseTab = document.querySelector('.tab-btn[data-tab="optuna"]');
+  if (baseTab?.dataset.ordinaryLabel) { baseTab.textContent = baseTab.dataset.ordinaryLabel; delete baseTab.dataset.ordinaryLabel; }
   if (!isCandidateStudy) {
     if (tabsContainer) tabsContainer.style.display = 'none';
     if (manualBtn) manualBtn.style.display = 'none';
@@ -1063,6 +1077,13 @@ async function openStudy(studyId) {
     if (loadVersion !== studyLoadVersion) return;
     ResultsState.studyId = studyId;
     ResultsState.studyName = data.study?.study_name || ResultsState.studyName;
+    ResultsState.portfolio = data.portfolio || null;
+    const back = document.getElementById('portfolioBackLink');
+    if (back) {
+      back.hidden = !data.portfolio;
+      if (data.portfolio) back.href = `/analytics?portfolio=${encodeURIComponent(data.portfolio.portfolioId)}&period=${data.portfolio.account.period}`;
+    }
+    if (data.portfolio && data.study?.optimization_mode === 'wfa') ResultsState.activeTab = 'optuna';
 
     if (!Object.prototype.hasOwnProperty.call(data.study?.config_json || {}, 'data_input') && !data.csv_exists) {
       showMissingCsvDialog(studyId, data.study?.csv_file_path || '', data.study?.csv_file_name || '');
@@ -1303,7 +1324,7 @@ function refreshResultsView() {
   if (progressLabel) progressLabel.textContent = ResultsState.mode === 'grid' ? 'Candidate - / -' : 'Trial - / -';
   if (progressPercent) progressPercent.textContent = '0%';
 
-  if (ResultsState.mode === 'wfa') {
+  if (ResultsState.mode === 'wfa' && ResultsState.activeTab !== 'manual_tests') {
     setComparisonLine('');
     updateTableHeader('Stitched OOS', '', getWfaStitchedPeriodLabel(ResultsState.results || []));
     const summary = ResultsState.stitched_oos || ResultsState.summary || {};
@@ -1502,6 +1523,10 @@ function bindManualDataSourceToggle() {
 }
 
 function getManualTrialNumbers() {
+  if (ResultsState.mode === 'wfa' && ResultsState.portfolio) {
+    const selection = ResultsState.wfaSelection;
+    return selection?.windowNumber && !selection.moduleType ? [selection.windowNumber] : [];
+  }
   const topMode = document.getElementById('manualTrialTop');
   const topInput = document.getElementById('manualTopK');
   const selectedMode = document.getElementById('manualTrialSelected');
@@ -1563,6 +1588,11 @@ async function runManualTestFromModal() {
     trialNumbers,
     sourceTab
   };
+  if (ResultsState.mode === 'wfa' && ResultsState.portfolio) {
+    payload.sourceTab = 'portfolio_window';
+    payload.windowNumber = ResultsState.wfaSelection.windowNumber;
+    payload.period = ResultsState.wfaSelection.period;
+  }
 
   try {
     await runManualTestRequest(ResultsState.studyId, payload);
@@ -1683,7 +1713,7 @@ function bindEventHandlers() {
       }
       let endpoint = null;
       let requestOptions = { method: 'POST' };
-      if (ResultsState.mode === 'wfa') {
+      if (ResultsState.mode === 'wfa' && ResultsState.activeTab !== 'manual_tests') {
         const selection = ResultsState.wfaSelection || {};
         if (selection.windowNumber) {
           endpoint = `/api/studies/${encodeURIComponent(ResultsState.studyId)}/wfa/windows/${selection.windowNumber}/trades`;

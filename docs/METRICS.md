@@ -257,3 +257,41 @@ unlike established realized RoMaD.
 The Strategy Lab schema-v2 metric axis is authoritative in
 `tools/strategy_lab/dataset.py`; its analysis and allocation interpretation is
 documented in the [Strategy Lab guide](../tools/strategy_lab/README.md).
+
+## Ticker portfolio projections
+
+Portfolio facts retain every realized per-bar balance change (including entry fees),
+opening/window/period/end anchors and original allocations. No lossy downsampling or
+new MTM storage precedes projection. Within each period the checked index grows by
+sum(account balances) / sum(opening allocations); period-end indices link. Ranks
+expand to their actual occupant/idle atoms, never to an average of complete rank
+indices. Internal unchecked periods hold flat cash and count toward elapsed duration.
+One shared Python projection supplies saved PF/period metrics and checked/focused views.
+
+Consistency uses the existing signed R² of log-positive equity against ordinal event
+points: Full uses the complete lossless path, Recent its final 25% of calendar duration.
+Opening/window/end anchors are retained; no daily interpolation or extra flat points
+are added. At least three points are required. Execution-level metrics remain unchanged.
+Annualization follows existing actual-duration/short-span rules.
+
+Trades/wins and admission diagnostics count distinct executed account-periods. Maximum
+leverage is the maximum observed accepted leverage; skipped is the sum of cap refusals;
+missing diagnostics remain unavailable. Scope-index positive OOS windows / executed
+OOS windows determines OOS Wins; valid zero-trade windows count, idle-only/gap windows
+do not. OOS P(med) is the median scope-index window return. OOS WR(med) pools checked
+wins/trades per window and excludes zero-trade windows. WFE is the ratio of annualized
+mean actual OOS returns to mean reference-capital IS returns across checked account-windows,
+using the existing zero-IS convention. Fixed without WFA has no WFE/OOS-only metrics.
+PF/period Profitable counts positive funded account-periods / executed funded accounts,
+including valid zero-trade accounts and excluding comparisons, idle and unavailable rows.
+
+A depleted linked index holds its exact nonpositive value through its funded scope;
+Profit/Ann/DD/Consistency/OOS return metrics are unavailable. Later allocation cannot
+reset a ruined rank. Facts/trades stay inspectable and the held curve remains eligible
+for mixed aggregation under existing positive-start rules.
+
+Across sets, distinct ordinary studies remain individual members; each portfolio's
+checked periods form one linked member. Existing equal-member/common-overlap weighting
+is preserved: three ordinary studies plus one portfolio means 75%/25%. Mixed cards
+retain member-level average conventions. No overlap is unavailable. Portfolio summary
+math does not rescale or replace actual executions. See [the guide](TICKER_PORTFOLIOS.md).
