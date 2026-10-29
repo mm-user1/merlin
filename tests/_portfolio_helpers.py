@@ -1,11 +1,25 @@
 """Small deterministic import-built packs, never production market data."""
 import numpy as np
 import pandas as pd
+import pytest
+from uuid import uuid4
 
 from data_provider import data, manifest
 from tests.fixtures.admission_strategy.strategy import rule_entry
 
 STRATEGY = 's07_ha_v01_b2'
+
+
+@pytest.fixture
+def portfolio_database():
+    """Opt-in module fixture: each test owns a DB and always restores its caller."""
+    from core import storage
+    previous = storage.get_active_db_name()
+    try:
+        storage.create_new_db('portfolio_' + uuid4().hex)
+        yield
+    finally:
+        storage.set_active_db(previous)
 
 
 def publish(root, *, start='2023-12-01', end='2024-06-01', venues=('BYBIT', 'OKX'), transform=None):

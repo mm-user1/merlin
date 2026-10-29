@@ -71,11 +71,23 @@ the outer Summary checks. Ordinary focused-set behavior and All Studies remain u
 
 Use ↗ on an executed ticker row to open Results, then **Back to portfolio**. WFA shows
 selected IS and actual OOS parameters/capital; Fixed without WFA has one reference result.
+Stored Fixed children with matching database ownership replay their finite positive
+internal capital even below or above the strategy editor bounds. Fixed without WFA
+uses the saved period allocation; WFA keeps reference capital for IS and the saved
+window capital for OOS. All other scalar/profile/runtime validation still applies.
+Ordinary Fixed studies and new user requests retain editor bounds; client-supplied
+portfolio metadata cannot enable this stored-child treatment. Existing affected
+children require neither a new run nor a data repair.
 Manual tests save separately and default to the selected window/period's execution
 capital. Stored curves and summaries display offline. Reconstruction, trade export and
 manual-source preparation verify consumed execution/filter/rule pins; append-only data
 outside those bounds is accepted. Ranking provenance is saved without requiring re-ranking
 or unrelated ranking files when opening an account. See [metrics](METRICS.md) for subset math.
+
+Stitched WFA trade export skips explicit `no_trade` windows for both ordinary and
+portfolio studies, matching per-window export. It never reconstructs trades for a
+window deliberately rejected by Forward Test. An all-no-trade export is the normal
+header-only CSV. This does not change ordinary delayed-window scheduling.
 
 ## Implementation ownership
 

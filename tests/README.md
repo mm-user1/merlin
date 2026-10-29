@@ -782,6 +782,15 @@ operational database. See the [V1](../docs/ADDING_NEW_STRATEGY.md) and
 
 ### Ticker portfolios
 
+`tests/server/test_portfolio_replay.py` covers stored Fixed portfolio allocations
+below/above editor bounds, actual carry, manual-source execution and fresh-process
+reconstruction against an explicitly selected external DB. It also checks ordinary
+and new-user bounds, ownership, invalid capital and replay-pin refusal. Portfolio
+modules opt into a per-test DB fixture that restores the prior active DB in `finally`;
+run them before `tests/test_storage.py` to retain order-isolation coverage. The ordinary
+WFA export cases in `tests/server/test_export.py` retain explicit no-trade skipping
+and the header-only empty-export response without rewriting saved windows.
+
 Focused deterministic coverage lives in `test_ticker_selector.py`, `test_portfolio.py`,
 `server/test_portfolio.py` and `test_js_portfolio.py` (actual Analytics set/table handlers
 under a small Node DOM shim). Use `tools/run_tests.py --keep-temp --` with an external

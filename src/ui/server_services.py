@@ -1128,7 +1128,27 @@ def _resolve_stored_execution_context(
             )
     else:
         config = raw_config if isinstance(raw_config, dict) else {}
-    config = _normalize_parameter_mode_payload(context, config)
+    execution_capital = None
+    if context.is_v2 and config.get("parameterMode") == "fixed" and "portfolio" in config:
+        from core.storage import get_db_connection
+        from core.portfolio import positive_capital
+        try:
+            identity = config["portfolio"]
+            with get_db_connection() as conn:
+                owner = conn.execute(
+                    "SELECT portfolio_id, account_id FROM portfolio_accounts WHERE study_id=?",
+                    (study.get("study_id"),),
+                ).fetchone()
+            if not isinstance(identity, dict) or owner is None or (
+                owner["portfolio_id"], owner["account_id"]
+            ) != (identity.get("id"), identity.get("account")):
+                raise ValueError("Stored portfolio ownership does not match this study.")
+            fixed = config.get("fixed_params")
+            execution_capital = positive_capital(fixed.get("initialCapital") if isinstance(fixed, dict) else None)
+        except (TypeError, ValueError) as exc:
+            raise _validation_error(code="V2_INVALID_PARAMETER_MODE", strategy_id=strategy_id,
+                                    path="config_json.portfolio", message=str(exc)) from exc
+    config = _normalize_parameter_mode_payload(context, config, execution_capital=execution_capital)
     raw_fixed = config.get("fixed_params")
     base_params = deepcopy(raw_fixed) if isinstance(raw_fixed, dict) else {}
     from core.engine_v2.admission import uses_admission, read_admission_envelope, execution_admission
@@ -1422,10 +1442,10 @@ def _normalize_v2_optimizer_payload(
     return normalized, runtime
 
 
-def _normalize_parameter_mode_payload(context, payload):
+def _normalize_parameter_mode_payload(context, payload, *, execution_capital=None):
     from core.parameter_mode import normalize_parameter_mode
     try:
-        return normalize_parameter_mode(payload, context.config)
+        return normalize_parameter_mode(payload, context.config, execution_capital=execution_capital)
     except (TypeError, ValueError) as exc:
         raise _validation_error(code="V2_INVALID_PARAMETER_MODE", strategy_id=context.strategy_id,
                                 path="parameterMode", message=str(exc)) from exc

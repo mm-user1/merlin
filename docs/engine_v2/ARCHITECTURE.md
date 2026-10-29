@@ -526,6 +526,12 @@ jobs with the existing Grid plan cache and one worker layer. WFA `run_window` is
 shared per-window extraction; ordinary WFA still constructs and runs its own calendar.
 IS reference capital is constant; actual OOS overrides are finite positive internal
 values independent of scalar editor bounds. Chosen IS params are not rewritten.
+The shared stored-execution resolver applies the same internal-capital normalization
+to Fixed children only after matching their saved portfolio/account identity to
+database ownership. It requires an explicit finite positive saved capital and
+retains all other scalar/profile/runtime validation. This shared path covers equity,
+trade exports and manual-source execution; original user scalars and ordinary Fixed
+studies still use declared editor bounds. No historical records are rewritten.
 
 Connection-aware Grid/WFA saves participate in one final portfolio transaction;
 ordinary callers still own their transactions. Additive parent/ownership tables and

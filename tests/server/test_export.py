@@ -312,6 +312,47 @@ def test_download_wfa_window_trades_respects_stored_oos_trade_count(client, monk
             csv_path.unlink()
 
 
+@pytest.mark.parametrize('all_no_trade', [False, True])
+def test_ordinary_wfa_export_skips_explicit_no_trade(client, monkeypatch, tmp_path, all_no_trade):
+    from core import storage
+    from core.engine_v2 import admission
+    from tests._portfolio_helpers import STRATEGY, payload, publish
+
+    with _temporary_active_db('no_trade_' + uuid.uuid4().hex):
+        pool = publish(tmp_path/'pack')
+        launched = client.post('/api/walkforward',data=dict(strategy=STRATEGY,
+            config=json.dumps(payload()),source=json.dumps(pool[0]),warmupBars='100',
+            wf_period_unit='months',wf_is_period_months='1',wf_oos_period_months='1'))
+        assert launched.status_code == 200,launched.get_data(as_text=True)
+        study_id = launched.get_json()['study_id']
+        saved = storage.load_study_from_db(study_id)
+        assert not saved['study']['config_json'].get('portfolio')
+        first,second = saved['windows']
+        assert first['oos_total_trades'] > 0
+        expected = client.post(f"/api/studies/{study_id}/wfa/windows/{first['window_number']}/trades",json={'period':'oos'})
+        assert expected.status_code == 200,expected.get_data(as_text=True)
+        with storage.get_db_connection() as conn:
+            for window in (first,second) if all_no_trade else (second,):
+                conn.execute("UPDATE wfa_windows SET window_status='no_trade', no_trade_reason='ft_reject_action_no_trade', oos_total_trades=0 WHERE study_id=? AND window_number=?",
+                             (study_id,window['window_number']))
+            conn.commit()
+        before = storage.load_study_from_db(study_id)
+        calls=[];real=admission.run_strategy
+        def execute(*args,**kwargs):
+            calls.append(dict(args[2]))
+            return real(*args,**kwargs)
+        monkeypatch.setattr(admission,'run_strategy',execute)
+        exported = client.post(f'/api/studies/{study_id}/wfa/trades')
+        assert exported.status_code == 200,exported.get_data(as_text=True)
+        if all_no_trade:
+            assert calls == []
+            assert exported.get_data(as_text=True) == 'Symbol,Side,Qty,Fill Price,Closing Time\n'
+        else:
+            assert len(calls) == 1
+            assert exported.get_data(as_text=True) == expected.get_data(as_text=True)
+        assert storage.load_study_from_db(study_id) == before
+
+
 def test_download_wfa_trades_uses_precise_oos_bounds(client, monkeypatch, tmp_path):
     import strategies
     import ui.server_routes_data as routes_data

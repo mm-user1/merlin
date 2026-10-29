@@ -5,12 +5,13 @@ from copy import deepcopy
 import pytest
 
 from core import storage
-from tests._portfolio_helpers import STRATEGY, payload, publish, selector
+from tests._portfolio_helpers import STRATEGY, payload, publish, selector, portfolio_database
+
+pytestmark = pytest.mark.usefixtures('portfolio_database')
 
 
 @pytest.mark.parametrize('wfa',[False,True])
 def test_http_launch_replay_manual_and_offline(client,tmp_path,wfa):
-    storage.create_new_db('T08 HTTP')
     pool = publish(tmp_path/'pack')
     form = dict(strategy=STRATEGY, config=json.dumps(payload()), sources=json.dumps(pool),
                 tickerSelector=json.dumps(selector()),warmupBars='100')
@@ -56,7 +57,6 @@ def test_http_launch_replay_manual_and_offline(client,tmp_path,wfa):
 
 
 def test_request_rejected_before_publication(client,tmp_path):
-    storage.create_new_db('T08 rejected')
     pool = publish(tmp_path/'pack')
     for edit in ({'topN':3},{'method':'future'},{'rebalanceMonths':0}):
         response = client.post('/api/portfolio',data=dict(strategy=STRATEGY,config=json.dumps(payload()),sources=json.dumps(pool),
@@ -68,10 +68,11 @@ def test_request_rejected_before_publication(client,tmp_path):
 
 
 def test_mixed_members_equal_weights_and_no_overlap(client):
-    storage.create_new_db('T08 overlap')
     start,end='2024-01-01T00:00:00+00:00','2024-03-01T00:00:00+00:00'
     record=dict(id='pf',selector={'topN':1},wfa=None,periods=[dict(id=1,start=start,end=end,windows=[],accounts=[
         dict(id='account',period=1,rank=1,role='funded',opening=100,closing=110,path=[[start,100],[end,110]])])])
+    from core.portfolio_projection import project
+    record.update(status='complete', metrics=project(record))
     with storage.get_db_connection() as conn:
         set_id=conn.execute("INSERT INTO study_sets(name,sort_order) VALUES ('PF',1)").lastrowid
         conn.execute('INSERT INTO portfolios VALUES (?,?,?)',('pf',set_id,json.dumps(record)))
@@ -79,6 +80,7 @@ def test_mixed_members_equal_weights_and_no_overlap(client):
             conn.execute('INSERT INTO studies(study_id,study_name,strategy_id,optimization_mode,config_json,stitched_oos_equity_curve,stitched_oos_timestamps_json,stitched_oos_point_count,stitched_oos_start_ts,stitched_oos_end_ts) VALUES (?,?,?,?,?,?,?,?,?,?)',
                 (str(number),'Ordinary '+str(number),STRATEGY,'wfa','{}',json.dumps([100,120]),json.dumps([start,end]),2,start,end))
         conn.commit()
+    assert storage.list_study_sets()[0]['kind'] == 'portfolio'
     payload={'portfolios':[{'id':'pf','selection':{'ranks':[1],'periods':[1]}}], 'studyIds':['0','1','2','0']}
     response=client.post('/api/portfolios/equity',json=payload)
     assert response.status_code==200,response.get_data(as_text=True)

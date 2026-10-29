@@ -10,7 +10,9 @@ from core.portfolio_storage import load_portfolio
 from core.ticker_selector import build_calendar, normalize_selector, rank_pool
 from core.walkforward_engine import WFConfig
 from ui.server_services import _build_optimization_config
-from tests._portfolio_helpers import STRATEGY, publish, payload, selector
+from tests._portfolio_helpers import STRATEGY, publish, payload, selector, portfolio_database
+
+pytestmark = pytest.mark.usefixtures('portfolio_database')
 
 
 def assert_empty_database():
@@ -52,7 +54,6 @@ def test_independent_projection_hand_case():
 
 @pytest.mark.parametrize('with_wfa', [False, True])
 def test_real_carried_execution_and_atomic_owned_children(tmp_path, with_wfa):
-    storage.create_new_db('T08 execution')
     pool = publish(tmp_path/'pack')
     config = _build_optimization_config('', payload(), strategy_id=STRATEGY, warmup_bars=100)
     wfa = WFConfig(is_period_days=None, oos_period_days=None, period_unit='months', is_period_months=1,
@@ -94,7 +95,6 @@ def test_real_carried_execution_and_atomic_owned_children(tmp_path, with_wfa):
 @pytest.mark.parametrize('stage',['cancel','funded','publish'])
 def test_no_partial_publication(tmp_path,monkeypatch,stage):
     import core.portfolio as coordinator
-    storage.create_new_db('T08 rollback')
     pool=publish(tmp_path/'pack')
     config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     def failure(*args,**kwargs): raise ValueError('injected failure')
@@ -112,7 +112,6 @@ def test_no_partial_publication(tmp_path,monkeypatch,stage):
 
 def test_comparison_failure_does_not_change_funding(tmp_path,monkeypatch):
     import core.portfolio as coordinator
-    storage.create_new_db('T08 comparisons')
     pool=publish(tmp_path/'pack')
     config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     baseline=run_portfolio(config,selector(topN=1),pool,publish=False)
@@ -131,7 +130,6 @@ def test_comparison_failure_does_not_change_funding(tmp_path,monkeypatch):
 
 
 def test_idle_places_and_subeditor_internal_capital(tmp_path):
-    storage.create_new_db('T08 idle')
     def listing(i,stamps,values,entry):
         if i:
             entry['instrument_rules']['listed_at_utc']='2024-02-01T00:00:00Z'
@@ -182,7 +180,6 @@ def test_four_rank_subset_gaps_depletion_and_no_reinjection():
 def test_grid_calendar_reference_once_and_single_window_child(tmp_path,monkeypatch):
     from core.walkforward_engine import WalkForwardEngine
     from core.post_process import PostProcessConfig
-    storage.create_new_db('T08 Grid WFA')
     pool=publish(tmp_path/'pack')
     settings=payload();settings.update(parameterMode='search',enabled_params={'stopX':True},param_ranges={'stopX':[2,3,1]},param_types={'stopX':'float'})
     settings['fixed_params'].update(start='2024-01-01',end='2024-05-31')
@@ -207,7 +204,6 @@ def test_grid_calendar_reference_once_and_single_window_child(tmp_path,monkeypat
 @pytest.mark.parametrize('action', ['no_trade', 'cooldown_reoptimize'])
 def test_rejected_forward_windows_preserve_actual_cash(tmp_path, action):
     from core.post_process import PostProcessConfig
-    storage.create_new_db(f'T08 FT rejection {action}')
     pool = publish(tmp_path/'pack')
     settings = payload()
     settings.update(parameterMode='search', enabled_params={'stopX':True},
@@ -232,7 +228,6 @@ def test_rejected_forward_windows_preserve_actual_cash(tmp_path, action):
 def test_execution_gap_is_checked_only_for_consumed_accounts(tmp_path, funded_gap):
     import pandas as pd
     from core.ticker_selector import rank_pool
-    storage.create_new_db(f'T08 consumed gaps {funded_gap}')
     clean = publish(tmp_path/'clean')
     selection = selector(topN=1)
     ranked = rank_pool(clean, '2024-02-01', selection)
@@ -258,7 +253,6 @@ def test_execution_gap_is_checked_only_for_consumed_accounts(tmp_path, funded_ga
 def test_account_pins_append_and_consumed_change(tmp_path):
     from core.data_input import replay_input
     import pandas as pd
-    storage.create_new_db('T08 pins')
     pool=publish(tmp_path/'original')
     config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     result=run_portfolio(config,selector(),pool)
@@ -276,7 +270,6 @@ def test_account_pins_append_and_consumed_change(tmp_path):
 
 
 def test_successful_repeated_runs_have_distinct_owned_children(tmp_path):
-    storage.create_new_db('T08 repeated')
     pool=publish(tmp_path/'pack')
     config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     first=run_portfolio(config,selector(),pool)
@@ -292,7 +285,6 @@ def test_actual_capital_reference_replay_is_not_return_scaling(tmp_path):
     from core.engine_v2.admission import run_strategy
     from strategies import get_strategy
     import pandas as pd
-    storage.create_new_db('T08 rounding')
     pool=publish(tmp_path/'pack')
     config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     wfa=WFConfig(is_period_days=None,oos_period_days=None,period_unit='months',is_period_months=1,oos_period_months=1,
@@ -334,7 +326,6 @@ def test_event_point_consistency_independent_correlation():
 
 def test_coordinator_depletion_stops_new_funding(tmp_path,monkeypatch):
     import core.portfolio as coordinator
-    storage.create_new_db('T08 depletion')
     pool=publish(tmp_path/'pack');config=_build_optimization_config('',payload(),strategy_id=STRATEGY,warmup_bars=100)
     real=coordinator.run_grid_optimization;calls=[]
     def loss(config,*args,**kwargs):
