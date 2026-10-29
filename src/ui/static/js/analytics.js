@@ -354,6 +354,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function setAllStudiesChecked(checked) {
+    if (window.AnalyticsPortfolio?.detailPending()) return;
     if (!window.AnalyticsTable || typeof window.AnalyticsTable.setAllChecked !== 'function') return;
     window.AnalyticsTable.setAllChecked(Boolean(checked));
   }
@@ -509,6 +510,13 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
     const previousFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
     syncSetStateFromModule();
     window.AnalyticsPortfolio?.setsChanged(AnalyticsState, eventPayload);
+    if (window.AnalyticsPortfolio?.active()) {
+      cancelPortfolioFetches();
+      cancelFocusedSetEquityFetch();
+      cancelAllStudiesEquityFetch();
+      cancelFocusedStudyEquityFetch();
+      cancelFocusedWindowBoundariesFetch();
+    }
     const nextFocusedSetId = toNonNegativeInteger(AnalyticsState.focusedSetId);
 
     if (nextFocusedSetId > 0) {
@@ -1780,7 +1788,24 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
     `;
   }
 
+  // Only PF exit retains the prior view. Ordinary-to-ordinary behavior is unchanged.
+  function portfolioExitPending() {
+    if (!window.AnalyticsPortfolio?.leaving()) return false;
+    ensurePortfolioDataForSelection();
+    const focusedSet = getFocusedSet();
+    if (focusedSet) return !getCachedSetEquity(focusedSet.id);
+    const selected = getSelectedStudies();
+    const study = getFocusedStudy() || (selected.length === 1 ? selected[0] : null);
+    if (study?.has_equity_curve && !getCachedStudyEquity(study.study_id)) {
+      ensureStudyEquity(study); return true;
+    }
+    if (study || selected.length < 2) return false;
+    return isAllStudiesSelection(getSelectedStudyIds())
+      ? !AnalyticsState.allStudiesEquity : !getCurrentPortfolioData();
+  }
+
   function renderSummaryCards() {
+    if (portfolioExitPending()) return;
     const container = document.getElementById('analyticsSummaryRow');
     if (!container) return;
 
@@ -2060,6 +2085,8 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function renderSelectedStudyChart() {
+    if (portfolioExitPending()) return;
+    if (window.AnalyticsPortfolio?.leaving()) window.AnalyticsPortfolio.finish();
     const focusedStudy = getFocusedStudy();
     if (focusedStudy) {
       clearChartMeta();
@@ -2380,6 +2407,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function renderTableHeaderMeta() {
+    if (window.AnalyticsPortfolio?.detailPending()) return;
     const meta = document.getElementById('analyticsTableHeaderMeta');
     if (!meta) return;
 
@@ -2440,6 +2468,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       item.addEventListener('click', async () => {
         if (AnalyticsState.dbSwitchInProgress || db.active) return;
         AnalyticsState.dbSwitchInProgress = true;
+        window.AnalyticsPortfolio?.reset();
         try {
           await switchDatabaseRequest(db.name);
           AnalyticsState.checkedStudyIds = new Set();
@@ -2463,6 +2492,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function onTableSelectionChange(checkedSet) {
+    if (window.AnalyticsPortfolio?.detailPending()) return;
     AnalyticsState.checkedStudyIds = new Set(checkedSet || []);
     if (window.AnalyticsSets && typeof window.AnalyticsSets.updateCheckedStudyIds === 'function') {
       window.AnalyticsSets.updateCheckedStudyIds(AnalyticsState.checkedStudyIds);
@@ -2504,6 +2534,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function setFocus(studyId) {
+    if (window.AnalyticsPortfolio?.detailPending()) return;
     const normalized = String(studyId || '').trim();
     if (!normalized) {
       clearFocus();
@@ -2613,7 +2644,8 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
 
   function renderTableWithCurrentState() {
     if (window.AnalyticsPortfolio?.renderTable(AnalyticsState, {selection:onTableSelectionChange,
-      focus:onTableFocusToggle, sort:onTableSortChange, view:onTableViewChange})) {
+      focus:onTableFocusToggle, sort:onTableSortChange, view:onTableViewChange,
+      complete:() => { renderTableSubtitle(); renderTableHeaderMeta(); }})) {
       renderResearchInfo();
       hideFocusSidebar();
       renderTableHeaderMeta();
@@ -2711,6 +2743,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   async function loadSummary() {
+    window.AnalyticsPortfolio?.reset();
     const response = await fetch('/api/analytics/summary');
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -2759,6 +2792,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
       syncSetStateFromModule();
     }
 
+    // Also invalidate navigation initiated while the new summary/sets were loading.
     window.AnalyticsPortfolio?.reset();
     const backroute = new URLSearchParams(window.location.search);
     const portfolio = AnalyticsState.sets.find(s=>s.portfolio_id === backroute.get('portfolio'));

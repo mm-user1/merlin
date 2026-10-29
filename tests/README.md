@@ -793,7 +793,14 @@ and the header-only empty-export response without rewriting saved windows.
 
 Focused deterministic coverage lives in `test_ticker_selector.py`, `test_portfolio.py`,
 `server/test_portfolio.py` and `test_js_portfolio.py` (actual Analytics set/table handlers
-under a small Node DOM shim). Use `tools/run_tests.py --keep-temp --` with an external
+under a small Node DOM shim).
+`test_js_portfolio.py` also runs `portfolio_loading.test.cjs` against the real
+portfolio controller and Analytics coordinator/header renderer. Controlled delayed
+detail/projection promises cover stale responses, PF exit/reset, retryable errors,
+empty/unavailable results, keyboard navigation and asynchronous counters. The shared
+DOM shim models events/selectors, not browser layout: actual main-area scrolling,
+short destinations and user scrolling during requests need the separate browser gate.
+Use `tools/run_tests.py --keep-temp --` with an external
 MERLIN_TEST_ROOT. Packs are import-built synthetic fixtures; no production data is needed.
 The Node executable may be supplied with MERLIN_NODE_EXECUTABLE. Keep JUnit, failed
 attempts and actual commands. Windows symlink boundary cases require host privilege;

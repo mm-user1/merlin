@@ -2,9 +2,39 @@
 (function () {
   let current = null, outerChecks = null, rows = [], key = '', epoch = 0, curveEpoch = 0;
   let showUnselected = false, hasUnselected = false, lastState = null, lastCallbacks = null, restoredChecks = null;
+  let detailPending = false, leaving = false, heldTable = null;
   const el = id => document.getElementById(id);
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const percent = value => value == null ? 'N/A' : `${Number(value).toFixed(1)}%`;
+  function pending(detail = false) {
+    document.querySelector('.main-area')?.classList.add('analytics-portfolio-view');
+    const table = el('analyticsSummaryTable')?.closest('.table-card');
+    if (table && !heldTable) {
+      heldTable = {element:table, minHeight:table.style.minHeight};
+      table.style.minHeight = `${table.getBoundingClientRect().height}px`;
+    }
+    detailPending = detail;
+    const chart = el('analyticsChartTitle')?.closest('.chart-card');
+    [chart, el('analyticsSummaryRow')].forEach(node => {
+      node?.setAttribute('aria-busy','true'); node?.classList.add('analytics-pending');
+    });
+    const status = el('analyticsLoading'); if (status) status.hidden = false;
+    [table, document.querySelector('.analytics-filters-section'), el('portfolioSelectorSettings')].forEach(node => {
+      if (!node) return;
+      node.inert = detail;
+      node.setAttribute('aria-busy',String(detail));
+      node.classList.toggle('analytics-pending',detail);
+    });
+  }
+  function finish() {
+    detailPending = false; leaving = false;
+    const status = el('analyticsLoading'); if (status) status.hidden = true;
+    document.querySelectorAll('.analytics-pending').forEach(node => {
+      node.classList.remove('analytics-pending'); node.setAttribute('aria-busy','false'); node.inert = false;
+    });
+    if (heldTable) { heldTable.element.style.minHeight = heldTable.minHeight; heldTable = null; }
+    if (!current) document.querySelector('.main-area')?.classList.remove('analytics-portfolio-view');
+  }
   async function get(url, options) {
     const response = await fetch(url, options), value = await response.json();
     if (!response.ok) throw new Error(value.error || 'Saved portfolio is unavailable.');
@@ -19,6 +49,8 @@
   }
   function setsChanged(state, event) {
     const next = context(state);
+    if (current && !next) { leaving = true; pending(); }
+    if (next) leaving = false;
     if (next?.scope) restoredChecks = null;
     if (next?.scope && !current?.scope && outerChecks === null) outerChecks = new Set(state.checkedStudyIds);
     if (!next?.scope && current?.scope && outerChecks !== null) {
@@ -48,6 +80,7 @@
     });
     state.checkedStudyIds = new Set(window.AnalyticsTable.getCheckedStudyIds());
     state.orderedStudyIds = window.AnalyticsTable.getOrderedStudyIds();
+    callbacks.complete?.();
     visuals(state);
   }
   function renderTable(state, callbacks) {
@@ -55,11 +88,11 @@
     lastState = state; lastCallbacks = callbacks;
     const ordinary = current.scope ? [] : state.sets.filter(s=>s.kind !== 'portfolio' && state.checkedSetIds.has(s.id)).flatMap(s=>s.study_ids);
     const nextKey = JSON.stringify([state.dbName,current,ordinary]);
-    if (nextKey === key) { drawTable(state, callbacks); return true; }
+    if (nextKey === key) { if (!detailPending) drawTable(state, callbacks); return true; }
     key = nextKey;
     const token = ++epoch;
-    ++curveEpoch; rows = []; hasUnselected = false; state.focusedStudyId = null;
-    drawTable(state, callbacks);
+    ++curveEpoch; state.focusedStudyId = null;
+    pending(true);
     Promise.all(current.scope
       ? [get(`/api/portfolios/${encodeURIComponent(current.scope.id)}${current.scope.period ? '?period='+current.scope.period : ''}`)]
       : current.portfolios.map(p=>get(`/api/portfolios/${encodeURIComponent(p.id)}`)))
@@ -86,13 +119,25 @@
           settings.querySelector('.settings-list').innerHTML = entries.map(([label,value])=>
             `<div class="setting-item"><span class="key">${escape(label)}</span><span class="val">${escape(value)}</span></div>`).join('');
         }
+        pending(false);
         drawTable(state, callbacks);
-      }).catch(error => { if (token === epoch) clear(error.message); });
+      }).catch(error => {
+        if (token !== epoch) return;
+        key = ''; rows = []; hasUnselected = false; state.checkedStudyIds = new Set();
+        pending(false);
+        drawTable(state, callbacks);
+        if (el('portfolioSelectorSettings')) el('portfolioSelectorSettings').hidden = true;
+        clear(error.message);
+        finish();
+      });
     return true;
   }
   function clear(message='No data to display') {
     window.AnalyticsEquity?.renderChart([],[]);
     const title = el('analyticsChartTitle'); if (title) title.textContent = message;
+    ['analyticsChartMeta','analyticsChartSubtitle','analyticsChartWarning'].forEach(id => {
+      const node = el(id); if (node) { node.textContent = ''; node.hidden = true; }
+    });
     cards({});
   }
   function cards(data) {
@@ -114,11 +159,14 @@
       if (el('portfolioShowUnselected')) el('portfolioShowUnselected').closest('label').hidden = true;
       return false;
     }
+    if (detailPending) return true;
     const focus = rows.find(r=>r.study_id===state.focusedStudyId);
     const selected = focus ? [focus] : rows.filter(r=>state.checkedStudyIds.has(r.study_id));
     const token = ++curveEpoch;
-    clear(focus?.unavailable ? (focus.reason || 'No saved result') : 'Loading…');
-    if (focus?.unavailable || !selected.length) { clear(focus?.reason || 'No data to display'); return true; }
+    if (focus?.unavailable || !selected.length) {
+      clear(focus?.reason || 'No data to display'); finish(); return true;
+    }
+    pending();
     const payload = {studyIds:selected.filter(r=>!r.portfolio_id).map(r=>r.study_id),
       portfolios:selected.filter(r=>r.portfolio_id).map(r=>({id:r.portfolio_id,selection:r.portfolioSelection}))};
     get('/api/portfolios/equity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
@@ -129,10 +177,15 @@
         const title = el('analyticsChartTitle');
         if (title) title.textContent = focus?.study_name || current.scope?.name || 'Selected studies';
         const meta = el('analyticsChartMeta'); if (meta) meta.textContent = data.depleted ? 'Depleted return index' : '';
-      }).catch(error=>{if(token===curveEpoch) clear(error.message);});
+        ['analyticsChartSubtitle','analyticsChartWarning'].forEach(id => {
+          const node = el(id); if (node) { node.hidden = true; node.textContent = ''; }
+        });
+        finish();
+      }).catch(error=>{if(token===curveEpoch) { clear(error.message); finish(); }});
     return true;
   }
   function setShowUnselected(value) {
+    if (detailPending) return;
     showUnselected = !!value;
     if (lastState && current) drawTable(lastState,lastCallbacks);
   }
@@ -144,7 +197,18 @@
       ? `X · Top ${s.selector.topN} · Every ${s.selector.rebalanceMonths}m · ${s.selector.params.lookbackMonths}m / ${s.selector.params.timeframeMinutes}m` : 'Off');
     return new Set(descriptions).size > 1 ? 'Mixed' : descriptions[0] || 'Off';
   }
-  function reset() { current = null; outerChecks = null; restoredChecks = null; rows = []; hasUnselected = false; key = ''; epoch++; curveEpoch++; }
-  window.AnalyticsPortfolio = {setsChanged,renderTable,visuals,active:()=>!!current,rows:()=>rows,setShowUnselected,describe,reset};
+  function reset() {
+    if (current || leaving) {
+      clear();
+      window.AnalyticsTable?.renderTable([],new Set(),()=>{}, {groupDatesEnabled:false});
+      if (el('analyticsTableHeaderMeta')) el('analyticsTableHeaderMeta').innerHTML = '';
+    }
+    current = null; finish(); outerChecks = null; restoredChecks = null; rows = [];
+    hasUnselected = false; key = ''; epoch++; curveEpoch++;
+    lastState = null; lastCallbacks = null;
+    if (el('portfolioSelectorSettings')) el('portfolioSelectorSettings').hidden = true;
+  }
+  window.AnalyticsPortfolio = {setsChanged,renderTable,visuals,active:()=>!!current,rows:()=>rows,setShowUnselected,describe,reset,
+    detailPending:()=>detailPending, leaving:()=>leaving, finish};
   document.addEventListener('DOMContentLoaded',()=>el('portfolioShowUnselected')?.addEventListener('change',e=>setShowUnselected(e.target.checked)));
 })();

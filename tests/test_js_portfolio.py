@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 
-@pytest.mark.parametrize('filename', ['portfolio.test.cjs', 'portfolio_queue.test.cjs'])
+@pytest.mark.parametrize('filename', ['portfolio.test.cjs', 'portfolio_queue.test.cjs', 'portfolio_loading.test.cjs'])
 def test_portfolio_production_handlers(tmp_path, filename):
     node = os.environ.get('MERLIN_NODE_EXECUTABLE') or shutil.which('node')
     assert node, 'An installed Node runtime is required.'

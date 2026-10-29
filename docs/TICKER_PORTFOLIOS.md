@@ -69,6 +69,16 @@ Turning it off hides and unchecks comparisons.
 Unavailable rows remain focusable but cannot be checked. Leaving portfolio scope restores
 the outer Summary checks. Ordinary focused-set behavior and All Studies remain unchanged.
 
+During scope or projection loading, the previous chart/cards remain dimmed with
+`Loading...` and `aria-busy`; they are not the newly selected result. Old Summary
+rows and links are inert until current detail arrives, while Study Sets navigation
+remains available. Temporary table height prevents a transient main-area scroll
+clamp; it is released on completion/error, without restoring over a user's scroll.
+Current detail refreshes the shared checked/shown/total counters; total includes
+saved comparison entries even when hidden. Only current replies can finish loading.
+Actual empty/unavailable/error results clear stale visuals, and failed detail can
+be retried by revisiting its scope. Valid result N/A values retain their meaning.
+
 Use ↗ on an executed ticker row to open Results, then **Back to portfolio**. WFA shows
 selected IS and actual OOS parameters/capital; Fixed without WFA has one reference result.
 Stored Fixed children with matching database ownership replay their finite positive

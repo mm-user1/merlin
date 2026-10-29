@@ -3171,6 +3171,19 @@
       padding: 18px 12px;
     }
 
+    .analytics-page .main-area.analytics-portfolio-view {
+      overflow-anchor: none;
+    }
+
+    .analytics-pending {
+      opacity: 0.55;
+    }
+
+    #analyticsLoading {
+      margin-left: auto;
+      font-size: 12px;
+    }
+
     .table-scroll.analytics-table-scroll {
       max-height: 760px;
     }
