@@ -15,6 +15,7 @@ from ..study import workers as workers_module
 from ..study.runner import metadata_admission_failures
 from ..study.bracket_rules import normalize_rules
 from ..study.contracts import semantic_digest
+from ..study.execution_sources import execution_source_paths
 from .request import normalize_request, bounds, planned_family, warmup_requirements
 from .common import fresh_directory, file_hash, write_json
 from .codec import encode_accounts, encode_container
@@ -32,9 +33,8 @@ def implementation(*, auxiliary=False):
               ('src/' if name.startswith('data_provider.') else '') + name.replace('.', '/') + '.py')
              for name in CORE_MODULES}
     names.update(('tools/pattern_lab/study/workers.py', 'tools/pattern_lab/study/bracket.py',
-                  'tools/pattern_lab/study/bracket_rules.py', 'src/core/engine_v2/sizing.py',
-                  'src/core/engine_v2/contracts.py', 'src/core/engine_v2/price_rounding.py',
-                  'src/core/engine_v2/execution_modes.py', 'src/core/backtest_engine.py'))
+                  'tools/pattern_lab/study/bracket_rules.py'))
+    names.update(execution_source_paths(repo))
     # The guarded reference loader owns the numerical source list too.
     from ..study.bracket import reference_core
     core = reference_core()

@@ -277,7 +277,7 @@ outside the account model.
 
 The [current guide](../tools/pattern_lab/README.md#current-capabilities-and-acceptance)
 owns the APIs and limits, including
-[incomplete core-source attribution for carried selections](../tools/pattern_lab/README.md#carried-execution-attribution-limit).
+[bounded generic execution-source attribution](../tools/pattern_lab/README.md#carried-execution-attribution-limit).
 Tool acceptance does not establish real-provider data coverage or profitability;
 collection and market experiments are separate operational tasks.
 

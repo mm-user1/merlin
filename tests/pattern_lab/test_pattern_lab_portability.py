@@ -320,10 +320,11 @@ else: raise AssertionError('changed helper accepted')
 
 
 def scoped_sources():
+    from tools.pattern_lab.study.execution_sources import GENERIC_EXECUTION_PATHS
     paths = subprocess.check_output(["git", "ls-files", "tools/pattern_lab/*.py"], cwd=h.REPO_ROOT, text=True).splitlines()
     paths = [name for name in paths if (h.REPO_ROOT / name).is_file()]
     paths += [p.relative_to(h.REPO_ROOT).as_posix() for p in (h.REPO_ROOT / "src/data_provider").rglob("*.py")]
-    return paths + [name for name in extensions.bracket_source_digests() if name.startswith("src/")]
+    return paths + list(GENERIC_EXECUTION_PATHS)
 
 
 def test_scoped_tracked_sources_have_no_cr():

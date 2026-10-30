@@ -533,12 +533,11 @@ def core_source_digests() -> dict[str, str]:
 
 def bracket_source_digests():
     """Bounded consumed-contract attribution without importing generic core."""
+    from .execution_sources import execution_source_paths
     root = Path(__file__).resolve().parents[3]
-    paths = ["src/core/engine_v2/"+name+".py" for name in
-             ("kernel", "sizing", "contracts", "price_rounding", "execution_modes", "diagnostics")]
-    paths += ["src/core/backtest_engine.py"]
+    paths = list(execution_source_paths(root))
     paths += ["tools/pattern_lab/study/"+name+".py" for name in ("bracket", "bracket_rules", "sequential", "sequential_checks")]
-    return {path:file_digest(root/path) for path in paths}
+    return {path:file_digest(root/path) for path in sorted(paths)}
 
 
 def library_versions() -> dict[str, str]:

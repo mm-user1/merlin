@@ -75,7 +75,7 @@ through `5473271`. Final integrated review found no material defect within the
 documented research scope. Start with the guide's
 [current capabilities and acceptance](../tools/pattern_lab/README.md#current-capabilities-and-acceptance)
 for the new account, robustness, auxiliary-data and selection routes. Read its
-[carried execution attribution limit](../tools/pattern_lab/README.md#carried-execution-attribution-limit)
+[generic execution attribution contract](../tools/pattern_lab/README.md#carried-execution-attribution-limit)
 when comparing implementations across code revisions. Readiness of the tools
 does not imply that a real dataset has been collected or a trading edge validated.
 

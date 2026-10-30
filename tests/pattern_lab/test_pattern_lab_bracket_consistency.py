@@ -299,7 +299,8 @@ def test_production_source_and_rule_identity_composition(tmp_path,monkeypatch):
     def run(name): return study.run_study(request=request,data_root=tmp_path/"pack",output_root=tmp_path/name)["identities"]
     original=run("original")
     hashes=extensions.bracket_source_digests()
-    assert set(hashes)=={f"src/core/engine_v2/{name}.py" for name in ("kernel","sizing","contracts","price_rounding","execution_modes","diagnostics")} | {"src/core/backtest_engine.py"} | {f"tools/pattern_lab/study/{name}.py" for name in ("bracket","bracket_rules","sequential","sequential_checks")}
+    assert set(hashes)=={f"src/core/engine_v2/{name}.py" for name in ("kernel","sizing","contracts","price_rounding","execution_modes","diagnostics","admission","quantity")} | {"src/core/backtest_engine.py"} | {f"tools/pattern_lab/study/{name}.py" for name in ("bracket","bracket_rules","sequential","sequential_checks","execution_sources")}
+    assert len(hashes)==14
     for index,path in enumerate(hashes):
         with monkeypatch.context() as patch:
             patch.setattr(extensions,"bracket_source_digests",lambda path=path:{**hashes,path:"0"*64})

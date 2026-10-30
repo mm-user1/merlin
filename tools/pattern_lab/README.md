@@ -46,7 +46,8 @@ New reader attribution includes exactly `data_provider`, `.errors`, `.data`,
 code is not reader execution. Required study/analysis sources must resolve.
 Account source paths resolve beneath `src/data_provider`; selection retains old
 research-relative keys and uses explicit `src/data_provider/*.py` keys for the
-shared sources. The existing carried core-attribution limit below is unchanged.
+shared sources. Generic execution attribution is specified below, separately
+from this shared-reader closure.
 
 Candidate schema stays 1. Required-code policy 2 replaces policy 1's legacy
 reader pair with that seven-module closure, preserving other required members and
@@ -102,7 +103,7 @@ deliberately omitted. Robustness views are descriptive, not automatic parameter
 optimization. Collector implementation does not mean real Funding/OI snapshots
 or older market history have already been acquired. Collection, measured sizing
 of large raw-OI workloads and real experiments are separate operational work.
-See also the [carried execution attribution limit](#carried-execution-attribution-limit).
+See also the [generic execution attribution contract](#carried-execution-attribution-limit).
 
 ## Earlier milestones
 
@@ -5577,18 +5578,48 @@ statistical claim, market experiment or generic storage framework is introduced.
 
 ### Carried execution attribution limit
 
-At `5473271`, selection implementation attribution hashes the Pattern Lab
-modules and experimental scorer sources but omits the Merlin core execution
-files that carried funded accounts use. The parent account study records those
-core files; selection does not record their current hashes at its own execution
-time. If the core changes between creating the parent and generating a carried
-selection, the selection's implementation identity alone does not reveal that
-change. Fixed-reference selections do not execute funded accounts.
+T06 completes prospective generic execution attribution for legacy bracket,
+native account and fixed/carried selection builders. The pure
+`study/execution_sources.py` inventory owns these nine repository-relative paths:
+`src/core/backtest_engine.py` and `src/core/engine_v2/{kernel,sizing,contracts,
+price_rounding,execution_modes,diagnostics,admission,quantity}.py`. The inventory
+file itself is also hashed. Missing required paths fail with a named data error.
+This is a bounded file-level contract, not a transitive import graph.
 
-This is a known provenance limitation, not a demonstrated numerical defect at
-the accepted baseline. Exact-parent verification re-executes funded accounts
-and catches changes that alter the saved facts or retained paths; it does not
-prove that every source file is unchanged. Record the repository revision used
-for parent and selection runs when comparing generations. Adding the account
-study's core source list to new selection attribution is an optional future
-maintenance change. Existing sealed artifacts must remain readable unchanged.
+Legacy brackets execute `run_reference_kernel`, including quantity validation
+whose no-context branch returns `None`; the ordinary bracket fixture invokes no
+admission function. Native accounts use `risk_position_size`, `quantity_lots`
+and `intrabar_path` from the guarded reference loader, without invoking admission
+or quantity functions. Admission is conservatively attributed on both routes;
+quantity is conservative for native accounts. Fixed-reference selection does not
+re-execute funded accounts but shares the uniform selection inventory.
+
+Bracket attribution contains exactly 14 entries: nine generic files, the
+inventory and the four existing bracket/rules/sequential/checks files. Bracket
+and account builders retain byte hashing; selection retains LF-normalized
+hashing, existing research-relative keys and explicit `src/core/...` keys.
+The helper has the existing `study/execution_sources.py` selection key. Scoped
+LF attributes include admission and quantity. Existing account generation checks
+now cover the added dependencies. Selection still hashes at publication and
+assumes stable sources during a run; no run-wide freeze or new worker guard is
+provided. Record the revision used for each parent and selection.
+
+The authorized `study/extensions.py` change alters new implementation identities
+and a required candidate source pin, including for event studies. Old policy-2
+candidates remain loadable but current-source execution refuses the extensions
+generation before pack access/publication. Re-freezing old discovery and analysis
+retains their old pins and does not repair drift. A fresh current-source candidate
+requires new discovery and analysis before freezing; policy-1 behavior is unchanged.
+No saved candidate or historical artifact is rewritten or resealed.
+
+Historical artifacts retain their saved source maps, identities and exact parent
+pins without requiring the new keys. Offline loading, full verification, transport
+and rebuilding remain supported. Account report rebuilds truthfully record current
+derivation sources: this patch changes only `account_study/runner.py` in that map;
+runtime/version metadata may differ across hosts. Economics stay unchanged and
+same-host repeated rebuilds match. Selection rebuilds retain saved metadata and
+match sealed originals on the same host. New selection comparisons must use the
+same parent to isolate this provenance change; a new parent legitimately changes
+selection specification/data identities as well. Exact-parent carried replay
+checks numerical facts at saved capital, not universal historical source identity.
+Old selections still omit these generic keys and retain that historical limitation.

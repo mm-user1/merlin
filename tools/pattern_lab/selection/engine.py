@@ -12,6 +12,7 @@ import numpy as np
 from ..accounts.contracts import require, integer, identifier
 from ..account_study.common import closed, json_text, parse_json, digest_id, member_names
 from ..study.contracts import semantic_digest
+from ..study.execution_sources import execution_source_paths, INVENTORY_PATH
 from .request import month_bounds, normalize_selection_request
 from .ledger import history_pool, score_view, ScoreView, money, REJECTIONS
 from .scorers import registry, contract, evaluate, Score, validate_scores
@@ -34,6 +35,10 @@ def implementation(experimental):
         files.extend(p for p in (root/folder).iterdir() if p.suffix in ('.py','.js'))
     sources = {p.relative_to(root).as_posix(): p for p in files}
     repo = root.parents[1]
+    # The helper itself already has a research-relative key from the study scan.
+    for key in execution_source_paths(repo):
+        if key != INVENTORY_PATH:
+            sources[key] = repo / key
     for name in READER_MODULES:
         key = 'src/data_provider/__init__.py' if name == 'data_provider' else 'src/' + name.replace('.', '/') + '.py'
         sources[key] = repo / key

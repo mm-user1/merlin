@@ -92,7 +92,7 @@ baselines, or mutate external systems unless explicitly authorized.
   data with composable entry filters, and monthly universe selection with fixed
   or carried capital. Final integrated review found no material defect in the
   documented research scope. The Pattern Lab guide owns current APIs, versioned
-  behavior and the known carried-execution source-attribution limit.
+  behavior and the bounded generic execution-source attribution contract.
   Funding is a feature, not an account cashflow; slippage is intentionally omitted.
   Data acquisition and market experiments remain separately authorized work.
   Proceed with experiments rather than reopening accepted milestones without

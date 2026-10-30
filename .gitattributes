@@ -11,6 +11,8 @@ src/core/engine_v2/contracts.py text eol=lf
 src/core/engine_v2/price_rounding.py text eol=lf
 src/core/engine_v2/execution_modes.py text eol=lf
 src/core/engine_v2/diagnostics.py text eol=lf
+src/core/engine_v2/admission.py text eol=lf
+src/core/engine_v2/quantity.py text eol=lf
 
 # Shared reader sources are also exact-byte generation inputs.
 src/data_provider/*.py text eol=lf
