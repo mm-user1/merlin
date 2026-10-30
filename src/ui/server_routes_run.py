@@ -1978,7 +1978,7 @@ def register_routes(app):
                     return _build_trial_metrics(trial, prefix="ft_")
                 return _build_trial_metrics(trial)
 
-            oos_preparation = {} if prepared is not None else None
+            oos_preparation = {}
             oos_results_payload = run_period_test_for_trials(
                 admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
                 entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING,
@@ -1992,7 +1992,7 @@ def register_routes(app):
                 baseline_period_days=int(baseline_period_days),
                 test_period_days=int(test_period_days),
                 original_metrics_resolver=resolve_original_metrics,
-                **({"preparation_facts": oos_preparation} if prepared is not None else {}),
+                preparation_facts=oos_preparation,
             )
 
             for idx, item in enumerate(oos_results_payload, 1):
@@ -2009,7 +2009,7 @@ def register_routes(app):
                 oos_start_date=oos_start_ts.strftime("%Y-%m-%d"),
                 oos_end_date=oos_end_ts.strftime("%Y-%m-%d"),
                 oos_source_module=source_module,
-                **({"parquet_oos_replay": oos_preparation} if prepared is not None else {}),
+                **({"parquet_oos_replay": oos_preparation} if prepared is not None else {"csv_oos_replay": oos_preparation}),
             )
 
         if _is_run_cancelled(run_id):

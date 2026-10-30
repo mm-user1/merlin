@@ -172,15 +172,17 @@ function renderOptunaTable(results) {
 
       row.addEventListener('click', async () => {
         selectTableRow(index, trialNumber);
-        await showParameterDetails({ ...result, param_id: paramId });
+        const selection = captureEquitySelection({ trialNumber: trialNumber });
+        await showParameterDetails({ ...result, param_id: paramId }, selection);
+        if (!selection.current()) return;
         setComparisonLine('');
         if (result.equity_curve && result.equity_curve.length) {
           renderEquityChart(result.equity_curve, null, result.timestamps);
           return;
         }
-        const payload = await fetchEquityCurve(result);
-        if (payload && payload.equity && payload.equity.length) {
-          renderEquityChart(payload.equity, null, payload.timestamps);
+        const payload = await fetchEquityCurve(result, null, selection);
+        if (selection.current() && payload && payload.equity && payload.equity.length) {
+          renderEquityChart(payload.equity, null, payload.timestamps, { referenceCapital: payload.reference_capital });
         }
     });
 
@@ -255,7 +257,9 @@ function renderForwardTestTable(results) {
 
     row.addEventListener('click', async () => {
       selectTableRow(index, trialNumber);
-      await showParameterDetails({ ...trial, param_id: paramId });
+      const selection = captureEquitySelection({ trialNumber: trialNumber });
+      await showParameterDetails({ ...trial, param_id: paramId }, selection);
+      if (!selection.current()) return;
 
       const comparison = window.PostProcessUI
         ? window.PostProcessUI.buildComparisonMetrics(trial)
@@ -277,9 +281,9 @@ function renderForwardTestTable(results) {
       const equity = await fetchEquityCurve(trial, {
         start: ResultsState.forwardTest.startDate,
         end: ResultsState.forwardTest.endDate
-      });
-      if (equity && equity.equity && equity.equity.length) {
-        renderEquityChart(equity.equity, null, equity.timestamps);
+      }, selection);
+      if (selection.current() && equity && equity.equity && equity.equity.length) {
+        renderEquityChart(equity.equity, null, equity.timestamps, { referenceCapital: equity.reference_capital });
       }
     });
 
@@ -332,7 +336,9 @@ function renderDsrTable(results) {
 
     row.addEventListener('click', async () => {
       selectTableRow(index, trialNumber);
-      await showParameterDetails({ ...trial, param_id: paramId });
+      const selection = captureEquitySelection({ trialNumber: trialNumber });
+      await showParameterDetails({ ...trial, param_id: paramId }, selection);
+      if (!selection.current()) return;
 
       const rankLine = rankDelta !== null ? `Rank: ${formatSigned(rankDelta, 0)}` : null;
 
@@ -348,9 +354,9 @@ function renderDsrTable(results) {
       ].filter(Boolean).join(' | ');
       setComparisonLine(line);
 
-      const equity = await fetchEquityCurve(trial);
-      if (equity && equity.equity && equity.equity.length) {
-        renderEquityChart(equity.equity, null, equity.timestamps);
+      const equity = await fetchEquityCurve(trial, null, selection);
+      if (selection.current() && equity && equity.equity && equity.equity.length) {
+        renderEquityChart(equity.equity, null, equity.timestamps, { referenceCapital: equity.reference_capital });
       }
     });
 
@@ -415,7 +421,9 @@ function renderStressTestTable(results) {
 
     row.addEventListener('click', async () => {
       selectTableRow(index, trialNumber);
-      await showParameterDetails({ ...trial, param_id: paramId });
+      const selection = captureEquitySelection({ trialNumber: trialNumber });
+      await showParameterDetails({ ...trial, param_id: paramId }, selection);
+      if (!selection.current()) return;
 
       const rankSourceLabel = stSource === 'ft' ? 'FT' : (stSource === 'dsr' ? 'DSR' : 'Optuna');
 
@@ -466,9 +474,9 @@ function renderStressTestTable(results) {
         setComparisonLine(line);
       }
 
-      const equity = await fetchEquityCurve(trial);
-      if (equity && equity.equity && equity.equity.length) {
-        renderEquityChart(equity.equity, null, equity.timestamps);
+      const equity = await fetchEquityCurve(trial, null, selection);
+      if (selection.current() && equity && equity.equity && equity.equity.length) {
+        renderEquityChart(equity.equity, null, equity.timestamps, { referenceCapital: equity.reference_capital });
       }
     });
 
@@ -544,7 +552,9 @@ function renderOosTestTable(results) {
 
     row.addEventListener('click', async () => {
       selectTableRow(index, trial.trial_number);
-      await showParameterDetails({ ...trial, param_id: paramId });
+      const selection = captureEquitySelection({ trialNumber: trial.trial_number });
+      await showParameterDetails({ ...trial, param_id: paramId }, selection);
+      if (!selection.current()) return;
 
       const profitDeg = trial.oos_test_profit_degradation;
       const maxDdChange = Number(metrics.max_drawdown_pct || 0) - Number(baseMetrics.max_drawdown_pct || 0);
@@ -565,9 +575,9 @@ function renderOosTestTable(results) {
         const equity = await fetchEquityCurve(trial, {
           start: ResultsState.oosTest.startDate,
           end: ResultsState.oosTest.endDate
-        });
-        if (equity && equity.equity && equity.equity.length) {
-          renderEquityChart(equity.equity, null, equity.timestamps);
+        }, selection);
+        if (selection.current() && equity && equity.equity && equity.equity.length) {
+          renderEquityChart(equity.equity, null, equity.timestamps, { referenceCapital: equity.reference_capital });
         }
       }
     });
@@ -637,7 +647,9 @@ function renderManualTestTable(results) {
 
     row.addEventListener('click', async () => {
       selectTableRow(index, trialNumber);
-      await showParameterDetails({ ...baseTrial, param_id: paramId });
+      const selection = captureEquitySelection({ trialNumber: trialNumber });
+      await showParameterDetails({ ...baseTrial, param_id: paramId }, selection);
+      if (!selection.current()) return;
 
       const comparison = entry.comparison || {};
       const line = [
@@ -654,9 +666,9 @@ function renderManualTestTable(results) {
         const equity = await fetchEquityCurve(baseTrial, {
           start: config.start_date,
           end: config.end_date
-        });
-        if (equity && equity.equity && equity.equity.length) {
-          renderEquityChart(equity.equity, null, equity.timestamps);
+        }, selection);
+        if (selection.current() && equity && equity.equity && equity.equity.length) {
+          renderEquityChart(equity.equity, null, equity.timestamps, { referenceCapital: equity.reference_capital });
         }
       }
     });
@@ -707,7 +719,9 @@ function renderWFATable(windows) {
       row.addEventListener('click', async () => {
         const windowNumber = window.window_number || window.window_id || index + 1;
         selectTableRow(index, windowNumber);
-        await showParameterDetails(window);
+        const selection = captureEquitySelection({ trialNumber: windowNumber });
+        await showParameterDetails(window, selection);
+        if (!selection.current()) return;
         setComparisonLine('');
       });
 
@@ -731,7 +745,7 @@ function selectTableRow(index, rowId) {
   window.EntryDiagnostics?.show(tab === 'manual_tests' ? manual?.entry_diagnostics : trial?.entry_diagnostics?.[scope], true);
 }
 
-async function showParameterDetails(result) {
+async function showParameterDetails(result, selection = captureEquitySelection()) {
   const section = document.getElementById('paramDetailsSection');
   const title = document.getElementById('paramDetailsTitle');
   const content = document.getElementById('paramDetailsContent');
@@ -740,12 +754,15 @@ async function showParameterDetails(result) {
 
   if ((!ResultsState.strategyConfig || !ResultsState.strategyConfig.parameters) && ResultsState.strategyId) {
     try {
-      ResultsState.strategyConfig = await fetchStrategyConfig(ResultsState.strategyId);
+      const config = await fetchStrategyConfig(ResultsState.strategyId);
+      if (!selection.current()) return;
+      ResultsState.strategyConfig = config;
     } catch (error) {
       console.warn('Failed to load strategy config for parameter ordering', error);
     }
   }
 
+  if (!selection.current()) return;
   const label = result.param_id
     || createParamId(result.params || result.best_params || {}, ResultsState.strategyConfig, ResultsState.fixedParams);
   if (title) {
@@ -978,7 +995,8 @@ function renderEquityChart(equityData, windowBoundaries = null, timestamps = nul
     return getIndexRatio(boundary.index);
   };
 
-  const baseValue = 100.0;
+  const reference = options?.referenceCapital;
+  const baseValue = typeof reference === 'number' && Number.isFinite(reference) && reference > 0 ? reference : 100.0;
   const minValue = Math.min(...equityData, baseValue);
   const maxValue = Math.max(...equityData, baseValue);
   const valueRange = maxValue - minValue || 1;
@@ -1103,6 +1121,21 @@ function renderEquityChart(equityData, windowBoundaries = null, timestamps = nul
   polyline.setAttribute('stroke', '#4a90e2');
   polyline.setAttribute('stroke-width', '1.5');
   svg.appendChild(polyline);
+}
+
+// Capture at the user action, before parameter/config loading can yield.
+function captureEquitySelection(requested = {}) {
+  const state = ResultsState;
+  const token = {
+    studyId: state.studyId, tab: state.activeTab, rowId: state.selectedRowId,
+    manualId: state.activeManualTest?.id, wfa: state.wfaSelection, ...requested
+  };
+  state.equitySelectionToken = token;
+  token.current = () => state.equitySelectionToken === token &&
+    state.studyId === token.studyId && state.activeTab === token.tab &&
+    state.selectedRowId === token.rowId && state.activeManualTest?.id === token.manualId &&
+    state.wfaSelection === token.wfa;
+  return token;
 }
 
 function calculateWindowBoundaries(windows, stitchedOOS) {

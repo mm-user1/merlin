@@ -452,7 +452,7 @@ def test_stored_execution_endpoint_inventory_uses_shared_runtime_and_reads_tests
     client, monkeypatch, tmp_path
 ):
     from core.storage import get_study_trial, load_study_from_db
-    from ui import server_routes_data
+    from ui import server_routes_data, server_data_input
 
     csv_path = tmp_path / "stored_execution_inventory.csv"
     csv_path.write_text(
@@ -480,6 +480,9 @@ def test_stored_execution_endpoint_inventory_uses_shared_runtime_and_reads_tests
         {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1.0},
         index=pd.date_range("2025-01-01", "2025-08-01", freq="D", tz="UTC"),
     )
+    config["csv_oos_replay"] = dict(version=1, start="2025-06-01T00:00:00Z",
+        end="2025-06-10T23:59:59.999999Z", preparation_start="2025-05-12T00:00:00Z",
+        preparation_end="2025-06-10T00:00:00Z", warmup_bars=20, trade_start_idx=20)
     captured = []
 
     def fake_period_test(**kwargs):
@@ -500,6 +503,7 @@ def test_stored_execution_endpoint_inventory_uses_shared_runtime_and_reads_tests
         return [], None
 
     monkeypatch.setattr(server_routes_data, "load_data", lambda _path: frame)
+    monkeypatch.setattr(server_data_input, "load_data", lambda _path: frame)
     monkeypatch.setattr(server_routes_data, "run_period_test_for_trials", fake_period_test)
     monkeypatch.setattr(server_routes_data, "_run_trade_export", fake_trade_export)
 
@@ -510,6 +514,9 @@ def test_stored_execution_endpoint_inventory_uses_shared_runtime_and_reads_tests
             csv_path=csv_path,
             config_json=config,
         )
+        with get_db_connection() as conn:
+            conn.execute("UPDATE trials SET ft_rank=1, oos_test_total_trades=0, oos_test_net_profit_pct=0 WHERE study_id=?", (study_id,))
+            conn.commit()
         original_study = deepcopy(load_study_from_db(study_id)["study"])
         original_trial = deepcopy(get_study_trial(study_id, 7))
         studies_response = client.get("/api/studies")
@@ -569,8 +576,8 @@ def test_stored_execution_endpoint_inventory_uses_shared_runtime_and_reads_tests
             "slowLength": 70,
             "fastLength": 50,
             "dateFilter": False,
-            "start": "2025-01-01T00:00:00Z",
-            "end": "2025-02-01T00:00:00Z",
+            "start": None,
+            "end": None,
         }
         assert exported[1]["start"] == "2025-05-01T00:00:00Z"
         assert exported[1]["end"] == "2025-05-10T23:59:59.999999Z"
@@ -677,9 +684,10 @@ def test_v1_stored_trade_export_keeps_legacy_merge_semantics(
     assert captured["params"] == {
         "maType3": "HMA",
         "maType3_options": ["SMA", "HMA"],
-        "dateFilter": True,
+        "dateFilter": False,
         "maLength3": 75,
-        "start": "candidate",
+        "start": None,
+        "end": None,
     }
     assert captured["warmup_bars"] == 20
 

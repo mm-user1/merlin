@@ -105,7 +105,7 @@
     } else if (typeof calculateWindowBoundaries === 'function') {
       boundaries = calculateWindowBoundaries(windows, stitched);
     }
-    renderEquityChart(stitched.equity_curve, boundaries, stitched.timestamps || [], { useTimeScale: true });
+    renderEquityChart(stitched.equity_curve, boundaries, stitched.timestamps || [], { useTimeScale: true, referenceCapital: 100 });
   }
 
   function setWfaSelection(selection) {
@@ -168,11 +168,11 @@
     return [{ index }];
   }
 
-  async function generateWindowEquity(windowNumber, period) {
+  async function generateWindowEquity(windowNumber, period, token) {
     const studyId = getStudyId();
     if (!studyId) return;
     const selection = window.ResultsState.wfaSelection;
-    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection;
+    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection && (!token || token.current());
 
     try {
       const response = await fetch(`/api/studies/${encodeURIComponent(studyId)}/wfa/windows/${windowNumber}/equity`, {
@@ -182,30 +182,31 @@
       });
 
       if (!current()) return;
-      if (!response.ok) {
-        throw new Error(`Failed to generate equity: ${response.status}`);
-      }
-
       const data = await response.json();
       if (!current()) return;
+      if (!response.ok) throw new Error(data.error || `Failed to generate equity: ${response.status}`);
       if (typeof renderEquityChart === 'function') {
         const timestamps = data.timestamps || [];
         const boundaries = period === 'both'
           ? getIsOosBoundary(windowNumber, timestamps)
           : [];
-        renderEquityChart(data.equity_curve || [], boundaries, timestamps);
+        renderEquityChart(data.equity_curve || [], boundaries, timestamps, { referenceCapital: data.reference_capital });
       }
     } catch (error) {
-      if (current()) window.EntryDiagnostics?.show(null);
+      if (current()) {
+        window.EntryDiagnostics?.show(null);
+        renderEquityChart([]);
+        setComparisonLine(error.message || 'Equity replay failed.');
+      }
       console.error('Error generating window equity:', error);
     }
   }
 
-  async function generateTrialEquity(windowNumber, moduleType, trialNumber, period) {
+  async function generateTrialEquity(windowNumber, moduleType, trialNumber, period, token) {
     const studyId = getStudyId();
     if (!studyId) return;
     const selection = window.ResultsState.wfaSelection;
-    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection;
+    const current = () => getStudyId() === studyId && window.ResultsState.wfaSelection === selection && (!token || token.current());
 
     try {
       const response = await fetch(`/api/studies/${encodeURIComponent(studyId)}/wfa/windows/${windowNumber}/equity`, {
@@ -215,17 +216,18 @@
       });
 
       if (!current()) return;
-      if (!response.ok) {
-        throw new Error(`Failed to generate equity: ${response.status}`);
-      }
-
       const data = await response.json();
       if (!current()) return;
+      if (!response.ok) throw new Error(data.error || `Failed to generate equity: ${response.status}`);
       if (typeof renderEquityChart === 'function') {
-        renderEquityChart(data.equity_curve || [], [], data.timestamps || []);
+        renderEquityChart(data.equity_curve || [], [], data.timestamps || [], { referenceCapital: data.reference_capital });
       }
     } catch (error) {
-      if (current()) window.EntryDiagnostics?.show(null);
+      if (current()) {
+        window.EntryDiagnostics?.show(null);
+        renderEquityChart([]);
+        setComparisonLine(error.message || 'Equity replay failed.');
+      }
       console.error('Error generating trial equity:', error);
     }
   }
@@ -523,15 +525,15 @@
             const trialNumber = parseInt(row.dataset.trialNumber, 10);
             const period = defaultPeriodForModule(moduleType);
             const trial = trials.find((item) => Number(item.trial_number) === trialNumber);
-            if (trial) {
-              showParameterDetails({ ...trial, param_id: trial.param_id });
-            }
+            setWfaSelection({ windowNumber, moduleType, trialNumber, period });
+            const token = captureEquitySelection({ windowNumber, moduleType, trialNumber, period });
+            if (trial) await showParameterDetails({ ...trial, param_id: trial.param_id }, token);
+            if (!token.current()) return;
             if (typeof setComparisonLine === 'function') {
               const line = trial ? buildWfaComparisonLine(trial, moduleType, windowNumber) : '';
               setComparisonLine(line);
             }
-            setWfaSelection({ windowNumber, moduleType, trialNumber, period });
-            await generateTrialEquity(windowNumber, moduleType, trialNumber, period);
+            await generateTrialEquity(windowNumber, moduleType, trialNumber, period, token);
           });
         });
       }
@@ -811,12 +813,14 @@
 
       isRow.addEventListener('click', async () => {
         selectRow(isRow);
-        showParameterDetails(window);
         setWfaSelection({ windowNumber, period: 'is' });
+        const token = captureEquitySelection({ windowNumber, period: 'is' });
+        await showParameterDetails(window, token);
+        if (!token.current()) return;
         if (typeof setComparisonLine === 'function') {
           setComparisonLine('');
         }
-        await generateWindowEquity(windowNumber, 'is');
+        await generateWindowEquity(windowNumber, 'is', token);
       });
       tbody.appendChild(isRow);
 
@@ -857,14 +861,16 @@
 
       oosRow.addEventListener('click', async () => {
         selectRow(oosRow);
-        showParameterDetails(window.oos_execution_capital == null ? window : {
-          ...window, best_params: {...window.best_params, initialCapital:window.oos_execution_capital}
-        });
         setWfaSelection({ windowNumber, period: 'oos' });
+        const token = captureEquitySelection({ windowNumber, period: 'oos' });
+        await showParameterDetails(window.oos_execution_capital == null ? window : {
+          ...window, best_params: {...window.best_params, initialCapital:window.oos_execution_capital}
+        }, token);
+        if (!token.current()) return;
         if (typeof setComparisonLine === 'function') {
           setComparisonLine('');
         }
-        await generateWindowEquity(windowNumber, 'oos');
+        await generateWindowEquity(windowNumber, 'oos', token);
       });
       tbody.appendChild(oosRow);
 

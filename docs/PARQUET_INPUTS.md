@@ -140,9 +140,28 @@ Date-only display labels are not a replay oracle. Older Parquet studies without
 the record refuse only OOS reconstruction with an instruction to create a new study;
 null, malformed, unsupported or conflicting records also refuse it. Saved tables
 and otherwise supported IS/FT/manual/WFA views remain available. No metadata is
-backfilled on read. CSV retains its historical OOS path and period behavior.
+backfilled on read.
 When pinned reconstruction is refused, Results clears the previous curve and
-date labels before showing the error; the saved result table stays visible.
+date labels/diagnostics before showing the error; the saved result table stays
+visible. Obsolete replies cannot replace the current selection, including a
+selection change while parameter details or response JSON are still loading.
+
+CSV Optimize OOS uses sibling `config_json.csv_oos_replay` version 1 with the same
+exact timestamp/preparation/index/warmup fields, saved atomically with successful
+trial results. Present malformed/unknown/conflicting facts refuse. When that key
+is absent, supported history must retain enabled `fixed_params.dateFilter`, a
+full-precision executed IS `end` (naive historical V1 timestamps mean UTC), positive
+integer OOS days and, if FT is enabled, positive integer FT days. OOS starts at
+IS end plus FT days and ends OOS days later; saved OOS/FT date labels must agree.
+Date-only IS end, missing or contradictory history requires a new study. FT
+requires enabled FT and a saved trial FT rank; OOS requires enabled OOS and non-null
+saved trade/profit results (zero is valid). These checks do not hash CSV content.
+
+Both formats execute with original warmup before projecting the chart's metric
+view into the selected stage. Optimize IS dates come from executed post-split
+`fixed_params`, while runtime validation/warmup remains authoritative. FT preserves
+its original date-only invocation. Charts receive explicit execution capital;
+individual charts keep index spacing, normalized stitched curves keep time spacing.
 
 Reconstruction verifies the saved consumed interval, including warmup. Unused
 extension/backfill or a physical rewrite is compatible when consumed inputs and
@@ -159,6 +178,11 @@ equity and Analytics remain readable without the pack. Reconstructed charts and
 trade exports need matching inputs. Launch a new study to use changed data.
 Stored WFA OOS no-trade windows can return their flat curve or header-only trade
 CSV without reading the pack; windows that reconstruct trades still verify it.
+Traded WFA OOS requires complete precise actual timestamps. Only legacy undelayed
+windows without populated actual/status/delay facts may use precise scheduled
+timestamps; date-only labels are insufficient. Combined downloads use these same
+windows and fail completely on an invalid required window. No-trade windows still
+need valid precise scheduled bounds; an all-no-trade download is header-only offline.
 
 Display/study labels use the exact instrument ID and canonical TF, for example
 `OKX_BTC-USDT-SWAP, 1h`. Analytics and trade exports use `OKX:BTC-USDT-SWAP`.

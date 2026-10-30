@@ -92,8 +92,9 @@ def test_oos_replays_actual_original_execution(client, tmp_path, monkeypatch, mi
             trades = client.post(base + "/oos-trades", json={})
         assert curve.status_code == trades.status_code == 200, curve.get_data(as_text=True)
         assert len(replayed) == 2
-        equity = list(result.equity_curve or result.balance_curve)
-        assert curve.get_json() == dict(equity=equity, timestamps=[t.isoformat() for t in result.timestamps])
+        equity = list((result.equity_curve or result.balance_curve)[result.metric_start_idx:])
+        assert curve.get_json() == dict(equity=equity,
+            timestamps=[t.isoformat() for t in result.timestamps[result.metric_start_idx:]], reference_capital=capital)
         assert trades.get_data(as_text=True) == export_trades_csv(result.trades, symbol="TEST:AAA-USDT-SWAP")
         assert len(result.trades) == trial["oos_test_total_trades"]
         capital = float(params["initialCapital"])
@@ -343,7 +344,7 @@ def test_valid_relocation_and_missing_or_changed_inputs(client, oos_study, tmp_p
     assert len(originals) == 1
     manual_curve = client.post(base + f"/trials/{trial}/equity", json={"module": "manual_tests", "testId": test_id})
     assert manual_curve.status_code == 200
-    assert manual_curve.get_json()["equity"] == list(originals[0].equity_curve or originals[0].balance_curve)
+    assert manual_curve.get_json()["equity"] == list((originals[0].equity_curve or originals[0].balance_curve)[originals[0].metric_start_idx:])
     manual_trades = client.post(base + f"/tests/{test_id}/trials/{trial}/mt-trades", json={})
     assert manual_trades.get_data(as_text=True) == export_trades_csv(originals[0].trades, symbol="TEST:AAA-USDT-SWAP")
     manual_before = storage.load_manual_test_results(oos_study, test_id)
@@ -506,8 +507,9 @@ def test_csv_export_error_contract(client, monkeypatch, failure, status, message
         assert paths[-1] == expected
     study["optimization_mode"] = "wfa"
     window = {"window_id": "w1", "window_number": 1, "is_start_date": "2024-01-01", "is_end_date": "2024-01-03",
-              "oos_start_date": "2024-01-04", "oos_end_date": "2024-01-06", "best_params": {}}
+              "oos_start_ts": "2024-01-04T00:00:00Z", "oos_end_ts": "2024-01-06T00:00:00Z", "best_params": {}}
     monkeypatch.setattr(routes, "load_study_from_db", lambda _: {"study": study, "windows": [window]})
     for endpoint in ("trades", "windows/1/trades", "windows/1/equity"):
         response = client.post(f"/api/studies/stub/wfa/{endpoint}", json={"period": "oos"})
-        assert response.status_code == status and response.get_json()["error"] == message
+        expected = f"WFA window 1: {message}" if endpoint == "trades" else message
+        assert response.status_code == status and response.get_json()["error"] == expected

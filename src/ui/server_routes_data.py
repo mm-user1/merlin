@@ -113,6 +113,7 @@ try:
         _resolve_strategy_id_from_request,
         _resolve_stored_execution_context,
         _resolve_wfa_period,
+        _resolve_wfa_oos_bounds,
         _run_equity_export,
         _run_trade_export,
         _send_trades_csv,
@@ -154,6 +155,7 @@ except ImportError:
         _resolve_strategy_id_from_request,
         _resolve_stored_execution_context,
         _resolve_wfa_period,
+        _resolve_wfa_oos_bounds,
         _run_equity_export,
         _run_trade_export,
         _send_trades_csv,
@@ -172,6 +174,11 @@ except ImportError:
 
 def register_routes(app):
     register_input_routes(app)
+    if __package__:
+        from .server_data_input import trial_execution
+    else:
+        from server_data_input import trial_execution
+
     def _stored_execution_or_response(study: Dict[str, Any]):
         try:
             return _resolve_stored_execution_context(study), None
@@ -229,41 +236,6 @@ def register_routes(app):
             normalized = normalized[:limit]
 
         return normalized
-
-    def _prepend_wfa_flat_equity_prefix(
-        equity_curve: List[float],
-        timestamps: List[str],
-        *,
-        scheduled_start: Any,
-        live_start: Any,
-        initial_balance: float,
-    ) -> Tuple[List[float], List[str]]:
-        scheduled_start_ts = parse_timestamp_utc(scheduled_start)
-        live_start_ts = parse_timestamp_utc(live_start)
-        if scheduled_start_ts is None or live_start_ts is None or live_start_ts <= scheduled_start_ts:
-            return list(equity_curve or []), list(timestamps or [])
-
-        prefixed_curve: List[float] = [initial_balance]
-        prefixed_timestamps: List[str] = [scheduled_start_ts.isoformat()]
-
-        first_live_ts = parse_timestamp_utc(timestamps[0]) if timestamps else None
-        if first_live_ts is None or first_live_ts > live_start_ts:
-            prefixed_curve.append(initial_balance)
-            prefixed_timestamps.append(live_start_ts.isoformat())
-
-        prefixed_curve.extend(list(equity_curve or []))
-        prefixed_timestamps.extend(list(timestamps or []))
-
-        deduped_curve: List[float] = []
-        deduped_timestamps: List[str] = []
-        for curve_value, timestamp in zip(prefixed_curve, prefixed_timestamps):
-            if deduped_timestamps and timestamp == deduped_timestamps[-1]:
-                deduped_curve[-1] = curve_value
-            else:
-                deduped_curve.append(curve_value)
-                deduped_timestamps.append(timestamp)
-
-        return deduped_curve, deduped_timestamps
 
     def _resolve_csv_path_for_response(
         raw_path: Any,
@@ -848,27 +820,23 @@ def register_routes(app):
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
             return error_response
-
-        csv_path, prepared, error_response = _execution_input_or_response(study)
-        if error_response:
-            return error_response
+        resolved_csv = None
+        if "data_input" not in (study.get("config_json") or {}):
+            resolved_csv, _, error_response = _execution_input_or_response(study)
+            if error_response:
+                return error_response
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
             return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
-
-        params = execution_context.params_for(trial.get("params") or {})
-        warmup_bars = execution_context.warmup_bars
-
-        trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
-            strategy_id=study.get("strategy_id"),
-            csv_path=csv_path,
-            params=params,
-            warmup_bars=warmup_bars,
-        )
-        if error:
-            return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
+        try:
+            execution = trial_execution(study, trial, "optuna", context=execution_context, csv_path=resolved_csv)
+            trades, error = _run_trade_export(**execution)
+            if error:
+                raise ValueError(error)
+            csv_path = execution["csv_path"]
+        except (ValueError, TypeError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         filename = f"{study.get('study_name', 'study')}_trial_{trial_number}_trades.csv"
         return _send_trades_csv(
@@ -894,36 +862,23 @@ def register_routes(app):
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
             return error_response
-
-        csv_path, prepared, error_response = _execution_input_or_response(study)
-        if error_response:
-            return error_response
+        resolved_csv = None
+        if "data_input" not in (study.get("config_json") or {}):
+            resolved_csv, _, error_response = _execution_input_or_response(study)
+            if error_response:
+                return error_response
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
             return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
-
-        ft_start = study.get("ft_start_date")
-        ft_end = study.get("ft_end_date")
-        if not ft_start or not ft_end:
-            return jsonify({"error": "Forward test date range is missing."}), HTTPStatus.BAD_REQUEST
-
-        params = execution_context.params_for(
-            trial.get("params") or {},
-            operation_start=ft_start,
-            operation_end=ft_end,
-        )
-        warmup_bars = execution_context.warmup_bars
-
-        trades, error = _run_trade_export(
-            **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
-            strategy_id=study.get("strategy_id"),
-            csv_path=csv_path,
-            params=params,
-            warmup_bars=warmup_bars,
-        )
-        if error:
-            return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
+        try:
+            execution = trial_execution(study, trial, "forward_test", context=execution_context, csv_path=resolved_csv)
+            trades, error = _run_trade_export(**execution)
+            if error:
+                raise ValueError(error)
+            csv_path = execution["csv_path"]
+        except (ValueError, TypeError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         filename = f"{study.get('study_name', 'study')}_trial_{trial_number}_ft_trades.csv"
         return _send_trades_csv(
@@ -949,48 +904,23 @@ def register_routes(app):
         execution_context, error_response = _stored_execution_or_response(study)
         if error_response:
             return error_response
-
-        is_parquet = "data_input" in (study.get("config_json") or {})
-        export_options = {}
-        if not is_parquet:
-            csv_path, prepared, error_response = _execution_input_or_response(study)
+        resolved_csv = None
+        if "data_input" not in (study.get("config_json") or {}):
+            resolved_csv, _, error_response = _execution_input_or_response(study)
             if error_response:
                 return error_response
 
         trial = get_study_trial(study_id, trial_number)
         if not trial:
             return jsonify({"error": "Trial not found."}), HTTPStatus.NOT_FOUND
-
-        if is_parquet:
-            try:
-                frame, idx, dates, rules, filters = replay_oos_input(study, trial)
-            except (ValueError, OSError) as exc:
-                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-            csv_path = ""
-            oos_start, oos_end = dates["start"], dates["end"]
-            export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules, "entry_filter_context": filters}
-        else:
-            oos_start = study.get("oos_test_start_date")
-            oos_end = study.get("oos_test_end_date")
-            if not oos_start or not oos_end:
-                return jsonify({"error": "OOS Test date range is missing."}), HTTPStatus.BAD_REQUEST
-
-        params = execution_context.params_for(
-            trial.get("params") or {},
-            operation_start=oos_start,
-            operation_end=oos_end,
-        )
-        warmup_bars = execution_context.warmup_bars
-
-        trades, error = _run_trade_export(
-            **export_options,
-            strategy_id=study.get("strategy_id"),
-            csv_path=csv_path,
-            params=params,
-            warmup_bars=warmup_bars,
-        )
-        if error:
-            return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
+        try:
+            execution = trial_execution(study, trial, "oos_test", context=execution_context, csv_path=resolved_csv)
+            trades, error = _run_trade_export(**execution)
+            if error:
+                raise ValueError(error)
+            csv_path = execution["csv_path"]
+        except (ValueError, TypeError, OSError) as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
 
         filename = f"{study.get('study_name', 'study')}_trial_{trial_number}_oos_trades.csv"
         return _send_trades_csv(
@@ -1306,33 +1236,17 @@ def register_routes(app):
                 params = {**params, "initialCapital": positive_capital(window.get("oos_execution_capital"))}
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-        if is_window_oos:
-            try:
-                capital = resolve_execution_capital(study.get("strategy_id"), execution_context.params_for(params))
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-            actual_start = (
-                window.get("trade_start_ts")
-                or window.get("trade_start_date")
-                or actual_start
-            )
-            actual_end = (
-                window.get("trade_end_ts")
-                or window.get("trade_end_date")
-                or actual_end
-            )
-            if str(window.get("window_status") or "").lower() == "no_trade":
-                start_ts = parse_timestamp_utc(scheduled_start)
-                end_ts = parse_timestamp_utc(scheduled_end)
-                timestamps = []
-                equity_curve = []
-                if start_ts is not None:
-                    timestamps.append(start_ts.isoformat())
-                    equity_curve.append(capital)
-                if end_ts is not None and start_ts is not None and end_ts > start_ts:
-                    timestamps.append(end_ts.isoformat())
-                    equity_curve.append(capital)
-                return jsonify({"equity_curve": equity_curve, "timestamps": timestamps})
+        try:
+            if is_window_oos:
+                scheduled_start, scheduled_end, actual_start, actual_end = _resolve_wfa_oos_bounds(window)
+            capital = resolve_execution_capital(study.get("strategy_id"), execution_context.params_for(params))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        if is_window_oos and str(window.get("window_status") or "").lower() == "no_trade":
+            from core.walkforward_engine import WalkForwardEngine
+            flat = WalkForwardEngine._build_flat_result(scheduled_start, scheduled_end, capital)
+            return jsonify(equity_curve=flat.equity_curve,
+                           timestamps=[ts.isoformat() for ts in flat.timestamps], reference_capital=capital)
 
 
         csv_path, prepared, error_response = _execution_input_or_response(study)
@@ -1347,6 +1261,7 @@ def register_routes(app):
         )
 
         equity_curve, timestamps, error = _run_equity_export(
+            scheduled_start=scheduled_start if is_window_oos else None,
             **({"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context} if prepared is not None else {}),
             strategy_id=study.get("strategy_id"),
             csv_path=csv_path,
@@ -1356,16 +1271,7 @@ def register_routes(app):
         if error:
             return jsonify({"error": error}), HTTPStatus.BAD_REQUEST
 
-        if is_window_oos:
-            equity_curve, timestamps = _prepend_wfa_flat_equity_prefix(
-                equity_curve or [],
-                timestamps or [],
-                scheduled_start=scheduled_start,
-                live_start=actual_start,
-                initial_balance=capital,
-            )
-
-        return jsonify({"equity_curve": equity_curve or [], "timestamps": timestamps or []})
+        return jsonify({"equity_curve": equity_curve or [], "timestamps": timestamps or [], "reference_capital": capital})
 
 
 
@@ -1421,6 +1327,12 @@ def register_routes(app):
                 params = {**params, "initialCapital": positive_capital(window.get("oos_execution_capital"))}
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+        actual_start, actual_end = start, end
+        if is_window_oos:
+            try:
+                _, _, actual_start, actual_end = _resolve_wfa_oos_bounds(window)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
         if is_window_oos and str(window.get("window_status") or "").lower() == "no_trade":
             trades = []
             module_label = module_type or "window"
@@ -1434,13 +1346,6 @@ def register_routes(app):
                 study=study,
                 filename=filename,
             )
-
-        actual_start = start
-        actual_end = end
-        if is_window_oos:
-            actual_start = window.get("trade_start_ts") or window.get("trade_start_date") or start
-            actual_end = window.get("trade_end_ts") or window.get("trade_end_date") or end
-
 
         csv_path, prepared, error_response = _execution_input_or_response(study)
         if error_response:
@@ -1502,86 +1407,45 @@ def register_routes(app):
         if error_response:
             return error_response
 
-        csv_path, prepared, error_response = _execution_input_or_response(study)
-        if error_response:
-            return error_response
-
         windows = study_data.get("windows") or []
         if not windows:
             return jsonify({"error": "No WFA windows available for this study."}), HTTPStatus.BAD_REQUEST
-
-        warmup_bars = execution_context.warmup_bars
-
-        from strategies import get_strategy
-
-        try:
-            strategy_class = get_strategy(study.get("strategy_id"))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-
-        try:
-            df = load_data(csv_path) if prepared is None else prepared.frame
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-
         adaptive_mode = bool(study.get("adaptive_mode"))
         all_trades = []
+        loaded = False
+        options = {}
+        csv_path = ""
         for window in windows:
-            if str(window.get("window_status") or "").lower() == "no_trade":
-                continue
-            start_raw, end_raw, error = _resolve_wfa_period(window, "oos")
-            if error:
-                continue
-            if (study.get("config_json") or {}).get("portfolio"):
-                start_raw = window.get("trade_start_ts") or start_raw
-                end_raw = window.get("trade_end_ts") or end_raw
-            start, end = align_date_bounds(df.index, start_raw, end_raw)
-            if start is None or end is None:
-                continue
-
-            params = execution_context.params_for(
-                window.get("best_params") or {},
-                operation_start=start,
-                operation_end=end,
-            )
-
-            if (study.get("config_json") or {}).get("portfolio"):
-                from core.portfolio import positive_capital
-                try:
+            try:
+                _, _, start, end = _resolve_wfa_oos_bounds(window)
+                if str(window.get("window_status") or "").lower() == "no_trade":
+                    continue
+                if not loaded:
+                    csv_path, prepared, error_response = _execution_input_or_response(study)
+                    if error_response:
+                        response, status = error_response
+                        return jsonify(error=f"WFA window {window.get('window_number')}: {response.get_json()['error']}"), status
+                    frame = load_data(csv_path) if prepared is None else prepared.frame
+                    options = {"prepared_frame": frame}
+                    if prepared is not None:
+                        options.update(admission_rules=prepared.admission_rules, quantity_rules=prepared.quantity_rules,
+                                       entry_filter_context=prepared.entry_filter_context)
+                    loaded = True
+                params = execution_context.params_for(window.get("best_params") or {},
+                    operation_start=start, operation_end=end)
+                if (study.get("config_json") or {}).get("portfolio"):
+                    from core.portfolio import positive_capital
                     params["initialCapital"] = positive_capital(window.get("oos_execution_capital"))
-                except ValueError as exc:
-                    return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-
-            try:
-                df_prepared, trade_start_idx = prepare_dataset_with_warmup(
-                    df, start, end, int(warmup_bars)
-                )
-            except Exception:
-                return jsonify({"error": "Failed to prepare dataset with warmup."}), HTTPStatus.BAD_REQUEST
-
-            try:
-                from core.engine_v2.admission import run_strategy
-                result = run_strategy(strategy_class, df_prepared, params, trade_start_idx,
-                    admission_rules=prepared.admission_rules if prepared is not None else None, quantity_rules=prepared.quantity_rules if prepared is not None else None,
-                    entry_filter_context=prepared.entry_filter_context if prepared is not None else MISSING)
-            except Exception as exc:
-                return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-
-            if adaptive_mode:
-                window_trades = _normalize_wfa_oos_trades(
-                    result.trades or [],
-                    start=start,
-                    end=end,
-                    expected_total=window.get("oos_total_trades"),
-                )
-            else:
-                window_trades = [
-                    trade
-                    for trade in result.trades
-                    if trade.entry_time and start <= trade.entry_time <= end
-                ]
-            all_trades.extend(window_trades)
-
+                trades, error = _run_trade_export(strategy_id=study.get("strategy_id"), csv_path=csv_path,
+                    params=params, warmup_bars=execution_context.warmup_bars, **options)
+                if error:
+                    raise ValueError(error)
+                if adaptive_mode:
+                    trades = _normalize_wfa_oos_trades(trades or [], start=start, end=end,
+                        expected_total=window.get("oos_total_trades"))
+                all_trades.extend(trades or [])
+            except (ValueError, TypeError, OSError) as exc:
+                return jsonify({"error": f"WFA window {window.get('window_number')}: {exc}"}), HTTPStatus.BAD_REQUEST
 
         if not adaptive_mode:
             all_trades.sort(key=lambda t: t.entry_time or pd.Timestamp.min)

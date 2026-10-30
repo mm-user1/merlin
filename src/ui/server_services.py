@@ -701,7 +701,20 @@ def _execute_backtest_request(
     }, None
 
 
-def _run_trade_export(
+def _validate_execution_coverage(frame, start, end):
+    """Reject absent interval coverage, allowing an end inside the final bar."""
+    if frame.empty:
+        raise ValueError("Saved execution source is empty.")
+    index = frame.index
+    # CSV has no content pin. This establishes interval coverage, not file identity.
+    cadence = index.to_series().diff().dropna().median() if len(index) > 1 else pd.Timedelta(0)
+    limit = index[-1] + cadence if cadence > pd.Timedelta(0) else index[-1]
+    if ((start is not None and start < index[0]) or
+            (end is not None and (end > limit or end == limit and limit != index[-1]))):
+        raise ValueError("Current source does not cover the saved execution interval.")
+
+
+def _run_export_execution(
     *,
     strategy_id: str,
     csv_path: str,
@@ -712,7 +725,7 @@ def _run_trade_export(
     admission_rules=None,
     quantity_rules=None,
     entry_filter_context=MISSING,
-) -> Tuple[Optional[List[Any]], Optional[str]]:
+):
     from strategies import get_strategy, get_strategy_config
     from core.engine_v2.admission import uses_admission
 
@@ -742,11 +755,12 @@ def _run_trade_export(
         payload["start"] = start
         payload["end"] = end
         try:
+            _validate_execution_coverage(df, start, end)
             df, trade_start_idx = prepare_dataset_with_warmup(
                 df, start, end, int(warmup_bars)
             )
-        except Exception:
-            return None, "Failed to prepare dataset with warmup."
+        except Exception as exc:
+            return None, f"Failed to prepare dataset with warmup: {exc}"
 
     try:
         from core.engine_v2.admission import run_strategy
@@ -754,68 +768,60 @@ def _run_trade_export(
     except Exception as exc:
         return None, str(exc)
 
-    return result.trades, None
+    return result, None
 
 
-def _run_equity_export(
-    *,
-    strategy_id: str,
-    csv_path: str,
-    params: Dict[str, Any],
-    warmup_bars: int,
-    prepared_frame=None,
-    prepared_trade_start_idx=None,
-    admission_rules=None,
-    quantity_rules=None,
-    entry_filter_context=MISSING,
-) -> Tuple[Optional[List[float]], Optional[List[str]], Optional[str]]:
-    from strategies import get_strategy, get_strategy_config
-    from core.engine_v2.admission import uses_admission
+def _run_trade_export(**kwargs) -> Tuple[Optional[List[Any]], Optional[str]]:
+    result, error = _run_export_execution(**kwargs)
+    return (None, error) if error else (result.trades, None)
 
+
+def _project_execution_equity(result, params, capital, *, scheduled_start=None):
+    """Project only after execution; never alter calculation warmup or metrics."""
+    from core.backtest_engine import StrategyResult
+    from core.metrics import _advanced_metric_view
+    from core.walkforward_engine import WalkForwardEngine
+    from types import SimpleNamespace
+
+    view = _advanced_metric_view(SimpleNamespace(
+        equity_curve=result.equity_curve or result.balance_curve or [],
+        timestamps=result.timestamps,
+        metric_start_idx=getattr(result, "metric_start_idx", 0),
+        metric_initial_equity=getattr(result, "metric_initial_equity", None),
+    ))
+    times = [parse_timestamp_utc(ts) for ts in view.timestamps]
+    values = list(view.equity_observations)
+    if any(ts is None or pd.isna(ts) for ts in times) or any(not math.isfinite(v) for v in values):
+        raise ValueError("Reconstructed equity requires finite values and valid timestamps.")
+    if any(right <= left for left, right in zip(times, times[1:])):
+        raise ValueError("Reconstructed equity timestamps must be strictly increasing and unique.")
+    start = end = None
+    if params.get("dateFilter"):
+        start, end = align_date_bounds(pd.DatetimeIndex(times), params.get("start"), params.get("end"))
+    pairs = [(ts, value) for ts, value in zip(times, values)
+             if (start is None or ts >= start) and (end is None or ts <= end)]
+    display = StrategyResult(trades=[], timestamps=[t for t, _ in pairs],
+        equity_curve=[v for _, v in pairs], balance_curve=[],
+        metric_start_idx=0, metric_initial_equity=capital)
+    if scheduled_start is not None:
+        display = WalkForwardEngine._prepend_flat_prefix(display,
+            scheduled_start=parse_timestamp_utc(scheduled_start), live_start=start,
+            initial_balance=capital)
+    return list(display.equity_curve), [t.isoformat() for t in display.timestamps]
+
+
+def _run_equity_export(*, scheduled_start=None, **kwargs):
+    from core.execution_capital import resolve_execution_capital
+    result, error = _run_export_execution(**kwargs)
+    if error:
+        return None, None, error
     try:
-        strategy_class = get_strategy(strategy_id)
-        if (prepared_frame is None and getattr(strategy_class, "STRATEGY_ID", None)
-                and uses_admission(get_strategy_config(strategy_class.STRATEGY_ID))):
-            raise ValueError("risk_bracket_v1 export requires prepared Parquet input.")
-    except ValueError as exc:
+        capital = resolve_execution_capital(kwargs["strategy_id"], kwargs["params"])
+        equity, timestamps = _project_execution_equity(
+            result, kwargs["params"], capital, scheduled_start=scheduled_start)
+        return equity, timestamps, None
+    except (ValueError, TypeError) as exc:
         return None, None, str(exc)
-
-    try:
-        df = load_data(csv_path) if prepared_frame is None else prepared_frame
-    except Exception as exc:
-        return None, None, str(exc)
-
-    trade_start_idx = prepared_trade_start_idx if prepared_trade_start_idx is not None else 0
-    payload = dict(params or {})
-    if prepared_trade_start_idx is None and payload.get("dateFilter"):
-        start_raw = payload.get("start")
-        end_raw = payload.get("end")
-        start, end = align_date_bounds(df.index, start_raw, end_raw)
-        if start_raw not in (None, "") and start is None:
-            return None, None, "Invalid start date."
-        if end_raw not in (None, "") and end is None:
-            return None, None, "Invalid end date."
-        payload["start"] = start
-        payload["end"] = end
-        try:
-            df, trade_start_idx = prepare_dataset_with_warmup(
-                df, start, end, int(warmup_bars)
-            )
-        except Exception:
-            return None, None, "Failed to prepare dataset with warmup."
-
-    try:
-        from core.engine_v2.admission import run_strategy
-        result = run_strategy(strategy_class, df, payload, trade_start_idx, admission_rules=admission_rules, entry_filter_context=entry_filter_context, quantity_rules=quantity_rules)
-    except Exception as exc:
-        return None, None, str(exc)
-
-    # Match /api/backtest preference: use equity_curve first, then balance_curve.
-    equity_curve = list(result.equity_curve or result.balance_curve or [])
-    timestamps = [
-        ts.isoformat() if hasattr(ts, "isoformat") else ts for ts in (result.timestamps or [])
-    ]
-    return equity_curve, timestamps, None
 
 
 def _send_trades_csv(
@@ -2842,6 +2848,37 @@ def _find_wfa_window(study_data: Dict[str, Any], window_number: int) -> Optional
         if int(window.get("window_number") or 0) == int(window_number):
             return window
     return None
+
+
+def _resolve_wfa_oos_bounds(window):
+    """Precise selected-OOS bounds, including the pre-delay legacy generation."""
+    def timestamp(key):
+        value = window.get(key)
+        if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", value):
+            raise ValueError(f"WFA {key} requires a precise saved timestamp.")
+        parsed = parse_timestamp_utc(value)
+        if parsed is None or pd.isna(parsed):
+            raise ValueError(f"Invalid WFA {key}.")
+        return parsed
+
+    start, end = timestamp("oos_start_ts"), timestamp("oos_end_ts")
+    if start > end:
+        raise ValueError("WFA scheduled timestamps are out of order.")
+    if str(window.get("window_status") or "").lower() == "no_trade":
+        return start, end, start, end
+    actual = [window.get(key) not in (None, "") for key in ("trade_start_ts", "trade_end_ts")]
+    if any(actual):
+        if not all(actual):
+            raise ValueError("WFA requires both precise actual trade timestamps.")
+        live_start, live_end = timestamp("trade_start_ts"), timestamp("trade_end_ts")
+    else:
+        modern = ("window_status", "entry_delay_days", "ft_retry_attempts_used", "remaining_oos_days_at_entry", "no_trade_reason")
+        if any(value not in (None, "") for key, value in window.items() if key.startswith("trade_") or key in modern):
+            raise ValueError("WFA actual trade timestamps are missing; modern delay/status facts cannot use scheduled bounds.")
+        live_start, live_end = start, end
+    if not start <= live_start <= live_end <= end:
+        raise ValueError("WFA actual trade interval is outside its scheduled interval.")
+    return start, end, live_start, live_end
 
 
 def _resolve_wfa_period(

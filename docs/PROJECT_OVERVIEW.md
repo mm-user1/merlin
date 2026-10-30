@@ -165,6 +165,16 @@ Strict reconstruction verifies consumed inputs; stored tables, stitched equity a
 Analytics remain available offline. No schema migration or historical-row rewrite
 is introduced. Source-aware labels include venue and timeframe.
 
+Saved trial charts and downloads reconstruct the selected execution stage. Optimize
+IS uses the executed post-split `fixed_params` dates, while stored V2 runtime still
+owns validation and warmup. CSV OOS records exact preparation facts atomically with
+results; older CSV records need precise corroborated history, whereas old Parquet
+OOS without exact facts remains unavailable. See [replay contracts](PARQUET_INPUTS.md).
+Chart projection removes technical warmup only after execution and uses explicit
+execution capital for monetary curves. Individual charts keep index spacing;
+stitched WFA/Analytics remain normalized at 100 with time spacing. Delayed WFA
+charts and exports use actual trading timestamps; no-trade views work offline.
+
 SQLite stores study metadata, optimization trials, WFA windows/module trials,
 manual/forward/OOS results, study sets, and analytics caches. Multiple database
 files are supported. Production databases and Queue state under `src/storage/`

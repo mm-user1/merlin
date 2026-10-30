@@ -1070,6 +1070,7 @@ let studyLoadVersion = 0;
 
 async function openStudy(studyId) {
   if (!studyId) return;
+  ResultsState.equitySelectionToken = null;
   const loadVersion = ++studyLoadVersion;
   window.EntryDiagnostics?.show(null, ResultsState.mode !== 'wfa');
   try {
@@ -1195,6 +1196,7 @@ async function refreshManualTestsList() {
 
 async function loadManualTestResultsById(testId) {
   if (!ResultsState.studyId || !testId) return;
+  ResultsState.equitySelectionToken = null;
   try {
     const data = await fetchManualTestResults(ResultsState.studyId, testId);
     ResultsState.activeManualTest = {
@@ -1245,21 +1247,23 @@ function bindTabs() {
   });
 }
 
-async function fetchEquityCurve(result, options = null) {
-  const selection = [ResultsState.studyId, ResultsState.activeTab, ResultsState.selectedRowId, ResultsState.activeManualTest?.id].join('|');
-  const current = () => selection === [ResultsState.studyId, ResultsState.activeTab, ResultsState.selectedRowId, ResultsState.activeManualTest?.id].join('|');
+async function fetchEquityCurve(result, options = null, selection = null) {
+  selection = selection || captureEquitySelection({ trialNumber: result.trial_number });
+  const current = () => selection.current();
+  if (!current()) return null;
   try {
-  if (ResultsState.studyId && ResultsState.hasDataInput) {
+  if (ResultsState.studyId) {
     const response = await fetch(`/api/studies/${encodeURIComponent(ResultsState.studyId)}/trials/${result.trial_number}/equity`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ module: ResultsState.activeTab, testId: ResultsState.activeManualTest?.id })
+      body: JSON.stringify({ module: selection.tab, testId: selection.manualId })
     });
+    if (!current()) return null;
     const data = await response.json();
     if (!current()) return null;
     if (!response.ok) {
       window.EntryDiagnostics?.show(null, true);
       renderEquityChart([]);
-      setComparisonLine(data.error || 'Pinned replay failed.');
+      setComparisonLine(data.error || 'Saved execution replay failed.');
       return null;
     }
     return data;
@@ -1292,12 +1296,15 @@ async function fetchEquityCurve(result, options = null) {
     method: 'POST',
     body: formData
   });
-  if (!response.ok) {
-    if (current()) window.EntryDiagnostics?.show(null, true);
-    return null;
-  }
+  if (!current()) return null;
   const data = await response.json();
   if (!current()) return null;
+  if (!response.ok) {
+    window.EntryDiagnostics?.show(null, true);
+    renderEquityChart([]);
+    setComparisonLine(data.error || 'Equity replay failed.');
+    return null;
+  }
   if (!data || !data.metrics) return null;
   const equity = data.metrics.equity_curve || data.metrics.balance_curve || [];
   const timestamps = data.metrics.timestamps || [];
@@ -1344,7 +1351,7 @@ function refreshResultsView() {
     } else if (typeof calculateWindowBoundaries === 'function') {
       boundaries = calculateWindowBoundaries(ResultsState.results || [], summary);
     }
-    renderEquityChart(summary.equity_curve || [], boundaries, summary.timestamps || [], { useTimeScale: true });
+    renderEquityChart(summary.equity_curve || [], boundaries, summary.timestamps || [], { useTimeScale: true, referenceCapital: 100 });
     renderWindowIndicators(ResultsState.summary?.total_windows || ResultsState.results?.length || 0);
   } else {
     setComparisonLine('');

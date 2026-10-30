@@ -4410,6 +4410,7 @@ def save_oos_test_results(
     oos_end_date: Optional[str],
     oos_source_module: Optional[str],
     parquet_oos_replay: Optional[Dict[str, Any]] = None,
+    csv_oos_replay: Optional[Dict[str, Any]] = None,
 ) -> bool:
     if not study_id:
         return False
@@ -4515,8 +4516,11 @@ def save_oos_test_results(
                     rows,
                 )
 
-            if parquet_oos_replay is not None:
-                if (not oos_enabled or not oos_results or not parquet_oos_replay
+            if parquet_oos_replay is not None and csv_oos_replay is not None:
+                raise ValueError("OOS replay cannot contain both CSV and Parquet preparation facts.")
+            facts = parquet_oos_replay if parquet_oos_replay is not None else csv_oos_replay
+            if facts is not None:
+                if (not oos_enabled or not oos_results or not facts
                         or cursor.rowcount != len(oos_results)
                         or len({r.get("trial_number") for r in oos_results}) != len(oos_results)
                         or any((r.get("test_metrics") or {}).get("total_trades") is None
@@ -4527,7 +4531,8 @@ def save_oos_test_results(
                     "SELECT config_json FROM studies WHERE study_id = ?", (study_id,)
                 ).fetchone()
                 config = json.loads(row[0] or "{}")
-                config["parquet_oos_replay"] = parquet_oos_replay
+                key = "parquet_oos_replay" if parquet_oos_replay is not None else "csv_oos_replay"
+                config[key] = facts
                 conn.execute("UPDATE studies SET config_json = ? WHERE study_id = ?",
                              (json.dumps(config), study_id))
 

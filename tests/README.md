@@ -1,5 +1,51 @@
 # Tests
 
+## Saved chart and trade reconstruction (T11)
+
+`server/test_reconstruction.py` observes original strategy executions for CSV
+post-split IS/FT/OOS, exact and supported legacy holdout facts, historical V1/V2
+full-source replay, CSV/Parquet warmup projection and delayed WFA downloads.
+It covers real FT cooldown delay, day/calendar/adaptive composition, offline
+no-trade, strict timestamp/coverage refusals and unchanged logical database rows.
+Adaptive assertions separate original pre-terminal observations from terminal
+rerun behavior. The FT invocation oracle runs the actual worker inline for
+observation; existing preservation tests retain real process transport.
+
+`test_js_results_reconstruction.py` executes the actual Results renderer and
+handlers for monetary bases, index/time spacing, selection during parameter/JSON
+awaits, obsolete replies and refused-to-valid WFA recovery. It requires an installed
+Node runtime (or `MERLIN_NODE_EXECUTABLE` plus process-local
+`ELECTRON_RUN_AS_NODE=1`). Browser appearance remains a separate owner check.
+
+Use the isolated launcher below, with core/JS and server in separate sequential
+processes. The focused regression commands are:
+
+```text
+python tools/run_tests.py --keep-temp -- tests/test_js_results_reconstruction.py tests/test_export.py tests/test_execution_capital.py tests/test_oos_selection.py tests/test_storage.py tests/test_js_parquet_input.py tests/test_js_wfa_calendar_ui.py tests/test_js_entry_admission.py tests/test_js_portfolio.py
+python tools/run_tests.py --keep-temp -- tests/server/test_reconstruction.py tests/server/test_export.py tests/server/test_data_input_followup.py tests/server/test_runtime.py tests/server/test_portfolio_replay.py
+```
+
+The T11 preservation gate additionally includes these bounded server nodes:
+
+```text
+tests/server/test_quantity_portfolio.py::test_owned_wfa_quantity_capital_and_missing_envelope
+tests/server/test_data_input_routes.py::test_grid_persistence_replay_manual_relocation_and_offline_view
+tests/server/test_data_input_routes.py::test_grid_postprocess_uses_resolved_union_with_filter_off
+tests/server/test_portfolio.py::test_http_launch_replay_manual_and_offline
+tests/server/test_entry_admission.py::test_grid_postprocess_manual_and_offline_diagnostics
+tests/server/test_entry_admission.py::test_new_mode_wfa_diagnostics_replay_analytics
+tests/server/test_entry_filters.py::test_optimize_workers_manual_reconstruction_and_relocation
+tests/server/test_fixed_mode.py::test_parquet_filter_cap_manual_and_pin_refusal
+tests/server/test_s07.py::test_optimize_queue_replay_manual_export
+tests/server/test_data.py::test_generate_wfa_window_equity
+tests/server/test_quantity_portfolio.py::test_each_config_fixed_quantity_replay_and_manual
+tests/server/test_quantity_portfolio.py::test_relocation_append_only_offline_and_fail_closed_metadata
+```
+
+No full-suite, benchmark, two-thread or Windows symlink waiver is part of this gate.
+
+## General invocation
+
 Run from the repository root using the configured project interpreter. On Windows:
 
 ```powershell

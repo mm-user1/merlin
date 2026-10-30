@@ -75,6 +75,17 @@ boundary excludes technical warmup without inventing observations. Realized
 basic metrics—including realized Max DD and RoMaD—do not use this advanced
 boundary.
 
+Results chart projection uses this evaluation view after strategy execution,
+without changing calculation warmup, trades or saved metrics. Retained real
+observations must be finite, paired with strictly increasing unique timestamps
+and inside the selected stage. A delayed display prefix starts at scheduled start
+with execution capital; a boundary collision retains the real observation's PnL.
+Monetary curves carry `reference_capital` from the final execution parameters,
+including saved WFA portfolio OOS capital. The renderer uses it for scale and
+baseline; first equity is not an initial-capital substitute. Individual charts
+retain index spacing. Stitched WFA and Analytics stay normalized at 100 and retain
+time spacing. These display rules do not alter metric formulas or historical rows.
+
 ## Realized metrics
 
 Net Profit, gross profit/loss, Profit Factor, trade counts, Win Rate, average

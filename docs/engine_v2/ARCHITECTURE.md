@@ -513,8 +513,18 @@ Non-delayed stitched output is unchanged.
 IS/OOS metric callers resolve capital from the same final parameters used for
 execution. Flat no-trade windows use that balance; delayed engine prefixes retain
 the explicit advanced anchor, with execution capital as the missing-anchor fallback.
-Reconstructed route prefixes use saved execution capital while preserving their
-existing warmup/order behavior. Stitched curves remain normalized at 100.
+Reconstruction executes with the original warmup, then projects the advanced
+evaluation view into the selected interval. Real timestamps must be unique and
+increasing before the existing prefix helper is used; retained observations,
+including first-live-bar PnL, are unchanged. Delayed display prefixes use saved
+execution capital. Individual charts retain index spacing; stitched curves remain
+normalized at 100 with time spacing. Explicit no-trade windows are flat and offline.
+Window OOS charts and individual/combined exports share precise actual trading
+bounds. Partial modern facts refuse; only undelayed legacy records without modern
+execution facts may use precise scheduled timestamps. A required invalid window
+fails the complete download with its window number. Adaptive replay preserves its
+existing count cap and terminal rerun semantics, not an invented original-position
+snapshot at the trigger boundary.
 Corrected non-100 FT/stress metrics can alter later selection; fixed-candidate raw
 executions are unchanged. Historical rows are not repaired; see
 [metric compatibility](../METRICS.md#execution-capital-and-historical-results).
@@ -534,7 +544,11 @@ prepared bar bounds, trading index and warmup count in the versioned
 OOS reconstruction verifies those facts against the parent pin and reproduces
 the original preparation, without expanding date-only display labels. Older
 Parquet records without this metadata require a new study for OOS reconstruction;
-stored metrics and other supported views remain available. CSV replay is unchanged.
+stored metrics and other supported views remain available. CSV stages use the same
+execution/projection path. New CSV OOS stores sibling `csv_oos_replay` version 1;
+legacy derivation requires full-precision executed IS end, positive period lengths
+and corroborating display dates. Present malformed facts never fall back to legacy
+derivation. CSV interval/preparation checks do not establish content identity.
 
 New V2 Grid/WFA studies persist one request-level `config_json.v2_runtime`
 envelope with schema `v2_runtime_metadata_v1`. The envelope separately records
@@ -545,7 +559,10 @@ writers omit the envelope.
 Stored execution resolves current registry/profile authority first. It then
 uses valid current runtime metadata, compatible legacy facts, and defaults in
 the established presence-sensitive order. Candidate params never own runtime;
-operation-specific dates are applied last and Warmup stays separate. Reads,
+operation-specific dates are applied last and Warmup stays separate. Optimize IS
+specifically uses executed post-split `fixed_params.dateFilter/start/end`, not the
+outer request runtime dates; false/absent fixed Date Filter retains full-source IS.
+FT preserves its original date-only invocation. Reads,
 post-processing, and compatibility views never rewrite stored metadata.
 
 Historical rows may omit additive runtime, worker, rank, and identity fields

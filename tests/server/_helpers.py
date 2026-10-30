@@ -181,6 +181,8 @@ def _create_wfa_study() -> str:
         is_end=pd.Timestamp("2025-05-30", tz="UTC"),
         oos_start=pd.Timestamp("2025-05-31", tz="UTC"),
         oos_end=pd.Timestamp("2025-06-14", tz="UTC"),
+        trade_start=pd.Timestamp("2025-05-31", tz="UTC"),
+        trade_end=pd.Timestamp("2025-06-14", tz="UTC"),
         best_params=params,
         param_id="test_params",
         is_net_profit_pct=0.0,

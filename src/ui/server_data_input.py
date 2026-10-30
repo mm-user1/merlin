@@ -5,7 +5,7 @@ import re
 
 import pandas as pd
 
-from core.backtest_engine import prepare_dataset_with_warmup
+from core.backtest_engine import prepare_dataset_with_warmup, parse_timestamp_utc, load_data
 from core.entry_filters import MISSING, capability, effective_config, source_locator
 from core.entry_filter_input import metadata_entry, saved_effective
 
@@ -182,14 +182,8 @@ def execution_input(study, manual=None):
     return str(_resolve_csv_path(path)), None
 
 
-def replay_oos_input(study, trial):
-    """Reconstruct only the recorded OOS preparation, inside the original input pin."""
-    if trial.get("oos_test_total_trades") is None or trial.get("oos_test_net_profit_pct") is None:
-        raise DataInputError("OOS result is unavailable for this trial.")
-    config = study.get("config_json") or {}
-    if "parquet_oos_replay" not in config:
-        raise DataInputError("This study predates exact OOS replay metadata; a new study is required for OOS reconstruction.")
-    facts = config["parquet_oos_replay"]
+def _replay_dates(facts, record_key):
+    """The common versioned preparation contract, independent of input format."""
     try:
         if not isinstance(facts, dict) or type(facts.get("version")) is not int or facts["version"] != 1:
             raise ValueError("unsupported or missing version")
@@ -206,6 +200,28 @@ def replay_oos_input(study, trial):
                 raise ValueError(f"{key} must be a nonnegative integer")
         if dates["start"] > dates["end"] or dates["preparation_start"] > dates["preparation_end"]:
             raise ValueError("timestamps are out of order")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataInputError(f"Invalid {record_key}: {exc}. OOS reconstruction is blocked.") from exc
+    return dates
+
+
+def _verify_oos_frame(frame, idx, facts, dates, key):
+    if (frame.empty or idx != facts["trade_start_idx"] or not 0 <= idx < len(frame)
+            or frame.index[0] != dates["preparation_start"]
+            or frame.index[-1] != dates["preparation_end"]):
+        raise DataInputError(f"OOS preparation conflicts with saved {key} facts; reconstruction refused.")
+
+
+def replay_oos_input(study, trial):
+    """Reconstruct only the recorded OOS preparation, inside the original input pin."""
+    if trial.get("oos_test_total_trades") is None or trial.get("oos_test_net_profit_pct") is None:
+        raise DataInputError("OOS result is unavailable for this trial.")
+    config = study.get("config_json") or {}
+    if "parquet_oos_replay" not in config:
+        raise DataInputError("This study predates exact OOS replay metadata; a new study is required for OOS reconstruction.")
+    facts = config["parquet_oos_replay"]
+    dates = _replay_dates(facts, "parquet_oos_replay")
+    try:
         validate_pin(config["data_input"])
         bounds = config["data_input"]["bounds"]
         if not (pd.Timestamp(bounds["evaluation_start"]) <= dates["start"] <= dates["end"]
@@ -221,11 +237,105 @@ def replay_oos_input(study, trial):
     )
     if prepared.quantity_rules is not None:
         raise DataInputError("Quantity portfolios do not support standalone holdout replay.")
-    if (frame.empty or idx != facts["trade_start_idx"] or not 0 <= idx < len(frame)
-            or frame.index[0] != dates["preparation_start"]
-            or frame.index[-1] != dates["preparation_end"]):
-        raise DataInputError("OOS preparation conflicts with saved parquet_oos_replay facts; reconstruction refused.")
+    _verify_oos_frame(frame, idx, facts, dates, "parquet_oos_replay")
     return frame, idx, dates, prepared.admission_rules, prepared.entry_filter_context
+
+
+def _legacy_csv_oos_dates(study):
+    fixed = (study.get("config_json") or {}).get("fixed_params") or {}
+    end = fixed.get("end")
+    try:
+        if not fixed.get("dateFilter") or not isinstance(end, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|\+00:00)?", end
+        ):
+            raise ValueError("full-precision fixed_params.end is required")
+        is_end = parse_timestamp_utc(end)
+        if is_end is None or pd.isna(is_end):
+            raise ValueError("invalid IS end")
+        keys = ["oos_test_period_days"] + (["ft_period_days"] if study.get("ft_enabled") else [])
+        for key in keys:
+            if type(study.get(key)) is not int or study[key] <= 0:
+                raise ValueError(f"{key} must be a positive integer")
+        start = is_end + pd.Timedelta(days=study["ft_period_days"] if study.get("ft_enabled") else 0)
+        end = start + pd.Timedelta(days=study["oos_test_period_days"])
+        labels = {"oos_test_start_date": start, "oos_test_end_date": end}
+        if study.get("ft_enabled"):
+            labels.update(ft_start_date=is_end, ft_end_date=start)
+        for key, date in labels.items():
+            label = parse_timestamp_utc(study.get(key))
+            if label is None or pd.isna(label) or label.date() != date.date():
+                raise ValueError(f"{key} disagrees with retained invocation dates")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DataInputError(f"Legacy CSV OOS cannot be reconstructed: {exc}. A new study is required.") from exc
+    return dict(start=start, end=end)
+
+
+def trial_execution(study, trial, module, *, manual=None, context=None, csv_path=None):
+    """Resolve one saved trial stage for both monetary charts and trade downloads."""
+    if __package__:
+        from .server_services import _resolve_stored_execution_context, _validate_execution_coverage
+    else:
+        from server_services import _resolve_stored_execution_context, _validate_execution_coverage
+    context = context or _resolve_stored_execution_context(study)
+    config = study.get("config_json") or {}
+    candidate = trial.get("params") or {}
+    start = end = None
+    options = {}
+    resolved_csv = csv_path
+    csv_path = csv_path or ""
+    if module == "oos_test":
+        if (study.get("optimization_mode") not in {"grid", "optuna"} or not study.get("oos_test_enabled")
+                or trial.get("oos_test_total_trades") is None or trial.get("oos_test_net_profit_pct") is None):
+            raise DataInputError("OOS result is unavailable for this trial.")
+        if "data_input" in config:
+            frame, idx, dates, rules, filters = replay_oos_input(study, trial)
+            options.update(admission_rules=rules, entry_filter_context=filters)
+        else:
+            facts = config.get("csv_oos_replay")
+            dates = _replay_dates(facts, "csv_oos_replay") if "csv_oos_replay" in config else _legacy_csv_oos_dates(study)
+            if facts is not None and facts["warmup_bars"] != context.warmup_bars:
+                raise DataInputError("csv_oos_replay warmup conflicts with stored runtime.")
+            if resolved_csv is None:
+                csv_path, _ = execution_input(study)
+            source = load_data(csv_path)
+            _validate_execution_coverage(source, dates["start"], dates["end"])
+            frame, idx = prepare_dataset_with_warmup(source, dates["start"], dates["end"], context.warmup_bars)
+            if facts is not None:
+                _verify_oos_frame(frame, idx, facts, dates, "csv_oos_replay")
+        start, end = dates["start"], dates["end"]
+        options.update(prepared_frame=frame, prepared_trade_start_idx=idx)
+    else:
+        if module == "forward_test":
+            if not study.get("ft_enabled") or not trial.get("ft_rank"):
+                raise DataInputError("Forward test result is unavailable for this trial.")
+            start, end = study.get("ft_start_date"), study.get("ft_end_date")
+        elif module == "manual_tests":
+            if manual is None:
+                raise DataInputError("Manual test not found.")
+            start, end = manual.get("start_date"), manual.get("end_date")
+        elif module in {"optuna", "grid", "dsr", "stress_test"}:
+            fixed = config.get("fixed_params") or {}
+            if fixed.get("dateFilter"):
+                start, end = fixed.get("start"), fixed.get("end")
+        else:
+            raise DataInputError("Unknown result module.")
+        requires_dates = module in {"forward_test", "manual_tests"} or bool((config.get("fixed_params") or {}).get("dateFilter"))
+        if requires_dates:
+            parsed = [parse_timestamp_utc(value) for value in (start, end)]
+            if any(value is None or pd.isna(value) for value in parsed) or parsed[0] > parsed[1]:
+                raise DataInputError("Saved execution stage has missing or invalid dates.")
+        if resolved_csv is None:
+            csv_path, prepared = execution_input(study, manual)
+        else:
+            prepared = None
+        if prepared is not None:
+            options.update(prepared_frame=prepared.frame, admission_rules=prepared.admission_rules,
+                           quantity_rules=prepared.quantity_rules, entry_filter_context=prepared.entry_filter_context)
+    params = context.params_for(candidate, operation_start=start, operation_end=end)
+    if module in {"optuna", "grid", "dsr", "stress_test"} and not (config.get("fixed_params") or {}).get("dateFilter"):
+        params.update(dateFilter=False, start=None, end=None)
+    return dict(strategy_id=study["strategy_id"], csv_path=csv_path, params=params,
+                warmup_bars=context.warmup_bars, **options)
 
 
 def browse(raw):
@@ -342,18 +452,8 @@ def register_routes(app):
         body = request.get_json(silent=True) or {}
         module = body.get("module", "optuna")
         manual = None
-        start = end = None
         try:
-            context = _resolve_stored_execution_context(study)
-            if module == "forward_test":
-                if not study.get("ft_enabled") or not trial.get("ft_rank"):
-                    raise DataInputError("Forward test result is unavailable.")
-                start, end = study.get("ft_start_date"), study.get("ft_end_date")
-            elif module == "oos_test":
-                if not study.get("oos_test_enabled"):
-                    raise DataInputError("OOS result is unavailable.")
-                start, end = study.get("oos_test_start_date"), study.get("oos_test_end_date")
-            elif module == "manual_tests":
+            if module == "manual_tests":
                 manual = storage.load_manual_test_results(study_id, body.get("testId"))
                 if not manual:
                     raise DataInputError("Manual test not found.")
@@ -363,26 +463,12 @@ def register_routes(app):
                     raise DataInputError("Trial is absent from this manual test.")
                 if owned_manual:
                     trial = selected
-                start, end = manual.get("start_date"), manual.get("end_date")
-            elif module not in {"optuna", "grid", "dsr", "stress_test"}:
-                raise DataInputError("Unknown result module.")
-            export_options = {}
-            if module == "oos_test" and "data_input" in (study.get("config_json") or {}):
-                frame, idx, dates, rules, filters = replay_oos_input(study, trial)
-                csv_path = ""
-                start, end = dates["start"], dates["end"]
-                export_options = {"prepared_frame": frame, "prepared_trade_start_idx": idx, "admission_rules": rules, "entry_filter_context": filters}
-            else:
-                csv_path, prepared = execution_input(study, manual)
-                if prepared is not None:
-                    export_options = {"prepared_frame": prepared.frame, "admission_rules": prepared.admission_rules, "quantity_rules": prepared.quantity_rules, "entry_filter_context": prepared.entry_filter_context}
-            params = context.params_for(trial.get("params") or {}, operation_start=start, operation_end=end)
-            equity, timestamps, error = _run_equity_export(
-                strategy_id=study["strategy_id"], csv_path=csv_path, params=params,
-                warmup_bars=context.warmup_bars,
-                **export_options)
+            execution = trial_execution(study, trial, module, manual=manual)
+            from core.execution_capital import resolve_execution_capital
+            capital = resolve_execution_capital(study["strategy_id"], execution["params"])
+            equity, timestamps, error = _run_equity_export(**execution)
             if error:
                 raise DataInputError(error)
         except (ValueError, TypeError, OSError) as exc:
             return jsonify(error=str(exc)), 400
-        return jsonify(equity=equity, timestamps=timestamps)
+        return jsonify(equity=equity, timestamps=timestamps, reference_capital=capital)
