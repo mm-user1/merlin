@@ -14,6 +14,92 @@ Benchmark numbers are machine-dependent. Always record the machine, CPU, Python
 version, Numba version, thread environment, command, worker count, candidate
 count, and the full Grid V2 timings dict before comparing runs.
 
+## Quantity-only vectorized position preparation (T10, 2026-10-30)
+
+Bounded local Windows measurement against accepted T09
+`7f84ea9a9f1707aa01bbb005551ad4da1bd7ca88`, with quantity rules **On on both sides**.
+The product change is confined to `core/grid_v2.py`; the compiled kernel and its
+execution ABI are unchanged. Full compatible position tables now broadcast four
+validated constants instead of calling typed accessors for every candidate.
+
+Reproducible recipe (run sequentially using each side's source root):
+
+```python
+from core.grid_v2 import (GridV2Settings, GridV2StrategyHooks, build_grid_v2_plan,
+                         execute_grid_v2_candidates, _pack_table_config_arrays)
+from tests._quantity_helpers import setup, frame, rules
+_, module, config, profile, params = setup('s06_r_trend_v02_b2', 'false')
+settings = GridV2Settings(
+    enabled_variants=('bracket',),
+    enabled_axes=('thresholdOS', 'stopX', 'stopRR', 'stopLP', 'stopMaxPct', 'stopMaxDays'),
+    requested_budget=1440, compiled_workers=1, top_n=1,
+    quantity_rules=rules(step='.02', minimum='.060001', notional='1'))
+bars = frame(1500)
+hooks = GridV2StrategyHooks.from_strategy(module)
+plan = build_grid_v2_plan(config, settings, params)
+indices = tuple(range(plan.deduped_candidate_count))
+packed = _pack_table_config_arrays(plan, indices, 100)
+result = execute_grid_v2_candidates(plan, bars, 100, hooks,
+    compute_sharpe=False, compute_sharpe_daily=False, compute_sqn=False,
+    compute_max_drawdown_mtm=False)
+```
+
+The tracked `frame(1500)` uses NumPy default_rng seed 7, hourly UTC bars starting
+2023-01-01, synthetic lognormal closes and deterministic opening/high/low noise.
+`setup` uses the declared defaults, normalized bracket parameters and dateFilter
+False; Warmup/trade_start_idx is 100. Axes use unchanged declared domains:
+thresholdOS 20/30/40, stopX 1/1.5/2/2.5/3, stopRR 1.5/2/2.5/3, stopLP 2/4,
+stopMaxPct 2/4/6/8, stopMaxDays 2/4/6: **1,440 full candidates**, not sampled.
+Rules are synthetic BYBIT base step .02, minimum .060001 (ceiling to four lots),
+minimum notional 1, no admission cap. Remaining Grid settings are defaults:
+full planning, table request, compiled preferred, 512 MiB cache estimate limit,
+net_profit_pct primary, selected Slow enrichment On, no filters/ties. One actual
+Numba thread was observed inside every compiled loop; top_n=1 executed real trades.
+
+Each side used a separate initially empty external NUMBA_CACHE_DIR and bytecode/
+output root. The accepted-base collection preceded product edits. Actual imported
+grid_v2, compiled_kernel and fixture-helper paths were asserted under the explicit
+source root, with raw SHA-256, labelled LF-normalized SHA-256 and Git-blob hashes.
+The frozen helper uses the same inputs on both sides. There were three packing-only
+calls on the prepared plan, then one JIT-inclusive public call and three warm public
+calls. Planning is measured separately. Public calls include Fast and selected Slow
+work; packing timings are diagnostic subsets and must not be added to public times.
+
+| Measurement (seconds) | Accepted T09 | T10 final source |
+| --- | ---: | ---: |
+| Planning | 0.0445734 | 0.0439154 |
+| Packing repetitions | 0.0276396, 0.0265587, 0.0268818 | 0.0005267, 0.0003668, 0.0003651 |
+| Packing median | 0.0268818 | 0.0003668 |
+| First public call, including JIT | 40.590706 | 42.205280 |
+| Warm public repetitions | 0.0638962, 0.0627859, 0.0622214 | 0.0374299, 0.0365786, 0.0354185 |
+| Warm public median | 0.0627859 | 0.0365786 |
+
+Packing decreased in this case; the warm public median decreased about 42%.
+The first call was slower and is disclosed, not used as a speedup claim. These are
+small synthetic Grid evaluation measurements, not UI/WFA research duration or a
+prediction for 200,000 candidates, other markets, S03 or S07. No CI speed threshold
+or universal performance percentage follows from them.
+
+Host: Windows 11 10.0.26200, AMD64 Family 26 Model 68 Stepping 0, Python 3.13.7,
+NumPy 2.3.3, Numba 0.65.1. Backend was compiled_numba and metadata said table on
+both sides; independent permanent dispatch spies establish the actual acceleration.
+Lossless float.hex/NaN-aware serialization matched every Fast output, row/flag/count,
+ordering, selected result, reference trade/balance/equity/metric and plan/semantic
+identity exactly. Timing/source-attribution fields were not equality targets.
+
+Evidence: `docs/_work/dev_04_merlin/T10/code-review-inputs/benchmark-before-02.json`,
+`benchmark-after-03.json`, `benchmark-comparison.json`, and `benchmark-ledger.json`.
+Frozen `benchmark_v2.py` SHA-256:
+`0cf1cd327b0d08743dee328e6a5b0c4aede4d8e17e48c37879c44bcbd251df6e`.
+These ignored artifacts supplement the complete tracked recipe above.
+All attempts totalled **186.769 seconds** against the cumulative 300-second host
+budget, including startup/setup/warmups/JIT. This includes a retained 44.795-second
+first attempt that failed serialization, 42.604 seconds for the corrected baseline,
+55.325 seconds for an initial after-source, and 44.044 seconds for final after-source
+after a guard-order correction. The corrected helper is identical for the accepted
+pair. Each process had a remaining-budget deadline; no allowance was reset and no
+6,000-bar extension was run. Correctness and isolated mutation checks are separate.
+
 ## Risk-bracket admission preservation measurement (2026-10-26)
 
 Exact parent `68a101c9ddf9d07d37bda35e8d880a2234975cb5` was captured before editing.

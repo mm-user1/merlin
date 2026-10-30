@@ -4180,7 +4180,7 @@ def _pack_table_config_arrays(
     table = plan.candidate_table
     indices = np.asarray(tuple(int(index) for index in candidate_indices), dtype=np.int64)
     arrays = _empty_config_arrays(int(indices.shape[0]))
-    if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1" or plan.settings.quantity_rules is not None:
+    if plan.profile.modes.get("entryAdmission") == "risk_bracket_v1":
         from .engine_v2.compiled_kernel import pack_compiled_config_arrays_from_rows
         # Typed accessors retain table semantics without materializing full candidates.
         return pack_compiled_config_arrays_from_rows(row_count=len(indices),
@@ -4188,6 +4188,8 @@ def _pack_table_config_arrays(
                 if table.has_param_for_index(int(indices[row]), name) else default,
             get_modes=lambda row: table.modes_for_index(int(indices[row])), trade_start_idx=trade_start_idx,
             profile=plan.profile, admission_rules=plan.settings.admission_rules, quantity_rules=plan.settings.quantity_rules)
+    from .engine_v2.quantity import execution_quantity
+    quantity = execution_quantity(plan.profile, plan.settings.quantity_rules, plan.settings.admission_rules)
     if indices.size == 0:
         return arrays
 
@@ -4223,6 +4225,16 @@ def _pack_table_config_arrays(
     _fill_bool_config_array(arrays["enable_short"], table, indices, "enableShort", True)
     _fill_bool_config_array(arrays["use_date_filter"], table, indices, "dateFilter", True)
     _fill_mode_config_arrays(arrays, table, indices)
+    if quantity is not None:
+        if (not np.all(arrays["strict_boundary"]) or np.any(arrays["boundary_none"])
+                or np.any(arrays["rounding_code"] != 0)):
+            raise ValueError("Packed quantity rows require strict-close without price rounding.")
+        arrays["contract_size"].fill(float(quantity.base_step))
+        arrays["admission_cap"].fill(0.0)
+        arrays["admission_min_lots"].fill(quantity.minimum_lots)
+        arrays["admission_min_notional"].fill(
+            math.nan if quantity.minimum_notional is None else float(quantity.minimum_notional)
+        )
     _fill_tick_size_config_array(arrays["tick_size"], arrays["rounding_code"], table, indices)
     return arrays
 

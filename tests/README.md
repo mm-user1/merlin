@@ -782,6 +782,18 @@ operational database. See the [V1](../docs/ADDING_NEW_STRATEGY.md) and
 
 ### Ticker portfolios
 
+`v2/test_v2_quantity_table.py` checks vectorized position preparation across all
+eight S06 variants against both mapping and typed-row oracles, including actual
+Fast/selected reference results. Only inactive trail_distance_r/chandelier_atr_mult/
+sar_speed array values have the exact mode-masked exclusions; execution equality
+has none. Dispatch spies prohibit both row packers and inspect the actual compiled
+call. Context/array/trail guards, empty/reordered batches and fresh rebased arrays
+are covered. The quantity execution module keeps chunking/sampled/fallback coverage
+one-threaded and independently observes one/two threads inside real compiled loops,
+restoring incoming state. Insufficient two-thread capacity fails that dedicated
+case. The edge module tests bidirectional finite-start, nonfinal equity overflow;
+T10 evidence demonstrates each missing guard is detected in isolated source copies.
+
 Quantity-only preservation is covered by `v2/test_v2_quantity_execution.py`
 (all five configurations/12 variants, exact neutral-rule comparisons, Grid packers
 and conditional identity), `v2/test_v2_quantity_edges.py` (independent arithmetic,

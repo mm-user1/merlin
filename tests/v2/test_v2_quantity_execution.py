@@ -83,7 +83,7 @@ def test_quantity_grid_packers_and_identity(sid, variant, value):
 
 @pytest.mark.parametrize('sid',[LEGACY[0],LEGACY[2]])
 @pytest.mark.parametrize('policy',['full','sampled'])
-def test_quantity_chunked_two_threads_and_real_reference_fallback(sid,policy):
+def test_quantity_chunked_sampled_and_real_reference_fallback(sid,policy):
     from core.grid_v2 import estimate_grid_v2_cache
     _,module,config,profile,params=setup(sid,'false')
     axis='maLength3' if sid.startswith('s03') else 'stopX'
@@ -101,10 +101,10 @@ def test_quantity_chunked_two_threads_and_real_reference_fallback(sid,policy):
         with pytest.raises(MemoryError):
             execute_grid_v2_candidates(build_grid_v2_plan(config,replace(settings,max_signal_cache_mb=limit),params),bars,100,hooks)
         limit=settings.max_signal_cache_mb  # Position retains its existing whole-cache contract.
-    chunked=execute_grid_v2_candidates(build_grid_v2_plan(config,replace(settings,compiled_workers=2,max_signal_cache_mb=limit),params),bars,100,hooks)
+    chunked=execute_grid_v2_candidates(build_grid_v2_plan(config,replace(settings,max_signal_cache_mb=limit),params),bars,100,hooks)
     fallback=execute_grid_v2_candidates(build_grid_v2_plan(config,replace(settings,prefer_compiled=False),params),bars,100,hooks)
     assert base.metadata['backend_kind']==chunked.metadata['backend_kind']=='compiled_numba'
-    assert chunked.metadata['compiled_workers']==2
+    assert chunked.metadata['compiled_workers']==1
     assert chunked.metadata['chunk_count']>1 if signal else chunked.metadata['chunk_count']==1
     assert fallback.metadata['backend_kind']=='reference'
     for a,b,c in zip(base.rows,chunked.rows,fallback.rows):
@@ -115,3 +115,39 @@ def test_quantity_chunked_two_threads_and_real_reference_fallback(sid,policy):
         assert a.net_profit_pct==b.net_profit_pct
         assert a.net_profit_pct==pytest.approx(c.net_profit_pct,abs=1e-10,rel=1e-10)
     assert [x.row.candidate_id for x in base.selected]==[x.row.candidate_id for x in chunked.selected]
+
+
+@pytest.mark.parametrize('sid', [LEGACY[0], LEGACY[2]])
+def test_quantity_actual_two_threads_restore_incoming_state(sid, monkeypatch):
+    import numba
+    import core.engine_v2.compiled_kernel as position
+    import core.engine_v2.compiled_kernel_signal as signal
+    assert numba.config.NUMBA_NUM_THREADS >= 2, 'This case requires actual two-thread Numba capacity.'
+    _, module, config, profile, params = setup(sid, 'false')
+    settings = GridV2Settings(enabled_axes=('maLength3' if sid == LEGACY[0] else 'stopX',),
+        quantity_rules=rules(step='.2', minimum='.400001', notional='1'), top_n=2, compiled_workers=1)
+    plan = build_grid_v2_plan(config, settings, params)
+    hooks = GridV2StrategyHooks.from_strategy(module)
+    bars = frame()
+    owner, name = (signal, '_COMPILED_SIGNAL_STACKED_BATCH_LOOP') if sid == LEGACY[0] else (position, '_COMPILED_STACKED_BATCH_LOOP')
+    original = getattr(owner, name)
+    observed = []
+    def real_loop(*args):
+        observed.append(numba.get_num_threads())
+        return original(*args)
+    monkeypatch.setattr(owner, name, real_loop)
+    incoming = numba.get_num_threads()
+    try:
+        numba.set_num_threads(2)
+        one = execute_grid_v2_candidates(plan, bars, 100, hooks)
+        assert observed and set(observed) == {1}
+        assert numba.get_num_threads() == 2
+        observed.clear()
+        two = execute_grid_v2_candidates(replace(plan, settings=replace(settings, compiled_workers=2)), bars, 100, hooks)
+        assert observed and set(observed) == {2}
+        assert numba.get_num_threads() == 2
+        assert one.metadata['backend_kind'] == two.metadata['backend_kind'] == 'compiled_numba'
+        np.testing.assert_equal([asdict(r) for r in one.rows], [asdict(r) for r in two.rows])
+        assert [r.row.candidate_id for r in one.selected] == [r.row.candidate_id for r in two.selected]
+    finally:
+        numba.set_num_threads(incoming)

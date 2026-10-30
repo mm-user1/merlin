@@ -422,8 +422,16 @@ Malformed saved mode metadata is unavailable per study; reads never repair it.
 ## Compiled execution and resources
 
 Compiled Grid uses core-owned config packing and population batching. Full
-table-compatible plans use the typed table packer; sampled and other mapping
-cases use core mapping packing. Strategies do not add packing hooks.
+table-compatible position plans use vectorized table packing, including explicit
+quantity-only context: validate once and broadcast the rule-owned step, zero cap,
+minimum lots and optional notional. Context validation precedes the empty return;
+filled quantity rows must remain strict-close and unrounded. Existing public array
+and active-trail validation still runs. Inactive stateful-trail seeds retain their
+ordinary table representation; the kernel reads them only in their active modes.
+Risk-bracket admission retains typed-row packing. Sampled, explicit mapping and
+normalization-incompatible cases retain mapping packing; signal-reversal preparation
+is unchanged. Each call allocates fresh arrays, including after window rebasing.
+Strategies do not add packing hooks; execution and identity versions are unchanged.
 
 The compiled result ABI remains 26 columns. Optional sidecars, including the
 request-gated bar-close MTM drawdown sidecar, do not change that ABI.

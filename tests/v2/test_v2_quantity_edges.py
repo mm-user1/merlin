@@ -92,6 +92,24 @@ def test_oversized_positive_lots_fail_explicitly(family):
     assert int(fast(q)[OUTPUT_FLAGS])&GUARDRAIL_FLAG_EXECUTION_ERROR
 
 
+@pytest.mark.parametrize('short', [False, True])
+def test_signal_finite_start_overflows_while_position_is_open(short):
+    ordinary = data(length=5, short=short)
+    quantity = rules(step='1', notional='0')
+    changes = dict(kernel_only=True, initialCapital=1000., positionPct=100., commissionPct=0.)
+    # Establish an actual finite fill at bar 1 before changing a nonfinal close.
+    control, _ = pair('signal', ordinary, quantity, **changes)
+    trade = control(quantity).trades[0]
+    assert trade.entry_time == ordinary.timestamps[1] and trade.size == 10.
+    closes, highs = ordinary.close.copy(), ordinary.high.copy()
+    closes[2] = highs[2] = 1e308
+    bars = replace(ordinary, close=closes, high=highs)
+    slow, fast = pair('signal', bars, quantity, **changes)
+    with pytest.raises(ValueError, match='Nonfinite quantity-execution account capital or equity'):
+        slow(quantity)
+    assert int(fast(quantity)[OUTPUT_FLAGS]) & GUARDRAIL_FLAG_EXECUTION_ERROR
+
+
 @pytest.mark.parametrize('family',['position','signal'])
 def test_midrun_negative_balance_refuses_new_entries_with_legacy_counts(family):
     bars=data(length=8,signals=(0,4) if family=='position' else (0,))
