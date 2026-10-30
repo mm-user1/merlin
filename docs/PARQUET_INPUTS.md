@@ -157,6 +157,17 @@ Date-only IS end, missing or contradictory history requires a new study. FT
 requires enabled FT and a saved trial FT rank; OOS requires enabled OOS and non-null
 saved trade/profit results (zero is valid). These checks do not hash CSV content.
 
+Valid exact CSV OOS facts may establish a preparation that originally clipped a
+requested start/end to available CSV history. Replay uses the original requested
+dates and warmup, then requires the prepared first/last bar and trading index to
+match those facts before execution. It does not reject solely because the request
+extends outside current coverage. Missing required preparation/warmup or appended
+bars inside an originally clipped interval that change that preparation refuse.
+This validates preparation boundaries/index, not every interior CSV value.
+Without exact facts, legacy OOS and other guarded CSV stages retain conservative
+interval-coverage refusal: dates alone cannot distinguish original clipping from
+missing history. Invalid present facts never fall back to the legacy path.
+
 Both formats execute with original warmup before projecting the chart's metric
 view into the selected stage. Optimize IS dates come from executed post-split
 `fixed_params`, while runtime validation/warmup remains authoritative. FT preserves

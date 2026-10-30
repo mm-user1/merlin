@@ -44,6 +44,29 @@ tests/server/test_quantity_portfolio.py::test_relocation_append_only_offline_and
 
 No full-suite, benchmark, two-thread or Windows symlink waiver is part of this gate.
 
+### Clipped CSV OOS follow-up (T11-1)
+
+The reconstruction module also captures original nonempty Grid/OOS execution for
+requested end beyond CSV history and a fully covered control at capital 1000.
+Start clipping uses the original period executor plus normal atomic persistence,
+because an Optimize split cannot naturally put holdout start before source start.
+Both saved routes verify exact frame/index, execution parameters, trades and
+retained observations; required-boundary truncation and append into the old
+clipped interval refuse without writes. Legacy uncovered OOS and guarded IS remain
+refused. Existing malformed-facts, membership, runtime and Parquet tests apply.
+The real-JS harness now invokes both stitched callers and checks their explicit
+time-scale and reference-100 options, preserving the single-run and async checks.
+
+This narrow follow-up uses these two separate sequential groups (not the full
+parent gate), on Windows and Linux through the isolated launcher:
+
+```text
+python tools/run_tests.py --keep-temp -- tests/test_js_results_reconstruction.py tests/test_js_wfa_calendar_ui.py tests/test_export.py tests/test_execution_capital.py
+python tools/run_tests.py --keep-temp -- tests/server/test_reconstruction.py tests/server/test_export.py tests/server/test_data_input_followup.py tests/server/test_runtime.py tests/server/test_data_input_routes.py::test_grid_persistence_replay_manual_relocation_and_offline_view tests/server/test_data_input_routes.py::test_grid_postprocess_uses_resolved_union_with_filter_off tests/server/test_fixed_mode.py::test_parquet_filter_cap_manual_and_pin_refusal
+```
+
+Renderer/layout is unchanged; no new browser preview is required for this slice.
+
 ## General invocation
 
 Run from the repository root using the configured project interpreter. On Windows:

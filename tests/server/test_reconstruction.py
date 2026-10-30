@@ -207,6 +207,125 @@ def saved_csv(client, csv_source):
     return response.get_json()["study_id"]
 
 
+@pytest.mark.parametrize("clipped", ["end", "start", "covered"])
+def test_exact_csv_oos_replays_original_clipped_preparation(client, csv_source, monkeypatch, clipped):
+    from ui import server_routes_run
+    from core.backtest_engine import load_data
+    from strategies import get_strategy
+    path, source = csv_source
+    original_csv = path.read_bytes()
+    config = grid_payload()
+    config["worker_processes"] = 1
+    config["fixed_params"].update(initialCapital=1000, dateFilter=True,
+        start="2024-01-04T00:00:00Z", end="2024-01-22" if clipped == "end" else "2024-01-20")
+    config["oosTest"] = dict(enabled=True, periodDays=3, topK=2)
+    original_period = server_routes_run.run_period_test_for_trials
+    original_run = get_strategy(STRATEGY).run
+    captured = []
+
+    def period(**kwargs):
+        def execute(frame, params, idx):
+            result = original_run(frame, params, idx)
+            captured.append((frame.copy(), deepcopy(params), idx, result))
+            return result
+        with monkeypatch.context() as patch:
+            patch.setattr(get_strategy(STRATEGY), "run", staticmethod(execute))
+            return original_period(**kwargs)
+
+    monkeypatch.setattr(server_routes_run, "run_period_test_for_trials", period)
+    response = client.post("/api/optimize", data=dict(strategy=STRATEGY, csvPath=str(path),
+        config=json.dumps(config), warmupBars="100"))
+    assert response.status_code == 200, response.get_data(as_text=True)
+    sid = response.get_json()["study_id"]
+    saved = storage.load_study_from_db(sid)
+    if clipped == "start":
+        # An Optimize split cannot naturally put holdout start before source start.
+        # Use the original period executor and normal atomic persistence instead.
+        captured.clear()
+        start, end = source.index[0] - pd.Timedelta(days=1), source.index[2000]
+        facts = {}
+        results = period(df=load_data(str(path)), strategy_id=STRATEGY, warmup_bars=100,
+            fixed_params=saved["study"]["config_json"]["fixed_params"], start_ts=start, end_ts=end,
+            trials=saved["trials"], baseline_period_days=13, test_period_days=8,
+            original_metrics_resolver=lambda trial: {}, preparation_facts=facts)
+        assert storage.save_oos_test_results(sid, results, oos_enabled=True, oos_period_days=8,
+            oos_top_k=2, oos_start_date=start.strftime("%Y-%m-%d"), oos_end_date=end.strftime("%Y-%m-%d"),
+            oos_source_module="optuna", csv_oos_replay=facts)
+        saved = storage.load_study_from_db(sid)
+    facts = saved["study"]["config_json"]["csv_oos_replay"]
+    assert len(captured) == 2
+    assert (pd.Timestamp(facts["end"]) > source.index[-1]) == (clipped == "end")
+    assert (pd.Timestamp(facts["start"]) < source.index[0]) == (clipped == "start")
+    for trial in saved["trials"]:
+        frame, params, idx, original = next(item for item in captured if item[1]["maLength3"] == trial["params"]["maLength3"])
+        assert original.trades and idx == (0 if clipped == "start" else 100)
+        calls = []
+        def replay(frame2, params2, idx2):
+            pd.testing.assert_frame_equal(frame2, frame, check_exact=True)
+            assert idx2 == idx
+            assert pd.Timestamp(params2["start"]) == params["start"]
+            assert pd.Timestamp(params2["end"]) == params["end"]
+            # Runtime dates are serialized on replay; calculation warmup is the
+            # frame/index above, not the legacy strategy default warmupBars key.
+            excluded = {"start", "end", "warmupBars"}
+            assert {k: v for k, v in params2.items() if k not in excluded} == {
+                k: v for k, v in params.items() if k not in excluded}
+            result = original_run(frame2, params2, idx2)
+            assert result.trades == original.trades
+            calls.append(result)
+            return result
+        base = f"/api/studies/{sid}/trials/{trial['trial_number']}"
+        with monkeypatch.context() as patch:
+            patch.setattr(get_strategy(STRATEGY), "run", staticmethod(replay))
+            trade = client.post(base + "/oos-trades", json={})
+            curve = client.post(base + "/equity", json=dict(module="oos_test"))
+        assert trade.status_code == curve.status_code == 200, curve.get_data(as_text=True)
+        assert len(calls) == 2
+        assert trade.get_data(as_text=True) == export_trades_csv(original.trades, symbol="TEST:AAA")
+        assert curve.get_json() == dict(reference_capital=1000,
+            equity=list(original.equity_curve[original.metric_start_idx:]),
+            timestamps=[t.isoformat() for t in original.timestamps[original.metric_start_idx:]])
+    assert storage.load_study_from_db(sid) == saved
+
+    def refuse_pair(module="oos_test", reason="preparation"):
+        before = storage.load_study_from_db(sid)
+        for route, payload in [("oos-trades" if module == "oos_test" else "trades", {}),
+                               ("equity", dict(module=module))]:
+            refused = client.post(base + "/" + route, json=payload)
+            assert refused.status_code == 400, refused.get_data(as_text=True)
+            assert reason.lower() in refused.get_json()["error"].lower()
+        assert storage.load_study_from_db(sid) == before
+
+    # Removing the first required warmup/preparation bar changes actual facts.
+    written = pd.read_csv(path)
+    first = pd.Timestamp(facts["preparation_start"]).timestamp()
+    written.loc[written.time > first].to_csv(path, index=False)
+    refuse_pair()
+    path.write_bytes(original_csv)
+    # Removing the last required bar is also refused, even when some data remains.
+    last = pd.Timestamp(facts["preparation_end"]).timestamp()
+    written.loc[written.time < last].to_csv(path, index=False)
+    refuse_pair()
+    path.write_bytes(original_csv)
+    if clipped == "end":
+        extra = written.tail(12).copy()
+        extra["time"] = written.time.iloc[-1] + np.arange(1, 13) * 300
+        pd.concat([written, extra], ignore_index=True).to_csv(path, index=False)
+        refuse_pair()  # Appended bars lie inside the saved requested interval.
+        path.write_bytes(original_csv)
+        legacy = deepcopy(saved["study"]["config_json"])
+        del legacy["csv_oos_replay"]
+        storage.update_study_config_json(sid, legacy)
+        refuse_pair(reason="cover the saved execution interval")
+    # IS has no exact preparation authority; neither out-of-range side is waived.
+    for key, value in [("start", source.index[0] - pd.Timedelta(days=1)),
+                       ("end", source.index[-1] + pd.Timedelta(days=1))]:
+        guarded = deepcopy(saved["study"]["config_json"])
+        guarded["fixed_params"][key] = value.isoformat()
+        storage.update_study_config_json(sid, guarded)
+        refuse_pair(module="optuna", reason="cover the saved execution interval")
+
+
 def test_actual_ft_cooldown_delayed_parquet_execution(client, tmp_path, monkeypatch):
     from tests.server.test_entry_admission import publish, grid_payload, installed, STRATEGY_ID
     from core.walkforward_engine import WalkForwardEngine
@@ -254,7 +373,8 @@ def test_truncated_csv_refuses_stage_replay(client, saved_csv, csv_source):
     for route, payload in [("trades", {}), ("equity", {}), ("oos-trades", {}), ("equity", {"module": "oos_test"})]:
         response = client.post(base + "/" + route, json=payload)
         assert response.status_code == 400, response.get_data(as_text=True)
-        assert "cover the saved execution interval" in response.get_json()["error"]
+        expected = "conflicts with saved csv_oos_replay facts" if route == "oos-trades" or payload else "cover the saved execution interval"
+        assert expected in response.get_json()["error"]
     assert storage.load_study_from_db(saved_csv) == saved
 
 

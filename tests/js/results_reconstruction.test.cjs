@@ -87,6 +87,25 @@ async function main() {
   state.results=[{window_number:1,best_params:{initialCapital:1000},param_id:'window',available_modules:[],
     is_start_date:'2024-01-01',is_end_date:'2024-01-29',oos_start_date:'2024-01-30',oos_end_date:'2024-01-31',oos_execution_capital:750}];
   state.stitched_oos={equity_curve:[100,110],timestamps:[dates[0],dates[2]]};
+  // Invoke both real stitched callers, observing their explicit options rather
+  // than relying on renderer defaults (which would conceal a missing argument).
+  const render=context.renderEquityChart, stitchedCalls=[];
+  context.renderEquityChart=(...args)=>{stitchedCalls.push(args);return render(...args);};
+  const checkStitched=()=>{
+    assert.equal(stitchedCalls.length,1);
+    const [equity,,timestamps,options]=stitchedCalls.pop();
+    assert.deepEqual(equity,state.stitched_oos.equity_curve);
+    assert.deepEqual(timestamps,state.stitched_oos.timestamps);
+    assert.equal(options?.useTimeScale,true);
+    assert.equal(options?.referenceCapital,100);
+  };
+  vm.runInContext(controller.slice(controller.indexOf('function refreshResultsView('),controller.indexOf('function bindCollapsibles(')),context);
+  for(const name of ['updateStatusBadge','updateSidebarSettings','updateResultsHeader','updateTabsVisibility',
+    'setTableExpandVisibility','updateTableHeader','displaySummaryCards','renderWindowIndicators'])context[name]=()=>{};
+  context.getWfaStitchedPeriodLabel=()=> '2024-01-01 to 2024-01-31';
+  context.refreshResultsView();checkStitched();
+  await click(document.querySelector('.wfa-stitched-row'));checkStitched();
+  context.renderEquityChart=render;
   context.WFAResultsUI.renderWFAResultsTable(state.results,{});
   const wfaRows=document.querySelectorAll('.wfa-window-row');assert.equal(wfaRows.length,2);
   await click(wfaRows[1]);assert.equal(svg.children.length,0);assert.equal(axis.children.length,0);

@@ -170,6 +170,8 @@ IS uses the executed post-split `fixed_params` dates, while stored V2 runtime st
 owns validation and warmup. CSV OOS records exact preparation facts atomically with
 results; older CSV records need precise corroborated history, whereas old Parquet
 OOS without exact facts remains unavailable. See [replay contracts](PARQUET_INPUTS.md).
+Exact CSV OOS facts can verify an originally clipped preparation; legacy OOS and
+other guarded CSV stages still refuse uncovered requested intervals.
 Chart projection removes technical warmup only after execution and uses explicit
 execution capital for monetary curves. Individual charts keep index spacing;
 stitched WFA/Analytics remain normalized at 100 with time spacing. Delayed WFA

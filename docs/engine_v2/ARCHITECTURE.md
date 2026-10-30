@@ -549,6 +549,9 @@ execution/projection path. New CSV OOS stores sibling `csv_oos_replay` version 1
 legacy derivation requires full-precision executed IS end, positive period lengths
 and corroborating display dates. Present malformed facts never fall back to legacy
 derivation. CSV interval/preparation checks do not establish content identity.
+Exact CSV OOS facts verify the reproduced preparation even when the original
+requested interval clipped to available history. Legacy OOS and other guarded CSV
+stages retain conservative coverage refusal; see [replay contracts](../PARQUET_INPUTS.md).
 
 New V2 Grid/WFA studies persist one request-level `config_json.v2_runtime`
 envelope with schema `v2_runtime_metadata_v1`. The envelope separately records

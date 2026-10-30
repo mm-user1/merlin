@@ -298,7 +298,10 @@ def trial_execution(study, trial, module, *, manual=None, context=None, csv_path
             if resolved_csv is None:
                 csv_path, _ = execution_input(study)
             source = load_data(csv_path)
-            _validate_execution_coverage(source, dates["start"], dates["end"])
+            if facts is None:
+                _validate_execution_coverage(source, dates["start"], dates["end"])
+            # Exact facts can prove an originally clipped preparation; legacy
+            # dates alone cannot distinguish clipping from missing history.
             frame, idx = prepare_dataset_with_warmup(source, dates["start"], dates["end"], context.warmup_bars)
             if facts is not None:
                 _verify_oos_frame(frame, idx, facts, dates, "csv_oos_replay")
