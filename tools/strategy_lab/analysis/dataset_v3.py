@@ -4,13 +4,13 @@ import hashlib
 from types import SimpleNamespace
 
 from ..config import canonical_sha256
-from ..config_v2 import validate_request, calendar
+from ..config_v2 import validate_saved_request
 from ..dataset import DatasetError, load_json
 from ..parquet import (identity, validate_bindings, verify_artifacts, verified_groups)
 
 
 def validate_dataset_v3(root, manifest, raw):
-    validate_request(raw)
+    all_windows = validate_saved_request(raw)
     verify_artifacts(root, manifest)
     saved_identity = manifest["identity"]
     roster = raw["generation"]["market_data"]["instruments"]
@@ -20,7 +20,6 @@ def validate_dataset_v3(root, manifest, raw):
     if included != [{"canonical_symbol": e["instrument_id"], "cell": e["cell"]} for e in entries] or not entries:
         raise DatasetError("selected roster ownership/order mismatch.")
     ids = [w["window_id"] for w in saved_identity["windows"]]
-    all_windows = calendar(raw["generation"])
     windows = [w for w in all_windows if w.window_id in ids]
     if [w.window_id for w in windows] != ids or not windows:
         raise DatasetError("selected window ownership/order mismatch.")

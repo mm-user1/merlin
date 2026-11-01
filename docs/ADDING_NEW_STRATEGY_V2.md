@@ -31,8 +31,11 @@ Continue providing normal signals/dataprep and parameter normalization. Pass the
 explicit validated `admission_rules` argument when calling `run_v2_strategy`
 directly; the application adapter supplies this context for registered profiles.
 Never read a pack inside strategy signals, candidate execution or workers, and
-never import Pattern Lab. Application runs require Parquet; CSV CLI/Strategy Lab
-reject this mode. Verify both packing routes, actual spawned workers, saved replay
+never import Pattern Lab. Application runs require Parquet; CSV CLI and legacy
+Strategy Lab CSV generation reject this mode. The capability-gated
+[Strategy Lab Parquet route](../tools/strategy_lab/README.md#parquet-and-s07-off)
+supports it with explicit Off; this does not enable arbitrary strategies or active
+filters. Verify both packing routes, actual spawned workers, saved replay
 and selected diagnostics as described in [Architecture](engine_v2/ARCHITECTURE.md)
 and [Parquet inputs](PARQUET_INPUTS.md). Synthetic generic-engine coverage alone
 does not establish Pine parity or market performance for a new strategy.

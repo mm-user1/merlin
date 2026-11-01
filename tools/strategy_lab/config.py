@@ -13,6 +13,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .rule_contract import rules_v1
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
@@ -143,47 +145,7 @@ EVIDENCE_CRITERIA = {
     },
 }
 
-RULE_REGISTRY = {
-    "version": RULES_REGISTRY_VERSION,
-    "minimum_completed_trades": 15,
-    "baseline_rule": "primary_profit",
-    "selectable_rules": [
-        "primary_profit",
-        "trade_gate15_profit",
-        "trade_gate15_profit_factor",
-        "trade_gate15_daily_sharpe",
-        "trade_gate15_romad_mtm",
-        "star_mean_profit",
-        "star_worst_profit",
-        "balanced_percentile_raw",
-        "balanced_percentile_star",
-    ],
-    "nomination_eligible_rules": [
-        "trade_gate15_profit",
-        "trade_gate15_profit_factor",
-        "trade_gate15_daily_sharpe",
-        "trade_gate15_romad_mtm",
-        "star_mean_profit",
-        "star_worst_profit",
-        "balanced_percentile_raw",
-        "balanced_percentile_star",
-    ],
-    "non_nominatable_diagnostics": [
-        "trade_gate15_romad_realized",
-        "balanced_percentile_raw_realized",
-        "balanced_percentile_star_realized",
-        "pareto_plus_primary",
-        "population_no_skill",
-        "oos_oracle",
-        "oos_anti_oracle",
-    ],
-    "tie_break": [
-        {"field": "rule_score", "direction": "descending"},
-        {"field": "IS net_profit_pct", "direction": "descending"},
-        {"field": "semantic_key", "direction": "ascending"},
-        {"field": "candidate_id", "direction": "ascending"},
-    ],
-}
+RULE_REGISTRY = rules_v1()
 
 
 class StrategyLabConfigError(ValueError):

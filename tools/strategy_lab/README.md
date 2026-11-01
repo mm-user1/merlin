@@ -166,13 +166,32 @@ unavailable.
 
 The offline reader checks schemas, bindings, geometry, ownership, hashes, shapes
 and backend records without opening market packs or constructing Grid plans.
+It validates the saved supported contract once, independently of the installed
+strategy registry, parameter bounds/options and current engine version pins.
+Producing pins remain required, structurally valid and consistent across artifacts;
+they need not match today's stack, and the producing strategy need not remain
+registered. Historical `strategy_lab_rules_v1` membership/order, baseline,
+15-trade gate and ties remain exact supported semantics, independently of changes
+to the current generation registry. Unknown or altered semantics still fail.
+Config loading, new generation, preflight, partial resume and completed generation
+reruns retain strict current strategy/profile/version/domain/registry checks.
+Offline readability does not authorize generating or replaying a stale request.
 Analysis joins use full IDs in historical `canonical_symbol`/ticker fields.
 Mixed v2/v3 allocation comparisons fail; v3 comparisons align exact IDs and UTC
 blocks. Candidate and ticker decisions freeze from IS before OOS access. The
 existing 15-trade rules and tie order are unchanged.
 
-Analysis averages valid instruments equally within each block, then valid blocks
-equally, exposing counts/missingness. Allocation retains fixed `1/K` weights,
+The population headline mean first averages finite candidate returns within each
+instrument/block, then weights available instruments equally within each block
+and available blocks equally. Population median and quantiles instead pool finite
+observations. Profitable share pools positive finite observations over all
+observations, with unavailable entries retained in the denominator. Generic
+diagnostic metric-summary means pool finite observations and can differ from the
+headline. Counts/missingness remain explicit. For example, block 1 with
+A=[0,0], B=[100,unavailable] and block 2 with four zeros has block means 50 and 0,
+headline 25, diagnostic pooled mean 100/7, pooled median 0 and seven finite
+observations; profitable share is 1/8. These are different weights, not new metrics.
+Allocation retains fixed `1/K` weights,
 cash underfill and all/bottom/random/oracle controls. Required missing blocks make
 headline/compounding unavailable; allocation never compounds around them. Random
 controls use explicit seed/draw count even for empty pools. Oracle controls are

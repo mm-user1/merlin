@@ -84,6 +84,7 @@ def _report(result: AnalysisResult) -> bytes:
     dataset = metadata["dataset"]
     scope = metadata["analysis_scope"]
     population = summary["population"]
+    descriptive = metadata.get("period_unit") == "oos_block"
 
     def display(value: Any) -> str:
         if value is None:
@@ -114,8 +115,18 @@ def _report(result: AnalysisResult) -> bytes:
         f"- Partial scope: `{str(scope['is_partial']).lower()}`",
         f"- Scope requires unlock: `{str(scope['requires_unlock']).lower()}`",
         f"- Population observations: {population['observation_count']}",
-        f"- OOS Net Profit mean / median: {display(population['mean'])} / {display(population['median'])}",
-        f"- OOS profitable share: {display(population['profitable_share'])}",
+        *([
+            f"- OOS Net Profit headline mean (equal instrument/block weights): {display(population['mean'])}",
+            f"- OOS Net Profit median (pooled finite observations): {display(population['median'])}",
+            f"- OOS profitable share (pooled, all observations in denominator): {display(population['profitable_share'])}",
+            "",
+            "The population headline mean first averages finite candidate returns within each instrument/block, then gives equal weights to available instruments within a block and equal weights to available blocks.",
+            "Population median and quantiles pool finite observations. Profitable share pools positive finite observations over all observations, including unavailable entries in the denominator. These statistics do not use the headline's hierarchical weights.",
+            "Generic diagnostic metric-summary means pool finite observations and can differ from the population headline mean.",
+        ] if descriptive else [
+            f"- OOS Net Profit mean / median: {display(population['mean'])} / {display(population['median'])}",
+            f"- OOS profitable share: {display(population['profitable_share'])}",
+        ]),
         "",
         "### Actual UTC calendar blocks",
         "",
@@ -283,12 +294,11 @@ def _report(result: AnalysisResult) -> bytes:
             "",
             "## Interpretation boundary",
             "",
-            "This artifact applies frozen formulas and reports evidence mechanically. It does not nominate rules, allocate tickers, or conclude strategy quality. The descriptive month-block intervals are weak with five or six blocks.",
+            "This artifact applies frozen formulas and reports evidence mechanically. It does not nominate rules, allocate tickers, or conclude strategy quality. "
+            + ("" if descriptive else "The descriptive month-block intervals are weak with five or six blocks."),
             "",
         ]
     )
-    if metadata.get("period_unit") == "oos_block":
-        lines = [line.replace("The descriptive month-block intervals are weak with five or six blocks.", "") for line in lines]
     return "\n".join(lines).encode("utf-8")
 
 

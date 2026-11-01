@@ -193,9 +193,7 @@ def _validate_calendar_blocks(
 def _validate_contract(run_spec: Mapping[str, Any]) -> AnalysisContract:
     prereg = _require_mapping(run_spec.get("preregistration"), "preregistration")
     if run_spec.get("schema_version") == "strategy_lab_runspec_v2":
-        from ..config_v2 import validate_request
-
-        validate_request(run_spec)
+        # The v3 reader has already validated the complete saved contract.
         return AnalysisContract(
             observation={"monthly_ticker_aggregation": "equal_weight_valid_tickers",
                          "headline_aggregation": "equal_weight_valid_oos_blocks"},

@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 import pandas as pd
 
 from . import config as c
+from .rule_contract import rules_v1
 from core.engine_v2.admission import admission_cap
 from core.engine_v2.parameter_ties import enabled_parameter_ties
 from core.engine_v2.runtime_contract import normalize_v2_runtime_field_value
@@ -40,7 +41,7 @@ def calendar(generation):
 
 def validate_scopes(prereg, market, window_count):
     c._keys(prereg, "preregistration", {"analysis_contract", "analysis_scopes", "rule_registry", "seed", "random_control_draws"})
-    if prereg["analysis_contract"] != DESCRIPTIVE or prereg["rule_registry"] != c.RULE_REGISTRY:
+    if prereg["analysis_contract"] != DESCRIPTIVE or c.canonical_json_bytes(prereg["rule_registry"]) != c.canonical_json_bytes(rules_v1()):
         raise c.StrategyLabConfigError("unsupported descriptive analysis contract or rule registry.")
     if type(prereg["seed"]) is not int:
         raise c.StrategyLabConfigError("seed must be an integer, not boolean.")
@@ -65,16 +66,22 @@ def validate_scopes(prereg, market, window_count):
             raise c.StrategyLabConfigError("scope.window_numbers must be unique, ordered and in range.")
 
 
-def validate_request(raw):
+def validate_saved_request(raw):
+    """Validate the supported persisted contract once, without current execution eligibility."""
     c._keys(raw, "run spec", {"schema_version", "run_name", "generation", "preregistration"})
     if raw["schema_version"] != SCHEMA:
         raise c.StrategyLabConfigError("unsupported Parquet request schema.")
     c._text(raw["run_name"], "run_name")
     g = c._object(raw["generation"], "generation")
     c._keys(g, "generation", {"strategy", "market_data", "windows", "economics", "execution", "planning", "resources"})
-    config, profile = c._validate_strategy(c._object(g["strategy"], "strategy"), parquet=True)
-    if profile.modes.get("entryAdmission") != "risk_bracket_v1":
-        raise c.StrategyLabConfigError("Parquet Lab requires the risk_bracket_v1 capability.")
+    strategy = c._object(g["strategy"], "strategy")
+    c._keys(strategy, "generation.strategy", {"strategy_id", "strategy_version", "engine",
+        "grid_v2_engine_version", "plan_identity_schema_version", "semantic_identity_schema_version",
+        "runtime_contract_version", "planning_policy_version", "allocator_version"})
+    for name, value in strategy.items():
+        c._text(value, f"generation.strategy.{name}")
+    if strategy["engine"] != "v2":
+        raise c.StrategyLabConfigError("generation.strategy.engine: expected 'v2'.")
     execution = c._object(g["execution"], "execution")
     c._keys(execution, "execution", {"policy", "entry_filters"})
     if execution != {"policy": "risk_bracket_v1", "entry_filters": []}:
@@ -109,7 +116,7 @@ def validate_request(raw):
         w["calendar_anchor_day"] > 28 or start >= end or
         start.day != w["calendar_anchor_day"] or end.day != start.day):
         raise c.StrategyLabConfigError("invalid calendar contract.")
-    calendar(g)
+    windows = calendar(g)
     economics = c._object(g["economics"], "economics")
     c._keys(economics, "economics", {"base_params", "tick_size_provenance", "slippage_modelled", "funding_modelled"})
     if economics["slippage_modelled"] is not False or economics["funding_modelled"] is not False:
@@ -120,15 +127,17 @@ def validate_request(raw):
     if tick["operative"] is not False or tick["reason"] != "priceRounding=none":
         raise c.StrategyLabConfigError("unsupported tick provenance.")
     base = c._object(economics["base_params"], "base_params")
-    specs = config["parameters"]
-    required = {name for name in ("initialCapital", "commissionPct", "riskPerTrade", "enableLong", "enableShort", "maxEntryLeverage") if name in specs}
+    required = {"initialCapital", "commissionPct", "riskPerTrade", "enableLong", "enableShort", "maxEntryLeverage"}
     if not required <= set(base):
         raise c.StrategyLabConfigError("base_params must explicitly freeze capital, fees, risk, directions and maxEntryLeverage.")
     for name, value in base.items():
-        if name not in specs or profile.parameter_roles.get(name) == "runtime":
-            raise c.StrategyLabConfigError(f"invalid fixed parameter: {name}.")
-        scalar(value, specs[name], name)
-    admission_cap(profile, base)
+        c._text(name, "base_params key")
+        saved_scalar(value, name)
+    for name in ("initialCapital", "commissionPct", "riskPerTrade", "maxEntryLeverage"):
+        c._number(base[name], name, positive=name == "maxEntryLeverage")
+    for name in ("enableLong", "enableShort"):
+        if type(base[name]) is not bool:
+            raise c.StrategyLabConfigError(f"{name}: expected boolean.")
     resources = c._object(g["resources"], "resources")
     c._keys(resources, "resources", {"outer_workers", "numba_threads", "grid_v2_max_cache_mb"})
     for name in ("outer_workers", "numba_threads"):
@@ -137,27 +146,63 @@ def validate_request(raw):
     c._number(resources["grid_v2_max_cache_mb"], "grid_v2_max_cache_mb", positive=True)
     p = c._object(g["planning"], "planning")
     c._keys(p, "planning", {"enabled_variants", "enabled_axes", "axis_values", "planning_policy", "grid_v2_prefer_compiled", "expected_candidate_count", "expected_effective_planning_policy"}, optional=frozenset({"enabled_tie_groups"}))
-    variants = c._string_list(p["enabled_variants"], "enabled_variants")
-    if any(name not in profile.variants for name in variants):
-        raise c.StrategyLabConfigError("unknown enabled variant.")
+    c._string_list(p["enabled_variants"], "enabled_variants")
     axes = c._string_list(p["enabled_axes"], "enabled_axes", allow_empty=True)
-    ties = c._string_list(p.get("enabled_tie_groups", []), "enabled_tie_groups", allow_empty=True)
-    pairs = enabled_parameter_ties(config, ties)
+    c._string_list(p.get("enabled_tie_groups", []), "enabled_tie_groups", allow_empty=True)
     values = c._object(p["axis_values"], "axis_values")
-    if set(values) != set(axes) or set(axes) & {target for _, target in pairs}:
+    if set(values) != set(axes):
         raise c.StrategyLabConfigError("axis_values must match independent enabled_axes exactly.")
     for name in axes:
-        if name not in specs or not specs[name].get("optimize", {}).get("enabled") or name == "maxEntryLeverage":
-            raise c.StrategyLabConfigError(f"unsupported axis: {name}.")
         if not isinstance(values[name], list) or not values[name]:
             raise c.StrategyLabConfigError(f"axis {name} requires a nonempty domain assertion.")
         for value in values[name]:
-            scalar(value, specs[name], name)
+            saved_scalar(value, name)
     if p["planning_policy"] != "full" or p["expected_effective_planning_policy"] != "full" or p["grid_v2_prefer_compiled"] is not True:
         raise c.StrategyLabConfigError("full compiled planning is required.")
     c._integer(p["expected_candidate_count"], "expected_candidate_count", minimum=1)
     validate_scopes(c._object(raw["preregistration"], "preregistration"), market, w["expected_window_count"])
     c.canonical_json_bytes(raw)
+    return windows
+
+
+def saved_scalar(value, name):
+    """Persisted parameters have JSON scalar values, independent of today's config."""
+    if type(value) is bool:
+        return
+    if isinstance(value, (int, float)):
+        c._number(value, name)
+    elif isinstance(value, str):
+        c._text(value, name)
+    else:
+        raise c.StrategyLabConfigError(f"{name}: expected a finite JSON scalar.")
+
+
+def validate_request(raw):
+    """Generation eligibility adds current pins, profile, bounds and registry checks."""
+    validate_saved_request(raw)
+    g = raw["generation"]
+    config, profile = c._validate_strategy(g["strategy"], parquet=True)
+    if profile.modes.get("entryAdmission") != "risk_bracket_v1":
+        raise c.StrategyLabConfigError("Parquet Lab requires the risk_bracket_v1 capability.")
+    if raw["preregistration"]["rule_registry"] != c.RULE_REGISTRY:
+        raise c.StrategyLabConfigError("rule registry disagrees with current generation registry.")
+    base, specs = g["economics"]["base_params"], config["parameters"]
+    for name, value in base.items():
+        if name not in specs or profile.parameter_roles.get(name) == "runtime":
+            raise c.StrategyLabConfigError(f"invalid fixed parameter: {name}.")
+        scalar(value, specs[name], name)
+    admission_cap(profile, base)
+    p = g["planning"]
+    if any(name not in profile.variants for name in p["enabled_variants"]):
+        raise c.StrategyLabConfigError("unknown enabled variant.")
+    pairs = enabled_parameter_ties(config, p.get("enabled_tie_groups", []))
+    if set(p["enabled_axes"]) & {target for _, target in pairs}:
+        raise c.StrategyLabConfigError("axis_values must match independent enabled_axes exactly.")
+    for name, values in p["axis_values"].items():
+        if name not in specs or not specs[name].get("optimize", {}).get("enabled") or name == "maxEntryLeverage":
+            raise c.StrategyLabConfigError(f"unsupported axis: {name}.")
+        for value in values:
+            scalar(value, specs[name], name)
     return config, profile
 
 

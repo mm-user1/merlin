@@ -459,3 +459,191 @@ def test_domain_geometry_and_foreign_group_refusal(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="foreign"):
         run(path, root, out, resume=True)
     assert snapshot(out) == before
+
+
+@pytest.fixture(scope="module")
+def historical_v3(tmp_path_factory):
+    """Real completed two-candidate/two-block input, created before registry drift."""
+    work = tmp_path_factory.mktemp("historical-v3")
+    path = request(work, two=True)
+    raw = json.loads(path.read_text())
+    raw["generation"]["planning"].update(enabled_axes=["stopLP"],
+        axis_values={"stopLP": [2, 4]}, expected_candidate_count=2)
+    raw["generation"]["windows"].update(requested_end="2024-05-01", expected_window_count=2)
+    raw["preregistration"]["analysis_scopes"][0]["window_numbers"] = [1, 2]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    root, out, partial = (work / name for name in ("pack", "out", "partial"))
+    publish(root, symbols=("AAA", "BBB"))
+    run(path, root, partial, preflight_only=True)
+    run(path, root, out)
+    hidden = work / "hidden-pack"
+    root.rename(hidden)
+    assert not root.exists()
+    return path, hidden, out, partial
+
+
+def offline_results(out):
+    from tools.strategy_lab.analysis.output import render_files, render_allocation_files
+    dataset = open_dataset(out)
+    scope = dataset.resolve_scope("research")
+    analysis = evaluate_scope(dataset, scope)
+    allocation = evaluate_allocation([DatasetInput("s07", dataset, scope)], candidate_rule="primary_profit")
+    return dataset.manifest["identity"], render_files(analysis), render_allocation_files(allocation)
+
+
+@pytest.mark.parametrize("drift", ["engine", "bounds", "options", "unregistered", "profile", "registry", "nomination", "ties"])
+def test_historical_reader_ignores_current_generation_state(historical_v3, tmp_path, monkeypatch, drift):
+    from tools.strategy_lab import config
+    from tools.strategy_lab.analysis import dataset_v3
+    path, root, out, partial = historical_v3
+    before = snapshot(out)
+    expected = offline_results(out)
+    original_config = config.get_strategy_config
+
+    def unavailable(_):
+        raise ValueError("producing strategy is no longer registered")
+
+    def changed_config(strategy_id):
+        value = deepcopy(original_config(strategy_id))
+        if drift == "bounds":
+            value["parameters"]["initialCapital"]["max"] = 500
+        elif drift == "options":
+            value["parameters"]["entryRunLength"]["options"] = [999]
+        else:
+            value["execution"]["entryAdmission"] = "unsupported_future_admission"
+        return value
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("offline reader or stale generation invoked live lookup/preparation/planning/execution")
+
+    with monkeypatch.context() as m:
+        if drift == "engine":
+            m.setattr(config, "GRID_V2_ENGINE_VERSION", "future_engine")
+        elif drift == "ties":
+            # A nested edit also catches an import-time shallow copy of the registry.
+            m.setitem(config.RULE_REGISTRY["tie_break"][0], "direction", "ascending")
+        elif drift in {"registry", "nomination"}:
+            # Mutate the existing nested list, not just the module's dict binding.
+            key = "selectable_rules" if drift == "registry" else "nomination_eligible_rules"
+            original = config.RULE_REGISTRY[key]
+            m.setitem(config.RULE_REGISTRY, key, original.copy())
+            config.RULE_REGISTRY[key].pop()
+        else:
+            m.setattr(config, "get_strategy_config", unavailable if drift == "unregistered" else changed_config)
+        m.setattr(parquet, "generate_parquet", forbidden)
+        with pytest.raises(config.StrategyLabConfigError):
+            load_run_spec(path)
+        with pytest.raises(config.StrategyLabConfigError):
+            run(path, root, tmp_path / "new", preflight_only=True)
+        assert not (tmp_path / "new").exists()
+        if drift == "engine":
+            for output, kwargs in ((partial, {"resume": True}), (out, {})):
+                saved = snapshot(output)
+                with pytest.raises(config.StrategyLabConfigError):
+                    run(path, root, output, **kwargs)
+                assert snapshot(output) == saved
+        for module, name in ((config, "get_strategy_config"), (config, "_validate_strategy"),
+                (config_v2, "build_grid_v2_plan"), (parquet, "get_strategy"),
+                (parquet.data_input, "prepare_input"), (parquet.data_input, "replay_input"),
+                (parquet, "execute_grid_v2_candidates")):
+            m.setattr(module, name, forbidden)
+        calls = []
+        validate = dataset_v3.validate_saved_request
+        def counted(raw):
+            calls.append(True)
+            return validate(raw)
+        m.setattr(dataset_v3, "validate_saved_request", counted)
+        assert offline_results(out) == expected
+        assert len(calls) == 1
+    assert snapshot(out) == before
+    assert run(path, root, out).no_op
+    assert snapshot(out) == before
+
+
+@pytest.mark.parametrize("field,value", [
+    ("version", "unknown_rules"),
+    ("minimum_completed_trades", 14),
+    ("minimum_completed_trades", True),
+    ("baseline_rule", "trade_gate15_profit"),
+    ("selectable_rules", ["primary_profit"]),
+    ("selectable_rules", ["unknown_rule"]),
+    ("nomination_eligible_rules", []),
+    ("non_nominatable_diagnostics", []),
+    ("tie_break", [{"field": "candidate_id", "direction": "descending"}]),
+])
+def test_frozen_rules_reject_changed_semantics(historical_v3, field, value):
+    raw = json.loads(historical_v3[0].read_text())
+    raw["preregistration"]["rule_registry"][field] = value
+    with pytest.raises(ValueError, match="rule registry"):
+        config_v2.validate_saved_request(raw)
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda r: r.update(schema_version="unknown_request"),
+    lambda r: r["preregistration"].update(analysis_contract="unknown_analysis"),
+    lambda r: r["generation"]["strategy"].update(strategy_version=1),
+    lambda r: r["generation"]["strategy"].pop("grid_v2_engine_version"),
+    lambda r: r["generation"]["economics"]["base_params"].update(stopLP=[2]),
+    lambda r: r["generation"]["economics"]["base_params"].update(stopX=float("inf")),
+])
+def test_frozen_request_rejects_unsupported_structure(historical_v3, mutation):
+    raw = json.loads(historical_v3[0].read_text())
+    mutation(raw)
+    with pytest.raises(ValueError):
+        config_v2.validate_saved_request(raw)
+
+
+def test_reader_rejects_resealed_rule_semantics(historical_v3, tmp_path):
+    from tools.strategy_lab.config import canonical_sha256
+    from tools.strategy_lab.dataset import artifact_record, atomic_write_json
+    from tools.strategy_lab.analysis.dataset import AnalysisError
+    out = tmp_path / "resealed"
+    shutil.copytree(historical_v3[2], out)
+    raw = load_json(out / "normalized_runspec.json", "request")
+    # Keep the version, membership and all other facts; change only declared order.
+    raw["preregistration"]["rule_registry"]["nomination_eligible_rules"].reverse()
+    atomic_write_json(out / "normalized_runspec.json", raw)
+    manifest = load_json(out / "manifest.json", "manifest")
+    manifest["artifacts"]["normalized_runspec.json"] = artifact_record(out / "normalized_runspec.json", out)
+    manifest["identity"]["pre_registration_sha256"] = canonical_sha256(raw)
+    atomic_write_json(out / "manifest.json", manifest)
+    parquet.verify_artifacts(out, manifest)  # All artifact sizes/hashes are valid.
+    before = snapshot(out)
+    with pytest.raises(AnalysisError, match="rule registry"):
+        open_dataset(out)
+    assert snapshot(out) == before
+
+
+def test_descriptive_population_weights_with_asymmetric_missingness(historical_v3, monkeypatch):
+    from tools.strategy_lab.analysis.output import render_files
+    dataset = open_dataset(historical_v3[2])
+    scope = dataset.resolve_scope("research")
+    assert dataset.geometry.count == 2 and len(scope.windows) == len(scope.tickers) == 2
+    actual = dataset.load_oos_window
+    def observations(scope, window):
+        matrices = actual(scope, window)
+        for ti, matrix in enumerate(matrices.values()):
+            matrix[:, dataset.metric_index["net_profit_pct"]] = (
+                [100, np.nan] if ti == 1 and window.window_id == 1 else [0, 0])
+            # Net return has no generic metric-summary key. Feed the same small
+            # observation set through an existing diagnostic channel to certify
+            # that pooling path without adding a new output statistic.
+            matrix[:, dataset.metric_index["profit_factor"]] = matrix[:, dataset.metric_index["net_profit_pct"]]
+        return matrices
+    monkeypatch.setattr(dataset, "load_oos_window", observations)
+    result = evaluate_scope(dataset, scope)
+    population = result.summary["population"]
+    diagnostic = result.summary["diagnostics"]["metric_summaries"]["oos"]["profit_factor"]
+    assert population["monthly_means"] == [50, 0]
+    assert population["mean"] == 25
+    assert population["median"] == population["quartile_25"] == population["quartile_75"] == 0
+    assert population["finite_count"] == diagnostic["finite_count"] == 7
+    assert population["unavailable_count"] == 1 and population["profitable_share"] == 1 / 8
+    assert diagnostic["mean"] == pytest.approx(100 / 7)
+    report = render_files(result)["report.md"].decode()
+    assert "headline mean (equal instrument/block weights): 25.000000" in report
+    assert "median (pooled finite observations): 0.000000" in report
+    assert "including unavailable entries in the denominator" in report
+    assert "Generic diagnostic metric-summary means pool finite observations" in report
+    assert "finite candidate returns within each instrument/block" in report
+    assert "weak with five or six blocks" not in report
