@@ -274,6 +274,13 @@ The Strategy Lab schema-v2 metric axis is authoritative in
 `tools/strategy_lab/dataset.py`; its analysis and allocation interpretation is
 documented in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 
+Lab dataset v3 retains that axis and appends raw `margin_reject_count` for its
+Parquet risk-bracket route. This counts above-cap refusals, independently of
+`rejected_fill_count`; minimum-notional refusals have no invented counter.
+Raw `max_required_leverage` is preserved, and zero on a no-fill row does not
+establish an observed accepted-fill maximum. Selected-run nullable diagnostics
+above remain a separate contract.
+
 ## Ticker portfolio projections
 
 Portfolio facts retain every realized per-bar balance change (including entry fees),

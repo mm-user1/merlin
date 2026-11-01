@@ -47,6 +47,7 @@ METRIC_AXIS = (
     "flags",
     "max_drawdown_mtm_pct",
 )
+METRIC_AXIS_V3 = (*METRIC_AXIS, "margin_reject_count")
 GUARDRAIL_FIELDS = (
     "rejected_fill_count",
     "zero_size_entry_count",
@@ -270,6 +271,18 @@ def group_matrix(
     if result.shape != expected or result.dtype != np.float64:
         raise DatasetError("group matrix shape or dtype violates strategy_lab_dataset_v2.")
     return result
+
+
+def group_matrix_v3(is_rows, oos_rows, plan):
+    """Preserve v2 projection exactly, appending the required raw cap counter."""
+    base = group_matrix(is_rows, oos_rows, plan)
+    if any("margin_reject_count" not in row.guardrail_summary for rows in (is_rows, oos_rows) for row in rows):
+        raise DatasetError("v3 requires the raw margin_reject_count on every row.")
+    counts = np.asarray([
+        [_nonnegative_integer(row.guardrail_summary["margin_reject_count"], "margin_reject_count")
+         for row in rows] for rows in (is_rows, oos_rows)
+    ], dtype=np.float64).T[:, :, None]
+    return np.concatenate((base, counts), axis=2)
 
 
 def _task_temp(path: Path) -> Path:

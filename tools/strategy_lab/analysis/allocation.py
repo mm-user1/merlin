@@ -12,6 +12,7 @@ import numpy as np
 
 from .dataset import AnalysisDataset, AnalysisError, ResolvedScope, Window, git_facts
 from .evaluate import descriptive_bootstrap
+from .descriptive import random_settings, not_requested, interval_not_requested
 from .json_utils import canonical_json_bytes
 from .rules import RULE_REQUIREMENTS, evaluate_rule, select_candidates, star_neighbours
 
@@ -191,7 +192,7 @@ def _random_summary(
     returns: Sequence[float],
     observed: float | None,
 ) -> Mapping[str, Any]:
-    uncertainty = dataset_input.dataset.contract.evidence.get("uncertainty", {})
+    uncertainty = random_settings(dataset_input.dataset.contract)
     base_seed = uncertainty.get("seed")
     draws = uncertainty.get("resamples")
     if (
@@ -441,6 +442,9 @@ def evaluate_allocation(
     """Evaluate N>=1 datasets through one exact-calendar, two-level freeze path."""
     if not inputs:
         raise AnalysisError("allocation requires at least one explicitly labelled dataset.")
+    if len({item.dataset.schema_version for item in inputs}) != 1:
+        raise AnalysisError("mixed v2/v3 allocation identity contracts are unsupported.")
+    descriptive = inputs[0].dataset.contract.descriptive
     primary_k = _exact_positive_integer(primary_k, "primary_k")
     sensitivity_k = _exact_positive_integer(sensitivity_k, "sensitivity_k")
     labels = [item.label for item in inputs]
@@ -452,6 +456,8 @@ def evaluate_allocation(
     if len(set(manifest_hashes)) != len(manifest_hashes):
         raise AnalysisError("dataset labels resolve to conflicting duplicate dataset identities.")
     scorer_facts = _scorer_facts(ticker_scorer)
+    if descriptive and scorer_facts != _scorer_facts(OFFICIAL_TICKER_SCORER):
+        raise AnalysisError("descriptive v3 currently supports the existing IS-profit ticker scorer only.")
     for item in inputs:
         registry = item.dataset.contract.rule_registry
         if candidate_rule not in RULE_REQUIREMENTS:
@@ -465,8 +471,9 @@ def evaluate_allocation(
             raise AnalysisError(
                 f"dataset {item.label!r} does not support {candidate_rule!r}; missing: {missing}."
             )
-        declared = item.dataset.contract.split.get("development_ticker_count")
-        _exact_positive_integer(declared, f"dataset {item.label!r} declared development pool")
+        if not descriptive:
+            declared = item.dataset.contract.split.get("development_ticker_count")
+            _exact_positive_integer(declared, f"dataset {item.label!r} declared development pool")
 
     block_maps = [{window.block_key: window for window in item.scope.windows} for item in inputs]
     common_blocks = set(block_maps[0])
@@ -584,23 +591,14 @@ def evaluate_allocation(
             ranked = _rank(decisions)
             bottom_ranked = _rank(decisions, bottom=True)
             available = len(ranked)
-            declared_pool = int(item.dataset.contract.split["development_ticker_count"])
-            matched_k = (
-                max(
-                    1,
-                    min(
-                        available,
-                        math.ceil(primary_k / declared_pool * available),
-                    ),
-                )
-                if available
-                else None
-            )
             variants = {
                 "primary": {"k": primary_k, "label": "operational_primary"},
                 "sensitivity": {"k": sensitivity_k, "label": "sensitivity"},
-                "matched_fraction": {"k": matched_k, "label": "diagnostic"},
             }
+            if not descriptive:
+                declared_pool = int(item.dataset.contract.split["development_ticker_count"])
+                matched_k = max(1, min(available, math.ceil(primary_k / declared_pool * available))) if available else None
+                variants["matched_fraction"] = {"k": matched_k, "label": "diagnostic"}
             for variant in variants.values():
                 k = variant["k"]
                 variant["top"] = (
@@ -739,10 +737,10 @@ def evaluate_allocation(
                         "label": "diagnostic",
                         "hindsight": False,
                         "non_deployable": True,
-                        "draw_count": item.dataset.contract.evidence["uncertainty"][
+                        "draw_count": random_settings(item.dataset.contract)[
                             "resamples"
                         ],
-                        "base_seed": item.dataset.contract.evidence["uncertainty"][
+                        "base_seed": random_settings(item.dataset.contract)[
                             "seed"
                         ],
                         "derived_seed": None,
@@ -985,7 +983,7 @@ def evaluate_allocation(
     dataset_summaries: dict[str, Mapping[str, Any]] = {}
     for item in inputs:
         variants: dict[str, Mapping[str, Any]] = {}
-        for variant_name in ("primary", "sensitivity", "matched_fraction"):
+        for variant_name in (("primary", "sensitivity") if descriptive else ("primary", "sensitivity", "matched_fraction")):
             blocks = dataset_blocks[item.label]
             monthly = [block["variants"][variant_name]["capacity_return_pct"] for block in blocks]
             sets = [block["variants"][variant_name]["selected_tickers"] for block in blocks]
@@ -1031,7 +1029,7 @@ def evaluate_allocation(
                 "turnover": _turnover(sets, ks, varying=variant_name == "matched_fraction"),
                 "bootstrap": {
                     "effect": headline,
-                    **descriptive_bootstrap(monthly, item.dataset.contract.evidence["uncertainty"]),
+                    **(interval_not_requested() if descriptive else descriptive_bootstrap(monthly, item.dataset.contract.evidence["uncertainty"])),
                 },
                 "mean_spreads": {
                     key: (float(np.mean(values)) if all(value is not None for value in values) else None)
@@ -1128,6 +1126,12 @@ def evaluate_allocation(
             for index, key in enumerate(ordered_blocks)
         ],
     }
+    if descriptive:
+        units = {"schema_version": "strategy_lab_allocation_v2", "period_unit": "oos_block",
+                 "oos_period_months": {item.label: item.dataset.run_spec["generation"]["windows"]["oos_period_months"] for item in inputs}}
+        capabilities = {name: not_requested() for name in ("matched_fraction", "evidence", "nominations", "bootstrap", "outlier_removal")}
+        metadata.update(**units, capabilities=capabilities)
+        summary.update(**units, capabilities=capabilities)
     return AllocationResult(
         metadata,
         summary,

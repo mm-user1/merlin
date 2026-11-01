@@ -174,61 +174,65 @@ def _report(result: AnalysisResult) -> bytes:
             reason = "missing metrics: " + ", ".join(state["missing_metrics"])
             lines.append(f"| `{name}` | {state['kind']} | {state['status']}: {reason} |")
 
-    lines.extend(
-        [
-            "",
-            "## Descriptive month-block bootstrap intervals",
-            "",
-            "These intervals are descriptive only. With five or six blocks they are weak and are not statistical proof.",
-            "",
-            "| Rule | Headline | Effect | Blocks | CI95 low | CI95 high | CI95 width | Status/reason |",
-            "|---|---|---:|---:|---:|---:|---:|---|",
-        ]
-    )
-    selectable = metadata["contracts"]["rule_registry"]["selectable_rules"]
-    for name in selectable:
-        row = summary["rules"].get(name)
-        if row is None:
-            continue
-        for headline, interval in row["bootstraps"].items():
-            reason = interval["status"] if interval["reason"] is None else f"{interval['status']}: {interval['reason']}"
-            lines.append(
-                f"| `{name}` | `{headline}` | {display(interval['effect'])} | {interval['block_count']} "
-                f"| {display(interval['lower'])} | {display(interval['upper'])} "
-                f"| {display(interval['width'])} | {reason} |"
-            )
+    if metadata.get("period_unit") == "oos_block":
+        lines.extend(["", f"Returns cover {metadata['oos_period_months']}-month OOS blocks. `monthly_*` fields and `monthly_results.csv` are historical per-block aliases; no annualization is applied.",
+                      "Evidence, nominations, bootstrap intervals and outlier removal: not_requested (strategy_lab_descriptive_v1).", ""])
+    else:
+        lines.extend(
+            [
+                "",
+                "## Descriptive month-block bootstrap intervals",
+                "",
+                "These intervals are descriptive only. With five or six blocks they are weak and are not statistical proof.",
+                "",
+                "| Rule | Headline | Effect | Blocks | CI95 low | CI95 high | CI95 width | Status/reason |",
+                "|---|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        selectable = metadata["contracts"]["rule_registry"]["selectable_rules"]
+        for name in selectable:
+            row = summary["rules"].get(name)
+            if row is None:
+                continue
+            for headline, interval in row["bootstraps"].items():
+                reason = interval["status"] if interval["reason"] is None else f"{interval['status']}: {interval['reason']}"
+                lines.append(
+                    f"| `{name}` | `{headline}` | {display(interval['effect'])} | {interval['block_count']} "
+                    f"| {display(interval['lower'])} | {display(interval['upper'])} "
+                    f"| {display(interval['width'])} | {reason} |"
+                )
 
-    lines.extend(["", "## Mechanical evidence", ""])
-    evidence_by_rule = summary["evidence_by_selectable_rule"]
-    for name in selectable:
-        rows = evidence_by_rule.get(name)
-        if rows is None:
-            state = metadata["rule_states"][name]
+        lines.extend(["", "## Mechanical evidence", ""])
+        evidence_by_rule = summary["evidence_by_selectable_rule"]
+        for name in selectable:
+            rows = evidence_by_rule.get(name)
+            if rows is None:
+                state = metadata["rule_states"][name]
+                lines.extend(
+                    [
+                        f"### `{name}`",
+                        "",
+                        f"Evidence unavailable: {state['status']}; missing metrics: {', '.join(state['missing_metrics'])}.",
+                        "",
+                    ]
+                )
+                continue
             lines.extend(
                 [
                     f"### `{name}`",
                     "",
-                    f"Evidence unavailable: {state['status']}; missing metrics: {', '.join(state['missing_metrics'])}.",
-                    "",
+                    "| Criterion | Operator | Threshold | Of | Observed | Status | Reason |",
+                    "|---|---:|---:|---:|---:|---|---|",
                 ]
             )
-            continue
-        lines.extend(
-            [
-                f"### `{name}`",
-                "",
-                "| Criterion | Operator | Threshold | Of | Observed | Status | Reason |",
-                "|---|---:|---:|---:|---:|---|---|",
-            ]
-        )
-        for evidence in rows:
-            declared_of = "" if evidence["of"] is None else display(evidence["of"])
-            lines.append(
-                f"| `{evidence['criterion']}` | `{evidence['operator']}` | {display(evidence['threshold'])} "
-                f"| {declared_of} | {display(evidence['observed'])} "
-                f"| {evidence['status']} | {evidence['reason'] or ''} |"
-            )
-        lines.append("")
+            for evidence in rows:
+                declared_of = "" if evidence["of"] is None else display(evidence["of"])
+                lines.append(
+                    f"| `{evidence['criterion']}` | `{evidence['operator']}` | {display(evidence['threshold'])} "
+                    f"| {declared_of} | {display(evidence['observed'])} "
+                    f"| {evidence['status']} | {evidence['reason'] or ''} |"
+                )
+            lines.append("")
 
     diagnostics = summary["diagnostics"]
     lines.extend(
@@ -283,6 +287,8 @@ def _report(result: AnalysisResult) -> bytes:
             "",
         ]
     )
+    if metadata.get("period_unit") == "oos_block":
+        lines = [line.replace("The descriptive month-block intervals are weak with five or six blocks.", "") for line in lines]
     return "\n".join(lines).encode("utf-8")
 
 
@@ -357,6 +363,10 @@ def _allocation_report(result: AllocationResult) -> bytes:
         "## Dataset results",
         "",
     ]
+    if metadata.get("period_unit") == "oos_block":
+        lines.extend([f"OOS block lengths in months by dataset: `{metadata['oos_period_months']}`.",
+                      "`monthly_*` fields and `monthly_results.csv` are historical OOS-block aliases; returns are not annualized.",
+                      "Matched fraction, evidence, nominations, bootstrap intervals and outlier removal: not_requested (strategy_lab_descriptive_v1).", ""])
     for label in metadata["dataset_labels"]:
         facts = summary["datasets"][label]
         lines.extend(

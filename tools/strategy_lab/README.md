@@ -51,6 +51,143 @@ Schema-v2 MTM is supported for generic signal reversal as well as position
 execution, using the research-only optional sidecar and unchanged 26-column
 compiled ABI. See [metric semantics](../../docs/METRICS.md#strategy-lab-mtm-drawdown).
 
+## Parquet and S07 Off
+
+| Request | Input/execution | Dataset | Reader/report |
+| --- | --- | --- | --- |
+| `strategy_lab_runspec_v1` | Existing CSV and certified S03/S06 | `strategy_lab_dataset_v2`, 21 metrics | Existing analysis/allocation v1 |
+| `strategy_lab_runspec_v2` | Parquet, admission-capable V2, explicit Off | `strategy_lab_dataset_v3`, 22 metrics | Descriptive analysis/allocation v2 |
+
+Dataset v1 is not supported by the analysis reader. Existing request hashes,
+CSV validation, v2 metrics, rules and evidence contracts are preserved. The new
+route requires `entryAdmission="risk_bracket_v1"`; S07 is the certified production
+integration. Active F06, S03/S06 Parquet, selectors, carried capital, FT/stress and
+delayed OOS remain unsupported and are rejected.
+
+The complete runnable request is [s07_off_example.json](runspecs/s07_off_example.json).
+Its dates, roster and economics are synthetic illustrations, not an authorized
+market experiment. It declares one research cell, three windows, explicit
+capital/fees/risk/directions/cap, and all 840 registered S07 combinations.
+`axis_values` assert registered domains, never override them. Disable axes and
+supply fixed scalars for a smaller grid. The cap cannot be an axis. Manual
+Contract Size and runtime/date parameters in base parameters are refused.
+
+From the repository root, using a fresh external scratch directory:
+
+```powershell
+$py = 'C:/Users/MT/Desktop/Strategy/S_Python/.venv/Scripts/python.exe'
+$scratch = Join-Path $env:LOCALAPPDATA 'Temp/strategy-lab-synthetic-example'
+$spec = 'tools/strategy_lab/runspecs/s07_off_example.json'
+& $py -B -m tools.strategy_lab.synthetic_parquet --output-dir "$scratch/pack"
+& $py -B -m tools.strategy_lab.config $spec
+& $py -B -m tools.strategy_lab.generate $spec --data-root "$scratch/pack" `
+  --output-dir "$scratch/smoke" --ticker BYBIT_AAAUSDT --window 2 --preflight-only
+& $py -B -m tools.strategy_lab.generate $spec --data-root "$scratch/pack" `
+  --output-dir "$scratch/smoke" --ticker BYBIT_AAAUSDT --window 2 --resume
+& $py -B -m tools.strategy_lab.analysis.cli analyze --dataset "$scratch/smoke" `
+  --scope research --allow-partial-scope --output "$scratch/smoke-analysis"
+& $py -B -m tools.strategy_lab.generate $spec --data-root "$scratch/pack" `
+  --output-dir "$scratch/full"
+& $py -B -m tools.strategy_lab.analysis.cli analyze --dataset "$scratch/full" `
+  --scope research --output "$scratch/analysis"
+& $py -B -m tools.strategy_lab.analysis.cli allocate --dataset "s07=$scratch/full" `
+  --scope research --rule primary_profit --primary-k 6 --sensitivity-k 8 `
+  --output "$scratch/allocation"
+```
+
+For isolated verification use the test launcher and external compiler caches as
+specified in [tests/README.md](../../tests/README.md). The synthetic command only
+publishes generated candles into a new directory; it collects no market data.
+Repeat generation with `--resume` after interruption, retaining exact selections.
+A completed repeat verifies sources/artifacts and returns a no-op. Changed requests
+require a fresh output. Offline `config` reports plan facts as
+`requires_source_rules`; only `generate --preflight-only` prepares rules-aware
+plans, checks count/domains/geometry and publishes an incomplete resumable plan.
+No manually calculated fingerprints are needed.
+
+Requests declare ordered normalized full instrument IDs, cells, one pack/timeframe,
+calendar, analysis scopes, and random-control seed/draw count. Durations must be
+positive multiples of 5 minutes dividing 1440. Full schedules retain Merlin's
+minimum of two complete windows; a smoke can select one original window ID.
+Multi-month OOS blocks are supported. A sole `research` cell needs no holdout.
+The CLI default remains `development`; explicitly pass `--scope research`.
+Locked scopes require both `--unlock-scope` and a frozen `--policy`; missing windows
+require `--allow-partial-scope`.
+
+### Frozen inputs and publication
+
+Preflight processes instruments sequentially, freezing each selected union with
+outer warmup and intervening bars for nonadjacent windows. Merlin `prepare_input`
+owns closed continuous candles, quote-turnover Volume and float64 OHLCV. No clipping,
+filling, CSV conversion or collection occurs. Locks end before numerical work;
+one instrument frame is retained at a time. Each segment uses Merlin warmup slicing
+and fresh strategy preparation, as in WFA, at the declared fixed initial capital.
+All candidates execute compiled Grid without ranking, sampling or selected Slow.
+
+Shared `candidates.json` schema v2 stores geometry once. Exact order/IDs/keys,
+parameters, modes, axes/codes/masks must agree across instruments; unequal geometry
+fails without remapping. Each instrument retains its own plan fingerprint and
+semantic digest. `input_bindings.json` version 1 owns portable consumed pins,
+admission/Off envelopes, plans and exact segment bounds/warmup facts.
+`data_quality.csv` keeps the historical columns/order, with full IDs in
+`canonical_symbol` and blank CSV-only filename/hash fields. It reports
+status/ownership; bindings own preparation identity.
+
+Identity binds the request, roster, selections, geometry, effective admission
+rules/cap, consumed fingerprints, versions and metric axes. Roots, acquisition
+metadata and original decimal spelling are provenance, protected by artifact
+checksums but excluded from semantic identity. Compatible provenance refreshes
+and equivalent rule spellings never rewrite the saved envelopes.
+
+Partial resume verifies bindings/artifacts and replays each source immediately
+before pending or regenerated groups. Valid groups remain reusable without market
+reads, with no final source sweep. Completion proves consumed historical inputs,
+not an atomic multi-instrument snapshot or equality with today's pack. A completed
+rerun explicitly replays every source to verify current reproducibility. Changed
+consumed candles/effective rules fail; compatible outside appends pass. Completed
+outputs remain immutable even when corrupt; only partial groups can regenerate.
+
+For relocation, pass an equivalent pack through `--data-root` (or the existing
+environment fallback). Lab reconstructs the current-host core descriptor from
+portable facts, including Windows-origin provenance on Linux, and verifies saved
+content/rules through core replay without editing artifacts. Wrong venue,
+instrument, timeframe, rules or consumed candles fail. This rule is Off-only.
+Output beneath the resolved source root, including aliases, is refused.
+
+### Descriptive v3 outputs
+
+The float64 layout remains `[candidate, is/oos, metric]`. V3 appends raw
+`margin_reject_count` to the unchanged v2 axis. In risk-bracket mode it counts
+above-cap refusals; `rejected_fill_count` is not a substitute. Raw
+`max_required_leverage` remains unchanged: zero on a no-fill row does not prove
+an observed accepted-fill maximum. Minimum-notional refusals have no invented
+counter. Finite zero returns remain data; nonfinite/unavailable values remain
+unavailable.
+
+The offline reader checks schemas, bindings, geometry, ownership, hashes, shapes
+and backend records without opening market packs or constructing Grid plans.
+Analysis joins use full IDs in historical `canonical_symbol`/ticker fields.
+Mixed v2/v3 allocation comparisons fail; v3 comparisons align exact IDs and UTC
+blocks. Candidate and ticker decisions freeze from IS before OOS access. The
+existing 15-trade rules and tie order are unchanged.
+
+Analysis averages valid instruments equally within each block, then valid blocks
+equally, exposing counts/missingness. Allocation retains fixed `1/K` weights,
+cash underfill and all/bottom/random/oracle controls. Required missing blocks make
+headline/compounding unavailable; allocation never compounds around them. Random
+controls use explicit seed/draw count even for empty pools. Oracle controls are
+hindsight diagnostics, and all allocation remains normalized research.
+
+Both metadata and summary use `strategy_lab_analysis_v2` or
+`strategy_lab_allocation_v2`, `period_unit="oos_block"`, and explicit
+`oos_period_months` (by input label for allocation). Five analysis and six allocation
+filenames remain unchanged. `monthly_results.csv` and `monthly_*` fields are
+historical aliases for per-OOS-block quantities, including multi-month blocks;
+returns are not annualized or rescaled. Evidence verdicts, nominations, bootstrap
+intervals and outlier removal are `not_requested` under
+`strategy_lab_descriptive_v1`. Allocation omits `matched_fraction`, recording one
+capability status instead. No executable portfolio or carried-capital claim is made.
+
 ## Safety and identity
 
 - Source CSVs are read only. The tool never rewrites, sorts, or writes beside
@@ -245,7 +382,7 @@ for an aligned comparison:
 
 ## Dataset and resume contract
 
-The generator builds one validated V2 plan and evaluates every candidate over
+The legacy CSV generator builds one validated V2 plan and evaluates every candidate over
 independent IS/OOS prepared segments. Effective `compiled_numba` execution is
 required; unavailable compilation or silent reference fallback fails before a
 group is published. Calendar windows come from Merlin's authoritative builder,
@@ -257,8 +394,8 @@ Current `strategy_lab_dataset_v2` group arrays are `float64` with axes
 metrics. The final metric is research-only bar-close
 `max_drawdown_mtm_pct`; it is not a public optimizer objective or persisted
 Merlin run result. It differs from realized balance Max DD and TradingView's
-intrabar High/Low drawdown. Signal-reversal execution is unsupported for this
-metric and fails explicitly. See [metrics authority](../../docs/METRICS.md).
+intrabar High/Low drawdown. Both generic position and signal-reversal execution
+support this metric. See [metrics authority](../../docs/METRICS.md).
 
 `candidates.json` preserves candidate order, identity, and geometry. Group
 files publish atomically with checksums. `manifest.partial.json` claims only

@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SUPPORTED_DATASET_SCHEMAS = {"strategy_lab_dataset_v2"}
+SUPPORTED_DATASET_SCHEMAS = {"strategy_lab_dataset_v2", "strategy_lab_dataset_v3"}
 SUPPORTED_RULE_VERSIONS = {"strategy_lab_rules_v1"}
 SUPPORTED_EVIDENCE_VERSIONS = {"strategy_lab_evidence_v1"}
 EVALUABLE_EVIDENCE_BLOCKS = (
@@ -85,6 +85,9 @@ class AnalysisContract:
     evidence_version: str
     maximum_nominated_rules: int
     primary_comparison: str
+    descriptive: bool = False
+    seed: int | None = None
+    random_control_draws: int | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,17 @@ def _validate_calendar_blocks(
 
 def _validate_contract(run_spec: Mapping[str, Any]) -> AnalysisContract:
     prereg = _require_mapping(run_spec.get("preregistration"), "preregistration")
+    if run_spec.get("schema_version") == "strategy_lab_runspec_v2":
+        from ..config_v2 import validate_request
+
+        validate_request(run_spec)
+        return AnalysisContract(
+            observation={"monthly_ticker_aggregation": "equal_weight_valid_tickers",
+                         "headline_aggregation": "equal_weight_valid_oos_blocks"},
+            rule_registry=prereg["rule_registry"], scopes=tuple(prereg["analysis_scopes"]),
+            split={}, evidence={}, evidence_version="not_requested", maximum_nominated_rules=0,
+            primary_comparison="top1_oos_net_profit_vs_primary_profit", descriptive=True,
+            seed=prereg["seed"], random_control_draws=prereg["random_control_draws"])
     required = (
         "observation_contract",
         "rule_registry",
@@ -487,7 +501,9 @@ class AnalysisDataset:
 def _candidate_geometry(
     payload: Mapping[str, Any], manifest_identity: Mapping[str, Any]
 ) -> CandidateGeometry:
-    if payload.get("schema_version") != "strategy_lab_candidates_v1":
+    candidate_schema = ("strategy_lab_candidates_v2" if manifest_identity.get("dataset_schema") == "strategy_lab_dataset_v3"
+                        else "strategy_lab_candidates_v1")
+    if payload.get("schema_version") != candidate_schema:
         raise AnalysisError("unsupported candidates.json schema version.")
     rows = payload.get("candidates")
     count = payload.get("candidate_count")
@@ -672,6 +688,13 @@ def open_dataset(
         ) != artifact.get("sha256"):
             raise AnalysisError(f"manifest artifact verification failed: {artifact_name}.")
     run_spec = _load_json(root / "normalized_runspec.json", "normalized_runspec.json")
+    if schema == "strategy_lab_dataset_v3":
+        try:
+            from .dataset_v3 import validate_dataset_v3
+
+            validate_dataset_v3(root, manifest, run_spec)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            raise AnalysisError(f"invalid dataset v3: {exc}") from exc
     contract = _validate_contract(run_spec)
     # The Phase-0 field name is historical: its frozen identity hashes the
     # complete normalized run spec, as config.load_run_spec() does.

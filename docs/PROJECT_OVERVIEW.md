@@ -241,7 +241,9 @@ Strategy Lab is local, research-only tooling for certified V2 strategies. It
 uses tracked run specs and read-only market inputs to generate deterministic,
 resumable datasets in explicit ignored output directories. Implemented
 capabilities include structural/real-pack certification, schema-v2 bar-close
-MTM data, development analysis, and fixed-capacity allocation. It does not
+MTM data, development analysis, and fixed-capacity allocation. Versioned Parquet
+generation adds S07 Off with admission, portable consumed-input bindings, and
+dataset-v3 descriptive analysis/allocation alongside the preserved CSV path. It does not
 change Merlin runtime behavior and has no CSV-level multiprocessing extension.
 
 The complete usage, identity, schema, resume, analysis, allocation, and safety

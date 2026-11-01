@@ -401,6 +401,8 @@ def evaluate_scope(
     *,
     custom_rules: Sequence[CustomRule] = (),
 ) -> AnalysisResult:
+    if dataset.contract.descriptive and custom_rules:
+        raise AnalysisError("descriptive v3 currently supports the frozen built-in rules only.")
     selectable, declared_diagnostics = _validate_registry(dataset)
     formula_rules = selectable + tuple(
         name for name in declared_diagnostics if name in FORMULA_DIAGNOSTICS
@@ -493,6 +495,7 @@ def evaluate_scope(
             "zero_size_entry_count",
             "invalid_stop_distance_count",
             "max_required_leverage",
+            "margin_reject_count",
         )
         if metric in dataset.metric_index
     )
@@ -691,15 +694,21 @@ def evaluate_scope(
     )
     monthly_rows: list[Mapping[str, Any]] = []
     rule_summaries: dict[str, Mapping[str, Any]] = {}
-    uncertainty = dataset.contract.evidence["uncertainty"]
-    procedure = dataset.contract.evidence["outlier_procedure"]
+    from .descriptive import not_requested, interval_not_requested
+    descriptive = dataset.contract.descriptive
+    uncertainty = not_requested() if descriptive else dataset.contract.evidence["uncertainty"]
+    procedure = not_requested() if descriptive else dataset.contract.evidence["outlier_procedure"]
     population_flat = oos_net_grid.ravel()
     population_monthly_mean: list[float | None] = []
     population_monthly_median: list[float | None] = []
     population_monthly_profitable: list[float | None] = []
     for wi, window in enumerate(scope.windows):
         values = oos_net_grid[:, wi, :].ravel()
-        population_monthly_mean.append(_finite_mean(values))
+        population_monthly_mean.append(
+            _finite_mean(np.asarray([_finite_mean(row) if np.isfinite(row).any() else np.nan
+                                    for row in oos_net_grid[:, wi, :]], dtype=float))
+            if descriptive else _finite_mean(values)
+        )
         population_monthly_median.append(_finite_median(values))
         population_monthly_profitable.append(profitable_share(values))
         monthly_rows.append(
@@ -723,7 +732,8 @@ def evaluate_scope(
         "observation_count": int(population_flat.size),
         "finite_count": int(np.isfinite(population_flat).sum()),
         "unavailable_count": int((~np.isfinite(population_flat)).sum()),
-        "mean": _finite_mean(population_flat),
+        "mean": (_finite_mean(np.asarray([value if value is not None else np.nan for value in population_monthly_mean]))
+                 if descriptive else _finite_mean(population_flat)),
         "median": _finite_median(population_flat),
         "quartile_25": _finite_quantile(population_flat, 0.25),
         "quartile_75": _finite_quantile(population_flat, 0.75),
@@ -747,34 +757,38 @@ def evaluate_scope(
         lift5 = top5 - baseline[:, :, 1]
         lift1_monthly, lift1_headline = monthly_headline(lift1)
         lift5_monthly, lift5_headline = monthly_headline(lift5)
-        robustness = outlier_robustness(
-            lift1,
-            top1,
-            scope.tickers,
-            procedure,
-            ticker_cell_count=scope.ticker_cell_count,
-        )
         selected_pairs = int(np.isfinite(top1).sum())
-        bootstraps = {
-            "top1_absolute": {
-                "effect": top1_headline,
-                **descriptive_bootstrap(top1_monthly, uncertainty),
-            },
-            "top1_lift": {
-                "effect": lift1_headline,
-                **descriptive_bootstrap(lift1_monthly, uncertainty),
-            },
-            "top5_lift": {
-                "effect": lift5_headline,
-                **descriptive_bootstrap(lift5_monthly, uncertainty),
-            },
-            "robust_top1_lift": {
-                "effect": robustness["robust_lift_headline"],
-                **descriptive_bootstrap(
-                    robustness["robust_monthly_lift_descriptive"], uncertainty
-                ),
-            },
-        }
+        if descriptive:
+            robustness = {**not_requested(), "robust_lift_headline": None}
+            bootstraps = {name: interval_not_requested() for name in ("top1_absolute", "top1_lift", "top5_lift", "robust_top1_lift")}
+        else:
+            robustness = outlier_robustness(
+                lift1,
+                top1,
+                scope.tickers,
+                procedure,
+                ticker_cell_count=scope.ticker_cell_count,
+            )
+            bootstraps = {
+                "top1_absolute": {
+                    "effect": top1_headline,
+                    **descriptive_bootstrap(top1_monthly, uncertainty),
+                },
+                "top1_lift": {
+                    "effect": lift1_headline,
+                    **descriptive_bootstrap(lift1_monthly, uncertainty),
+                },
+                "top5_lift": {
+                    "effect": lift5_headline,
+                    **descriptive_bootstrap(lift5_monthly, uncertainty),
+                },
+                "robust_top1_lift": {
+                    "effect": robustness["robust_lift_headline"],
+                    **descriptive_bootstrap(
+                        robustness["robust_monthly_lift_descriptive"], uncertainty
+                    ),
+                },
+            }
         summary = {
             "rule_kind": rule_states[name]["kind"],
             "rule_status": rule_states[name]["status"],
@@ -829,22 +843,25 @@ def evaluate_scope(
                 }
             )
     evidence_by_rule = {}
-    for name in selectable:
-        supported = name in rule_summaries
-        missing = rule_states[name]["missing_metrics"]
-        evidence_by_rule[name] = evaluate_evidence(
-            dataset.contract.evidence,
-            population,
-            rule_summaries.get(name, {}),
-            actual_block_count=len(scope.block_keys),
-            scope_complete=not scope.is_partial,
-            rule_supported=supported,
-            unsupported_reason=(
-                f"official rule is unsupported; missing metrics: {', '.join(missing)}"
-                if not supported
-                else None
-            ),
-        )
+    if descriptive:
+        evidence_by_rule = {name: not_requested() for name in selectable}
+    else:
+        for name in selectable:
+            supported = name in rule_summaries
+            missing = rule_states[name]["missing_metrics"]
+            evidence_by_rule[name] = evaluate_evidence(
+                dataset.contract.evidence,
+                population,
+                rule_summaries.get(name, {}),
+                actual_block_count=len(scope.block_keys),
+                scope_complete=not scope.is_partial,
+                rule_supported=supported,
+                unsupported_reason=(
+                    f"official rule is unsupported; missing metrics: {', '.join(missing)}"
+                    if not supported
+                    else None
+                ),
+            )
     flags = np.concatenate(flag_values) if flag_values else np.empty(0)
     finite_flags = flags[np.isfinite(flags)].astype(np.int64)
     known_mask = 2 | 4 | 8
@@ -887,10 +904,12 @@ def evaluate_scope(
     canonical_order = [ticker_position[ticker] for ticker in sorted(scope.tickers)]
     ordered_ticker_grid = oos_net_grid[canonical_order]
     ticker_half_a = np.nanmean(ordered_ticker_grid[0::2].reshape(-1, candidate_count), axis=0)
-    ticker_half_b = np.nanmean(ordered_ticker_grid[1::2].reshape(-1, candidate_count), axis=0)
+    ticker_half_b = (np.nanmean(ordered_ticker_grid[1::2].reshape(-1, candidate_count), axis=0)
+                     if ticker_count > 1 else np.full(candidate_count, np.nan))
     split = max(1, window_count // 2)
     time_half_a = np.nanmean(oos_net_grid[:, :split].reshape(-1, candidate_count), axis=0)
-    time_half_b = np.nanmean(oos_net_grid[:, split:].reshape(-1, candidate_count), axis=0)
+    time_half_b = (np.nanmean(oos_net_grid[:, split:].reshape(-1, candidate_count), axis=0)
+                  if window_count > split else np.full(candidate_count, np.nan))
     diagnostics = {
         "metric_finite_counts": metric_finite,
         "metric_summaries": metric_summaries,
@@ -949,6 +968,7 @@ def evaluate_scope(
                 "zero_size_entry_count",
                 "invalid_stop_distance_count",
                 "max_required_leverage",
+                "margin_reject_count",
             )
             if metric in metric_values["oos"]
         },
@@ -1056,6 +1076,12 @@ def evaluate_scope(
         "evidence_by_selectable_rule": evidence_by_rule,
         "diagnostics": diagnostics,
     }
+    if descriptive:
+        units = {"schema_version": "strategy_lab_analysis_v2", "period_unit": "oos_block",
+                 "oos_period_months": dataset.run_spec["generation"]["windows"]["oos_period_months"]}
+        capabilities = {name: not_requested() for name in ("evidence", "nominations", "bootstrap", "outlier_removal")}
+        metadata.update(**units, capabilities=capabilities)
+        summary.update(**units, capabilities=capabilities)
     pair_decisions.sort(key=lambda row: (row["window_id"], row["ticker"], row["rule"]))
     monthly_rows.sort(key=lambda row: (row["window_id"], row["row_kind"], row["rule"]))
     return AnalysisResult(metadata, summary, tuple(pair_decisions), tuple(monthly_rows))

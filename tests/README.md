@@ -171,8 +171,11 @@ Preserve the existing Pattern Lab bracket, bracket-consistency, account executio
 account verification, account-study integration, carried selection and identity
 tests when shared V2 helpers change. Prospective source hashes change honestly;
 unchanged numerical fixtures do not imply unchanged implementation identity or
-permission to rewrite sealed artifacts. Strategy Lab stays CSV-only and rejects
-the new mode; its planning/packing preservation tests remain applicable.
+permission to rewrite sealed artifacts. Strategy Lab's legacy CSV route rejects
+the new mode; its v2 request/v3 dataset Parquet route supports admission with Off.
+`tests/strategy_lab/test_parquet_v3.py` covers the full synthetic S07 lattice,
+reference transport, replay, resume, offline reports and descriptive allocation.
+Existing Lab planning/packing preservation tests remain applicable.
 
 For Merlin Parquet input changes, add `tests/test_data_input.py`,
 `tests/test_data_input_workers.py`, `tests/server/test_data_input_routes.py`,

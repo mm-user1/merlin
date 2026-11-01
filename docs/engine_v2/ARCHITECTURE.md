@@ -69,8 +69,9 @@ execution, WFA and spawned FT/Stress workers. Workers consume the prepared frame
 and rules without reopening packs. `entry_admission` is the version-1 saved
 envelope; it pins the cap, effective decimal rules and validated source snapshot.
 See [Parquet inputs](../PARQUET_INPUTS.md) for conversion and replay semantics.
-Direct core and both compiled packers require rules too. CSV CLI and Strategy Lab
-generation reject this mode; V2 DSR remains unsupported.
+Direct core and both compiled packers require rules too. CSV CLI and legacy
+Strategy Lab CSV generation reject this mode. Lab's versioned Parquet route
+supplies validated rules and explicit Off context; see its guide. V2 DSR remains unsupported.
 
 Grid Preview resolves these rules from validated metadata under one local/provider
 read session, without preparing or hashing candles. Pending and metadata-known

@@ -1,0 +1,188 @@
+{
+  "schema_version": "strategy_lab_runspec_v2",
+  "run_name": "s07_off_synthetic_example",
+  "generation": {
+    "strategy": {
+      "allocator_version": "ordered_block_allocator_v1",
+      "engine": "v2",
+      "grid_v2_engine_version": "grid_v2_phase2_5",
+      "plan_identity_schema_version": "grid_v2_plan_identity_v3",
+      "planning_policy_version": "grid_v2_planning_v1",
+      "runtime_contract_version": "v2_runtime_contract_v1",
+      "semantic_identity_schema_version": "grid_v2_semantic_identity_v2",
+      "strategy_id": "s07_ha_v01_b2",
+      "strategy_version": "v01"
+    },
+    "market_data": {
+      "source_type": "parquet",
+      "timeframe_minutes": 30,
+      "instruments": [
+        {
+          "instrument_id": "BYBIT_AAAUSDT",
+          "cell": "research"
+        }
+      ]
+    },
+    "windows": {
+      "timeframe_minutes": 30,
+      "period_unit": "months",
+      "is_period_months": 1,
+      "oos_period_months": 1,
+      "calendar_anchor_day": 1,
+      "requested_start": "2024-02-01",
+      "requested_end": "2024-06-01",
+      "expected_window_count": 3,
+      "warmup_bars": 100
+    },
+    "economics": {
+      "base_params": {
+        "enableLong": true,
+        "enableShort": true,
+        "entryRunLength": 6,
+        "stopX": 2.0,
+        "stopRR": 3.0,
+        "stopLP": 2,
+        "stopMaxDays": 4,
+        "riskPerTrade": 2.0,
+        "maxEntryLeverage": 8.0,
+        "initialCapital": 1000.0,
+        "commissionPct": 0.05
+      },
+      "tick_size_provenance": {
+        "tickSize": 0.001,
+        "operative": false,
+        "reason": "priceRounding=none"
+      },
+      "slippage_modelled": false,
+      "funding_modelled": false
+    },
+    "execution": {
+      "policy": "risk_bracket_v1",
+      "entry_filters": []
+    },
+    "planning": {
+      "enabled_variants": [
+        "default"
+      ],
+      "enabled_axes": [
+        "entryRunLength",
+        "stopX",
+        "stopRR",
+        "stopLP",
+        "stopMaxDays"
+      ],
+      "axis_values": {
+        "entryRunLength": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "stopX": [
+          1.0,
+          1.5,
+          2.0,
+          2.5,
+          3.0
+        ],
+        "stopRR": [
+          1.5,
+          2.0,
+          2.5,
+          3.0
+        ],
+        "stopLP": [
+          2,
+          4
+        ],
+        "stopMaxDays": [
+          2,
+          4,
+          6
+        ]
+      },
+      "planning_policy": "full",
+      "grid_v2_prefer_compiled": true,
+      "expected_candidate_count": 840,
+      "expected_effective_planning_policy": "full"
+    },
+    "resources": {
+      "outer_workers": 1,
+      "numba_threads": 1,
+      "grid_v2_max_cache_mb": 512
+    }
+  },
+  "preregistration": {
+    "analysis_contract": "strategy_lab_descriptive_v1",
+    "analysis_scopes": [
+      {
+        "name": "research",
+        "ticker_cell": "research",
+        "window_numbers": [
+          1,
+          2,
+          3
+        ],
+        "requires_unlock": false
+      }
+    ],
+    "rule_registry": {
+      "baseline_rule": "primary_profit",
+      "minimum_completed_trades": 15,
+      "nomination_eligible_rules": [
+        "trade_gate15_profit",
+        "trade_gate15_profit_factor",
+        "trade_gate15_daily_sharpe",
+        "trade_gate15_romad_mtm",
+        "star_mean_profit",
+        "star_worst_profit",
+        "balanced_percentile_raw",
+        "balanced_percentile_star"
+      ],
+      "non_nominatable_diagnostics": [
+        "trade_gate15_romad_realized",
+        "balanced_percentile_raw_realized",
+        "balanced_percentile_star_realized",
+        "pareto_plus_primary",
+        "population_no_skill",
+        "oos_oracle",
+        "oos_anti_oracle"
+      ],
+      "selectable_rules": [
+        "primary_profit",
+        "trade_gate15_profit",
+        "trade_gate15_profit_factor",
+        "trade_gate15_daily_sharpe",
+        "trade_gate15_romad_mtm",
+        "star_mean_profit",
+        "star_worst_profit",
+        "balanced_percentile_raw",
+        "balanced_percentile_star"
+      ],
+      "tie_break": [
+        {
+          "direction": "descending",
+          "field": "rule_score"
+        },
+        {
+          "direction": "descending",
+          "field": "IS net_profit_pct"
+        },
+        {
+          "direction": "ascending",
+          "field": "semantic_key"
+        },
+        {
+          "direction": "ascending",
+          "field": "candidate_id"
+        }
+      ],
+      "version": "strategy_lab_rules_v1"
+    },
+    "seed": 20261101,
+    "random_control_draws": 100
+  }
+}

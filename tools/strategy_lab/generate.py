@@ -455,6 +455,7 @@ def generate_dataset(
     ticker_selectors: Sequence[str] | None = None,
     window_selectors: Sequence[int] | None = None,
     resume: bool = False,
+    preflight_only: bool = False,
     repo_root: str | Path = REPO_ROOT,
     _after_group: Callable[[int, Path], None] | None = None,
     _progress: Callable[[str], None] | None = None,
@@ -473,6 +474,14 @@ def generate_dataset(
     )
     run_spec_started = time.perf_counter()
     spec = load_run_spec(run_spec_path, repo_root=repo)
+    if spec.raw["schema_version"] == "strategy_lab_runspec_v2":
+        from .parquet import generate_parquet
+
+        return generate_parquet(spec, root, output, ticker_selectors=ticker_selectors,
+            window_selectors=window_selectors, resume=resume, preflight_only=preflight_only,
+            repo=repo, after_group=_after_group, progress=_progress)
+    if preflight_only:
+        raise DatasetError("--preflight-only requires a v2 Parquet run spec.")
     run_spec_load_seconds = time.perf_counter() - run_spec_started
     plan_build_seconds = spec.plan_build_seconds
     _assert_plan_contract(spec)
@@ -827,6 +836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--ticker", action="append", dest="tickers")
     parser.add_argument("--window", action="append", type=int, dest="windows")
     args = parser.parse_args(argv)
@@ -838,11 +848,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             ticker_selectors=args.tickers,
             window_selectors=args.windows,
             resume=args.resume,
+            preflight_only=args.preflight_only,
             _progress=lambda message: print(f"Strategy Lab: {message}"),
         )
     except (DataQualityError, DatasetError, ValueError) as exc:
         parser.exit(2, f"Strategy Lab generation error: {exc}\n")
-    state = "verified no-op" if result.no_op else "complete"
+    state = "verified no-op" if result.no_op else ("preflight incomplete" if result.manifest_path.name == "manifest.partial.json" else "complete")
     print(
         f"Strategy Lab {result.scope} {state}: {result.completed_groups} group(s), "
         f"reused={result.reused_groups}, regenerated={result.regenerated_groups}, "

@@ -335,7 +335,7 @@ def _load_json_object(path: Path, field: str) -> Mapping[str, Any]:
     return _object(value, field)
 
 
-def _validate_strategy(strategy: Mapping[str, Any]) -> tuple[Mapping[str, Any], Any]:
+def _validate_strategy(strategy: Mapping[str, Any], *, parquet: bool = False) -> tuple[Mapping[str, Any], Any]:
     expected = {
         "strategy_id",
         "strategy_version",
@@ -386,7 +386,7 @@ def _validate_strategy(strategy: Mapping[str, Any]) -> tuple[Mapping[str, Any], 
         ) from None
     if profile.engine != "v2":
         raise StrategyLabConfigError("generation.strategy.strategy_id: resolved profile is not V2.")
-    if profile.modes.get("entryAdmission"):
+    if not parquet and profile.modes.get("entryAdmission"):
         raise StrategyLabConfigError("Strategy Lab CSV execution does not support risk_bracket_v1; use Merlin Parquet execution.")
     return config, profile
 
@@ -679,6 +679,16 @@ def load_run_spec(
 ) -> RunSpec:
     source_path = Path(path).resolve()
     raw = _load_json_object(source_path, "run spec")
+    if raw.get("schema_version") == "strategy_lab_runspec_v2":
+        from .config_v2 import validate_request
+
+        try:
+            validate_request(raw)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise StrategyLabConfigError(f"Parquet run spec: {exc}") from exc
+        return RunSpec(source_path, raw, raw["generation"], raw["preregistration"],
+                       canonical_sha256(raw["generation"]), canonical_sha256(raw),
+                       None, None, None, 0.0)
     _keys(raw, "run spec", {"schema_version", "run_name", "generation", "preregistration"})
     if raw["schema_version"] != RUNSPEC_SCHEMA_VERSION:
         raise StrategyLabConfigError(f"schema_version: expected '{RUNSPEC_SCHEMA_VERSION}'.")
@@ -800,6 +810,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "inventory_count": len(spec.inventory.entries) if spec.inventory else None,
                 "generation_sha256": spec.generation_sha256,
                 "pre_registration_sha256": spec.pre_registration_sha256,
+                **({"plan_facts": "requires_source_rules",
+                    "inventory_count": len(spec.generation["market_data"]["instruments"]),
+                    "execution_mode": spec.generation["execution"]["policy"]}
+                   if spec.raw["schema_version"] == "strategy_lab_runspec_v2" else {}),
             },
             indent=2,
             sort_keys=True,
