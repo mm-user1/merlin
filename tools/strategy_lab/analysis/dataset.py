@@ -686,6 +686,15 @@ def open_dataset(
         ) != artifact.get("sha256"):
             raise AnalysisError(f"manifest artifact verification failed: {artifact_name}.")
     run_spec = _load_json(root / "normalized_runspec.json", "normalized_runspec.json")
+    expected_runspec = {
+        "strategy_lab_dataset_v2": "strategy_lab_runspec_v1",
+        "strategy_lab_dataset_v3": "strategy_lab_runspec_v2",
+    }[schema]
+    if run_spec.get("schema_version") != expected_runspec:
+        raise AnalysisError(
+            f"dataset/RunSpec schema mismatch: {schema!r} requires {expected_runspec!r}, "
+            f"got {run_spec.get('schema_version')!r}."
+        )
     if schema == "strategy_lab_dataset_v3":
         try:
             from .dataset_v3 import validate_dataset_v3

@@ -166,6 +166,9 @@ unavailable.
 
 The offline reader checks schemas, bindings, geometry, ownership, hashes, shapes
 and backend records without opening market packs or constructing Grid plans.
+Before reader dispatch, dataset v2 requires RunSpec v1 and dataset v3 requires
+RunSpec v2. Missing, unknown or mismatched request versions fail explicitly;
+candidate schemas remain checked separately (v1 for dataset v2, v2 for dataset v3).
 It validates the saved supported contract once, independently of the installed
 strategy registry, parameter bounds/options and current engine version pins.
 Producing pins remain required, structurally valid and consistent across artifacts;
@@ -186,11 +189,16 @@ instrument/block, then weights available instruments equally within each block
 and available blocks equally. Population median and quantiles instead pool finite
 observations. Profitable share pools positive finite observations over all
 observations, with unavailable entries retained in the denominator. Generic
-diagnostic metric-summary means pool finite observations and can differ from the
-headline. Counts/missingness remain explicit. For example, block 1 with
+diagnostic summaries of other metrics pool finite observations; `net_profit_pct`
+has no generic metric-summary output. Counts/missingness remain explicit.
+For example, block 1 with
 A=[0,0], B=[100,unavailable] and block 2 with four zeros has block means 50 and 0,
-headline 25, diagnostic pooled mean 100/7, pooled median 0 and seven finite
-observations; profitable share is 1/8. These are different weights, not new metrics.
+headline 25, pooled median 0 and seven finite observations; profitable share is 1/8.
+The illustrative seven finite values have pooled mean 100/7; this is not an
+additional net-profit field emitted by the tool. Placing those same synthetic
+values in an existing diagnostic channel such as `profit_factor` also gives
+100/7 through its pooling rule. This arithmetic witness asserts no financial
+relationship between profit factor and net return and adds no statistic.
 Allocation retains fixed `1/K` weights,
 cash underfill and all/bottom/random/oracle controls. Required missing blocks make
 headline/compounding unavailable; allocation never compounds around them. Random

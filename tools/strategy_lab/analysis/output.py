@@ -122,7 +122,7 @@ def _report(result: AnalysisResult) -> bytes:
             "",
             "The population headline mean first averages finite candidate returns within each instrument/block, then gives equal weights to available instruments within a block and equal weights to available blocks.",
             "Population median and quantiles pool finite observations. Profitable share pools positive finite observations over all observations, including unavailable entries in the denominator. These statistics do not use the headline's hierarchical weights.",
-            "Generic diagnostic metric-summary means pool finite observations and can differ from the population headline mean.",
+            "Generic diagnostic summaries of other metrics pool finite observations. Net profit has no generic metric-summary output.",
         ] if descriptive else [
             f"- OOS Net Profit mean / median: {display(population['mean'])} / {display(population['median'])}",
             f"- OOS profitable share: {display(population['profitable_share'])}",

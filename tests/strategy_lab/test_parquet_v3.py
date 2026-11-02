@@ -614,6 +614,46 @@ def test_reader_rejects_resealed_rule_semantics(historical_v3, tmp_path):
     assert snapshot(out) == before
 
 
+@pytest.mark.parametrize("case", ["both_labels", "gate14", "unknown_analysis", "reverse", "missing", "unknown_request"])
+def test_reader_rejects_resealed_schema_pair(historical_v3, tmp_path, case):
+    from tools.strategy_lab.config import canonical_sha256
+    from tools.strategy_lab.dataset import artifact_record, atomic_write_json
+    from tools.strategy_lab.analysis.dataset import AnalysisError, _candidate_geometry
+    source = historical_v3[2]
+    original = snapshot(source)
+    out = tmp_path / "resealed"
+    shutil.copytree(source, out)
+    raw = load_json(out / "normalized_runspec.json", "request")
+    manifest = load_json(out / "manifest.json", "manifest")
+    candidates = load_json(out / "candidates.json", "candidates")
+    if case in {"both_labels", "gate14", "unknown_analysis"}:
+        # Both manifest declarations AND the candidate label change; the request
+        # remains v2. A manifest-only mutation would fail at the wrong boundary.
+        manifest["schema_version"] = manifest["identity"]["dataset_schema"] = "strategy_lab_dataset_v2"
+        candidates["schema_version"] = "strategy_lab_candidates_v1"
+        if case == "gate14":
+            raw["preregistration"]["rule_registry"]["minimum_completed_trades"] = 14
+        elif case == "unknown_analysis":
+            raw["preregistration"]["analysis_contract"] = "unsupported_analysis_contract"
+    elif case == "missing":
+        raw.pop("schema_version")
+    else:
+        raw["schema_version"] = "strategy_lab_runspec_v1" if case == "reverse" else "unknown_request"
+    for name, payload in (("normalized_runspec.json", raw), ("candidates.json", candidates)):
+        atomic_write_json(out / name, payload)
+        manifest["artifacts"][name] = artifact_record(out / name, out)
+    manifest["identity"]["pre_registration_sha256"] = canonical_sha256(raw)
+    atomic_write_json(out / "manifest.json", manifest)
+    parquet.verify_artifacts(out, manifest)
+    assert _candidate_geometry(candidates, manifest["identity"]).count == 2
+    assert manifest["identity"]["pre_registration_sha256"] == canonical_sha256(raw)
+    before = snapshot(out)
+    with pytest.raises(AnalysisError, match="dataset/RunSpec schema mismatch"):
+        open_dataset(out)
+    assert snapshot(out) == before
+    assert snapshot(source) == original
+
+
 def test_descriptive_population_weights_with_asymmetric_missingness(historical_v3, monkeypatch):
     from tools.strategy_lab.analysis.output import render_files
     dataset = open_dataset(historical_v3[2])
@@ -644,6 +684,8 @@ def test_descriptive_population_weights_with_asymmetric_missingness(historical_v
     assert "headline mean (equal instrument/block weights): 25.000000" in report
     assert "median (pooled finite observations): 0.000000" in report
     assert "including unavailable entries in the denominator" in report
-    assert "Generic diagnostic metric-summary means pool finite observations" in report
+    assert "Generic diagnostic summaries of other metrics pool finite observations" in report
+    assert "Net profit has no generic metric-summary output." in report
+    assert "net_profit_pct" not in result.summary["diagnostics"]["metric_summaries"]["oos"]
     assert "finite candidate returns within each instrument/block" in report
     assert "weak with five or six blocks" not in report

@@ -357,7 +357,9 @@ def _view(**overrides) -> ISView:
 
 def test_reader_uses_declared_axes_nonzero_ids_and_structural_is_view(tmp_path):
     root = _synthetic_dataset(tmp_path, metric_axis=tuple(reversed(METRICS)))
+    before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
     dataset = open_dataset(root)
+    assert dataset.schema_version == "strategy_lab_dataset_v2" and dataset.run_spec["generation"] == {}
     scope = dataset.resolve_scope()
     assert dataset.geometry.candidate_ids.tolist() == [10, 20, 30, 40]
     view = dataset.load_is_window(scope, scope.windows[0])["AAA"]
@@ -365,6 +367,7 @@ def test_reader_uses_declared_axes_nonzero_ids_and_structural_is_view(tmp_path):
     assert not hasattr(view, "oos")
     assert not hasattr(view, "load_oos")
     assert not view.metrics["net_profit_pct"].flags.writeable
+    assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
 def test_outside_worktree_dataset_uses_code_repository_git_facts(tmp_path):
