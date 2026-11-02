@@ -48,11 +48,14 @@ def publish(root, *, symbols=("AAA",), end="2024-06-02", rules=None, start="2024
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--symbols", nargs="+", default=["AAA"])
+    parser.add_argument("--start", default="2024-01-28")
+    parser.add_argument("--end", default="2024-06-02")
     args = parser.parse_args()
     root = args.output_dir.resolve()
     if root.is_relative_to(REPO_ROOT):
         parser.error("use a fresh external directory for synthetic input")
-    publish(root)
+    publish(root, symbols=tuple(args.symbols), start=args.start, end=args.end)
     print(root)
 
 

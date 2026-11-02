@@ -1,0 +1,87 @@
+{
+  "schema_version": "strategy_lab_fixed_runspec_v1",
+  "run_name": "s07_fixed_synthetic_series",
+  "generation": {
+    "strategy": {
+      "allocator_version": "ordered_block_allocator_v1",
+      "engine": "v2",
+      "grid_v2_engine_version": "grid_v2_phase2_5",
+      "plan_identity_schema_version": "grid_v2_plan_identity_v3",
+      "planning_policy_version": "grid_v2_planning_v1",
+      "runtime_contract_version": "v2_runtime_contract_v1",
+      "semantic_identity_schema_version": "grid_v2_semantic_identity_v2",
+      "strategy_id": "s07_ha_v01_b2",
+      "strategy_version": "v01"
+    },
+    "economics": {
+      "base_params": {
+        "enableLong": true,
+        "enableShort": true,
+        "entryRunLength": 6,
+        "stopX": 2.0,
+        "stopRR": 3.0,
+        "stopLP": 2,
+        "stopMaxDays": 4,
+        "riskPerTrade": 2.0,
+        "maxEntryLeverage": 8.0,
+        "initialCapital": 1000.0,
+        "commissionPct": 0.05
+      },
+      "slippage_modelled": false,
+      "funding_modelled": false
+    },
+    "market_data": {
+      "source_type": "parquet",
+      "instruments": [
+        {
+          "instrument_id": "BYBIT_AAAUSDT",
+          "cell": "synthetic_a"
+        },
+        {
+          "instrument_id": "BYBIT_BBBUSDT",
+          "cell": "synthetic_b"
+        }
+      ]
+    },
+    "execution": {
+      "parameter_mode": "fixed",
+      "policy": "risk_bracket_v1",
+      "entry_filters": []
+    },
+    "parameter_sets": [
+      {
+        "name": "base",
+        "params": {}
+      },
+      {
+        "name": "lower_risk",
+        "params": {
+          "riskPerTrade": 1.0,
+          "stopX": 2.17
+        }
+      }
+    ],
+    "timeframes_minutes": [
+      5,
+      60
+    ],
+    "periods": [
+      {
+        "name": "first",
+        "start": "2024-02-03",
+        "end": "2024-02-04",
+        "warmup_bars": 100
+      },
+      {
+        "name": "second",
+        "start": "2024-02-05",
+        "end": "2024-02-06",
+        "warmup_bars": 100
+      }
+    ],
+    "resources": {
+      "outer_workers": 1
+    },
+    "expected_run_count": 16
+  }
+}

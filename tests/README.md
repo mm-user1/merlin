@@ -95,6 +95,30 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+Strategy Lab continuous Fixed coverage is in `strategy_lab/test_fixed.py`,
+`test_fixed_parity.py`, `test_fixed_lifecycle.py` and `test_fixed_cli.py`, with
+the ordinary `_fixed_helpers.py` fixture and public synthetic provider builder.
+It uses no market pack or ignored audit script. Coverage includes application
+Fixed/Grid date-only-End parity (every trade/curve and final state), explicit core
+Daily Sharpe/MTM calculations, an actual month-crossing position, full/partial
+months, scalar/source refusals, a 16-account series, atomic claim recovery,
+source-verifying resume/no-op, historical offline reads and resealed contradictions.
+CLI tests execute every example cell, follow static report links with the source
+pack hidden, and exercise a bounded deterministic core quantity refusal. The
+examples use short periods, avoiding long-period synthetic compounding overflow.
+
+For this Lab-only boundary integration, the preservation gate is:
+
+```text
+python -B tools/run_tests.py --keep-temp -- tests/strategy_lab
+python -B tools/run_tests.py --keep-temp -- tests/v2/test_v2_fixed_singleton.py tests/v2/test_v2_s07_ha.py tests/test_data_input.py tests/test_metrics.py
+```
+
+Keep compiler cold-start time distinct from warm execution. Use external
+`MERLIN_TEST_ROOT` and record actual timings/RSS rather than imposing timing tests
+or claiming an input memory budget. The existing warm-cache timeout disposition
+below still applies to the IS/OOS two-process test.
+
 Start/Queue source UI preservation uses `test_js_source_workflow.py` alongside
 the existing Queue, Parquet, Entry Filters, admission, Fixed, Grid-objective and
 strategy-readiness JavaScript checks. It drives actual selection/editor/Queue

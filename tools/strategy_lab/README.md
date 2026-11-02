@@ -7,6 +7,177 @@ parity, analyzes frozen development rules, and evaluates fixed-capacity ticker
 allocation. It does not support Backtester V1, nominate a policy, or establish
 strategy quality by itself.
 
+Continuous Fixed research also runs explicit scalar configurations as independent
+accounts, with persisted evaluation curves and offline calendar views. It is a
+separate mode from the candidate-enumeration IS/OOS datasets described below.
+
+## Continuous Fixed research
+
+`python -m tools.strategy_lab.fixed` supports `validate`, `run` and `report`.
+The request `strategy_lab_fixed_runspec_v1` pairs exclusively with
+`strategy_lab_fixed_dataset_v1`. Both Fixed and IS/OOS readers reject the other
+family; old schemas and numerical contracts are preserved.
+
+One account starts once with its explicit initial capital and runs continuously
+through its Start–End interval. Reporting months never restart capital, close a
+position or reset indicators. A separately rerun subperiod has fresh capital,
+warmup and a new final boundary, so it is a different experiment. Every instrument
+has its own account; there is no shared capital, portfolio curve, ranking or winner
+selection. Fixed means fixed scalar parameters; Merlin's sizing still uses the
+changing balance. Generic `risk_bracket_v1` hooks/reference execution are reused,
+initially verified with S07. No S07-specific kernel is implemented in the Lab.
+
+### Request, input and runtime boundaries
+
+The complete examples are [a 16-account series](runspecs/s07_fixed_example.json)
+and [one account](runspecs/s07_fixed_single.json). Their settings are synthetic
+fixtures, not trading recommendations. The closed request declares:
+
+- Strategy/engine/runtime/planning/identity pins, checked against the live config
+  before generation; complete resolved scalars are frozen for historical reads.
+- Ordered exact full instrument IDs and descriptive cells; explicit initial
+  capital, commission, risk, long/short flags and leverage cap. Funding and
+  slippage must explicitly be false. Manual Contract Size is not allowed.
+- Named scalar parameter overlays, target timeframes, named periods with explicit
+  Start/End and integer warmup, `expected_run_count`, and `outer_workers: 1`.
+- `execution` exactly `parameter_mode: "fixed"`, `policy: "risk_bracket_v1"`,
+  `entry_filters: []`. Active filters, ties, ranges, axes, optimization, WFA,
+  automatic discovery, shared capital and concurrent execution are unsupported.
+
+Core Fixed resolution owns defaults, selectors, dependencies and scalar domains.
+Valid off-grid literals are supported; optimization-grid membership is irrelevant.
+Unknown names and wrong types are rejected before resolution. S07 Fixed's current
+cap domain is **1..10**, and user warmup is **100..5000 target bars**, without
+clamping. T01 IS/OOS retains its broader positive-cap and warmup domains; use values
+supported by both when comparing modes.
+
+Timeframes must be unique integers at least 5, divisible by 5, and dividing 1440
+exactly (5, 15, 60 and 240 are examples; 25 is invalid). Core prepares complete,
+closed, continuous 5-minute source groups, verified quote turnover and admission
+rules, plus all requested preceding warmup bars. No gaps are filled, no incomplete
+groups accepted, and no CSV conversion occurs. Gaps outside consumption remain
+irrelevant. Warmup creates state without funded trading history.
+
+Start/End select UTC target candle **open times**. End is inclusive. A date-only
+End such as `2024-03-31` includes that entire UTC day; a precise
+`2024-04-01T00:00:00Z` includes one April candle and may materially change monthly
+Sharpe. Core owns parsing/alignment. Effective execution dates and cap come from
+prepared facts/admission, and `warmupBars` matches the actual trade-start index.
+Requested bounds, effective evaluation bounds and half-open consumed bounds are
+all saved. There is only one `strict_close` final boundary, retaining core fees,
+pending-order rules, admission rounding/cap refusals and guardrails.
+
+### Bounded synthetic commands
+
+Use a fresh external directory; the builder publishes generated candles and never
+collects data. These two-day intervals avoid the sine fixture's known long-period
+5m/15m compounding overflow. All 16 declared cells are exercised by the CLI tests.
+
+```powershell
+$py = 'C:/Users/MT/Desktop/Strategy/S_Python/.venv/Scripts/python.exe'
+$scratch = Join-Path $env:LOCALAPPDATA 'Temp/strategy-lab-fixed-example'
+$spec = 'tools/strategy_lab/runspecs/s07_fixed_example.json'
+& $py -B -m tools.strategy_lab.synthetic_parquet --output-dir "$scratch/pack" `
+  --symbols AAA BBB --start 2024-01-28 --end 2024-02-07
+& $py -B -m tools.strategy_lab.fixed validate $spec
+& $py -B -m tools.strategy_lab.fixed run $spec --data-root "$scratch/pack" `
+  --output-dir "$scratch/dataset" --preflight-only
+& $py -B -m tools.strategy_lab.fixed run $spec --data-root "$scratch/pack" `
+  --output-dir "$scratch/dataset" --resume
+& $py -B -m tools.strategy_lab.fixed report --dataset "$scratch/dataset" `
+  --output-dir "$scratch/report"
+# Open $scratch/report/index.html locally. Market inputs are unnecessary for reporting.
+```
+
+For a single account, use `s07_fixed_single.json` and a fresh dataset/report
+directory with the same pack. Linux uses its configured interpreter and native
+paths. For verification, use the isolated launcher and external caches documented
+in [tests/README.md](../../tests/README.md).
+
+`validate` prints resolved settings, the matrix count and the sequential/date/
+warmup policy. It performs live-config validation, but cannot claim source admission.
+Preflight resolves every declared cell before any execution and freezes all bindings.
+Traversal is parameter set → timeframe → period → instrument in declared order.
+Duplicate account IDs fail preflight, including differently written periods that
+collapse to the same coarse timeframe grid. IDs bind pinned semantics, canonical
+non-runtime scalars, instrument/timeframe and resolved warmup/start/end/trade index;
+labels, raw date spellings, paths and provenance are not account-ID discriminators.
+The dataset contract separately binds the full request and source/effective facts.
+
+### Artifacts, accounting and offline reports
+
+`manifest.partial.json` embeds the frozen request, scalar contract and ordered
+account bindings. Each `accounts/<account_id>/` contains:
+
+| File | Meaning |
+| --- | --- |
+| `result.json` | Exact execution parameters/pins/bounds, source/admission/Off facts, capital/metric anchor, core metrics and units, availability, guards, final state, backend, timings/RSS and curve/table hashes |
+| `curve.parquet` | Every evaluation bar: `timestamp_ns` int64 UTC bar-open, `equity` and `balance` float64 account currency; no warmup or synthetic anchor row |
+| `monthly.csv` | Calendar accounting derived from those saved observations and anchor |
+| `report.html` | Static embedded-SVG equity/balance view, metrics, economics and monthly table |
+
+`series-index.csv` retains every declared row, including pending/failed rows and
+reasons, cells/labels, economics, metrics, counts and relative artifact paths.
+`manifest.json` alone marks completion. The backend is `generic_v2_reference`;
+Fixed does not run a redundant compiled screen. Existing IS/OOS generation still
+requires its compiled backend.
+
+Whole-run basic/advanced metrics are core results, not reconstructed trade
+statistics. Net Profit is realized balance change; realized Max DD and bar-close
+MTM Max DD are separate. Daily Sharpe and MTM calculations are explicitly requested.
+Null/unavailable metrics stay JSON `null` and empty numeric CSV cells, with reasons;
+valid zero stays zero. A loss, no trades or cap-blocked account can complete normally.
+Invalid accounting or execution errors cannot become zero-profit results. Trade
+ledgers and raw event exports are not provided by this feature.
+
+Monthly observations use end-of-bar values indexed by UTC bar-open timestamps.
+The first month opens at the saved pre-evaluation capital anchor; subsequent months
+open at the prior month's last equity/balance. This preserves first-bar P&L.
+Return is `100*(closing_equity/opening_equity-1)` only for positive opening equity;
+otherwise the visible month has null return and `nonpositive_opening_equity`.
+Realized P&L is closing minus opening balance, distinct from equity change.
+Rows retain first/last timestamps, counts and `partial_month`; a full month must
+cover every target bar-open. Final partial months remain visible without annualizing
+returns, inventing months or reallocating crossing-position profits.
+
+`report` verifies saved contracts, artifact hashes/shapes and calendar arithmetic
+without current registry/default/engine lookup or market access. It writes a separate
+offline index and one account view at a time. Links point to original JSON/Parquet/CSV;
+keep their relative locations if moving a report. Rebuilding derived views never
+changes execution artifacts. Default reporting requires completion; `--allow-partial`
+shows verified completed accounts and all declared pending/failed rows. The static
+plot samples at most 1,000 points; stored curves, metrics and tables retain all rows.
+There is no JavaScript, CDN or server dependency. Saved validation checks consistency,
+not execution truth against an adversary who rewrites and reseals every artifact.
+
+### Failure, resume and resource policy
+
+Per-file atomic writes precede a validated completed-account claim in the partial
+manifest. That claim publishes the account. An interrupted unclaimed account restarts
+from its original capital; its exact owned files may be replaced. Claimed completed
+files are immutable: missing/corrupt artifacts fail rather than regenerate. A partial
+dataset requires explicit `--resume`; changed experiments require a new output.
+
+Every invocation source-verifies all accounts before proceeding, including completed
+accounts on partial resume and complete no-op. Pending accounts replay their frozen
+inputs/rules again at consumption. Equivalent pack relocation and provenance-only
+rule refresh are allowed; changed consumed candles, operative rules, scalars, geometry
+or live pins are refused. This is stricter than T01 partial resume, which can reuse
+valid completed groups without market reads. Offline Fixed reporting needs no sources.
+
+Failure/interruption records the failing account and stops with nonzero status;
+later cells remain pending. There is no continue-after-failure option. Resume cannot
+repair deterministic core refusals (including quantity overflow): correcting settings
+requires a new request/output, without clamping quantities or dropping failed cells.
+
+Preparation/execution retain one account's frame/working arrays at a time. One account
+still needs memory proportional to its interval. Recorded RSS is the native **process
+lifetime peak**, or null if unavailable, not a per-account allocation guarantee.
+Preparation/execution timers and consumed row counts accompany it. There is no input
+cache budget, persistent frame cache, hard row limit or speculative parallelism.
+
+## IS/OOS candidate research
+
 The canonical S06 bracket run is `runspecs/s06_bracket_mvp.json`: 480 Grid V2
 candidates, 30-minute data, two-month IS and one-month OOS, eight calendar
 windows, and a frozen 24-development/94-holdout split. Six additional tracked
