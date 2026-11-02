@@ -14,9 +14,9 @@ import pyarrow.parquet as pq
 from ..config import canonical_sha256
 from ..dataset import atomic_write, atomic_write_json, artifact_record
 from ..parquet import portable_pin, replay
-from .config import DATASET_SCHEMA, cells, load
+from .config import DATASET_SCHEMA, REQUEST_V2, SCHEMA_PAIRS, cells, load
 from .accounting import CURVE_SCHEMA, MONTH_COLUMNS, csv_bytes, finite_json, monthly, validate_curve
-from .storage import (BACKEND, RESULT_SCHEMA, account_identity, contract_identity, open_dataset,
+from .storage import (BACKEND, RESULT_SCHEMA, RESULT_PAIRS, account_identity, contract_identity, open_dataset,
     read_account, safe_path, validate_contract)
 from .report import account_html, write_index
 
@@ -42,7 +42,7 @@ def peak_rss_bytes():
         return None
 
 
-def build_execution(config, parameter_set, prepared):
+def build_execution(config, parameter_set, prepared, entry_filters=()):
     from core.grid_v2 import GridV2Settings, GridV2StrategyHooks, build_grid_v2_plan
     from core.parameter_mode import require_singleton
     from strategies import get_strategy
@@ -51,7 +51,7 @@ def build_execution(config, parameter_set, prepared):
         "maxEntryLeverage":prepared.entry_admission["maxEntryLeverage"]}
     variants = parameter_set["variants"]
     plan = build_grid_v2_plan(config, GridV2Settings(enabled_axes=(), enabled_variants=tuple(variants) if variants else None,
-        admission_rules=prepared.admission_rules, prefer_compiled=False, slow_enrich_selected=False), params)
+        admission_rules=prepared.admission_rules, entry_filter_config=tuple(entry_filters), prefer_compiled=False, slow_enrich_selected=False), params)
     require_singleton(plan)
     if any(d.get("severity") in ("warning", "error") for d in plan.metadata.get("diagnostics", ())):
         raise ValueError("Fixed singleton plan has warning/error diagnostics.")
@@ -69,12 +69,14 @@ def build_execution(config, parameter_set, prepared):
 
 def prepare_account(raw, config, cell, root):
     from core import data_input
+    from ..filters import effective
+    items = effective(raw, config)
     ps, timeframe, period, instrument = cell
     started = time.perf_counter()
     prepared = data_input.prepare_input({"type":"parquet", "version":1, "pack_root":str(root),
         "instrument_id":instrument["instrument_id"], "timeframe_minutes":timeframe}, date_filter=True,
-        start=period["start"], end=period["end"], warmup_bars=period["warmup_bars"], admission_params=ps["params"], entry_filters=[])
-    plan, _, params, candidate = build_execution(config, ps, prepared)
+        start=period["start"], end=period["end"], warmup_bars=period["warmup_bars"], admission_params=ps["params"], entry_filters=items)
+    plan, _, params, candidate = build_execution(config, ps, prepared, items)
     account = {"parameter_set":ps["name"], "period":period["name"], **instrument, "timeframe_minutes":timeframe,
         "params":params, "input_pin":portable_pin(prepared.facts), "entry_admission":prepared.entry_admission,
         "entry_filter_inputs":prepared.entry_filter_inputs, "candidate":candidate, "plan_fingerprint":plan.plan_fingerprint,
@@ -84,14 +86,16 @@ def prepare_account(raw, config, cell, root):
     return account  # No frame, plan, hooks or execution arrays escape this call.
 
 
-def execute_account(config, parameter_set, account, root):
+def execute_account(config, parameter_set, account, root, entry_filters=(), filter_root_overrides=None):
     from core.engine_v2.runner import run_v2_strategy
     from core.engine_v2.contracts import GUARDRAIL_FLAG_EXECUTION_ERROR
-    prepared = replay(account, root)
-    plan, hooks, params, candidate = build_execution(config, parameter_set, prepared)
+    prepared = replay(account, root, entry_filters, filter_root_overrides) if entry_filters or filter_root_overrides else replay(account, root)
+    plan, hooks, params, candidate = build_execution(config, parameter_set, prepared, entry_filters)
     if plan.plan_fingerprint != account["plan_fingerprint"] or candidate != account["candidate"]:
         raise ValueError("consumed candidate geometry differs from frozen plan.")
     started = time.perf_counter()
+    from core.entry_filters import validate_context
+    validate_context(plan.profile.entry_filter_methods, prepared.entry_filter_context, list(plan.settings.entry_filter_config))
     result = run_v2_strategy(data=hooks.build_execution_data(prepared.frame, params), profile=plan.profile,
         params=params, trade_start_idx=prepared.trade_start_idx, admission_rules=prepared.admission_rules,
         entry_filter_context=prepared.entry_filter_context, compute_sharpe_daily=True, compute_max_drawdown_mtm=True)
@@ -103,7 +107,7 @@ def execute_account(config, parameter_set, account, root):
         "process_peak_rss_bytes":peak_rss_bytes(), "platform":platform.platform(), "python":platform.python_version()}
 
 
-def publish_account(output, account, execution, provenance):
+def publish_account(output, account, execution, provenance, result_schema=RESULT_SCHEMA, filter_editor=None):
     sr = execution.strategy_result
     start = account["input_pin"]["bounds"]["trade_start_idx"]
     capital = account["params"]["initialCapital"]
@@ -127,7 +131,7 @@ def publish_account(output, account, execution, provenance):
     atomic_write(paths["curve.parquet"], lambda p:pq.write_table(curve, p, compression="zstd"))
     atomic_write(paths["monthly.csv"], lambda p:p.write_bytes(csv_bytes(rows, MONTH_COLUMNS)))
     artifacts = {n:artifact_record(paths[n], output) for n in ("curve.parquet", "monthly.csv")}
-    payload = {"schema_version":RESULT_SCHEMA, "account":account, "backend":BACKEND, "initial_capital":capital,
+    payload = {"schema_version":result_schema, "account":account, "backend":BACKEND, "initial_capital":capital,
         "metric_anchor":capital, "prepared_trade_start_idx":start, "curve_start_idx":0, "observation_count":len(ts),
         "metrics":metrics, "metric_units":units, "metric_unavailable_reasons":{n:("no_completed_trades" if not metrics["total_trades"]
             else "unavailable_core_metric") for n,v in metrics.items() if v is None},
@@ -137,17 +141,21 @@ def publish_account(output, account, execution, provenance):
     atomic_write_json(paths["result.json"], payload)
     claim = {**artifacts, "result.json":artifact_record(paths["result.json"], output)}
     # Validate before publishing the manifest claim. Unclaimed files are recoverable.
-    read_account(output, account, claim)
-    account_html(output, account, claim, paths["report.html"])
+    read_account(output, account, claim, result_schema)
+    account_html(output, account, claim, paths["report.html"], result_schema, filter_editor)
     return claim
 
 
-def run(request, data_root, output, *, resume=False, preflight_only=False):
+def run(request, data_root, output, *, resume=False, preflight_only=False, filter_root_overrides=None):
     raw, config, resolved = load(request)
+    from ..filters import effective, runtime_roots
+    new = raw["schema_version"] == REQUEST_V2
+    items = effective(raw, config)
     root, output = Path(data_root).resolve(), Path(output).absolute()
     if output.resolve().is_relative_to(root) or root.is_relative_to(output.resolve()):
         raise ValueError("Fixed output must not overlap the market root.")
     partial, complete = (safe_path(output, n) for n in ("manifest.partial.json", "manifest.json"))
+    overrides = runtime_roots(items, filter_root_overrides, existing=partial.exists() or complete.exists(), output=output, target=root)
     existing = None
     if partial.exists() or complete.exists():
         existing = open_dataset(output, allow_partial=True)
@@ -158,9 +166,18 @@ def run(request, data_root, output, *, resume=False, preflight_only=False):
     elif output.exists() and any(output.iterdir()):
         raise ValueError("refusing nonempty output without a Fixed manifest.")
     started = time.perf_counter()
+    sets = {p["name"]: p for p in resolved["parameter_sets"]}
     accounts, seen = [], set()
-    for cell in cells(raw, resolved):
-        a = prepare_account(raw, config, cell, root)
+    for index, cell in enumerate(cells(raw, resolved)):
+        if new and existing is not None:
+            a = existing["contract"]["accounts"][index]
+            prepared = replay(a, root, items, overrides)
+            plan, hooks, params, candidate = build_execution(config, sets[a["parameter_set"]], prepared, items)
+            if params != a["params"] or candidate != a["candidate"] or plan.plan_fingerprint != a["plan_fingerprint"]:
+                raise ValueError("replayed live singleton plan differs from frozen account.")
+            del prepared, plan, hooks
+        else:
+            a = prepare_account(raw, config, cell, root)
         if a["account_id"] in seen:
             raise ValueError("duplicate account identity after timeframe grid resolution.")
         seen.add(a["account_id"])
@@ -174,20 +191,23 @@ def run(request, data_root, output, *, resume=False, preflight_only=False):
         if m["complete"]:
             return {"complete":True, "no_op":True, "completed":len(accounts), "accounts":len(accounts), "seconds":time.perf_counter()-started}
     else:
-        m = {"schema_version":DATASET_SCHEMA, "complete":False, "contract":contract,
+        m = {"schema_version":SCHEMA_PAIRS[raw["schema_version"]], "complete":False, "contract":contract,
             "request_sha256":canonical_sha256(raw), "contract_sha256":contract_identity(contract), "completed":{}, "failure":None}
         atomic_write_json(partial, m)
         write_index(output, m)
     if preflight_only:
         return {"complete":False, "completed":len(m["completed"]), "accounts":len(accounts), "preflight_seconds":time.perf_counter()-started}
-    sets = {p["name"]:p for p in resolved["parameter_sets"]}
     for a in m["contract"]["accounts"]:
         ident = a["account_id"]
         if ident in m["completed"]:
             continue
         try:
-            execution, provenance = execute_account(config, sets[a["parameter_set"]], a, root)
-            claim = publish_account(output, a, execution, provenance)
+            if new:
+                execution, provenance = execute_account(config, sets[a["parameter_set"]], a, root, items, overrides)
+                claim = publish_account(output, a, execution, provenance, RESULT_PAIRS[m["schema_version"]], raw["generation"]["execution"]["entryFilters"])
+            else:
+                execution, provenance = execute_account(config, sets[a["parameter_set"]], a, root)
+                claim = publish_account(output, a, execution, provenance)
             del execution
             # Mutate a copy so a failed claim write cannot be mistaken for publication.
             claimed = deepcopy(m)

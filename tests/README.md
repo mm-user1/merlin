@@ -107,7 +107,21 @@ CLI tests execute every example cell, follow static report links with the source
 pack hidden, and exercise a bounded deterministic core quantity refusal. The
 examples use short periods, avoiding long-period synthetic compounding overflow.
 
-For this Lab-only boundary integration, the preservation gate is:
+Generic-filter coverage adds `strategy_lab/test_filters_fixed.py`,
+`test_filters_replay.py`, `test_filters_parquet.py`, `test_filter_comparison.py`
+and `test_filters_cli.py`, with the public-provider `_filter_helpers.py` fixture.
+It exercises the actual Fixed adapter, compiled IS/OOS/reference parity, non-vacuous
+M>1 state with identical overlapping candles, retained-origin replay, cross-host
+locators, offline schema guards/scope locks and complete ordered Fixed pairs.
+The CLI workflow copies all four examples, relocates target/filter roots, hides
+the sources and verifies the reports. For filter integration run the full Lab
+gate below, followed by `tests/test_entry_filters.py tests/test_entry_filters_v2.py
+tests/v2/test_v2_entry_filters.py tests/test_data_input.py
+tests/v2/test_v2_fixed_singleton.py`. On Linux set `NUMBA_NUM_THREADS=2` **before**
+the core gate and verify capacity for its two-thread test, even on a one-CPU VPS;
+this is a test precondition, not a physical-core or performance claim.
+
+The continuous Fixed integration preservation gate is:
 
 ```text
 python -B tools/run_tests.py --keep-temp -- tests/strategy_lab

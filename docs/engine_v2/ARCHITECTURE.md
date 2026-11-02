@@ -71,7 +71,9 @@ envelope; it pins the cap, effective decimal rules and validated source snapshot
 See [Parquet inputs](../PARQUET_INPUTS.md) for conversion and replay semantics.
 Direct core and both compiled packers require rules too. CSV CLI and legacy
 Strategy Lab CSV generation reject this mode. Lab's versioned Parquet route
-supplies validated rules and explicit Off context; see its guide. V2 DSR remains unsupported.
+supplies validated rules and a core-validated Off or active filter context through
+explicit versioned requests; see its [filter guide](../../tools/strategy_lab/README.md#generic-entry-filters).
+V2 DSR remains unsupported.
 
 Grid Preview resolves these rules from validated metadata under one local/provider
 read session, without preparing or hashing candles. Pending and metadata-known

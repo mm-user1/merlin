@@ -11,6 +11,149 @@ Continuous Fixed research also runs explicit scalar configurations as independen
 accounts, with persisted evaluation curves and offline calendar views. It is a
 separate mode from the candidate-enumeration IS/OOS datasets described below.
 
+## Generic entry filters
+
+One explicit fixed `entryFilters` editor object applies to each new request.
+Multiple active items intersect long/short permissions independently; filter settings
+are not an optimization axis or another series dimension. Core owns normalization,
+capability, preparation, native clocks, state and signal masking. Initially certified:
+S07 with F06 `candleDirection` v1 and v2, including v2 Break > 1. Filters gate raw
+entries, never exits, sizing or next-open fills. Active filters require Parquet and
+an opted-in strategy. Unknown active methods/versions fail; inactive content follows
+core semantics and causes no dependency reads.
+
+| Family | Request | Dataset / supporting format |
+| --- | --- | --- |
+| Historical CSV | `strategy_lab_runspec_v1` | `strategy_lab_dataset_v2`, unchanged |
+| Historical Parquet Off | `strategy_lab_runspec_v2` | `strategy_lab_dataset_v3`, bindings 1 |
+| New Parquet filters or Off | `strategy_lab_runspec_v3` | `strategy_lab_dataset_v4`, bindings 2, candidates v2 |
+| Historical continuous Fixed Off | `strategy_lab_fixed_runspec_v1` | Fixed dataset/result v1 |
+| New continuous Fixed filters or Off | `strategy_lab_fixed_runspec_v2` | `strategy_lab_fixed_dataset_v2` / `strategy_lab_fixed_result_v2` |
+
+New execution blocks replace `entry_filters: []` with required camelCase
+`entryFilters`; old formats remain Off-only. Explicit Off is
+`{"version":1,"enabled":false,"items":[]}`. Active items use the unchanged core
+editor described in [Entry Filters](../../docs/ENTRY_FILTERS.md). V1 and v2 are
+distinct methods; no implicit upgrade, alias or absent-field default is introduced.
+The target retains Lab timeframe restrictions; filter-source instruments and
+timeframes are independent and follow the core/provider domain.
+
+Effective descriptors are saved once in Fixed `contract.resolved.entry_filters`
+or IS/OOS bindings-2 `effective_entry_filters`. Each account/instrument saves its
+own `entry_filter_inputs` envelope. Raw declaration binds strict request resume,
+including changed inactive settings/labels. Normalized effective settings bind
+plan and Fixed account identity, excluding item IDs/order/disabled/duplicate AND
+items. Original core-normalized filter locators remain in that identity. Consumed
+hashes and native origins bind source contracts, not candidate semantic keys.
+
+Core v1/v2 M=1 consume a bounded prefix; M>1 retains its declared native origin.
+Fixed v2 resume/no-op replays the saved envelope and verifies live scalar/plan
+agreement, so earlier metadata extension never chooses a new origin. IS/OOS
+prepares the selected window union once per instrument/pass and aligns permissions
+by timestamp across segments, including target warmup; filter state does not restart
+at IS/OOS boundaries. Target gaps fail; valid filter gaps create unknown/blocked
+intervals. Insufficient prefix, empty source or closure failures refuse execution.
+Consumed candle/gap edits fail replay even if later permissions coincide.
+
+### Filter relocation and offline views
+
+Both generation commands accept `--filter-roots PATH`. The file is a closed JSON
+object: `{"version":1,"roots":{"/original/filter-pack":"/current/filter-pack"}}`.
+Python APIs `fixed.run.run` and `generate.generate_dataset` accept the equivalent
+roots mapping as `filter_root_overrides`. Keys canonicalize with core `source_locator`
+(including raw Windows keys on Linux); conflicts, unused/unknown keys, relative or
+blank destinations fail. Every dependency sharing a locator uses its override.
+Original descriptors/facts remain unchanged; target relocation still uses `--data-root`.
+Overrides require an existing preflighted dataset. New outputs require original
+native absolute filter locations. A nonnative original locator without an explicit
+usable override fails before core I/O. Output may not overlap either direction
+with the target or any resolved filter source, including aliases/overrides.
+
+Historical reads, reports and comparison need no packs or live strategy registry.
+They verify exact schema pairs, effective declarations, envelopes/origins, target
+ownership and artifacts without translating old formats. Foreign-host recorded
+roots remain metadata, never paths interpreted under the current working directory.
+New Fixed CSV/account/series views expose `entry_filter_state`, `entry_filter_key`
+and core saved description text; the key is SHA-256 of the canonical effective list,
+including `[]` for Off. Full settings and source facts remain in saved evidence.
+Old output columns and historical-route reports are unchanged.
+
+New IS/OOS v4 keeps the candidate × IS/OOS × 22-metric shape, descriptive-v1 rules
+and normalized allocation. Reports identify filters and saved source facts.
+Locked scopes still need explicit unlock and frozen policy evidence through
+`resolve_scope`; available matrices do not authorize holdout analysis. Allocation
+keeps each input labeled and rejects mixed dataset-format combinations.
+
+### Bounded synthetic filter workflow
+
+Examples are fixtures, not recommendations or the 44-ticker research protocol:
+[Fixed Off](runspecs/s07_filters_fixed_off.json), [Fixed on](runspecs/s07_filters_fixed_on.json),
+[IS/OOS Off](runspecs/s07_filters_is_oos_off.json), [IS/OOS on](runspecs/s07_filters_is_oos_on.json).
+The on examples contain an illustrative absolute locator. Copy requests and set
+their actual synthetic root explicitly; never edit a frozen request to relocate it.
+Use a fresh external directory, from the repository root:
+
+```powershell
+$py = 'C:/Users/MT/Desktop/Strategy/S_Python/.venv/Scripts/python.exe'
+$work = Join-Path $env:LOCALAPPDATA 'Temp/strategy-lab-filter-example'
+& $py -B -m tools.strategy_lab.synthetic_parquet --output-dir "$work/pack" --symbols AAA BBB --start 2024-01-01 --end 2024-05-02
+@'
+import json, pathlib, sys
+work = pathlib.Path(sys.argv[1]).resolve()
+for family in ('fixed', 'is_oos'):
+    for state in ('off', 'on'):
+        name = f's07_filters_{family}_{state}.json'
+        raw = json.loads((pathlib.Path('tools/strategy_lab/runspecs') / name).read_text())
+        for item in raw['generation']['execution']['entryFilters']['items']:
+            item['source']['pack_root'] = str(work / 'pack')
+        (work / name).write_text(json.dumps(raw, indent=2), encoding='utf-8')
+'@ | & $py -B - $work
+foreach ($state in 'off','on') {
+  $request = "$work/s07_filters_fixed_$state.json"
+  & $py -B -m tools.strategy_lab.fixed validate $request
+  & $py -B -m tools.strategy_lab.fixed run $request --data-root "$work/pack" --output-dir "$work/fixed-$state" --preflight-only
+  & $py -B -m tools.strategy_lab.fixed run $request --data-root "$work/pack" --output-dir "$work/fixed-$state" --resume
+  & $py -B -m tools.strategy_lab.fixed report --dataset "$work/fixed-$state" --output-dir "$work/report-$state"
+  $request = "$work/s07_filters_is_oos_$state.json"
+  & $py -B -m tools.strategy_lab.config $request
+  & $py -B -m tools.strategy_lab.generate $request --data-root "$work/pack" --output-dir "$work/is-$state" --preflight-only
+  & $py -B -m tools.strategy_lab.generate $request --data-root "$work/pack" --output-dir "$work/is-$state" --resume
+  & $py -B -m tools.strategy_lab.analysis.cli analyze --dataset "$work/is-$state" --scope research --output "$work/analysis-$state"
+}
+& $py -B -m tools.strategy_lab.analysis.cli allocate --dataset "off=$work/is-off" --dataset "on=$work/is-on" --scope research --rule primary_profit --output "$work/allocation"
+& $py -B -m tools.strategy_lab.compare_filters --baseline "$work/fixed-off" --variant "$work/fixed-on" --output-dir "$work/comparison"
+```
+
+All declared cells and these public commands are exercised in the CLI tests, with
+packs hidden for offline readback. Linux uses its configured Python/native paths.
+One target frame plus required filter history is retained at a time. M>1 may consume
+long native history; this is not a hard memory budget. Same-root reads share the
+core session; distinct roots are serial, without an atomic cross-pack snapshot.
+No cross-account cache or scheduler is added. Fixed preserves source verification
+of every completed account and final-index recovery; IS/OOS preserves pending-work
+source checks and all-valid partial reuse. Complete IS/OOS no-op verifies all sources.
+
+### Paired Fixed Off/on CSV
+
+`python -m tools.strategy_lab.compare_filters --baseline OFF_DATASET --variant ON_DATASET --output-dir REPORT`
+accepts exactly two complete Fixed-v2 datasets, Off baseline and active variant.
+Every non-filter declaration except `run_name` must agree, including roster/order,
+cells, economics, parameters, dates/warmup and resources. Portable target pins,
+operative admission rules, resolved scalars and singleton geometry must also agree.
+Equivalent target relocation/provenance is allowed; mismatches never silently
+intersect coverage. Partial, IS/OOS, historical/new, On/on and Off/off inputs refuse.
+
+`pairs.csv` has one row per declared account with labels, both account IDs, candidate
+semantic key, Off/On values and On-minus-Off deltas for Net Profit %, MTM Max DD %
+and trade count. Percentage deltas are percentage points; trade deltas are counts.
+Saved unavailable values/reasons remain visible; deltas need two finite values.
+Negative drawdown delta means less measured drawdown, not higher profit. There is
+no ranking, aggregation, inference or claim of established improvement.
+`comparison.json` (`strategy_lab_filter_comparison_v1`) records source identities,
+digests, effective keys, coverage, matching policy and units and is published last.
+Output must be a separate empty directory. Sources remain unchanged; comparison
+resume/caching and paired IS/OOS deltas are not implemented (the latter belongs to T03).
+
 ## Continuous Fixed research
 
 `python -m tools.strategy_lab.fixed` supports `validate`, `run` and `report`.
@@ -40,8 +183,8 @@ fixtures, not trading recommendations. The closed request declares:
   slippage must explicitly be false. Manual Contract Size is not allowed.
 - Named scalar parameter overlays, target timeframes, named periods with explicit
   Start/End and integer warmup, `expected_run_count`, and `outer_workers: 1`.
-- `execution` exactly `parameter_mode: "fixed"`, `policy: "risk_bracket_v1"`,
-  `entry_filters: []`. Active filters, ties, ranges, axes, optimization, WFA,
+- Historical v1 `execution` exactly `parameter_mode: "fixed"`, `policy: "risk_bracket_v1"`,
+  `entry_filters: []`; new v2 uses the explicit editor above. Ties, ranges, axes, optimization, WFA,
   automatic discovery, shared capital and concurrent execution are unsupported.
 
 Core Fixed resolution owns defaults, selectors, dependencies and scalar domains.
@@ -244,8 +387,9 @@ compiled ABI. See [metric semantics](../../docs/METRICS.md#strategy-lab-mtm-draw
 Dataset v1 is not supported by the analysis reader. Existing request hashes,
 CSV validation, v2 metrics, rules and evidence contracts are preserved. The new
 route requires `entryAdmission="risk_bracket_v1"`; S07 is the certified production
-integration. Active F06, S03/S06 Parquet, selectors, carried capital, FT/stress and
-delayed OOS remain unsupported and are rejected.
+integration. This historical request family remains Off-only; active filters use
+the [new explicit schemas](#generic-entry-filters). S03/S06 Parquet, selectors,
+carried capital, FT/stress and delayed OOS remain unsupported and are rejected.
 
 The complete runnable request is [s07_off_example.json](runspecs/s07_off_example.json).
 Its dates, roster and economics are synthetic illustrations, not an authorized

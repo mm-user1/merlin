@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SUPPORTED_DATASET_SCHEMAS = {"strategy_lab_dataset_v2", "strategy_lab_dataset_v3"}
+SUPPORTED_DATASET_SCHEMAS = {"strategy_lab_dataset_v2", "strategy_lab_dataset_v3", "strategy_lab_dataset_v4"}
 SUPPORTED_RULE_VERSIONS = {"strategy_lab_rules_v1"}
 SUPPORTED_EVIDENCE_VERSIONS = {"strategy_lab_evidence_v1"}
 EVALUABLE_EVIDENCE_BLOCKS = (
@@ -192,7 +192,7 @@ def _validate_calendar_blocks(
 
 def _validate_contract(run_spec: Mapping[str, Any]) -> AnalysisContract:
     prereg = _require_mapping(run_spec.get("preregistration"), "preregistration")
-    if run_spec.get("schema_version") == "strategy_lab_runspec_v2":
+    if run_spec.get("schema_version") in ("strategy_lab_runspec_v2", "strategy_lab_runspec_v3"):
         # The v3 reader has already validated the complete saved contract.
         return AnalysisContract(
             observation={"monthly_ticker_aggregation": "equal_weight_valid_tickers",
@@ -312,6 +312,15 @@ class AnalysisDataset:
         self.allow_incomplete = allow_incomplete
         self.manifest_sha256 = _sha256(root / "manifest.json")
         self.schema_version = str(manifest["schema_version"])
+        self.filter_metadata = {}
+        if self.schema_version == "strategy_lab_dataset_v4":
+            from ..filters import summary
+            bindings = _load_json(root / "input_bindings.json", "input bindings")
+            editor = run_spec["generation"]["execution"]["entryFilters"]
+            self.filter_metadata = {"declared": editor, "effective": bindings["effective_entry_filters"],
+                "instruments": [{"instrument_id": b["instrument_id"], "target_root": b["original_root"],
+                    **summary(editor, bindings["effective_entry_filters"], b["entry_filter_inputs"], b["input_pin"]),
+                    "entry_filter_inputs": b["entry_filter_inputs"]} for b in bindings["instruments"]]}
         self.scope_label = str(manifest["scope"])
         self.status = str(manifest["status"])
         identity = manifest["identity"]
@@ -499,7 +508,7 @@ class AnalysisDataset:
 def _candidate_geometry(
     payload: Mapping[str, Any], manifest_identity: Mapping[str, Any]
 ) -> CandidateGeometry:
-    candidate_schema = ("strategy_lab_candidates_v2" if manifest_identity.get("dataset_schema") == "strategy_lab_dataset_v3"
+    candidate_schema = ("strategy_lab_candidates_v2" if manifest_identity.get("dataset_schema") in ("strategy_lab_dataset_v3", "strategy_lab_dataset_v4")
                         else "strategy_lab_candidates_v1")
     if payload.get("schema_version") != candidate_schema:
         raise AnalysisError("unsupported candidates.json schema version.")
@@ -689,19 +698,20 @@ def open_dataset(
     expected_runspec = {
         "strategy_lab_dataset_v2": "strategy_lab_runspec_v1",
         "strategy_lab_dataset_v3": "strategy_lab_runspec_v2",
+        "strategy_lab_dataset_v4": "strategy_lab_runspec_v3",
     }[schema]
     if run_spec.get("schema_version") != expected_runspec:
         raise AnalysisError(
             f"dataset/RunSpec schema mismatch: {schema!r} requires {expected_runspec!r}, "
             f"got {run_spec.get('schema_version')!r}."
         )
-    if schema == "strategy_lab_dataset_v3":
+    if schema in ("strategy_lab_dataset_v3", "strategy_lab_dataset_v4"):
         try:
             from .dataset_v3 import validate_dataset_v3
 
             validate_dataset_v3(root, manifest, run_spec)
         except (ValueError, KeyError, TypeError, OSError) as exc:
-            raise AnalysisError(f"invalid dataset v3: {exc}") from exc
+            raise AnalysisError(f"invalid {schema}: {exc}") from exc
     contract = _validate_contract(run_spec)
     # The Phase-0 field name is historical: its frozen identity hashes the
     # complete normalized run spec, as config.load_run_spec() does.

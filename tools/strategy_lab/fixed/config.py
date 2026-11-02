@@ -9,6 +9,9 @@ from ..dataset import load_json
 
 REQUEST_SCHEMA = "strategy_lab_fixed_runspec_v1"
 DATASET_SCHEMA = "strategy_lab_fixed_dataset_v1"
+REQUEST_V2 = "strategy_lab_fixed_runspec_v2"
+DATASET_V2 = "strategy_lab_fixed_dataset_v2"
+SCHEMA_PAIRS = {REQUEST_SCHEMA: DATASET_SCHEMA, REQUEST_V2: DATASET_V2}
 ECONOMICS = ("initialCapital", "commissionPct", "riskPerTrade", "enableLong", "enableShort", "maxEntryLeverage")
 RUNTIME = {"dateFilter", "start", "end", "warmupBars"}
 VERSION_KEYS = {"strategy_id", "strategy_version", "engine", "grid_v2_engine_version",
@@ -40,7 +43,7 @@ def _list(value, name):
 
 def validate_structure(raw):
     """Frozen v1 structure, without consulting registry/defaults or market inputs."""
-    if raw.get("schema_version") != REQUEST_SCHEMA:
+    if raw.get("schema_version") not in SCHEMA_PAIRS:
         raise ValueError("unsupported Fixed request schema.")
     c._keys(raw, "Fixed request", {"schema_version", "run_name", "generation"})
     c._text(raw["run_name"], "run_name")
@@ -52,9 +55,15 @@ def validate_structure(raw):
         c._text(v, k)
     if g["strategy"]["engine"] != "v2":
         raise ValueError("Fixed requires engine v2.")
-    c._keys(c._object(g["execution"], "execution"), "execution", {"parameter_mode", "policy", "entry_filters"})
-    if g["execution"] != {"parameter_mode": "fixed", "policy": "risk_bracket_v1", "entry_filters": []}:
-        raise ValueError("Fixed requires risk_bracket_v1 and explicit Filter Off; no optimization.")
+    key = "entryFilters" if raw["schema_version"] == REQUEST_V2 else "entry_filters"
+    c._keys(c._object(g["execution"], "execution"), "execution", {"parameter_mode", "policy", key})
+    if g["execution"]["parameter_mode"] != "fixed" or g["execution"]["policy"] != "risk_bracket_v1":
+        raise ValueError("Fixed requires risk_bracket_v1; no optimization.")
+    if key == "entryFilters":
+        from ..filters import effective
+        effective(raw)
+    elif g["execution"][key] != []:
+        raise ValueError("Fixed v1 requires explicit Filter Off.")
     c._keys(c._object(g["resources"], "resources"), "resources", {"outer_workers"})
     if type(g["resources"]["outer_workers"]) is not int or g["resources"]["outer_workers"] != 1:
         raise ValueError("Fixed requires outer_workers=1.")
@@ -140,7 +149,11 @@ def resolve(raw):
         normalize_v2_runtime_field_value("warmupBars", p["warmup_bars"], user_boundary=True)
         if _timestamp(p["start"]) > _timestamp(p["end"], end=True):
             raise ValueError("period start exceeds inclusive End.")
-    return config, {"parameter_specs": specs, "parameter_sets": sets}
+    resolved = {"parameter_specs": specs, "parameter_sets": sets}
+    if raw["schema_version"] == REQUEST_V2:
+        from ..filters import effective
+        resolved["entry_filters"] = effective(raw, config)
+    return config, resolved
 
 
 def cells(raw, resolved):

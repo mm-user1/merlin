@@ -17,6 +17,7 @@ from data_provider.manifest import normalize_instrument_id
 from data_provider.errors import DataProviderError
 
 SCHEMA = "strategy_lab_runspec_v2"
+FILTER_SCHEMA = "strategy_lab_runspec_v3"
 DESCRIPTIVE = "strategy_lab_descriptive_v1"
 
 
@@ -69,7 +70,7 @@ def validate_scopes(prereg, market, window_count):
 def validate_saved_request(raw):
     """Validate the supported persisted contract once, without current execution eligibility."""
     c._keys(raw, "run spec", {"schema_version", "run_name", "generation", "preregistration"})
-    if raw["schema_version"] != SCHEMA:
+    if raw["schema_version"] not in (SCHEMA, FILTER_SCHEMA):
         raise c.StrategyLabConfigError("unsupported Parquet request schema.")
     c._text(raw["run_name"], "run_name")
     g = c._object(raw["generation"], "generation")
@@ -83,9 +84,15 @@ def validate_saved_request(raw):
     if strategy["engine"] != "v2":
         raise c.StrategyLabConfigError("generation.strategy.engine: expected 'v2'.")
     execution = c._object(g["execution"], "execution")
-    c._keys(execution, "execution", {"policy", "entry_filters"})
-    if execution != {"policy": "risk_bracket_v1", "entry_filters": []}:
-        raise c.StrategyLabConfigError("only risk_bracket_v1 with explicit entry_filters=[] (Off) is supported.")
+    key = "entryFilters" if raw["schema_version"] == FILTER_SCHEMA else "entry_filters"
+    c._keys(execution, "execution", {"policy", key})
+    if execution["policy"] != "risk_bracket_v1":
+        raise c.StrategyLabConfigError("risk_bracket_v1 is required.")
+    if key == "entryFilters":
+        from .filters import effective
+        effective(raw)
+    elif execution[key] != []:
+        raise c.StrategyLabConfigError("historical Parquet requests require explicit entry_filters=[] (Off).")
     market = c._object(g["market_data"], "market_data")
     c._keys(market, "market_data", {"source_type", "timeframe_minutes", "instruments"})
     timeframe = c._integer(market["timeframe_minutes"], "timeframe_minutes", minimum=1)
@@ -182,6 +189,8 @@ def validate_request(raw):
     validate_saved_request(raw)
     g = raw["generation"]
     config, profile = c._validate_strategy(g["strategy"], parquet=True)
+    from .filters import effective
+    effective(raw, config)
     if profile.modes.get("entryAdmission") != "risk_bracket_v1":
         raise c.StrategyLabConfigError("Parquet Lab requires the risk_bracket_v1 capability.")
     if raw["preregistration"]["rule_registry"] != c.RULE_REGISTRY:
@@ -226,6 +235,7 @@ def scalar(value, spec, name):
 
 
 def build_plan(spec, rules):
+    from .filters import effective
     g = spec.generation
     config, profile = c._validate_strategy(g["strategy"], parquet=True)
     p = g["planning"]
@@ -234,7 +244,8 @@ def build_plan(spec, rules):
         enabled_axes=tuple(p["enabled_axes"]), enabled_tie_groups=tuple(p.get("enabled_tie_groups", [])),
         prefer_compiled=True, slow_enrich_selected=False, compiled_workers=1,
         max_signal_cache_mb=float(g["resources"]["grid_v2_max_cache_mb"]),
-        planning_policy="full", admission_rules=rules)
+        planning_policy="full", admission_rules=rules,
+        entry_filter_config=tuple(effective(spec.raw, config)))
     plan = build_grid_v2_plan(config, settings, g["economics"]["base_params"])
     if (plan.deduped_candidate_count != p["expected_candidate_count"] or
         tuple(plan.candidate_table.variant_names) != tuple(p["enabled_variants"]) or

@@ -250,6 +250,12 @@ change Merlin runtime behavior and has no CSV-level multiprocessing extension.
 adds independent continuous accounts and offline views, separate from candidate
 enumeration with IS/OOS and without shared-capital portfolio execution.
 
+[Generic entry filters](../tools/strategy_lab/README.md#generic-entry-filters)
+add one fixed core filter configuration per request, with S07/F06 v1/v2
+certification, saved-origin replay and runtime source relocation. Fixed v2 supports
+offline paired Off/on CSV deltas; Parquet dataset v4 keeps descriptive IS/OOS
+analysis/allocation and its scope locks. Historical Off families remain unchanged.
+
 The complete usage, identity, schema, resume, analysis, allocation, and safety
 contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 

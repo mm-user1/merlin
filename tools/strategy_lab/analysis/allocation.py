@@ -443,7 +443,7 @@ def evaluate_allocation(
     if not inputs:
         raise AnalysisError("allocation requires at least one explicitly labelled dataset.")
     if len({item.dataset.schema_version for item in inputs}) != 1:
-        raise AnalysisError("mixed v2/v3 allocation identity contracts are unsupported.")
+        raise AnalysisError("mixed v2/v3/v4 allocation identity contracts are unsupported.")
     descriptive = inputs[0].dataset.contract.descriptive
     primary_k = _exact_positive_integer(primary_k, "primary_k")
     sensitivity_k = _exact_positive_integer(sensitivity_k, "sensitivity_k")
@@ -1080,6 +1080,7 @@ def evaluate_allocation(
                 "schema_version": item.dataset.schema_version,
                 "scope": item.dataset.scope_label,
                 "status": item.dataset.status,
+                **({"entry_filters": item.dataset.filter_metadata} if item.dataset.filter_metadata else {}),
                 "requested_scope": item.scope.name,
                 "declared_ticker_count": len(item.dataset.tickers),
                 "requested_ticker_count": len(item.scope.tickers),

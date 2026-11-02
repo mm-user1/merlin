@@ -8,10 +8,12 @@ import pandas as pd
 
 from .. import config as c
 from ..dataset import load_json, validate_artifact_record
-from .config import DATASET_SCHEMA, REQUEST_SCHEMA, ECONOMICS, RUNTIME, cells, scalar, validate_structure
+from .config import DATASET_SCHEMA, REQUEST_SCHEMA, REQUEST_V2, DATASET_V2, SCHEMA_PAIRS, ECONOMICS, RUNTIME, cells, scalar, validate_structure
 from .accounting import MONTH_COLUMNS, csv_bytes, monthly, read_curve, validate_curve
 
 RESULT_SCHEMA = "strategy_lab_fixed_result_v1"
+RESULT_V2 = "strategy_lab_fixed_result_v2"
+RESULT_PAIRS = {DATASET_SCHEMA: RESULT_SCHEMA, DATASET_V2: RESULT_V2}
 BACKEND = "generic_v2_reference"
 BASIC = ("net_profit", "net_profit_pct", "gross_profit", "gross_loss", "max_drawdown", "max_drawdown_pct",
     "total_trades", "winning_trades", "losing_trades", "win_rate", "avg_win", "avg_loss", "avg_trade", "max_consecutive_losses")
@@ -38,7 +40,11 @@ def safe_path(root, relative):
 
 def account_identity(raw, account):
     bounds = account["input_pin"]["bounds"]
-    return {"strategy": raw["generation"]["strategy"], "execution": raw["generation"]["execution"],
+    execution = raw["generation"]["execution"]
+    if raw["schema_version"] == REQUEST_V2:
+        from ..filters import effective
+        execution = {"parameter_mode": "fixed", "policy": execution["policy"], "entry_filters": effective(raw)}
+    return {"strategy": raw["generation"]["strategy"], "execution": execution,
         "params": {k: v for k, v in account["params"].items() if k not in RUNTIME},
         "instrument_id": account["instrument_id"], "timeframe_minutes": account["timeframe_minutes"],
         "bounds": {k: bounds[k] for k in ("warmup_start", "start", "end", "trade_start_idx")}}
@@ -65,7 +71,12 @@ def validate_contract(contract):
     raw = contract["request"]
     validate_structure(raw)
     resolved = contract["resolved"]
-    c._keys(resolved, "resolved", {"parameter_specs", "parameter_sets"})
+    new = raw["schema_version"] == REQUEST_V2
+    c._keys(resolved, "resolved", {"parameter_specs", "parameter_sets"} | ({"entry_filters"} if new else set()))
+    if new:
+        from ..filters import effective, validate_saved
+        if resolved["entry_filters"] != effective(raw):
+            raise ValueError("saved effective filter contract mismatch.")
     specs = c._object(resolved["parameter_specs"], "parameter_specs")
     if not set(ECONOMICS) <= set(specs) or set(specs) & (RUNTIME | {"contractSize"}):
         raise ValueError("invalid saved scalar contract.")
@@ -120,7 +131,9 @@ def validate_contract(contract):
         rules = read_admission_envelope(a["entry_admission"], expected["maxEntryLeverage"])
         if rules.instrument_id != instrument["instrument_id"] or pin["instrument"]["instrument_id"] != instrument["instrument_id"]:
             raise ValueError("saved admission instrument mismatch.")
-        if a["entry_filter_inputs"] != {"version": 1, "state": "off"}:
+        if new:
+            validate_saved(raw["generation"]["execution"]["entryFilters"], resolved["entry_filters"], a["entry_filter_inputs"], pin)
+        elif a["entry_filter_inputs"] != {"version": 1, "state": "off"}:
             raise ValueError("saved Fixed context must be Off.")
         candidate = a["candidate"]
         c._keys(candidate, "candidate", {"count", "variant", "semantic_key", "params"})
@@ -145,7 +158,7 @@ def verify_record(root, record, expected):
     return path
 
 
-def read_account(root, account, claim):
+def read_account(root, account, claim, result_schema=RESULT_SCHEMA):
     """Verify one claimed result and its arithmetic, retaining only this curve."""
     prefix = "accounts/" + account["account_id"] + "/"
     c._keys(claim, "completed account", {"result.json", "curve.parquet", "monthly.csv"})
@@ -156,7 +169,7 @@ def read_account(root, account, claim):
         "metric_unavailable_reasons", "monthly_return_observations", "guardrails", "final_state", "entry_diagnostics",
         "artifacts", "provenance"})
     capital = account["params"]["initialCapital"]
-    if (result["schema_version"] != RESULT_SCHEMA or result["account"] != account or result["backend"] != BACKEND or
+    if (result_schema not in RESULT_PAIRS.values() or result["schema_version"] != result_schema or result["account"] != account or result["backend"] != BACKEND or
             result["initial_capital"] != capital or result["metric_anchor"] != capital or result["curve_start_idx"] != 0 or
             result["prepared_trade_start_idx"] != account["input_pin"]["bounds"]["trade_start_idx"]):
         raise ValueError("saved Fixed result identity/anchor/backend mismatch.")
@@ -205,7 +218,7 @@ def open_dataset(root, *, allow_partial=False):
     if not path.exists():
         path = safe_path(root, "manifest.partial.json")
     m = deepcopy(load_json(path, "Fixed manifest"))
-    if m.get("schema_version") != DATASET_SCHEMA or m.get("contract", {}).get("request", {}).get("schema_version") != REQUEST_SCHEMA:
+    if m.get("schema_version") not in RESULT_PAIRS or SCHEMA_PAIRS.get(m.get("contract", {}).get("request", {}).get("schema_version")) != m["schema_version"]:
         raise ValueError("unsupported Fixed dataset/request schema pair.")
     c._keys(m, "manifest", {"schema_version", "complete", "contract", "request_sha256", "contract_sha256", "completed", "failure"})
     if type(m["complete"]) is not bool or m["complete"] != (path.name == "manifest.json"):
@@ -227,7 +240,7 @@ def open_dataset(root, *, allow_partial=False):
         raise ValueError("incomplete account coverage in complete Fixed manifest.")
     for a in accounts:
         if a["account_id"] in completed:
-            read_account(root, a, completed[a["account_id"]])
+            read_account(root, a, completed[a["account_id"]], RESULT_PAIRS[m["schema_version"]])
     if not m["complete"] and not allow_partial:
         raise ValueError("Fixed dataset is partial; explicitly use --allow-partial.")
     return m

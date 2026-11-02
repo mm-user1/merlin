@@ -18,6 +18,7 @@ def main(argv=None):
     execute.add_argument("--output-dir", type=Path, required=True)
     execute.add_argument("--resume", action="store_true")
     execute.add_argument("--preflight-only", action="store_true")
+    execute.add_argument("--filter-roots", type=Path)
     view = sub.add_parser("report")
     view.add_argument("--dataset", type=Path, required=True)
     view.add_argument("--output-dir", type=Path, required=True)
@@ -33,7 +34,9 @@ def main(argv=None):
                 "source_admission":"requires_preflight"}, allow_nan=False))
         if args.command == "run":
             from .run import run
-            print(json.dumps(run(args.request, args.data_root, args.output_dir, resume=args.resume, preflight_only=args.preflight_only)))
+            from ..filters import read_overrides
+            print(json.dumps(run(args.request, args.data_root, args.output_dir, resume=args.resume,
+                preflight_only=args.preflight_only, filter_root_overrides=read_overrides(args.filter_roots))))
         elif args.command == "report":
             from .report import report
             print(json.dumps(report(args.dataset, args.output_dir, allow_partial=args.allow_partial)))

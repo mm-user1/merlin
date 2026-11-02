@@ -9,11 +9,17 @@ import numpy as np
 from ..dataset import atomic_write, atomic_write_json, load_json
 from .accounting import MONTH_COLUMNS, csv_bytes
 from .config import ECONOMICS
-from .storage import METRICS, open_dataset, read_account, safe_path
+from .storage import METRICS, RESULT_SCHEMA, RESULT_PAIRS, open_dataset, read_account, safe_path
+from .config import DATASET_V2
 
 INDEX_COLUMNS = ("account_id", "parameter_set", "period", "instrument_id", "cell", "timeframe_minutes",
     "requested_start", "requested_end", "resolved_start", "resolved_end", "warmup_bars", "status", "reason",
     *ECONOMICS, *METRICS, "observation_count", "result", "curve", "monthly", "html")
+FILTER_COLUMNS = ("entry_filter_state", "entry_filter_key", "entry_filter_description")
+
+
+def index_columns(manifest):
+    return INDEX_COLUMNS + (FILTER_COLUMNS if manifest["schema_version"] == DATASET_V2 else ())
 
 
 def text_file(path, content):
@@ -35,8 +41,8 @@ def page(title, content):
         f"<h1>{escape(title)}</h1>{content}</html>")
 
 
-def account_html(root, account, claim, destination):
-    result, (ts, eq, bal), rows = read_account(root, account, claim)
+def account_html(root, account, claim, destination, result_schema=RESULT_SCHEMA, filter_editor=None):
+    result, (ts, eq, bal), rows = read_account(root, account, claim, result_schema)
     sample = np.unique(np.linspace(0, len(ts)-1, min(1000, len(ts)), dtype=int))
     low, high = min(eq.min(), bal.min()), max(eq.max(), bal.max())
     span = max(high-low, 1.0)
@@ -66,6 +72,11 @@ def account_html(root, account, claim, destination):
         + "<h2>Calendar accounting</h2><p>Returns require positive opening equity. Realized P&amp;L and MTM change are distinct; "
           "partial months are retained without annualizing their returns. Precise midnight End can add a one-bar month.</p>"
         + table(rows, MONTH_COLUMNS))
+    if filter_editor is not None:
+        from ..filters import summary
+        from core.entry_filters import effective_config
+        content += "<h2>Entry filters</h2>" + table([summary(filter_editor, effective_config(filter_editor),
+            account["entry_filter_inputs"], account["input_pin"])], FILTER_COLUMNS)
     links = []
     for name in ("result.json", "curve.parquet", "monthly.csv"):
         target = safe_path(root, claim[name]["path"])
@@ -90,12 +101,17 @@ def index_rows(root, manifest):
                 html=f"accounts/{ident}/report.html")
         elif manifest["failure"] and manifest["failure"]["account_id"] == ident:
             row.update(status="failed", reason=manifest["failure"]["reason"])
-        rows.append({k:row.get(k, "") for k in INDEX_COLUMNS})
+        if manifest["schema_version"] == DATASET_V2:
+            from ..filters import summary
+            contract = manifest["contract"]
+            row.update(summary(contract["request"]["generation"]["execution"]["entryFilters"],
+                contract["resolved"]["entry_filters"], a["entry_filter_inputs"], a["input_pin"]))
+        rows.append({k:row.get(k, "") for k in index_columns(manifest)})
     return rows
 
 
 def write_index(root, manifest):
-    data = csv_bytes(index_rows(root, manifest), INDEX_COLUMNS)
+    data = csv_bytes(index_rows(root, manifest), index_columns(manifest))
     atomic_write(safe_path(root, "series-index.csv"), lambda p:p.write_bytes(data))
 
 
@@ -103,9 +119,11 @@ def report(dataset, output, *, allow_partial=False):
     root, output = Path(dataset).resolve(), Path(output).absolute()
     m = open_dataset(root, allow_partial=allow_partial)
     # A report must never replace its source, an ancestor, or a recorded market root.
-    protected = [root, *(Path(a["provenance"]["pack_root"]).resolve() for a in m["contract"]["accounts"])]
-    if any(output.resolve().is_relative_to(p) or p.is_relative_to(output.resolve()) for p in protected):
-        raise ValueError("report output overlaps the dataset or market source.")
+    from ..filters import protect_output, recorded_roots
+    contract = m["contract"]
+    protect_output(output, [root, *(a["provenance"]["pack_root"] for a in contract["accounts"]),
+        *recorded_roots(contract["resolved"].get("entry_filters", []))])
+    editor = contract["request"]["generation"]["execution"].get("entryFilters")
     marker = safe_path(output, "report.json")
     identity = {"schema_version":"strategy_lab_fixed_report_v1", "contract_sha256":m["contract_sha256"]}
     if output.exists() and any(output.iterdir()) and (not marker.exists() or load_json(marker, "report") != identity):
@@ -116,15 +134,16 @@ def report(dataset, output, *, allow_partial=False):
     for a, row in zip(m["contract"]["accounts"], rows):
         if a["account_id"] in m["completed"]:
             name = f"accounts/{a['account_id']}/report.html"
-            account_html(root, a, m["completed"][a["account_id"]], safe_path(output, name))
+            account_html(root, a, m["completed"][a["account_id"]], safe_path(output, name), RESULT_PAIRS[m["schema_version"]], editor)
             links.append(f'<li><a href="{name}">{escape(a["parameter_set"])} / {escape(a["period"])} / {escape(a["instrument_id"])} / {a["timeframe_minutes"]}m</a></li>')
             for field in ("result", "curve", "monthly"):
                 row[field] = Path(os.path.relpath(safe_path(root, row[field]), output)).as_posix()
-    atomic_write(safe_path(output, "series-index.csv"), lambda p:p.write_bytes(csv_bytes(rows, INDEX_COLUMNS)))
+    atomic_write(safe_path(output, "series-index.csv"), lambda p:p.write_bytes(csv_bytes(rows, index_columns(m))))
     title = "Fixed series — " + ("complete" if m["complete"] else "PARTIAL")
     text_file(safe_path(output, "index.html"), page(title,
         f"<p>{len(m['completed'])} / {len(rows)} completed independent accounts. No portfolio aggregation or ranking.</p>"
         + '<p><a href="series-index.csv">Machine-readable series index</a></p><ul>' + "".join(links) + "</ul>"
-        + table(rows, ("parameter_set", "period", "instrument_id", "cell", "timeframe_minutes", "status", "reason", *ECONOMICS, "net_profit_pct"))))
+        + table(rows, ("parameter_set", "period", "instrument_id", "cell", "timeframe_minutes", "status", "reason", *ECONOMICS, "net_profit_pct")
+            + (FILTER_COLUMNS if editor is not None else ()))))
     atomic_write_json(marker, identity)
     return {"complete":m["complete"], "accounts":len(rows), "completed":len(m["completed"]), "report":str(output/"index.html")}

@@ -641,7 +641,7 @@ def load_run_spec(
 ) -> RunSpec:
     source_path = Path(path).resolve()
     raw = _load_json_object(source_path, "run spec")
-    if raw.get("schema_version") == "strategy_lab_runspec_v2":
+    if raw.get("schema_version") in ("strategy_lab_runspec_v2", "strategy_lab_runspec_v3"):
         from .config_v2 import validate_request
 
         try:
@@ -775,7 +775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **({"plan_facts": "requires_source_rules",
                     "inventory_count": len(spec.generation["market_data"]["instruments"]),
                     "execution_mode": spec.generation["execution"]["policy"]}
-                   if spec.raw["schema_version"] == "strategy_lab_runspec_v2" else {}),
+                   if spec.raw["schema_version"] in ("strategy_lab_runspec_v2", "strategy_lab_runspec_v3") else {}),
             },
             indent=2,
             sort_keys=True,

@@ -108,6 +108,7 @@ def _report(result: AnalysisResult) -> bytes:
         "",
         f"- Dataset schema/scope/status: `{dataset['schema_version']}` / `{dataset['scope']}` / `{dataset['status']}`.{smoke_note}",
         f"- Manifest SHA-256: `{dataset['manifest_sha256']}`",
+        *(["- Entry filters and saved source facts: " + json.dumps(dataset["entry_filters"], sort_keys=True)] if "entry_filters" in dataset else []),
         f"- Requested analysis scope/cell: `{scope['name']}` / `{scope['ticker_cell']}`",
         f"- Actual tickers / full ticker-cell authority: {scope['ticker_count']} / {scope['ticker_cell_count']}",
         f"- Actual calendar blocks: {scope['actual_calendar_block_count']}",
@@ -378,6 +379,8 @@ def _allocation_report(result: AllocationResult) -> bytes:
                       "`monthly_*` fields and `monthly_results.csv` are historical OOS-block aliases; returns are not annualized.",
                       "Matched fraction, evidence, nominations, bootstrap intervals and outlier removal: not_requested (strategy_lab_descriptive_v1).", ""])
     for label in metadata["dataset_labels"]:
+        if "entry_filters" in metadata["datasets"][label]:
+            lines.append(f"- {label} entry filters and saved source facts: " + json.dumps(metadata["datasets"][label]["entry_filters"], sort_keys=True))
         facts = summary["datasets"][label]
         lines.extend(
             [
@@ -505,6 +508,18 @@ def _inside(path: Path, parent: Path) -> bool:
     return True
 
 
+def _protect_filter_output(output, datasets, metadata, names):
+    from ..filters import protect_output, recorded_roots
+    from ..fixed.storage import safe_path
+    roots = list(datasets)
+    for facts in metadata:
+        roots.extend(recorded_roots(facts["effective"]))
+        roots.extend(i["target_root"] for i in facts["instruments"])
+    protect_output(output, roots)
+    for name in names:
+        safe_path(output, name)
+
+
 def write_analysis(
     result: AnalysisResult,
     output_dir: str | Path,
@@ -513,6 +528,8 @@ def write_analysis(
 ) -> Mapping[str, Any]:
     output = Path(output_dir).resolve()
     dataset = Path(dataset_root).resolve()
+    if "entry_filters" in result.run_metadata["dataset"]:
+        _protect_filter_output(output_dir, [dataset], [result.run_metadata["dataset"]["entry_filters"]], OUTPUT_FILES)
     if output == dataset or _inside(output, dataset):
         raise AnalysisError("analysis output must be outside every input dataset root.")
     files = render_files(result)
@@ -558,6 +575,9 @@ def write_allocation(
 ) -> Mapping[str, Any]:
     output = Path(output_dir).resolve()
     datasets = tuple(Path(root).resolve() for root in dataset_roots)
+    filters = [v["entry_filters"] for v in result.run_metadata["datasets"].values() if "entry_filters" in v]
+    if filters:
+        _protect_filter_output(output_dir, datasets, filters, ALLOCATION_OUTPUT_FILES)
     if not datasets:
         raise AnalysisError("allocation publication requires input dataset roots.")
     if any(output == dataset or _inside(output, dataset) for dataset in datasets):

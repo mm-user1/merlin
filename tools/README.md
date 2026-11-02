@@ -110,6 +110,7 @@ fixed-capacity allocation, and independent continuous Fixed accounts:
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.config tools\strategy_lab\runspecs\s06_bracket_mvp.json
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.generate --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.fixed --help
+C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.compare_filters --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.certify --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.analysis.cli --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.analysis.allocation_certify --help
@@ -119,6 +120,8 @@ See the [Strategy Lab manual](strategy_lab/README.md) for identity, isolation,
 schema, resume, scope-unlock, analysis, allocation, and certification contracts.
 The [continuous Fixed guide](strategy_lab/README.md#continuous-fixed-research)
 covers independent accounts and offline views, separate from IS/OOS enumeration.
+The [filter guide](strategy_lab/README.md#generic-entry-filters) covers versioned
+Fixed/IS-OOS filter requests, source relocation and Fixed-only paired Off/on CSVs.
 
 ## Pattern Lab
 

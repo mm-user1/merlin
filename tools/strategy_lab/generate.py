@@ -456,6 +456,7 @@ def generate_dataset(
     window_selectors: Sequence[int] | None = None,
     resume: bool = False,
     preflight_only: bool = False,
+    filter_root_overrides=None,
     repo_root: str | Path = REPO_ROOT,
     _after_group: Callable[[int, Path], None] | None = None,
     _progress: Callable[[str], None] | None = None,
@@ -474,12 +475,14 @@ def generate_dataset(
     )
     run_spec_started = time.perf_counter()
     spec = load_run_spec(run_spec_path, repo_root=repo)
-    if spec.raw["schema_version"] == "strategy_lab_runspec_v2":
+    if spec.raw["schema_version"] in ("strategy_lab_runspec_v2", "strategy_lab_runspec_v3"):
         from .parquet import generate_parquet
 
         return generate_parquet(spec, root, output, ticker_selectors=ticker_selectors,
             window_selectors=window_selectors, resume=resume, preflight_only=preflight_only,
-            repo=repo, after_group=_after_group, progress=_progress)
+            repo=repo, after_group=_after_group, progress=_progress, filter_root_overrides=filter_root_overrides)
+    if filter_root_overrides:
+        raise DatasetError("CSV requests do not accept filter root overrides.")
     if preflight_only:
         raise DatasetError("--preflight-only requires a v2 Parquet run spec.")
     run_spec_load_seconds = time.perf_counter() - run_spec_started
@@ -837,10 +840,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--filter-roots", type=Path)
     parser.add_argument("--ticker", action="append", dest="tickers")
     parser.add_argument("--window", action="append", type=int, dest="windows")
     args = parser.parse_args(argv)
     try:
+        from .filters import read_overrides
         result = generate_dataset(
             args.run_spec,
             data_root=args.data_root,
@@ -849,6 +854,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             window_selectors=args.windows,
             resume=args.resume,
             preflight_only=args.preflight_only,
+            filter_root_overrides=read_overrides(args.filter_roots),
             _progress=lambda message: print(f"Strategy Lab: {message}"),
         )
     except (DataQualityError, DatasetError, ValueError) as exc:

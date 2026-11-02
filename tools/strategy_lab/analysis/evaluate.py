@@ -1005,6 +1005,7 @@ def evaluate_scope(
             "schema_version": dataset.schema_version,
             "scope": dataset.scope_label,
             "status": dataset.status,
+            **({"entry_filters": dataset.filter_metadata} if dataset.filter_metadata else {}),
         },
         "analysis_scope": {
             "name": scope.name,

@@ -24,6 +24,7 @@ from core.grid_v2 import GridV2StrategyHooks, execute_grid_v2_candidates
 from strategies import get_strategy
 
 SCHEMA = "strategy_lab_dataset_v3"
+FILTER_SCHEMA = "strategy_lab_dataset_v4"
 SUPPORTING = ("normalized_runspec.json", "candidates.json", "input_bindings.json", "data_quality.csv")
 
 
@@ -40,13 +41,13 @@ def portable_pin(facts):
     return pin
 
 
-def replay(binding, root):
+def replay(binding, root, entry_filters=(), filter_root_overrides=None):
     """Reconstruct only the host locator; retained root/provenance never changes."""
     pin = deepcopy(binding["input_pin"])
     pin["source"]["pack_root"] = str(Path(root).resolve())
     return data_input.replay_input(pin, entry_admission=binding["entry_admission"],
         admission_cap=binding["entry_admission"]["maxEntryLeverage"],
-        entry_filters=[], entry_filter_inputs=binding["entry_filter_inputs"])
+        entry_filters=list(entry_filters), entry_filter_inputs=binding["entry_filter_inputs"], filter_root_overrides=filter_root_overrides)
 
 
 def semantic_binding(binding):
@@ -77,7 +78,7 @@ def segment_facts(prepared, timeframe):
 def identity(spec, entries, windows, candidates, bindings):
     from .generate import _window_payload
     count = candidates["candidate_count"]
-    return {"dataset_schema": SCHEMA, "run_name": spec.raw["run_name"],
+    return {"dataset_schema": FILTER_SCHEMA if spec.raw["schema_version"] == "strategy_lab_runspec_v3" else SCHEMA, "run_name": spec.raw["run_name"],
         "generation_sha256": spec.generation_sha256, "pre_registration_sha256": spec.pre_registration_sha256,
         "roster_sha256": canonical_sha256(spec.generation["market_data"]["instruments"]),
         "candidate_count": count, "candidate_axis": list(range(1, count + 1)),
@@ -117,7 +118,14 @@ def verify_artifacts(output, manifest):
 
 def validate_bindings(spec, entries, windows, candidates, bindings):
     """Check frozen ownership and segment facts without a pack read or Grid plan."""
-    if bindings.get("schema_version") != 1 or type(bindings.get("schema_version")) is not int:
+    from .filters import effective, validate_saved
+    new = spec.raw["schema_version"] == "strategy_lab_runspec_v3"
+    items = effective(spec.raw)
+    from .config import _keys
+    _keys(bindings, "input bindings", {"schema_version", "instruments"} | ({"effective_entry_filters"} if new else set()))
+    if new and bindings["effective_entry_filters"] != items:
+        raise DatasetError("saved effective filter configuration mismatch.")
+    if bindings.get("schema_version") != (2 if new else 1) or type(bindings.get("schema_version")) is not int:
         raise DatasetError("unsupported input bindings schema.")
     rows = bindings.get("instruments")
     if not isinstance(rows, list) or len(rows) != len(entries):
@@ -127,11 +135,13 @@ def validate_bindings(spec, entries, windows, candidates, bindings):
     delta = pd.Timedelta(minutes=timeframe)
     cap = spec.generation["economics"]["base_params"]["maxEntryLeverage"]
     for entry, b in zip(entries, rows):
-        if (b.get("instrument_id") != entry["instrument_id"] or b.get("cell") != entry["cell"] or
-            b.get("entry_filter_inputs") != {"version": 1, "state": "off"} or
-            type(b["entry_filter_inputs"]["version"]) is not int):
+        if (b.get("instrument_id") != entry["instrument_id"] or b.get("cell") != entry["cell"]):
             raise DatasetError("input binding instrument/cell/Off ownership mismatch.")
         pin = b["input_pin"]
+        if new:
+            validate_saved(spec.generation["execution"]["entryFilters"], items, b["entry_filter_inputs"], pin)
+        elif b.get("entry_filter_inputs") != {"version": 1, "state": "off"} or type(b["entry_filter_inputs"]["version"]) is not int:
+            raise DatasetError("historical input binding requires Off.")
         source = pin["source"]
         if source != {"type": "parquet", "version": 1, "instrument_id": entry["instrument_id"], "timeframe_minutes": timeframe}:
             raise DatasetError("portable source descriptor mismatch.")
@@ -194,7 +204,7 @@ def verified_groups(output, manifest, entries, windows, bindings, *, complete):
 
 
 def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, resume,
-                     preflight_only, repo, after_group, progress):
+                     preflight_only, repo, after_group, progress, filter_root_overrides=None):
     from .generate import (GenerationResult, _selected_windows, _execution_backend_facts,
         _require_compiled_backend_available, _git_facts, _backend_summary)
     started = time.perf_counter()
@@ -212,13 +222,17 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
         check_path(output, relative)
     complete = (output / "manifest.json").exists()
     existing = complete or (output / "manifest.partial.json").exists()
+    from .filters import effective, runtime_roots
+    items = effective(spec.raw)
+    schema = FILTER_SCHEMA if spec.raw["schema_version"] == "strategy_lab_runspec_v3" else SCHEMA
+    overrides = runtime_roots(items, filter_root_overrides, existing=existing, output=output, target=root)
     partial_path = output / "manifest.partial.json"
     timings = {"preflight_seconds": 0., "execution_seconds": 0.}
     if existing:
         if not complete and not resume:
             raise DatasetError("partial output exists; pass --resume.")
         manifest = load_json(output / ("manifest.json" if complete else "manifest.partial.json"), "manifest")
-        if manifest.get("schema_version") != SCHEMA or manifest.get("status") != ("complete" if complete else "partial") or manifest.get("scope") != scope:
+        if manifest.get("schema_version") != schema or manifest.get("status") != ("complete" if complete else "partial") or manifest.get("scope") != scope:
             raise DatasetError("incompatible manifest schema/status/scope.")
         verify_artifacts(output, manifest)
         saved = load_json(output / "normalized_runspec.json", "run spec")
@@ -233,7 +247,7 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
         valid = verified_groups(output, manifest, entries, windows, bindings, complete=complete)
         if complete:
             for binding in bindings["instruments"]:
-                prepared = replay(binding, root)
+                prepared = replay(binding, root, items, overrides) if schema == FILTER_SCHEMA else replay(binding, root)
                 del prepared
             return GenerationResult(output, output / "manifest.json", scope, len(paths), len(paths), 0, True,
                                     {"total_seconds": time.perf_counter()-started})
@@ -241,7 +255,9 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
         if output.exists() and any(output.iterdir()):
             raise DatasetError("output is nonempty without an owned manifest; refusing overwrite.")
         candidates = None
-        bindings = {"schema_version": 1, "instruments": []}
+        bindings = {"schema_version": 2 if schema == FILTER_SCHEMA else 1, "instruments": []}
+        if schema == FILTER_SCHEMA:
+            bindings["effective_entry_filters"] = items
         quality = []
         g = spec.generation
         for entry in entries:
@@ -249,7 +265,7 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
                 "instrument_id": entry["instrument_id"], "timeframe_minutes": g["market_data"]["timeframe_minutes"]}
             prepared = data_input.prepare_input(source, date_filter=True,
                 start=windows[0].is_start.isoformat(), end=windows[-1].oos_end.isoformat(),
-                warmup_bars=g["windows"]["warmup_bars"], admission_params=g["economics"]["base_params"], entry_filters=[])
+                warmup_bars=g["windows"]["warmup_bars"], admission_params=g["economics"]["base_params"], entry_filters=items)
             plan = build_plan(spec, prepared.admission_rules)
             projected = geometry(plan, g["strategy"])
             if candidates is not None and candidates != projected:
@@ -279,7 +295,7 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
         for name, value in (("normalized_runspec.json", spec.raw), ("candidates.json", candidates), ("input_bindings.json", bindings)):
             atomic_write_json(output / name, value)
         atomic_write_quality_csv(output / "data_quality.csv", quality)
-        manifest = {"schema_version": SCHEMA, "status": "partial", "scope": scope,
+        manifest = {"schema_version": schema, "status": "partial", "scope": scope,
             "identity": expected_identity, "artifacts": {name: artifact_record(output/name, output) for name in SUPPORTING}, "groups": []}
         valid = {}
         atomic_write_json(partial_path, manifest)
@@ -299,7 +315,7 @@ def generate_parquet(spec, root, output, *, ticker_selectors, window_selectors, 
             pending = [w for w in windows if f"groups/{entry['instrument_id']}/window_{w.window_id:02d}.npy" not in valid]
             if not pending:
                 continue
-            prepared = replay(binding, root)
+            prepared = replay(binding, root, items, overrides) if schema == FILTER_SCHEMA else replay(binding, root)
             plan = build_plan(spec, prepared.admission_rules)
             if plan.plan_fingerprint != binding["plan_fingerprint"] or geometry(plan, spec.generation["strategy"]) != candidates:
                 raise DatasetError("replayed plan/geometry differs from frozen binding.")
