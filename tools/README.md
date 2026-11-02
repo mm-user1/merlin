@@ -104,11 +104,12 @@ is unchanged; prefer the Python launcher for ordinary commands.
 Strategy Lab is a local, read-only-input research pipeline for certified V2
 strategies. Its current commands cover run-spec validation, inventory,
 resumable dataset generation, real-pack certification, deterministic analysis,
-and fixed-capacity allocation:
+fixed-capacity allocation, and independent continuous Fixed accounts:
 
 ```powershell
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.config tools\strategy_lab\runspecs\s06_bracket_mvp.json
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.generate --help
+C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.fixed --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.certify --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.analysis.cli --help
 C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy_lab.analysis.allocation_certify --help
@@ -116,6 +117,8 @@ C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe -m tools.strategy
 
 See the [Strategy Lab manual](strategy_lab/README.md) for identity, isolation,
 schema, resume, scope-unlock, analysis, allocation, and certification contracts.
+The [continuous Fixed guide](strategy_lab/README.md#continuous-fixed-research)
+covers independent accounts and offline views, separate from IS/OOS enumeration.
 
 ## Pattern Lab
 

@@ -246,6 +246,10 @@ generation adds S07 Off with admission, portable consumed-input bindings, and
 dataset-v3 descriptive analysis/allocation alongside the preserved CSV path. It does not
 change Merlin runtime behavior and has no CSV-level multiprocessing extension.
 
+[Continuous Fixed research](../tools/strategy_lab/README.md#continuous-fixed-research)
+adds independent continuous accounts and offline views, separate from candidate
+enumeration with IS/OOS and without shared-capital portfolio execution.
+
 The complete usage, identity, schema, resume, analysis, allocation, and safety
 contracts are in the [Strategy Lab guide](../tools/strategy_lab/README.md).
 

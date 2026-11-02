@@ -18,6 +18,131 @@ from _fixed_helpers import fixed_pack, request, save_request, snapshot
 runner = importlib.import_module("tools.strategy_lab.fixed.run")
 
 
+def assert_complete_index(out, manifest):
+    with (out / "series-index.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    accounts = manifest["contract"]["accounts"]
+    assert [r["account_id"] for r in rows] == [a["account_id"] for a in accounts]
+    for row, account in zip(rows, accounts):
+        claim = manifest["completed"][account["account_id"]]
+        result = load_json(out / claim["result.json"]["path"], "result")
+        assert row["status"] == "complete" and row["reason"] == ""
+        for key in ("parameter_set", "period", "instrument_id", "cell", "timeframe_minutes"):
+            assert row[key] == str(account[key])
+        assert float(row["net_profit"]) == result["metrics"]["net_profit"]
+        for field, name in (("result", "result.json"), ("curve", "curve.parquet"), ("monthly", "monthly.csv")):
+            assert row[field] == claim[name]["path"] and (out / row[field]).is_file()
+
+
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_final_claim_index_recovery(fixed_pack, tmp_path, monkeypatch, error):
+    path = save_request(tmp_path, request())
+    out = tmp_path / "out"
+    write_index = runner.write_index
+
+    def interrupted_index(root, manifest):
+        if len(manifest["completed"]) == len(manifest["contract"]["accounts"]):
+            raise error("final claim saved, index interrupted")
+        write_index(root, manifest)
+
+    monkeypatch.setattr(runner, "write_index", interrupted_index)
+    with pytest.raises(error, match="index interrupted"):
+        runner.run(path, fixed_pack, out)
+    partial = open_dataset(out, allow_partial=True)
+    assert not partial["complete"] and len(partial["completed"]) == 1
+    assert partial["failure"] is None and not (out / "manifest.json").exists()
+    with (out / "series-index.csv").open(newline="", encoding="utf-8") as stream:
+        assert [r["status"] for r in csv.DictReader(stream)] == ["pending"]
+    saved = snapshot(out / "accounts")
+    before_retry = snapshot(out)
+
+    def forbidden(*args):
+        pytest.fail("completed account executed or republished")
+
+    monkeypatch.setattr(runner, "execute_account", forbidden)
+    monkeypatch.setattr(runner, "publish_account", forbidden)
+    # With zero accounts left, a failed final index write must still withhold completion.
+    with pytest.raises(error, match="index interrupted"):
+        runner.run(path, fixed_pack, out, resume=True)
+    assert snapshot(out) == before_retry
+    assert open_dataset(out, allow_partial=True) == partial
+
+    monkeypatch.setattr(runner, "write_index", write_index)
+    write_json = runner.atomic_write_json
+
+    def complete_after_index(destination, manifest):
+        if destination.name == "manifest.json":
+            assert_complete_index(out, manifest)
+        write_json(destination, manifest)
+
+    monkeypatch.setattr(runner, "atomic_write_json", complete_after_index)
+    assert runner.run(path, fixed_pack, out, resume=True)["complete"]
+    assert_complete_index(out, open_dataset(out))
+    assert snapshot(out / "accounts") == saved
+    complete = snapshot(out)
+    assert runner.run(path, fixed_pack, out)["no_op"]
+    assert snapshot(out) == complete
+
+
+def test_final_marker_interruption(fixed_pack, tmp_path, monkeypatch):
+    path = save_request(tmp_path, request())
+    out = tmp_path / "out"
+    write_json = runner.atomic_write_json
+
+    def interrupt_marker(destination, manifest):
+        if destination.name == "manifest.json":
+            assert_complete_index(out, manifest)
+            raise KeyboardInterrupt("index refreshed, completion interrupted")
+        write_json(destination, manifest)
+
+    monkeypatch.setattr(runner, "atomic_write_json", interrupt_marker)
+    with pytest.raises(KeyboardInterrupt, match="completion interrupted"):
+        runner.run(path, fixed_pack, out)
+    partial = open_dataset(out, allow_partial=True)
+    assert not partial["complete"] and partial["failure"] is None
+    assert not (out / "manifest.json").exists()
+    assert_complete_index(out, partial)
+    saved = snapshot(out / "accounts")
+    monkeypatch.setattr(runner, "atomic_write_json", write_json)
+    monkeypatch.setattr(runner, "execute_account", lambda *a: pytest.fail("completed account executed"))
+    monkeypatch.setattr(runner, "publish_account", lambda *a: pytest.fail("completed account republished"))
+    assert runner.run(path, fixed_pack, out, resume=True)["complete"]
+    assert_complete_index(out, open_dataset(out))
+    assert snapshot(out / "accounts") == saved
+
+
+@pytest.mark.parametrize("change", ["run_name", "scalar", "cell"])
+def test_changed_request_resume_refused(fixed_pack, tmp_path, monkeypatch, change):
+    raw = request()
+    path = save_request(tmp_path, raw)
+    out = tmp_path / "out"
+    runner.run(path, fixed_pack, out, preflight_only=True)
+    before = snapshot(out)
+    if change == "run_name":
+        raw["run_name"] += "-changed"
+    elif change == "scalar":
+        raw["generation"]["parameter_sets"][0]["params"]["stopX"] = 2.17
+    else:
+        raw["generation"]["market_data"]["instruments"][0]["cell"] = "changed"
+    changed = save_request(tmp_path, raw, "changed.json")
+    monkeypatch.setattr(runner, "execute_account", lambda *a: pytest.fail("refused request executed"))
+    with pytest.raises(ValueError, match="contract changed; use a new output"):
+        runner.run(changed, fixed_pack, out, resume=True)
+    assert snapshot(out) == before
+
+
+def test_foreign_output_refused(fixed_pack, tmp_path, monkeypatch):
+    path = save_request(tmp_path, request())
+    out = tmp_path / "foreign"
+    out.mkdir()
+    (out / "owner.txt").write_text("unrelated output", encoding="utf-8")
+    before = snapshot(out)
+    monkeypatch.setattr(runner, "execute_account", lambda *a: pytest.fail("foreign output executed"))
+    with pytest.raises(ValueError, match="nonempty output without a Fixed manifest"):
+        runner.run(path, fixed_pack, out, resume=True)
+    assert snapshot(out) == before
+
+
 def test_series_interruption_resume_and_memory_scope(fixed_pack, tmp_path, monkeypatch):
     from core import data_input
     raw = request(series=True)

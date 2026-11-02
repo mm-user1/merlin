@@ -118,7 +118,7 @@ def publish_account(output, account, execution, provenance):
     rows = monthly(ts, equity, balance, capital, account["timeframe_minutes"])
     metrics = finite_json(asdict(execution.basic_metrics) | asdict(execution.advanced_metrics) |
                           {"max_drawdown_mtm_pct":execution.max_drawdown_mtm_pct})
-    units = {n:("percent" if n.endswith("_pct") or n == "win_rate" else "count" if n in (
+    units = {n:("percent" if n.endswith("_pct") or n in ("win_rate", "ulcer_index") else "count" if n in (
         "total_trades", "winning_trades", "losing_trades", "max_consecutive_losses", "sharpe_daily_observations", "sharpe_daily_active_days")
         else "account_currency" if n in ("net_profit", "gross_profit", "gross_loss", "max_drawdown", "avg_win", "avg_loss", "avg_trade") else "ratio") for n in metrics}
     prefix = "accounts/" + account["account_id"] + "/"
@@ -201,6 +201,8 @@ def run(request, data_root, output, *, resume=False, preflight_only=False):
             write_index(output, m)
             raise
         write_index(output, m)
+    # Resume may have no remaining accounts after the final claim was saved.
+    write_index(output, m)
     m["complete"] = True
     atomic_write_json(complete, m)
     return {"complete":True, "no_op":False, "completed":len(accounts), "accounts":len(accounts), "seconds":time.perf_counter()-started}

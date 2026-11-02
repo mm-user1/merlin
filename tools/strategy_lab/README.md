@@ -130,6 +130,10 @@ valid zero stays zero. A loss, no trades or cap-blocked account can complete nor
 Invalid accounting or execution errors cannot become zero-profit results. Trade
 ledgers and raw event exports are not provided by this feature.
 
+Ulcer Index values are already percentage-scale; newly generated metadata and
+HTML label them `percent`. Older saved `ratio` labels remain readable and are
+preserved, including when resuming already claimed accounts. Values are not rescaled.
+
 Monthly observations use end-of-bar values indexed by UTC bar-open timestamps.
 The first month opens at the saved pre-evaluation capital anchor; subsequent months
 open at the prior month's last equity/balance. This preserves first-bar P&L.
@@ -157,6 +161,14 @@ manifest. That claim publishes the account. An interrupted unclaimed account res
 from its original capital; its exact owned files may be replaced. Claimed completed
 files are immutable: missing/corrupt artifacts fail rather than regenerate. A partial
 dataset requires explicit `--resume`; changed experiments require a new output.
+
+Finalization refreshes the series index from durable claims before publishing
+`manifest.json`, even when resume has no accounts left to execute. An index-write
+failure leaves the claims resumable and withholds completion. Completed datasets
+remain unchanged on a valid no-op. If a historical completed dataset has a stale
+index from an earlier interruption, use `report --dataset DATASET --output-dir REPORT`
+with a separate output directory to reconstruct truthful views without modifying
+the original dataset.
 
 Every invocation source-verifies all accounts before proceeding, including completed
 accounts on partial resume and complete no-op. Pending accounts replay their frozen
