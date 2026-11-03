@@ -61,7 +61,7 @@ def test_field_preserves_analyze_and_hierarchical_support(tmp_path):
     out = tmp_path/"audit"
     write_field_audit(result, out)
     assert all((out/"analysis"/n).read_bytes() == b for n, b in standalone.items())
-    assert json.loads((out/"audit.json").read_text())["schema_version"] == "strategy_lab_field_audit_v1"
+    assert json.loads((out/"audit.json").read_text())["schema_version"] == "strategy_lab_field_audit_v2"
     with pytest.raises(AnalysisError, match="empty access log"):
         evaluate_field_audit(item.dataset, item.scope)
     with pytest.raises(AnalysisError, match="empty output"):
@@ -264,3 +264,38 @@ def test_symlink_ancestors(tmp_path):
         pytest.skip(f"host cannot create symlinks: {exc}")
     with pytest.raises(AnalysisError, match="symlinks"):
         new_output(link/"nested", [])
+
+
+def test_field_time_groups_map_overlapping_is_and_preserve_ties(tmp_path):
+    root = _synthetic_dataset(tmp_path)
+    for ticker in ("AAA", "BBB"):
+        for window in (1, 2):
+            mutate_group(root, ticker, window, lambda a, m: a.__setitem__((slice(None), slice(None), m["net_profit_pct"]), 4))
+    item = input_at(root)
+    windows = tuple(replace(w, is_start="2023-12-01" if w.window_id == 1 else "2023-12-15",
+        is_end="2024-01-15", oos_start="2024-03-01" if w.window_id == 1 else "2024-02-01",
+        oos_end="2024-03-31" if w.window_id == 1 else "2024-02-29") for w in item.scope.windows)
+    result = evaluate_field_audit(item.dataset, replace(item.scope, windows=windows))
+    out = tmp_path/"time-audit"
+    write_field_audit(result, out)
+    metadata = json.loads((out/"audit.json").read_text())
+    mapping = metadata["window_groups"]
+    assert set(mapping) == {"window:1", "window:2"}
+    for w in windows:
+        assert mapping[f"window:{w.window_id}"] == dict(window_id=w.window_id,
+            is_interval=[w.is_start, w.is_end], oos_interval=[w.oos_start, w.oos_end])
+    for segment in ("is", "oos"):
+        rows = [r for r in result.tables["concentration"] if r["semantic_key"] == "z" and r["segment"] == segment]
+        times = [r for r in rows if r["dimension"] == "time"]
+        tickers = [r for r in rows if r["dimension"] == "ticker"]
+        assert [r["group"] for r in times] == ["window:2", "window:1"]
+        assert all(r["largest_positive_group"] == "window:2" and r["contribution"] == 2 for r in times)
+        assert all(r["complete_total"] == 4 and r["total_excluding_largest"] == 2 for r in rows)
+        assert sum(r["contribution"] for r in times) == sum(r["contribution"] for r in tickers) == 4
+        assert all(mapping[r["group"]][segment+"_interval"] for r in times)
+    # Equal OOS starts with different ends are distinct saved blocks, too.
+    item = input_at(root)
+    tied = tuple(replace(w, oos_start="2024-02-01", oos_end=f"2024-02-{27+w.window_id}") for w in item.scope.windows)
+    result = evaluate_field_audit(item.dataset, replace(item.scope, windows=tied))
+    times = [r for r in result.tables["concentration"] if r["dimension"] == "time" and r["semantic_key"] == "z" and r["segment"] == "is"]
+    assert len(times) == 2 and all(r["largest_positive_group"] == "window:1" for r in times)

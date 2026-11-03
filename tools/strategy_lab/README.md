@@ -916,7 +916,7 @@ cannot overlap any input dataset or recorded native target/filter root in either
 direction, the canonical Lab evidence directories, or `src/storage`; symlink
 ancestors/leaves are refused. Display labels are unique nonblank strings, never
 filesystem components; duplicate source identities fail. HTML is escaped, light,
-self-contained and links relative CSV files. CSV is authoritative. Structured
+self-contained and links relative artifacts. CSV and shared JSON facts are authoritative. Structured
 CSV cells use canonical JSON; empty numeric cells mean unavailable, not zero.
 
 All three new CLIs emit one success JSON document to stdout; failures and
@@ -956,14 +956,22 @@ exactly one of `candidate_rule` and `candidate_policy`; it also accepts
 Fixed accepts `universe` (or a `ticker_list` file), `ticker_list_mode`,
 `allow_partial`, and `parameter_axes`. Each input resolves membership independently
 in saved order; strict membership is the default. Explicit intersection rejects
-wholly unknown IDs and empty per-input membership. Without a Fixed universe,
+wholly unknown IDs, empty per-input membership and an empty common input roster.
+The common-roster guard retains each input's effective subset and saved order.
+Without a Fixed universe,
 declared inventories and per-input membership are retained.
 
 | Descriptor schema | Authoritative tables and nested publication |
 | --- | --- |
-| `strategy_lab_field_audit_v1` (`audit.json`) | `cell_summary.csv`, `candidate_summary.csv`, `axis_marginals.csv`, `neighbour_stability.csv`, `concentration.csv`; unchanged five-file `analysis/` |
+| `strategy_lab_field_audit_v2` (`audit.json`) | `cell_summary.csv`, `candidate_summary.csv`, `axis_marginals.csv`, `neighbour_stability.csv`, `concentration.csv`; unchanged five-file `analysis/` |
 | `strategy_lab_screen_v1` (`screen.json`) | `comparisons.csv`, `candidate_turnover.csv`, `concentration.csv`; unchanged six-file `allocation/`; strict pairs add `filter_candidate_pairs.csv` and `filter_selection_pairs.csv` |
-| `strategy_lab_fixed_comparison_v1` (`comparison.json`) | `accounts.csv`, `calendar.csv`, `summaries.csv`, `neighbours.csv`, `concentration.csv` |
+| `strategy_lab_fixed_comparison_v2` (`comparison.json`) | `accounts.csv`, `calendar.csv`, `summaries.csv`, `neighbours.csv`, `concentration.csv`, shared `cohort_facts.json` |
+
+The [comparative report schema](COMPARATIVE_REPORT_SCHEMA.md) defines every column,
+row level, structured cell and shared-fact join. Fixed v2 replaces repeated cohort
+payloads with references; field v2 uses stable window groups with exact IS/OOS
+interval metadata. Screen v1 adds nullable `same_candidate`. Historical reports
+remain unchanged.
 
 Descriptors retain input manifests/hashes/contracts/families, effective scopes,
 unlock evidence, research-document identities, membership, metric units, Git
@@ -1026,6 +1034,8 @@ configuration**, **policy reselection with filters**, and **policy and ticker
 allocation on the common IS-eligible pool**. Reselection joins frozen semantic keys
 to each side's saved OOS, including local selections excluded from the common pool;
 selection, finite selected-IS score and pool membership have separate columns.
+`same_candidate` compares nonnull frozen semantic keys independently of these
+availability flags; a missing key yields null.
 
 Fixed primary summaries aggregate tickers only at **variant × economics stratum ×
 exact evaluation-period key**. Variant contains producing strategy identity,
@@ -1038,8 +1048,13 @@ primary grain fail. Pending/failed declared accounts require `--allow-partial`;
 corrupt completed claims always fail.
 
 For each metric, common membership intersects completed finite ticker sets across
-all variants in that stratum/period cohort. Tables retain the exact cohort/hash,
-expected union, available/common memberships, missing IDs and saved sample facts.
+all variants in that stratum/period cohort. `cohort_id` joins shared roster and
+metric facts in `cohort_facts.json`; account references retain exact pins, bounds,
+admission and missingness. Available coverage divides by the variant's declared
+roster; common coverage divides by the cohort union. Both expose a separate
+positive/union share and `cohort_expected_count`. Missingness includes failed and
+pending accounts; available trade totals require the variant roster to be finite,
+while common totals require the whole union to be finite in every variant.
 Empty common sets are unavailable. Equal membership with unequal pins/bounds/TF/
 admission is `descriptive_common_membership`. Trades expose observed sums and
 medians with complete totals unavailable when expected members are missing.
@@ -1062,7 +1077,11 @@ It reports signed observed/complete totals, positive gross, absolute negative gr
 positive shares, the largest positive contributor (canonical ID/UTC tie break) and
 arithmetic total excluding it. No positive contribution means null shares/removal;
 zero net totals are not percentages of net. Field contributions reconcile to the
-finite-support hierarchical candidate mean, with partial-support counts. Screen
+finite-support hierarchical candidate mean, with partial-support counts. Field
+time groups are `window:<window_id>`; `audit.json.window_groups` maps each to both
+IS and OOS endpoint pairs. Segment chooses the interval; overlapping IS windows
+remain separate descriptive blocks. Equal-largest ties retain saved OOS-start
+string order, with window ID breaking identical-start ties. Screen
 member contributions divide by the total expected common-block count, so they
 reconcile to mean capacity return; an unavailable block contributes no partial
 member subtotal and makes the complete total unavailable. Cash contributes zero.

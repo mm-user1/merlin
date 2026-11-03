@@ -80,6 +80,17 @@ def test_offline_public_apis_relocation_and_strict_stream(families, tmp_path, mo
     shutil.copytree(families["fixedv1"], relocated)
     compare_fixed([("old", relocated), ("on", families["fixedon"])], tmp_path/"fixed-report", parameter_axes=["stopLP"])
     meta = json.loads((tmp_path/"fixed-report/comparison.json").read_text())
+    assert meta["schema_version"] == "strategy_lab_fixed_comparison_v2"
+    facts_path = tmp_path/"fixed-report/cohort_facts.json"
+    assert meta["artifacts"]["cohort_facts.json"] == artifact_record(facts_path, facts_path.parent)
+    assert 'href="cohort_facts.json"' in (facts_path.parent/"index.html").read_text()
+    facts = json.loads(facts_path.read_text())["cohorts"]
+    accounts = {r["account_id"]: r for r in read_rows(facts_path.parent/"accounts.csv")}
+    for r in read_rows(facts_path.parent/"summaries.csv"):
+        if r["level"] == "primary":
+            context = facts[r["cohort_id"]]
+            assert r["metric"] in context["metrics"] and r["variant_key"] in context["variants"]
+            assert all(aid in accounts for roster in context["variants"].values() for aid in roster.values())
     assert meta["account_count"] == 12 and len(meta["variants"]) == 6
     assert {r["period_kind"] for r in read_rows(tmp_path/"fixed-report/calendar.csv")} == {"continuous_calendar_slice"}
 
@@ -165,6 +176,12 @@ def test_fixed_metric_cohorts_failed_middle_and_tampering(families, tmp_path):
     summaries = read_rows(out/"summaries.csv")
     common = [r for r in summaries if r["level"] == "primary" and r["membership"] == "common"]
     assert common and all(r["reason"] == "empty_common_sample" and r["mean"] == "" for r in common)
+    from tools.strategy_lab.analysis import load_universe
+    universe_path = tmp_path/"universe.json"
+    universe_path.write_text(json.dumps(dict(schema_version="strategy_lab_universe_v1", name="both",
+        evidence_classification="exploratory", selection_note="synthetic", tickers=["BYBIT_AAAUSDT", "BYBIT_BBBUSDT"])))
+    compare_fixed([("partial", root)], tmp_path/"explicit", allow_partial=True, universe=load_universe(universe_path))
+    assert read_rows(tmp_path/"explicit/summaries.csv") == summaries
     claim = manifest["completed"][accounts[0]["account_id"]]
     (root/claim["monthly.csv"]["path"]).write_text("corrupt")
     with pytest.raises(ValueError, match="verification"):
@@ -221,6 +238,7 @@ def test_filter_reselection_keeps_local_excluded_candidate_oos(families, tmp_pat
     rows = read_rows(tmp_path/"report/filter_selection_pairs.csv")
     row = next(r for r in rows if r["ticker"] == "BYBIT_AAAUSDT")
     assert row["off_semantic_key"] != row["on_semantic_key"]
+    assert row["same_candidate"] == "False"
     assert row["off_selection_available"] == row["on_selection_available"] == "True"
     assert row["off_ticker_score_available"] == "False" and row["on_ticker_score_available"] == "True"
     assert row["off_in_common_pool"] == row["on_in_common_pool"] == "False"
@@ -247,7 +265,7 @@ def test_fixed_exact_period_metric_specific_cohort_and_ambiguity(families, tmp_p
     assert _period(a)[0] == rows[0]["period_key"][0]
     rows[0]["metrics"]["max_drawdown_mtm_pct"] = None
     rows[2]["input_pin"]["input_fingerprint"] = "different target snapshot"
-    summaries, _ = _summaries(rows)
+    summaries, _, shared = _summaries(rows)
     common = [r for r in summaries if r["level"] == "primary" and r["membership"] == "common"]
     assert all(r["finite"] == 1 for r in common if r["metric"] == "max_drawdown_mtm_pct")
     assert all(r["finite"] == 2 for r in common if r["metric"] == "net_profit_pct")
@@ -256,7 +274,7 @@ def test_fixed_exact_period_metric_specific_cohort_and_ambiguity(families, tmp_p
     temporal = deepcopy(rows[0]); temporal["period_key"] = ["2024-03-02T00:00:00+00:00", rows[0]["period_key"][1]]
     tf = deepcopy(rows[0]); tf["variant"]["timeframe_minutes"] = tf["timeframe_minutes"] = 120
     tf["variant_key"] = digest(tf["variant"])
-    summaries, groups = _summaries([*rows, other, temporal, tf])
+    summaries, groups, _ = _summaries([*rows, other, temporal, tf])
     assert len(groups) == 6
     assert all(r["mean"] is None for r in summaries if r["level"].startswith("cross_"))
     duplicated = deepcopy(rows[0]); duplicated["input_pin"]["bounds"]["warmup_start"] = "different"
@@ -306,3 +324,176 @@ def test_fixed_universe_uses_declared_inventory_and_captured_snapshots(families,
     before = deepcopy(snapshots)
     captured_results[0]["metrics"]["net_profit_pct"] = 999999
     assert snapshots == before
+
+
+def test_fixed_shared_facts_and_denominators():
+    from _fixed_helpers import comparison_account
+    from tools.strategy_lab.fixed.compare import _summaries, METRICS
+    a = comparison_account({"x": 1}, value=2)
+    b = comparison_account({"x": 2}, value=0)
+    extra = comparison_account({"x": 2}, "B", status="pending", value=None)
+    b["metrics"]["max_drawdown_mtm_pct"] = None
+    rows = [a, b, extra]
+    summaries, _, shared = _summaries(rows)
+    context_id, context = next(iter(shared["cohorts"].items()))
+    assert context["union_tickers"] == ["A", "B"]
+    lookup = {r["account_id"]: r for r in rows}
+    for v, roster in context["variants"].items():
+        for ticker, aid in roster.items():
+            assert lookup[aid]["ticker"] == ticker and lookup[aid]["variant_key"] == v
+            assert all(k in lookup[aid] for k in ("input_pin", "admission", "timeframe_minutes", "status", "metrics"))
+    primary = [r for r in summaries if r["level"] == "primary"]
+    for r in primary:
+        assert r["cohort_id"] == context_id and r["cohort_expected_count"] == 2
+        assert not ({"cohort_variants", "cohort_sha256", "expected_tickers", "finite_tickers",
+            "missing_nonfinite_tickers", "cohort_missing_nonfinite", "sample_facts"} & r.keys())
+        v, metric = r["variant_key"], r["metric"]
+        facts = context["metrics"][metric]
+        declared, finite = set(context["variants"][v]), set(facts["finite_tickers"][v])
+        expected = declared if r["membership"] == "available" else set(context["union_tickers"])
+        selected = finite if r["membership"] == "available" else set(facts["common_tickers"])
+        assert r["expected"] == r["expected_count"] == len(expected)
+        assert r["finite"] == len(selected) and r["missing"] == len(expected-selected)
+        assert r["declared_count"] == len(declared)
+        assert r["completed_count"] == 1
+        assert r["positive_share_expected"] == r["positive"]/len(expected)
+        assert r["positive_share_expected_cohort"] == r["positive"]/2
+        assert r["sample_classification"] == facts["sample_classification"]
+        if not selected:
+            assert r["positive"] == 0 and r["positive_share_finite"] is None
+            assert all(r[k] is None for k in ("mean", "median", "q25", "q75", "minimum", "maximum"))
+            assert r["reason"] == ("empty_common_sample" if r["membership"] == "common" else "no_finite_values")
+    def row(v, mode, metric="total_trades"):
+        return next(r for r in primary if (r["variant_key"], r["membership"], r["metric"]) == (v, mode, metric))
+    av = row(a["variant_key"], "available")
+    assert av["positive_share_expected"] == 1 and av["positive_share_expected_cohort"] == .5
+    assert av["observed_sum"] == av["complete_total"] == 2
+    bv = row(b["variant_key"], "available")
+    assert bv["observed_sum"] == 0 and bv["complete_total"] is None and bv["no_trade_count"] == 1
+    assert row(a["variant_key"], "common")["complete_total"] is None
+    assert context["metrics"]["net_profit_pct"]["common_tickers"] == ["A"]
+    assert context["metrics"]["max_drawdown_mtm_pct"]["common_tickers"] == []
+    assert set(context["metrics"]) == set(METRICS)
+    # Exact periods, strata and declared membership all contribute to identity.
+    others = [comparison_account({"x": 1}, stratum="other"),
+        comparison_account({"x": 1}, period=("2024-02-01", "2024-03-01"))]
+    _, _, multi = _summaries([*rows, *others])
+    assert len(multi["cohorts"]) == 3 and context_id in multi["cohorts"]
+    assert context_id not in _summaries([a, b])[2]["cohorts"]
+    assert shared == _summaries(list(reversed(rows)))[2]
+
+
+def test_fixed_sparse_index_matches_independent_edge_oracle():
+    from _fixed_helpers import comparison_account
+    from tools.strategy_lab.fixed.compare import _neighbours, METRICS
+    from tools.strategy_lab.report_support import neighbourhood
+    # x=2,y=2 is absent: x=1,y=2 must not bridge to x=3,y=2.
+    declarations = [(1, 1), (2, 1), (3, 1), (1, 2), (3, 2)]
+    rows = [comparison_account(dict(x=x, y=y), value=x+y) for x, y in declarations]
+    rows += [comparison_account(dict(x=2, y=1), "B"),
+        comparison_account(dict(x=2, y=1), period=("2025-01-01", "2025-02-01")),
+        comparison_account(dict(x=9, y=9), stratum="other"),
+        comparison_account(dict(x=9, y=9), filter_key="on"),
+        comparison_account(dict(x=9, y=9), timeframe=120)]
+    rows[1]["input_pin"]["input_fingerprint"] = "incomparable pin"
+    rows[4]["admission"] = {"mode": "different"}
+    rows[2]["status"] = "pending"
+    rows[2]["metrics"] = {}
+    actual = _neighbours(rows, ("y", "x"))
+    expected = []
+    for center in rows:
+        group = [r for r in rows if all(r[k] == center[k] for k in ("stratum_key", "filter_key", "timeframe_minutes"))]
+        values = [center["metrics"].get("net_profit_pct")]
+        for axis in ("y", "x"):
+            domain = sorted({r["strategy_params"][axis] for r in group})
+            pos = domain.index(center["strategy_params"][axis])
+            for other in domain[max(0, pos-1):pos]+domain[pos+1:pos+2]:
+                params = dict(center["strategy_params"], **{axis: other})
+                if not any(r["strategy_params"] == params for r in group):
+                    continue
+                match = next((r for r in group if r["strategy_params"] == params and
+                    r["ticker"] == center["ticker"] and r["period_key"] == center["period_key"]), None)
+                comparable = match is not None and all(match[k] == center[k] for k in ("input_pin", "admission", "timeframe_minutes"))
+                values.append(match["metrics"].get("net_profit_pct") if comparable else None)
+                for metric in METRICS:
+                    a = center["metrics"].get(metric)
+                    b = match["metrics"].get(metric) if comparable else None
+                    expected.append(dict(level="edge", center_account_id=center["account_id"],
+                        neighbor_account_id=match["account_id"] if match else None, ticker=center["ticker"],
+                        period_key=center["period_key"], axis=axis, distance=other-center["strategy_params"][axis],
+                        metric=metric, center=a, neighbor=b, difference=b-a if a is not None and b is not None else None,
+                        comparable=comparable, status="comparable" if comparable else "incomparable",
+                        reason=None if comparable else "different_target_pin_admission_or_evaluation_geometry" if match else "undeclared_ticker_period_cell"))
+        expected.append(dict(level="neighborhood", center_account_id=center["account_id"], ticker=center["ticker"],
+            period_key=center["period_key"], metric="net_profit_pct", **neighbourhood(values, list(range(len(values))), 0)))
+    assert actual == expected
+    assert any(r.get("reason") == "undeclared_ticker_period_cell" for r in actual)
+    assert any(r.get("status") == "insufficient_neighbors" for r in actual)
+    with pytest.raises(AnalysisError, match="ambiguous duplicate Fixed neighbor"):
+        _neighbours([*rows, deepcopy(rows[0])], ("x",))
+
+
+def test_fixed_explicit_disjoint_rosters_refused_before_publication(families, tmp_path):
+    from _fixed_helpers import snapshot
+    from tools.strategy_lab.config import canonical_sha256
+    from tools.strategy_lab.analysis import load_universe
+    inputs = []
+    for name, ticker in (("fixedoff", "BYBIT_AAAUSDT"), ("fixedon", "BYBIT_BBBUSDT")):
+        root = tmp_path/name
+        shutil.copytree(families[name], root)
+        manifest = storage.open_dataset(root)
+        contract = manifest["contract"]
+        generation = contract["request"]["generation"]
+        generation["market_data"]["instruments"] = [i for i in generation["market_data"]["instruments"] if i["instrument_id"] == ticker]
+        contract["accounts"] = [a for a in contract["accounts"] if a["instrument_id"] == ticker]
+        generation["expected_run_count"] = len(contract["accounts"])
+        manifest["request_sha256"] = canonical_sha256(contract["request"])
+        manifest["contract_sha256"] = storage.contract_identity(contract)
+        manifest["completed"] = {a["account_id"]: manifest["completed"][a["account_id"]] for a in contract["accounts"]}
+        atomic_write_json(root/"manifest.json", manifest)
+        storage.open_dataset(root)
+        inputs.append((name, root))
+    path = tmp_path/"universe.json"
+    path.write_text(json.dumps(dict(schema_version="strategy_lab_universe_v1", name="both",
+        evidence_classification="exploratory", selection_note="synthetic", tickers=["BYBIT_AAAUSDT", "BYBIT_BBBUSDT"])))
+    u = load_universe(path)
+    before = snapshot(tmp_path)
+    out = tmp_path/"refused"
+    with pytest.raises(AnalysisError, match="empty common input roster"):
+        compare_fixed(inputs, out, universe=u, ticker_list_mode="intersection")
+    assert not out.exists() and snapshot(tmp_path) == before
+    compare_fixed(inputs, tmp_path/"union")
+    common = [r for r in read_rows(tmp_path/"union/summaries.csv") if r["level"] == "primary" and r["membership"] == "common"]
+    assert common and all(r["reason"] == "empty_common_sample" for r in common)
+
+
+def test_filter_same_candidate_published_from_frozen_keys(families, tmp_path, monkeypatch):
+    result = evaluate_screen([item(families[n], n) for n in ("v4off", "v4on")],
+        candidate_rule="primary_profit", filter_baseline="v4off")
+    decisions = result.allocation.pair_decisions
+    cells = sorted({(r["ticker"], r["window_id"]) for r in decisions})
+    keys = list(result.filter_pair[0].dataset.geometry.semantic_keys)
+    combinations = [(keys[0], keys[0]), (keys[0], keys[1]), (keys[0], None), (None, None)]
+    for r in decisions:
+        left, right = combinations[cells.index((r["ticker"], r["window_id"]))]
+        r["semantic_key"] = left if r["dataset_label"] == "v4off" else right
+        r["candidate_id"] = 123  # Never the equality criterion.
+        r["ticker_score"] = None
+        r["in_common_pool"] = False
+    # A frozen same-key selection remains same when its saved OOS is unavailable.
+    dataset = result.filter_pair[0].dataset
+    original = dataset._load_segment
+    def load(scope, window, segment):
+        arrays = original(scope, window, segment)
+        if segment == "oos":
+            arrays = {ticker: values.copy() for ticker, values in arrays.items()}
+            for values in arrays.values():
+                values[:, dataset.metric_index["net_profit_pct"]] = float("nan")
+        return arrays
+    monkeypatch.setattr(dataset, "_load_segment", load)
+    write_screen(result, tmp_path/"flags")
+    rows = read_rows(tmp_path/"flags/filter_selection_pairs.csv")
+    windows = {w.block_key: w.window_id for w in result.filter_pair[0].scope.windows}
+    flags = {(r["ticker"], windows[tuple(json.loads(r["block_key"]))]): r["same_candidate"] for r in rows}
+    assert [flags[cell] for cell in cells] == ["True", "False", "", ""]
+    assert all(r["off_net_profit_pct"] == "" and r["off_in_common_pool"] == "False" for r in rows)

@@ -10,9 +10,10 @@ from .config import ECONOMICS, RUNTIME
 from .storage import open_dataset
 from ..analysis.dataset import AnalysisError, git_facts
 from ..analysis.research_inputs import Universe, digest, load_universe
+from ..analysis.json_utils import canonical_json_bytes
 from ..filters import recorded_roots
 from ..report_support import (labels, finite, statistics, concentration, neighbourhood,
-    new_output, write_rows, finish_report)
+    new_output, write_rows, write_bytes, finish_report)
 
 METRICS = ("net_profit_pct", "max_drawdown_pct", "max_drawdown_mtm_pct", "total_trades")
 
@@ -54,6 +55,8 @@ def _membership(universe, manifests, mode):
             raise AnalysisError(f"Fixed {label!r} has an empty requested intersection.")
         facts[label] = dict(declared_tickers=inventory, effective_tickers=selected[label],
             missing_requested_tickers=missing, excluded_tickers=sorted(set(inventory)-requested))
+    if not set.intersection(*(set(tickers) for tickers in selected.values())):
+        raise AnalysisError("explicit Fixed universe has an empty common input roster.")
     return selected, {**universe.provenance(), "mode": mode, "datasets": facts}
 
 
@@ -68,10 +71,16 @@ def _summaries(accounts):
         if len(tickers) != len(set(tickers)):
             raise AnalysisError(f"ambiguous duplicate ticker within variant/stratum/period: {variant}, {period}.")
         cohorts[stratum, period][variant] = rows
-    output = []
+    output, shared = [], {}
     for (stratum, period), variants in sorted(cohorts.items()):
         variant_keys = sorted(variants)
         expected = sorted({r["ticker"] for rows in variants.values() for r in rows})
+        rosters = {v: sorted(r["ticker"] for r in variants[v]) for v in variant_keys}
+        cohort_id = digest(dict(stratum_key=stratum, period_key=period, variant_tickers=rosters))
+        context = dict(stratum_key=stratum, period_key=period, union_tickers=expected,
+            variants={v: {r["ticker"]: r["account_id"] for r in sorted(variants[v], key=lambda r: r["ticker"])}
+                for v in variant_keys}, metrics={})
+        shared[cohort_id] = context
         for metric in METRICS:
             finite_sets = {variant: {r["ticker"] for r in rows if r["status"] == "completed" and finite(r["metrics"].get(metric))}
                 for variant, rows in variants.items()}
@@ -80,28 +89,29 @@ def _summaries(accounts):
                 bounds=r["input_pin"]["bounds"], timeframe=r["timeframe_minutes"], admission=r["admission"])
                 for r in rows if r["ticker"] in common} for variant, rows in variants.items()}
             identical = all(facts[v] == facts[variant_keys[0]] for v in variant_keys)
+            classification = ("unavailable_common_membership" if not common else
+                "identical_saved_sample_facts" if identical else "descriptive_common_membership")
+            context["metrics"][metric] = dict(finite_tickers={v: sorted(finite_sets[v]) for v in variant_keys},
+                common_tickers=sorted(common), sample_classification=classification)
             for variant, rows in sorted(variants.items()):
                 for mode in ("available", "common"):
                     selected = rows if mode == "available" else [r for r in rows if r["ticker"] in common]
+                    expected_count = len(rows) if mode == "available" else len(expected)
                     values = [r["metrics"].get(metric) if r["status"] == "completed" else None for r in selected]
                     stats = statistics(values)
-                    stats.update(expected=len(expected), missing=len(expected)-stats["finite"],
-                        positive_share_expected=stats["positive"]/len(expected))
+                    stats.update(expected=expected_count, missing=expected_count-stats["finite"],
+                        positive_share_expected=stats["positive"]/expected_count)
                     if mode == "common" and not common:
                         stats["reason"] = "empty_common_sample"
                     output.append(dict(level="primary", variant_key=variant, stratum_key=stratum, period_key=period,
-                        metric=metric, membership=mode, cohort_variants=variant_keys, cohort_sha256=digest(variant_keys),
-                        expected_tickers=expected, expected_count=len(expected), declared_count=len(rows),
+                        metric=metric, membership=mode, cohort_id=cohort_id,
+                        expected_count=expected_count, cohort_expected_count=len(expected), declared_count=len(rows),
                         completed_count=sum(r["status"] == "completed" for r in rows),
                         no_trade_count=sum(r["status"] == "completed" and r["metrics"].get("total_trades") == 0 for r in rows),
-                        finite_tickers=sorted(finite_sets[variant] if mode == "available" else common),
-                        missing_nonfinite_tickers=sorted(set(expected)-finite_sets[variant]),
-                        cohort_missing_nonfinite={v: sorted(set(expected)-finite_sets[v]) for v in variant_keys},
-                        sample_facts=facts, sample_classification="unavailable_common_membership" if not common else
-                            "identical_saved_sample_facts" if identical else "descriptive_common_membership",
+                        sample_classification=classification,
                         **stats, positive_share_expected_cohort=stats["positive"]/len(expected),
                         observed_sum=sum(v for v in values if finite(v)) if metric == "total_trades" and stats["finite"] else None,
-                        complete_total=sum(values) if metric == "total_trades" and len(values) == len(expected) and stats["finite"] == len(expected) else None))
+                        complete_total=sum(values) if metric == "total_trades" and stats["finite"] == expected_count else None))
     # Across-period/TF displays preserve each primary mean; they never pool accounts.
     cross = defaultdict(list)
     variant_facts = {r["variant_key"]: r["variant"] for r in accounts}
@@ -123,7 +133,7 @@ def _summaries(accounts):
             overlapping_periods=any(a[1] >= b[0] for a, b in zip(periods, periods[1:])), timeframes_minutes=timeframes,
             evaluation_geometry_varies=len(periods) > 1 or len(timeframes) > 1,
             mean=None, reason="independent runs; periods may overlap and timeframe/warmup geometry may differ; no pooled mean"))
-    return output, groups
+    return output, groups, dict(schema_version="strategy_lab_fixed_cohort_facts_v1", cohorts=shared)
 
 
 def _neighbours(accounts, axes):
@@ -136,27 +146,36 @@ def _neighbours(accounts, axes):
                 type(r["strategy_params"][axis]) not in (int, float) or not finite(r["strategy_params"][axis]) for r in accounts):
             raise AnalysisError(f"parameter axis {axis!r} must be a finite numeric strategy scalar in every account.")
     configurations = defaultdict(dict)
+    account_index = {}
     for row in accounts:
         key = row["stratum_key"], row["filter_key"], row["timeframe_minutes"]
-        configurations[key][digest(row["strategy_params"])] = row["strategy_params"]
+        params_key = digest(row["strategy_params"])
+        configurations[key][params_key] = row["strategy_params"]
+        account_key = (*key, params_key, row["ticker"], tuple(row["period_key"]))
+        if account_key in account_index:
+            raise AnalysisError("ambiguous duplicate Fixed neighbor account.")
+        account_index[account_key] = row
+    adjacent_values = {}
+    for key, declarations in configurations.items():
+        adjacent_values[key] = {}
+        for axis in axes:
+            values = sorted({p[axis] for p in declarations.values()})
+            adjacent_values[key][axis] = {value: tuple(values[j] for j in (i-1, i+1) if 0 <= j < len(values))
+                for i, value in enumerate(values)}
     output = []
     for center in accounts:
         key = center["stratum_key"], center["filter_key"], center["timeframe_minutes"]
         declarations = configurations[key]
         adjacent = []
         for axis in axes:
-            values = sorted({p[axis] for p in declarations.values()})
-            index = values.index(center["strategy_params"][axis])
-            for pos in (index-1, index+1):
-                if 0 <= pos < len(values):
-                    params = center["strategy_params"] | {axis: values[pos]}
-                    if digest(params) in declarations:
-                        adjacent.append((axis, params))
+            for value in adjacent_values[key][axis][center["strategy_params"][axis]]:
+                params = center["strategy_params"] | {axis: value}
+                params_key = digest(params)
+                if params_key in declarations:
+                    adjacent.append((axis, params, params_key))
         neighbors = []
-        for axis, params in adjacent:
-            match = next((r for r in accounts if r["stratum_key"] == key[0] and r["filter_key"] == key[1] and
-                r["timeframe_minutes"] == key[2] and r["strategy_params"] == params and
-                r["ticker"] == center["ticker"] and r["period_key"] == center["period_key"]), None)
+        for axis, params, params_key in adjacent:
+            match = account_index.get((*key, params_key, center["ticker"], tuple(center["period_key"])))
             comparable = match is not None and all(match[k] == center[k] for k in ("input_pin", "admission", "timeframe_minutes"))
             neighbors.append((match, comparable))
             for metric in METRICS:
@@ -270,21 +289,22 @@ def compare_fixed(inputs, output_dir, *, universe=None, ticker_list=None, ticker
             calendar.extend(dict(dataset_label=label, account_id=row["account_id"], variant_key=row["variant_key"],
                 stratum_key=row["stratum_key"], ticker=row["ticker"], period_key=row["period_key"],
                 period_kind="continuous_calendar_slice", **month) for month in months)
-    summaries, groups = _summaries(accounts)
+    summaries, groups, cohort_facts = _summaries(accounts)
     neighbors = _neighbours(accounts, tuple(parameter_axes))
     concentrated = _concentration(groups, calendar)
     output = new_output(output_dir, roots)
     tables = dict(accounts=accounts, calendar=calendar, summaries=summaries, neighbours=neighbors, concentration=concentrated)
     for name, rows in tables.items():
         write_rows(output, name+".csv", rows)
-    metadata = dict(schema_version="strategy_lab_fixed_comparison_v1", git=git_facts(), sources=sources,
+    write_bytes(output, "cohort_facts.json", canonical_json_bytes(cohort_facts))
+    metadata = dict(schema_version="strategy_lab_fixed_comparison_v2", git=git_facts(), sources=sources,
         research_inputs=membership, parameter_axes=list(parameter_axes),
         classification="descriptive_independent_accounts", grain="variant x economics stratum x exact evaluation period; aggregate tickers only",
         account_count=len(accounts), completed_count=sum(r["status"] == "completed" for r in accounts),
         variants={r["variant_key"]: r["variant"] for r in accounts}, strata={r["stratum_key"]: r["stratum"] for r in accounts},
         units="saved metrics; return/drawdown percent; counts; concentration currency, never summed percentages",
         limitations="No chaining independent periods; no shared-capital portfolio; common membership is metric-specific and may have different saved sample facts.")
-    return finish_report(output, "comparison.json", metadata, [n+".csv" for n in tables], "Continuous Fixed comparison",
+    return finish_report(output, "comparison.json", metadata, [*[n+".csv" for n in tables], "cohort_facts.json"], "Continuous Fixed comparison",
         {k: metadata[k] for k in ("account_count", "completed_count", "grain", "limitations")},
         [("Summary coverage", [dict(metric=metric,
             primary_grains=sum(r["level"] == "primary" and r["metric"] == metric and r["membership"] == "available" for r in summaries),

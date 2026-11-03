@@ -46,7 +46,7 @@ def labels(items):
         raise AnalysisError("unique nonblank display labels are required; paths are not labels.")
 
 
-def concentration(contributions, *, complete=True, partial_support=False):
+def concentration(contributions, *, complete=True, partial_support=False, order_key=None):
     """Group additive contributions; removal is arithmetic, never reweighting."""
     groups = defaultdict(list)
     for key, value in contributions:
@@ -57,7 +57,7 @@ def concentration(contributions, *, complete=True, partial_support=False):
     negative = -sum(min(v, 0) for v in observed.values())
     total = sum(observed.values()) if observed else None
     largest = min((k for k, v in observed.items() if v > 0),
-                  key=lambda k: (-observed[k], k), default=None)
+                  key=lambda k: (-observed[k], order_key(k) if order_key else k), default=None)
     return [dict(group=k, contribution=observed.get(k), expected=len(groups[k]),
         finite=sum(finite(v) for v in groups[k]), observed_subtotal=total,
         complete_total=total if complete else None, partial_support=partial_support,
@@ -67,7 +67,7 @@ def concentration(contributions, *, complete=True, partial_support=False):
         largest_positive_share=observed[largest]/positive if largest is not None else None,
         total_excluding_largest=total-observed[largest] if largest is not None and complete else None,
         reason="incomplete_contributions" if not complete else (None if positive else "no_positive_contribution"))
-        for k in sorted(groups)]
+        for k in sorted(groups, key=order_key)]
 
 
 def neighbourhood(values, indices, center):
@@ -158,7 +158,7 @@ def write_rows(output, name, rows, columns=None):
 def finish_report(output, descriptor, metadata, files, title, overview, tables=()):
     """Publish the completion descriptor last; interrupted directories cannot resume."""
     from .dataset import artifact_record
-    body = "<h1>" + escape(title) + "</h1><p>Saved-result descriptive diagnostics. CSV files are authoritative.</p>"
+    body = "<h1>" + escape(title) + "</h1><p>Saved-result descriptive diagnostics. CSV tables and linked structured JSON facts are authoritative.</p>"
     body += "<table><tr><th>Coverage / interpretation</th><th>Value</th></tr>"
     for key, value in overview.items():
         body += "<tr><td>" + escape(str(key)) + "</td><td>" + escape(str(value)) + "</td></tr>"

@@ -30,6 +30,19 @@ def snapshot(root):
     return {p.relative_to(root).as_posix():(p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
 
 
+def comparison_account(params, ticker="A", *, period=("2024-01-01", "2024-02-01"),
+                       stratum="s", filter_key="off", timeframe=60, status="completed", value=1):
+    """Detached reducer fixture; identities use the same declared match dimensions."""
+    from tools.strategy_lab.analysis.research_inputs import digest
+    variant = dict(params=params, filters=filter_key, timeframe_minutes=timeframe)
+    return dict(account_id=digest([variant, ticker, period, stratum]), variant=variant,
+        variant_key=digest(variant), stratum_key=stratum, filter_key=filter_key,
+        strategy_params=params, timeframe_minutes=timeframe, ticker=ticker, period_key=period,
+        status=status, input_pin=dict(input_fingerprint=ticker,
+            bounds=dict(evaluation_start=period[0], evaluation_end=period[1])), admission={"mode": "test"},
+        metrics={m: value for m in ("net_profit_pct", "max_drawdown_pct", "max_drawdown_mtm_pct", "total_trades")})
+
+
 @pytest.fixture(scope="module")
 def fixed_pack(tmp_path_factory):
     root = tmp_path_factory.mktemp("fixed-pack") / "pack"

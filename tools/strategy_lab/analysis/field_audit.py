@@ -170,6 +170,10 @@ def evaluate_field_audit(dataset, scope, *, universe=None, candidate_policy=None
                 neighbour_reductions[segment, m].add(wi, values)
         del is_views, oos, net_is, net_oos
     candidates, axis_rows, neighbour_rows, contributions = [], [], [], []
+    window_groups = {f"window:{window.window_id}": dict(window_id=window.window_id,
+        is_interval=[window.is_start, window.is_end], oos_interval=[window.oos_start, window.oos_end])
+        for window in scope.windows}
+    time_order = {key: (facts["oos_interval"][0], facts["window_id"]) for key, facts in window_groups.items()}
     for segment in ("is", "oos"):
         for ci, key in enumerate(geometry.semantic_keys):
             base = dict(semantic_key=key, candidate_id=int(geometry.candidate_ids[ci]), params=dict(geometry.params[ci]), segment=segment)
@@ -197,10 +201,11 @@ def evaluate_field_audit(dataset, scope, *, universe=None, candidate_policy=None
             blocks = facts["finite_blocks"]
             for dimension, values in (("ticker", [(ticker, float(reduction.weighted[ci, ti])/blocks if blocks and reduction.ticker_count[ci, ti] else None)
                     for ti, ticker in enumerate(scope.tickers)]),
-                    ("time", [(window.oos_start, number(reduction.block[ci, wi]/blocks) if blocks else None)
+                    ("time", [(f"window:{window.window_id}", number(reduction.block[ci, wi]/blocks) if blocks else None)
                     for wi, window in enumerate(scope.windows)])):
-                contributions.extend(dict(**base, dimension=dimension, unit="percentage_points_of_hierarchical_mean", **row)
-                    for row in concentration(values, partial_support=facts["missing_cells"] > 0))
+                for row in concentration(values, partial_support=facts["missing_cells"] > 0,
+                        order_key=time_order.__getitem__ if dimension == "time" else None):
+                    contributions.append(dict(**base, dimension=dimension, unit="percentage_points_of_hierarchical_mean", **row))
             mean = neighbour_reductions[segment, "mean"].facts(ci)
             neighbour_rows.append(dict(level="candidate", semantic_key=key, candidate_id=int(geometry.candidate_ids[ci]),
                 segment=segment, ticker=None, window_id=None, expected_members=len(neighbours[ci]), finite_members=None,
@@ -219,7 +224,10 @@ def evaluate_field_audit(dataset, scope, *, universe=None, candidate_policy=None
                     axis=axis, code=code, value=geometry.params[indices[0]][axis], candidate_count=len(indices),
                     expected_candidate_cells=len(indices)*t*w, finite_candidate_cells=int(marginal_finite[segment, metric][ai]),
                     **marginals[segment, metric].facts(ai)))
-    metadata = dict(schema_version="strategy_lab_field_audit_v1", git=git_facts(),
+    metadata = dict(schema_version="strategy_lab_field_audit_v2", git=git_facts(),
+        window_groups=window_groups,
+        time_grouping="window/block; segment selects is_interval or oos_interval; overlapping IS blocks are not disjoint calendar returns",
+        time_tie_break="saved OOS-start string ascending as in v1; window_id breaks identical-start ties",
         source=source_facts(dataset, scope), research_inputs=analysis.run_metadata.get("research_inputs"),
         selected_rule=selected_rule, rule_states=analysis.run_metadata.get("rule_states", analysis.summary.get("rule_states")),
         classification="descriptive_candidate_population", metric_units={m: "count" if m == "total_trades" else "percent" for m in metrics},

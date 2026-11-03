@@ -331,5 +331,3 @@ def mutate_group(root, ticker, window, change):
         if row["path"] == path.relative_to(root).as_posix():
             row.update(sha256=_sha(path), size=path.stat().st_size)
     (root/"manifest.json").write_text(json.dumps(manifest))
-
-

@@ -100,6 +100,9 @@ own saved field-audit, IS/OOS screen and Fixed comparison witnesses: hierarchica
 finite reductions, exact cohorts/periods, frozen filter reselection, common finite
 set guards, neighborhood support, additive concentration, detached provenance,
 validated account collection, scope authorization, JSON stdout and atomic output.
+Follow-up coverage includes Fixed v2 shared-fact joins and denominator contracts,
+explicit disjoint-roster refusal, an independent sparse multi-axis edge oracle,
+nullable frozen-key equality and field v2 interval groups/tie preservation.
 The synthetic analysis helpers live in `_analysis_helpers.py`; new tests import
 ordinary helpers, never other test modules or ignored review probes. Module-scoped
 provider packs/results are shared across family checks. Run these two modules with

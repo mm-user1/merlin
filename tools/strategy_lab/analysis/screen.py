@@ -234,6 +234,8 @@ def _filter_rows(result, selection_rows):
                         a, b = row["off_"+metric], row["on_"+metric]
                         row["delta_"+metric] = b-a if a is not None and b is not None else None
                         row["reason_"+metric] = None if a is not None and b is not None else "missing_selection_or_nonfinite_oos"
+                    off_key, on_key = row["off_semantic_key"], row["on_semantic_key"]
+                    row["same_candidate"] = off_key == on_key if off_key is not None and on_key is not None else None
                     selection_rows.append(row)
             del arrays
     result.metadata["diagnostic_access"] = {i.label: dict(start=start, entries=[list(e) for e in i.dataset.access_log[start:]])
