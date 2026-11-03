@@ -491,6 +491,32 @@ def offline_results(out):
     return dataset.manifest["identity"], render_files(analysis), render_allocation_files(allocation)
 
 
+def test_declarative_policy_and_universe_on_offline_v3(historical_v3, tmp_path, monkeypatch):
+    from tools.strategy_lab.analysis import load_candidate_policy, load_universe
+    from tools.strategy_lab.analysis.evaluate import CustomRule
+    from tools.strategy_lab.analysis.dataset import AnalysisError
+    from core import data_input
+    from tools.strategy_lab import config
+    _, _, out, _ = historical_v3
+    before = snapshot(out)
+    for module, name in ((data_input, "prepare_input"), (data_input, "replay_input"), (config, "get_strategy_config")):
+        monkeypatch.setattr(module, name, lambda *a, **k: pytest.fail("offline input accessed live stack"))
+    policy = load_candidate_policy(REPO_ROOT / "tools/strategy_lab/runspecs/candidate_policy_example.json")
+    universe = load_universe(REPO_ROOT / "tools/strategy_lab/runspecs/analysis_universe_example.json")
+    ds = open_dataset(out); scope = ds.resolve_scope("research")
+    with pytest.raises(AnalysisError, match="built-in"):
+        evaluate_scope(ds, scope, custom_rules=[CustomRule("custom", "1", lambda *a: np.ones(2))])
+    analysis = evaluate_scope(ds, scope, candidate_policy=policy, universe=universe)
+    allocation = evaluate_allocation([DatasetInput("v3", ds, scope)], candidate_policy=policy, universe=universe)
+    assert analysis.run_metadata["analysis_scope"]["tickers"] == ["BYBIT_AAAUSDT"]
+    assert analysis.run_metadata["analysis_scope"]["ticker_cell_count"] == 2
+    assert analysis.summary["rules"][policy.key]["bootstraps"]["top5_lift"]["reason"] == "selection_count=1"
+    assert allocation.summary["schema_version"] == "strategy_lab_allocation_v2"
+    write_analysis(analysis, tmp_path / "analysis", dataset_root=out)
+    write_allocation(allocation, tmp_path / "allocation", dataset_roots=(out,))
+    assert snapshot(out) == before
+
+
 @pytest.mark.parametrize("drift", ["engine", "bounds", "options", "unregistered", "profile", "registry", "nomination", "ties"])
 def test_historical_reader_ignores_current_generation_state(historical_v3, tmp_path, monkeypatch, drift):
     from tools.strategy_lab import config

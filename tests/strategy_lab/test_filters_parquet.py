@@ -109,6 +109,19 @@ def test_v4_offline_scope_locks_and_labeled_allocation(packs, tmp_path, monkeypa
     text = (tmp_path / "allocation/report.md").read_text(encoding="utf-8")
     assert "Filter Off" in text and "F06 v2" in text and "entry_filter_inputs" in text
     assert analysis.run_metadata["analysis_scope"]["unlock_evidence"]["policy_sha256"]
+    from tools.strategy_lab.analysis import load_candidate_policy, load_universe
+    from test_research_inputs import document, policy_doc, universe_doc
+    selection = load_candidate_policy(document(tmp_path, policy_doc()))
+    universe = load_universe(document(tmp_path, universe_doc(["BYBIT_AAAUSDT"]), "universe.json"))
+    exploratory = evaluate_scope(on_ds, scope, candidate_policy=selection, universe=universe)
+    paired = evaluate_allocation([DatasetInput("on", on_ds, scope),
+        DatasetInput("off", off_ds, off_ds.resolve_scope("research"))], candidate_policy=selection, universe=universe)
+    assert exploratory.summary["rules"][selection.key]["bootstraps"]["top5_lift"]["reason"] == "selection_count=1"
+    assert paired.run_metadata["research_inputs"]["universe"]["datasets"]["on"]["unlock_evidence"] == scope.unlock_evidence
+    assert paired.run_metadata["datasets"]["on"]["entry_filters"]["effective"]
+    assert not paired.run_metadata["datasets"]["off"]["entry_filters"]["effective"]
+    write_analysis(exploratory, tmp_path / "policy-analysis", dataset_root=out)
+    write_allocation(paired, tmp_path / "policy-allocation", dataset_roots=(out, off))
     assert [snapshot(p) for p in (out, off)] == before
 
 

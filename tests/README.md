@@ -95,6 +95,16 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+`strategy_lab/test_research_inputs.py` covers the separate offline analysis input
+extension: strict file snapshots/provenance, saved-order universe restriction,
+scope authorization, IS-only policy selection, cross-input freeze, fixed-capacity
+preservation, truthful Top-1-only fields and deterministic publication. Its 44-of-104
+fixture checks authority without a report benchmark. Existing small v3/v4 family
+fixtures cover the new public APIs with live sources unavailable. For this
+analysis-only surface run the new module with `test_strategy_lab_analysis.py` and
+`test_strategy_lab_allocation.py`, then full `tests/strategy_lab` once on the final
+tree; no core/engine or market campaign is needed.
+
 Strategy Lab continuous Fixed coverage is in `strategy_lab/test_fixed.py`,
 `test_fixed_parity.py`, `test_fixed_lifecycle.py` and `test_fixed_cli.py`, with
 the ordinary `_fixed_helpers.py` fixture and public synthetic provider builder.

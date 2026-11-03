@@ -12,6 +12,8 @@ from .dataset import AnalysisError, open_dataset
 from .allocation import DatasetInput, evaluate_allocation
 from .evaluate import evaluate_scope
 from .output import write_allocation, write_analysis
+from .research_inputs import load_universe
+from .candidate_policy import load_candidate_policy
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,12 +27,18 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--allow-incomplete-dataset", action="store_true")
     analyze.add_argument("--unlock-scope", action="store_true")
     analyze.add_argument("--policy", type=Path)
+    analyze.add_argument("--ticker-list", type=Path)
+    analyze.add_argument("--candidate-policy", type=Path)
     allocate = commands.add_parser(
         "allocate", help="evaluate fixed-capacity allocation over aligned datasets"
     )
     allocate.add_argument("--dataset", action="append", required=True)
     allocate.add_argument("--scope", default="development")
-    allocate.add_argument("--rule", required=True)
+    selection = allocate.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--rule")
+    selection.add_argument("--candidate-policy", type=Path)
+    allocate.add_argument("--ticker-list", type=Path)
+    allocate.add_argument("--ticker-list-mode", choices=("strict", "intersection"))
     allocate.add_argument("--primary-k", type=int, default=6)
     allocate.add_argument("--sensitivity-k", type=int, default=8)
     allocate.add_argument("--output", type=Path, required=True)
@@ -63,7 +71,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 unlock=args.unlock_scope,
                 policy_path=args.policy,
             )
-            result = evaluate_scope(dataset, scope)
+            result = evaluate_scope(dataset, scope,
+                universe=load_universe(args.ticker_list) if args.ticker_list else None,
+                candidate_policy=load_candidate_policy(args.candidate_policy) if args.candidate_policy else None)
             publication = write_analysis(result, args.output, dataset_root=dataset.root)
         else:
             labelled = tuple(_dataset_argument(value) for value in args.dataset)
@@ -84,6 +94,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = evaluate_allocation(
                 inputs,
                 candidate_rule=args.rule,
+                candidate_policy=load_candidate_policy(args.candidate_policy) if args.candidate_policy else None,
+                universe=load_universe(args.ticker_list) if args.ticker_list else None,
+                ticker_list_mode=args.ticker_list_mode,
                 primary_k=args.primary_k,
                 sensitivity_k=args.sensitivity_k,
             )

@@ -1,0 +1,7 @@
+{
+  "schema_version": "strategy_lab_universe_v1",
+  "name": "synthetic-research-subset",
+  "evidence_classification": "exploratory",
+  "selection_note": "Illustrative explicit membership in the synthetic Parquet examples; no confirmation claim.",
+  "tickers": ["BYBIT_AAAUSDT"]
+}

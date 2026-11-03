@@ -434,7 +434,10 @@ def _member_row(
 def evaluate_allocation(
     inputs: Sequence[DatasetInput],
     *,
-    candidate_rule: str,
+    candidate_rule: str | None = None,
+    candidate_policy=None,
+    universe=None,
+    ticker_list_mode=None,
     primary_k: int = 6,
     sensitivity_k: int = 8,
     ticker_scorer: TickerScorer = OFFICIAL_TICKER_SCORER,
@@ -442,6 +445,14 @@ def evaluate_allocation(
     """Evaluate N>=1 datasets through one exact-calendar, two-level freeze path."""
     if not inputs:
         raise AnalysisError("allocation requires at least one explicitly labelled dataset.")
+    if (candidate_rule is None) == (candidate_policy is None):
+        raise AnalysisError("allocation requires exactly one of candidate_rule or candidate_policy.")
+    from .candidate_policy import validate_policy_metrics
+    from .research_inputs import restrict_universe, attach_research_inputs
+    if candidate_policy is not None:
+        for item in inputs:
+            validate_policy_metrics(candidate_policy, item.dataset.metric_index, item.label)
+        candidate_rule = candidate_policy.key
     if len({item.dataset.schema_version for item in inputs}) != 1:
         raise AnalysisError("mixed v2/v3/v4 allocation identity contracts are unsupported.")
     descriptive = inputs[0].dataset.contract.descriptive
@@ -460,13 +471,16 @@ def evaluate_allocation(
         raise AnalysisError("descriptive v3 currently supports the existing IS-profit ticker scorer only.")
     for item in inputs:
         registry = item.dataset.contract.rule_registry
-        if candidate_rule not in RULE_REQUIREMENTS:
+        if "net_profit_pct" not in item.dataset.metric_index:
+            raise AnalysisError(f"dataset {item.label!r} allocation requires net_profit_pct.")
+        if candidate_policy is None and candidate_rule not in RULE_REQUIREMENTS:
             raise AnalysisError(f"unknown candidate rule {candidate_rule!r}.")
-        if candidate_rule not in tuple(registry.get("selectable_rules", ())):
+        if candidate_policy is None and candidate_rule not in tuple(registry.get("selectable_rules", ())):
             raise AnalysisError(
                 f"dataset {item.label!r} does not declare selectable rule {candidate_rule!r}."
             )
-        missing = [name for name in RULE_REQUIREMENTS[candidate_rule] if name not in item.dataset.metric_index]
+        required = candidate_policy.required_metrics if candidate_policy is not None else RULE_REQUIREMENTS[candidate_rule]
+        missing = [name for name in required if name not in item.dataset.metric_index]
         if missing:
             raise AnalysisError(
                 f"dataset {item.label!r} does not support {candidate_rule!r}; missing: {missing}."
@@ -475,6 +489,8 @@ def evaluate_allocation(
             declared = item.dataset.contract.split.get("development_ticker_count")
             _exact_positive_integer(declared, f"dataset {item.label!r} declared development pool")
 
+    scopes, universe_facts = restrict_universe(universe, [(i.label, i.dataset, i.scope) for i in inputs], ticker_list_mode)
+    inputs = [DatasetInput(i.label, i.dataset, scope) for i, scope in zip(inputs, scopes)]
     block_maps = [{window.block_key: window for window in item.scope.windows} for item in inputs]
     common_blocks = set(block_maps[0])
     for mapping in block_maps[1:]:
@@ -510,7 +526,7 @@ def evaluate_allocation(
             selected_views: dict[str, SelectedISTickerView] = {}
             for ticker in ordered_tickers:
                 view = is_views[ticker]
-                result = evaluate_rule(
+                result = candidate_policy.evaluate(view, item.dataset.geometry) if candidate_policy is not None else evaluate_rule(
                     candidate_rule,
                     view,
                     item.dataset.geometry,
@@ -1133,6 +1149,7 @@ def evaluate_allocation(
         capabilities = {name: not_requested() for name in ("matched_fraction", "evidence", "nominations", "bootstrap", "outlier_removal")}
         metadata.update(**units, capabilities=capabilities)
         summary.update(**units, capabilities=capabilities)
+    attach_research_inputs(metadata, summary, universe_facts, candidate_policy, ordered_tickers)
     return AllocationResult(
         metadata,
         summary,

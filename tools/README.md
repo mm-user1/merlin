@@ -122,6 +122,9 @@ The [continuous Fixed guide](strategy_lab/README.md#continuous-fixed-research)
 covers independent accounts and offline views, separate from IS/OOS enumeration.
 The [filter guide](strategy_lab/README.md#generic-entry-filters) covers versioned
 Fixed/IS-OOS filter requests, source relocation and Fixed-only paired Off/on CSVs.
+The [research input guide](strategy_lab/README.md#external-universes-and-declarative-candidate-policies)
+covers exploratory ticker lists and IS candidate policies for saved v2/v3/v4
+analysis/allocation, including strict/intersection membership and scope authorization.
 
 ## Pattern Lab
 

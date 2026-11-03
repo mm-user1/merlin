@@ -400,7 +400,18 @@ def evaluate_scope(
     scope: ResolvedScope,
     *,
     custom_rules: Sequence[CustomRule] = (),
+    candidate_policy=None,
+    universe=None,
 ) -> AnalysisResult:
+    from .candidate_policy import validate_policy_metrics
+    from .research_inputs import restrict_universe, attach_research_inputs
+    if candidate_policy is not None:
+        if custom_rules:
+            raise AnalysisError("candidate_policy cannot be combined with custom rules.")
+        validate_policy_metrics(candidate_policy, dataset.metric_index, "analysis")
+    (scope,), universe_facts = restrict_universe(universe, [("analysis", dataset, scope)])
+    policy_key = candidate_policy.key if candidate_policy is not None else None
+    policy_names = (policy_key,) if policy_key is not None else ()
     if dataset.contract.descriptive and custom_rules:
         raise AnalysisError("descriptive v3 currently supports the frozen built-in rules only.")
     selectable, declared_diagnostics = _validate_registry(dataset)
@@ -439,6 +450,9 @@ def evaluate_scope(
         }
     if "net_profit_pct" not in dataset.metric_index:
         raise AnalysisError("population analysis requires net_profit_pct.")
+    if candidate_policy is not None:
+        rule_states[policy_key] = dict(status="supported", missing_metrics=[], kind="declarative_policy",
+            result_label="exploratory", not_requested=["top5", "top10"], not_requested_reason="selection_count=1")
     active_formula_rules = tuple(
         name for name in formula_rules if not missing_by_rule[name]
     )
@@ -450,7 +464,7 @@ def evaluate_scope(
         for name in declared_diagnostics
         if name in OOS_DIAGNOSTICS and rule_states[name]["status"] == "supported"
     )
-    if not active_selectable_rules and not custom_rules:
+    if not active_selectable_rules and not custom_rules and candidate_policy is None:
         raise AnalysisError(
             "analysis has no supported official rule and no valid custom rule to evaluate."
         )
@@ -466,6 +480,7 @@ def evaluate_scope(
         active_formula_rules
         + active_oos_diagnostics
         + tuple(custom.name for custom in custom_rules)
+        + policy_names
     )
     pair_values = {
         name: np.full((ticker_count, window_count, 3), np.nan, dtype=np.float64)
@@ -547,6 +562,10 @@ def evaluate_scope(
                 )
                 selection = select_candidates(result, is_net, dataset.geometry)
                 pending[(ticker, custom.name)] = (selection, result)
+            if candidate_policy is not None:
+                result = candidate_policy.evaluate(view, dataset.geometry)
+                selection = select_candidates(result, is_net, dataset.geometry, maximum=1)
+                pending[(ticker, policy_key)] = (selection, result)
         # OOS is not loaded until every selection for this window is frozen above.
         oos_matrices = dataset.load_oos_window(scope, window)
         for ticker in scope.tickers:
@@ -576,7 +595,7 @@ def evaluate_scope(
                     trades = matrix[:, dataset.metric_index["total_trades"]]
                     values = values[np.isfinite(trades) & (trades > 0.0)]
                 win_rates.append(values.copy())
-            for name in active_formula_rules + tuple(custom.name for custom in custom_rules):
+            for name in active_formula_rules + tuple(custom.name for custom in custom_rules) + policy_names:
                 selection, result = pending[(ticker, name)]
                 view = window_views[ticker]
                 if selection is None or not selection.row_indices:
@@ -597,8 +616,11 @@ def evaluate_scope(
                     is_view=view,
                     oos_matrix=matrix,
                     metric_index=dataset.metric_index,
-                    label="exploratory" if name in {item.name for item in custom_rules} else "pre_registered",
+                    label="exploratory" if name == policy_key or name in {item.name for item in custom_rules} else "pre_registered",
                 )
+                if name == policy_key:
+                    row.update(top5_oos_net_profit_pct=None, top10_oos_net_profit_pct=None,
+                               top5_mean_individual_oos_percentile=None)
                 pair_decisions.append(row)
                 for column, key in enumerate(("top1_oos_net_profit_pct", "top5_oos_net_profit_pct", "top10_oos_net_profit_pct")):
                     value = row[key]
@@ -789,6 +811,8 @@ def evaluate_scope(
                     ),
                 },
             }
+        if name == policy_key:
+            bootstraps["top5_lift"] = {**interval_not_requested(), "reason": "selection_count=1"}
         summary = {
             "rule_kind": rule_states[name]["kind"],
             "rule_status": rule_states[name]["status"],
@@ -822,6 +846,8 @@ def evaluate_scope(
             "bootstrap_top1_lift": bootstraps["top1_lift"],
         }
         rule_summaries[name] = summary
+        if name == policy_key:
+            summary.update(result_label="exploratory", top5_lift_monthly_means=[None] * window_count)
         for wi, window in enumerate(scope.windows):
             monthly_rows.append(
                 {
@@ -1083,6 +1109,7 @@ def evaluate_scope(
         capabilities = {name: not_requested() for name in ("evidence", "nominations", "bootstrap", "outlier_removal")}
         metadata.update(**units, capabilities=capabilities)
         summary.update(**units, capabilities=capabilities)
+    attach_research_inputs(metadata, summary, universe_facts, candidate_policy, scope.tickers)
     pair_decisions.sort(key=lambda row: (row["window_id"], row["ticker"], row["rule"]))
     monthly_rows.sort(key=lambda row: (row["window_id"], row["row_kind"], row["rule"]))
     return AnalysisResult(metadata, summary, tuple(pair_decisions), tuple(monthly_rows))

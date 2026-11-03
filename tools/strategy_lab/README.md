@@ -734,6 +734,161 @@ for an aligned comparison:
   --rule primary_profit
 ```
 
+### External universes and declarative candidate policies
+
+Both analysis commands and Python evaluation APIs accept explicit exploratory
+inputs for saved candidate datasets v2/v3/v4. This does not regenerate a dataset,
+change its registered rules, or adapt continuous Fixed accounts to IS/OOS.
+Mixed-family allocation remains unsupported. With neither new input, historical
+output filenames, CSV columns, identities and calculations remain unchanged.
+
+The [universe example](runspecs/analysis_universe_example.json) is a closed JSON
+object with all five required fields:
+
+```json
+{
+  "schema_version": "strategy_lab_universe_v1",
+  "name": "synthetic-research-subset",
+  "evidence_classification": "exploratory",
+  "selection_note": "Explicit synthetic membership; no confirmation claim.",
+  "tickers": ["BYBIT_AAAUSDT"]
+}
+```
+
+Names/notes must be nonblank strings; tickers must be a nonempty list of unique
+exact saved identifiers without surrounding whitespace. Parquet uses full IDs;
+CSV retains its own symbols. There is no case folding, aliasing or live lookup.
+Unknown fields/versions, duplicate JSON keys and malformed types fail. Record how
+membership was chosen in `selection_note`, including reuse of strategy outcomes.
+V1 classification is always `exploratory`; a frozen list proves no independence.
+
+`--ticker-list PATH` restricts an already resolved scope in its saved order.
+Strict mode (the only analyze mode) requires every requested ID in every scope;
+an ID in another cell is still outside the authorized scope. Allocation optionally
+accepts `--ticker-list-mode intersection`: IDs absent from every scope fail, each
+scope is restricted, then the existing exact-calendar/common-pool alignment runs.
+Empty per-input or common subsets fail. A mode without a list fails.
+
+The original cell denominator, missing/declared windows, prior partial status and
+unlock evidence are retained. A proper membership subset is partial; the list
+itself declares that restriction and needs no `--allow-partial-scope`. That flag
+still concerns missing windows. Full membership in any file order preserves saved
+scope order and full/partial status. Allocation keeps its sorted common pool.
+Existing allocation requested counts/omissions refer to the post-list scopes;
+the new metadata records original authority and missing requested IDs separately.
+Calendar exclusions and candidate/score ineligibility remain separate facts.
+
+The [candidate policy example](runspecs/candidate_policy_example.json) has a closed
+schema, including nested objects:
+
+```json
+{
+  "schema_version": "strategy_lab_candidate_policy_v1",
+  "name": "profit-with-minimum-trades",
+  "version": "1",
+  "objective": {"metric": "net_profit_pct", "direction": "maximize"},
+  "constraints": [{"metric": "total_trades", "operator": ">=", "value": 15}],
+  "selection_count": 1,
+  "no_eligible": "unavailable",
+  "evidence_classification": "exploratory"
+}
+```
+
+All fields are required. Name/version are nonblank strings, selection count is
+integer 1, and no-eligible behavior is unavailable with no fallback. Constraints
+may be empty. Directions are `maximize`/`minimize`, operators `>`, `>=`, `<`, `<=`;
+thresholds are finite JSON numbers, excluding booleans and strings. Thresholds
+normalize to binary64, including positive zero, before hashing. Constraint order
+remains part of identity. Expressions, OOS references, unknown fields/versions,
+nonfinite thresholds and duplicate keys fail.
+
+The closed policy-v1 metric vocabulary is:
+
+```text
+net_profit_pct, max_drawdown_pct, total_trades, winning_trades, losing_trades,
+gross_profit, gross_loss, profit_factor, win_rate_pct, romad,
+max_consecutive_losses, sharpe_daily, sharpe_daily_observations,
+sharpe_daily_active_days, sqn, rejected_fill_count, zero_size_entry_count,
+invalid_stop_distance_count, max_required_leverage, max_drawdown_mtm_pct,
+margin_reject_count
+```
+
+Every requested metric must exist in every input before group metrics load.
+Both tools also require `net_profit_pct` for ties/outcomes, including allocation
+with a built-in rule. Per-row nonfinite values in the objective or constraints
+make that row ineligible; finite zero is data. There is no implicit trade gate,
+positive-profit gate or extra finite-net-profit eligibility test. Scores use the
+objective for maximization and its negative for minimization, with positive zero
+scores. Exact ties use score descending, finite IS net profit first/descending,
+semantic key ascending, then candidate ID ascending. No candidate trade-count
+tie-break is added. This does not reproduce a historical script's extra ties.
+
+One policy selects zero or one candidate per ticker/window using only IS views.
+All candidate decisions freeze before OOS access; allocation also freezes every
+input's common pool and ticker ranking before revealing any OOS. Allocation still
+ranks tickers by selected IS net profit, irrespective of the candidate objective.
+An unavailable ticker score does not trigger candidate reselection; unavailable
+candidate, ticker score and selected OOS remain distinct. `1/K` cash underfill,
+missing-block arithmetic and existing controls are preserved. Random-K seeds
+include candidate-rule identity, so an equivalent policy and built-in rule need
+not share random draws. Repeated identical policy runs remain deterministic.
+
+Analysis adds `declarative:<canonical-policy-sha256>` beside built-in/control rows,
+with kind `declarative_policy` and label `exploratory`. Top-5/10 fields and their
+lift/percentile summaries are null; policy rule state and Top-5 interval say
+`not_requested`, reason `selection_count=1`. The policy never enters official
+evidence or nominations. Legacy Top-1 descriptive intervals may remain exploratory;
+v3/v4 inference stays not requested. Legacy custom-callable behavior is unchanged,
+including its descriptive-family refusal; it cannot be mixed with a policy.
+
+After generating the synthetic datasets in the filter workflow above:
+
+```powershell
+$universe = 'tools/strategy_lab/runspecs/analysis_universe_example.json'
+$selection = 'tools/strategy_lab/runspecs/candidate_policy_example.json'
+& $py -B -m tools.strategy_lab.analysis.cli analyze --dataset "$work/is-on" --scope research --ticker-list $universe --candidate-policy $selection --output "$work/exploratory-analysis"
+& $py -B -m tools.strategy_lab.analysis.cli allocate --dataset "on=$work/is-on" --dataset "off=$work/is-off" --scope research --ticker-list $universe --candidate-policy $selection --primary-k 6 --sensitivity-k 8 --output "$work/exploratory-allocation"
+```
+
+Allocate requires exactly one of `--rule` and `--candidate-policy`. Existing
+`--policy` is a **different file: scope-unlock evidence**. A candidate policy or
+universe never unlocks a scope; locked scopes still need `--unlock-scope --policy`.
+The Python equivalents are public loaders and optional keyword arguments:
+
+```python
+from tools.strategy_lab.analysis import (
+    DatasetInput, open_dataset, load_universe, load_candidate_policy,
+    evaluate_scope, evaluate_allocation,
+)
+dataset = open_dataset(dataset_path)
+scope = dataset.resolve_scope("research")
+universe = load_universe("tools/strategy_lab/runspecs/analysis_universe_example.json")
+selection = load_candidate_policy("tools/strategy_lab/runspecs/candidate_policy_example.json")
+analysis = evaluate_scope(dataset, scope, universe=universe, candidate_policy=selection)
+allocation = evaluate_allocation(
+    [DatasetInput("on", dataset, scope)], universe=universe,
+    ticker_list_mode="strict", candidate_policy=selection, primary_k=6,
+)
+```
+
+Pass the validated `Universe`/`CandidatePolicy` values to the evaluators. Each
+loader reads and hashes one raw byte snapshot and normalizes that same document;
+evaluation does not reload it. Python scope APIs retain their trusted-caller
+boundary. Unknown membership, missing metrics and malformed definitions fail with
+`AnalysisError` (CLI exit 2) before decisions or publication.
+
+Either input adds `strategy_lab_research_inputs_v1` under metadata
+`research_inputs`: input paths/raw hashes, canonical documents/hashes, requested
+ordered membership, original authority/unlock evidence per label, effective scopes,
+canonical sorted final membership and its digest, policy definition, required
+metrics, tie/no-eligible semantics and exploratory status. Runtime paths are
+provenance, not canonical identity. Summary contains only schema version, universe
+document hash and policy key; existing summaries/rows retain counts. Reports render
+the inputs and capability limits. Without new inputs the envelope is absent.
+Five/six output files and CSV columns stay unchanged. Same-input publication is a
+verified no-op; changed raw bytes or definitions are different output evidence.
+Existing dataset/filter protection and nonempty-output refusal remain in force.
+
 ## Dataset and resume contract
 
 The legacy CSV generator builds one validated V2 plan and evaluates every candidate over

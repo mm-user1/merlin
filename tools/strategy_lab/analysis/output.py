@@ -300,6 +300,7 @@ def _report(result: AnalysisResult) -> bytes:
             "",
         ]
     )
+    lines.extend(_research_report(metadata))
     return "\n".join(lines).encode("utf-8")
 
 
@@ -352,6 +353,36 @@ def render_files(result: AnalysisResult) -> Mapping[str, bytes]:
         "monthly_results.csv": _csv_bytes(result.monthly_results, monthly_columns),
         "report.md": _report(result),
     }
+
+
+def _research_report(metadata):
+    if "research_inputs" not in metadata:
+        return []
+    inputs = metadata["research_inputs"]
+    lines = ["", "## Exploratory research inputs", "",
+             "These files declare analysis choices; they do not establish independent confirmation or unlock a scope."]
+    universe = inputs["universe"]
+    if universe:
+        lines.extend(["", f"Universe: {universe['document']['name']} ({universe['mode']}).",
+            f"Selection note: {universe['document']['selection_note']}",
+            f"Source: `{universe['path']}`; file SHA-256 `{universe['file_sha256']}`; document SHA-256 `{universe['document_sha256']}`.",
+            f"Requested IDs: `{universe['requested_tickers']}`.",
+            f"Resolved IDs: `{universe['resolved_tickers']}`; membership SHA-256 `{universe['resolved_tickers_sha256']}`."])
+        lines.append("")
+        for label, facts in universe["datasets"].items():
+            lines.append(f"- {label}: authorized {facts['authorized_ticker_count']}, cell authority {facts['ticker_cell_count']}; "
+                f"excluded {facts['excluded_tickers']}; missing requested {facts['missing_requested_tickers']}; "
+                f"partial {facts['is_partial']}; unlock evidence {json.dumps(facts['unlock_evidence'], sort_keys=True)}.")
+    policy = inputs["candidate_policy"]
+    if policy:
+        lines.extend(["", f"Candidate policy: {policy['name']} / {policy['version']}; `{policy['key']}` (exploratory).",
+            f"Source: `{policy['path']}`; file SHA-256 `{policy['file_sha256']}`; document SHA-256 `{policy['document_sha256']}`.",
+            "Definition: `" + json.dumps(policy["document"], sort_keys=True) + "`.",
+            f"Required IS metrics: {policy['required_metrics']}; score direction: {policy['score_direction']}.",
+            f"Ties: {policy['ties']}. No eligible candidate: {policy['no_eligible']}.",
+            "Top-5/10: not_requested, selection_count=1. Policy results are excluded from official evidence/nominations.",
+            "Allocation still ranks tickers by selected IS net profit and uses fixed 1/K weights."])
+    return lines
 
 
 def _allocation_report(result: AllocationResult) -> bytes:
@@ -461,6 +492,7 @@ def _allocation_report(result: AllocationResult) -> bytes:
         )
     lines.extend(f"- {item}" for item in metadata["limitations"])
     lines.append("")
+    lines.extend(_research_report(metadata))
     return "\n".join(lines).encode("utf-8")
 
 

@@ -1,0 +1,10 @@
+{
+  "schema_version": "strategy_lab_candidate_policy_v1",
+  "name": "profit-with-minimum-trades",
+  "version": "1",
+  "objective": {"metric": "net_profit_pct", "direction": "maximize"},
+  "constraints": [{"metric": "total_trades", "operator": ">=", "value": 15}],
+  "selection_count": 1,
+  "no_eligible": "unavailable",
+  "evidence_classification": "exploratory"
+}
