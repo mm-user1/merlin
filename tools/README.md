@@ -101,6 +101,10 @@ is unchanged; prefer the Python launcher for ordinary commands.
 
 ## Strategy Lab
 
+Saved-result reports include candidate `analysis.cli field-audit`, comparative
+`analysis.cli screen` (including strict Off/on diagnostics), and continuous
+`fixed compare`. See [schemas, examples and interpretation](strategy_lab/README.md#saved-result-audits-and-comparative-screens).
+
 Strategy Lab is a local, read-only-input research pipeline for certified V2
 strategies. Its current commands cover run-spec validation, inventory,
 resumable dataset generation, real-pack certification, deterministic analysis,

@@ -23,6 +23,13 @@ def main(argv=None):
     view.add_argument("--dataset", type=Path, required=True)
     view.add_argument("--output-dir", type=Path, required=True)
     view.add_argument("--allow-partial", action="store_true")
+    compare = sub.add_parser("compare")
+    compare.add_argument("--dataset", action="append", required=True)
+    compare.add_argument("--output-dir", type=Path, required=True)
+    compare.add_argument("--ticker-list", type=Path)
+    compare.add_argument("--ticker-list-mode", choices=("strict", "intersection"))
+    compare.add_argument("--allow-partial", action="store_true")
+    compare.add_argument("--parameter-axis", action="append", default=[])
     args = parser.parse_args(argv)
     try:
         if args.command in ("validate", "run"):
@@ -40,6 +47,12 @@ def main(argv=None):
         elif args.command == "report":
             from .report import report
             print(json.dumps(report(args.dataset, args.output_dir, allow_partial=args.allow_partial)))
+        elif args.command == "compare":
+            from . import compare_fixed
+            from ..analysis.cli import _dataset_argument
+            print(json.dumps(compare_fixed([_dataset_argument(x) for x in args.dataset], args.output_dir,
+                ticker_list=args.ticker_list, ticker_list_mode=args.ticker_list_mode,
+                allow_partial=args.allow_partial, parameter_axes=args.parameter_axis)))
         return 0
     except (Exception, KeyboardInterrupt) as exc:
         print(f"Fixed {args.command} failed: {type(exc).__name__}: {exc}", file=sys.stderr)

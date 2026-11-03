@@ -12,6 +12,8 @@ from .allocation import (
 from .evaluate import AnalysisResult, evaluate_scope
 from .candidate_policy import CandidatePolicy, load_candidate_policy
 from .research_inputs import Universe, load_universe
+from .field_audit import evaluate_field_audit, write_field_audit
+from .screen import evaluate_screen, write_screen
 
 __all__ = [
     "AnalysisError",
@@ -29,4 +31,8 @@ __all__ = [
     "Universe",
     "load_candidate_policy",
     "load_universe",
+    "evaluate_field_audit",
+    "write_field_audit",
+    "evaluate_screen",
+    "write_screen",
 ]

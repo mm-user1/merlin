@@ -95,6 +95,7 @@ def load_candidate_policy(path):
 def validate_policy_metrics(policy, metric_index, label):
     if not isinstance(policy, CandidatePolicy):
         raise AnalysisError("candidate_policy must be supplied by load_candidate_policy.")
+    policy.verify()
     missing = sorted(set(policy.required_metrics) - set(metric_index))
     if missing:
         raise AnalysisError(f"dataset {label!r} candidate policy missing metrics: {missing}.")

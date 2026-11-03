@@ -1,5 +1,6 @@
 """Snapshot loading and scope restriction for explicit exploratory research inputs."""
 from dataclasses import dataclass
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -50,9 +51,18 @@ class InputDocument:
     document: dict
     document_sha256: str
 
+    def verify(self):
+        try:
+            valid = digest(self.document) == self.document_sha256
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise AnalysisError("loaded research input was mutated; reload the document.")
+
     def provenance(self):
+        self.verify()
         return dict(path=self.path, file_sha256=self.file_sha256,
-                    document=self.document, document_sha256=self.document_sha256)
+                    document=deepcopy(self.document), document_sha256=self.document_sha256)
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,7 @@ def restrict_universe(universe, inputs, mode=None):
         return [scope for _, _, scope in inputs], None
     if not isinstance(universe, Universe):
         raise AnalysisError("universe must be supplied by load_universe.")
+    universe.verify()
     mode = "strict" if mode is None else mode
     if mode not in ("strict", "intersection"):
         raise AnalysisError("ticker-list mode must be strict or intersection.")
@@ -109,7 +120,7 @@ def restrict_universe(universe, inputs, mode=None):
             original_is_partial=scope.is_partial, is_partial=subset.is_partial,
             membership_subset=subset.tickers != scope.tickers,
             declared_window_ids=list(scope.declared_window_ids), missing_window_ids=list(scope.missing_window_ids),
-            requires_unlock=scope.requires_unlock, unlock_evidence=scope.unlock_evidence)
+            requires_unlock=scope.requires_unlock, unlock_evidence=deepcopy(scope.unlock_evidence))
     return scopes, {**universe.provenance(), "requested_tickers": list(universe.document["tickers"]),
                     "mode": mode, "datasets": facts}
 

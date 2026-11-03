@@ -873,7 +873,9 @@ allocation = evaluate_allocation(
 
 Pass the validated `Universe`/`CandidatePolicy` values to the evaluators. Each
 loader reads and hashes one raw byte snapshot and normalizes that same document;
-evaluation does not reload it. Python scope APIs retain their trusted-caller
+evaluation does not reload it. An integrity check rejects nested document mutation
+before evaluation. Returned provenance, including nested scope-unlock evidence,
+is detached from the loaded documents and caller scopes. Python scope APIs retain their trusted-caller
 boundary. Unknown membership, missing metrics and malformed definitions fail with
 `AnalysisError` (CLI exit 2) before decisions or publication.
 
@@ -888,6 +890,186 @@ the inputs and capability limits. Without new inputs the envelope is absent.
 Five/six output files and CSV columns stay unchanged. Same-input publication is a
 verified no-op; changed raw bytes or definitions are different output evidence.
 Existing dataset/filter protection and nonempty-output refusal remain in force.
+
+## Saved-result audits and comparative screens
+
+Three offline reports use validated saved results and explicit research inputs.
+They do not execute strategies, select parameters on OOS, nominate policies, or
+turn independent accounts into a shared portfolio. Candidate reports support
+saved v2/v3/v4; a screen requires one family across its inputs. Fixed comparison
+supports descriptive mixtures of saved Fixed v1/v2. The older strict
+`compare_filters` remains Fixed-v2-only.
+
+After the bounded synthetic filter workflow above has created `$work/is-off`,
+`$work/is-on`, `$work/fixed-off` and `$work/fixed-on`, run:
+
+```powershell
+& $py -B -m tools.strategy_lab.analysis.cli field-audit --dataset "$work/is-on" --scope research --candidate-policy tools/strategy_lab/runspecs/candidate_policy_example.json --output "$work/field-audit"
+& $py -B -m tools.strategy_lab.analysis.cli screen --dataset "off=$work/is-off" --dataset "on=$work/is-on" --scope research --rule primary_profit --filter-baseline off --primary-k 6 --sensitivity-k 8 --output "$work/filter-screen"
+& $py -B -m tools.strategy_lab.fixed compare --dataset "off=$work/fixed-off" --dataset "on=$work/fixed-on" --parameter-axis stopLP --output-dir "$work/fixed-comparison"
+```
+
+Output directories must be new or empty; these reports have no resume/no-op mode.
+Every file is atomic and the JSON descriptor is published last. An interrupted
+directory without that descriptor is incomplete and must not be reused. Output
+cannot overlap any input dataset or recorded native target/filter root in either
+direction, the canonical Lab evidence directories, or `src/storage`; symlink
+ancestors/leaves are refused. Display labels are unique nonblank strings, never
+filesystem components; duplicate source identities fail. HTML is escaped, light,
+self-contained and links relative CSV files. CSV is authoritative. Structured
+CSV cells use canonical JSON; empty numeric cells mean unavailable, not zero.
+
+All three new CLIs emit one success JSON document to stdout; failures and
+strategy-discovery messages go to stderr. Fixed's package bootstrap also moves
+discovery chatter to stderr for existing `validate`, `run`, and `report` commands.
+Their JSON payloads and saved files are unchanged; `run` retains its two JSON
+payload lines. Existing analysis/allocate may similarly move reader chatter to
+stderr. This is scoped to these entry points, not a global registry change.
+
+Public Python entry points:
+
+```python
+from tools.strategy_lab.analysis import (
+    open_dataset, DatasetInput, evaluate_field_audit, write_field_audit,
+    evaluate_screen, write_screen, load_universe, load_candidate_policy,
+)
+from tools.strategy_lab.fixed import compare_fixed
+
+dataset = open_dataset(is_on_path)
+scope = dataset.resolve_scope("research")
+audit = evaluate_field_audit(dataset, scope)  # requires an empty access log
+write_field_audit(audit, audit_output)
+off = open_dataset(is_off_path)
+on = open_dataset(is_on_path)
+screen = evaluate_screen([
+    DatasetInput("off", off, off.resolve_scope("research")),
+    DatasetInput("on", on, on.resolve_scope("research")),
+], candidate_rule="primary_profit", filter_baseline="off")
+write_screen(screen, screen_output)
+compare_fixed([("off", fixed_off_path), ("on", fixed_on_path)], fixed_output,
+              parameter_axes=["stopLP"])
+```
+
+Evaluators accept loaded `universe` and `candidate_policy` values. Screen requires
+exactly one of `candidate_rule` and `candidate_policy`; it also accepts
+`ticker_list_mode`, `primary_k`, `sensitivity_k`, `baseline` or `filter_baseline`.
+Fixed accepts `universe` (or a `ticker_list` file), `ticker_list_mode`,
+`allow_partial`, and `parameter_axes`. Each input resolves membership independently
+in saved order; strict membership is the default. Explicit intersection rejects
+wholly unknown IDs and empty per-input membership. Without a Fixed universe,
+declared inventories and per-input membership are retained.
+
+| Descriptor schema | Authoritative tables and nested publication |
+| --- | --- |
+| `strategy_lab_field_audit_v1` (`audit.json`) | `cell_summary.csv`, `candidate_summary.csv`, `axis_marginals.csv`, `neighbour_stability.csv`, `concentration.csv`; unchanged five-file `analysis/` |
+| `strategy_lab_screen_v1` (`screen.json`) | `comparisons.csv`, `candidate_turnover.csv`, `concentration.csv`; unchanged six-file `allocation/`; strict pairs add `filter_candidate_pairs.csv` and `filter_selection_pairs.csv` |
+| `strategy_lab_fixed_comparison_v1` (`comparison.json`) | `accounts.csv`, `calendar.csv`, `summaries.csv`, `neighbours.csv`, `concentration.csv` |
+
+Descriptors retain input manifests/hashes/contracts/families, effective scopes,
+unlock evidence, research-document identities, membership, metric units, Git
+facts, counts/omissions, interpretation and artifact sizes/hashes. Field audit
+runs the existing analysis first, then a window-major diagnostic pass with its
+own access offset/log. Screen calls allocation once; strict candidate-pair CSV
+streams in an authorized post-freeze pass. Fixed captures validated scalar and
+monthly snapshots during the reader's mandatory account validation, retaining
+no curves; the old filter comparator uses the same collector.
+
+Field tables identify every candidate by semantic key, local ID and scalar
+parameters. Cell rows include expected/finite/missing counts, positive shares
+over expected and finite denominators, zero trades, means/medians/linear quartiles
+and extrema. Spearman uses paired finite values, average ranks and a minimum of
+eight; constant vectors are unavailable. Candidate means use equal finite tickers
+within each block, then equal available blocks. Marginals first average finite
+candidates within a block/mask/active-axis value, then use that hierarchy. No
+inactive value becomes an axis setting. Candidate ticker/block rows carry net
+return separately; drawdown/trades have candidate summaries with the same
+weighting. Finite zero is data; NaN/infinity are missing.
+
+Policy feasibility counts finite objectives and each constraint independently,
+then all-constraint eligibility, without an implicit trade gate. Selected OOS
+comparisons and detailed neighborhoods reuse frozen IS decisions from the policy
+or saved baseline rule. OOS never reselects. Core `star_neighbours` includes the
+center and preserves geometry block/mask and globally generated code adjacency:
+codes absent everywhere are bridged, codes present only in another block are not.
+Categorical adjacency does not mean numeric proximity. Aggregate neighborhood rows
+cover every candidate/segment; detailed rows cover only IS-selected candidates.
+No geometric neighbor gives `insufficient_neighbors`; no finite distinct neighbor
+gives `no_finite_distinct_neighbor` and null mean/worst/positive share. A nonfinite
+center makes center-relative deltas unavailable. Missing members remain in counts;
+no automatic robustness threshold is applied.
+
+Screen `--scope-for LABEL=NAME` overrides a default scope. Each locked input needs
+its own `--unlock-policy LABEL=PATH` plus `--unlock-scope`, even when files are
+shared. Partial scopes/incomplete inputs need the existing explicit flags.
+All inputs freeze IS candidate decisions and common-pool ticker rankings before
+OOS. Primary/sensitivity, cash underfill, random seeds/draws, bottom/oracle/anti-oracle
+controls, omissions and ticker turnover reuse allocation. Matched fraction is
+legacy-only. Candidate turnover compares nonnull semantic keys in adjacent common
+blocks (including gaps), independent of OOS or common-pool exclusion.
+
+Only an explicit `--baseline` creates generic input-minus-baseline deltas. Capacity
+headlines require every paired block to be finite. All-available deltas also require
+identical nonempty finite-OOS ticker sets; otherwise `different_finite_ticker_sets`
+or `no_finite_tickers` explains the null. Both sets and values remain visible; no
+new paired-subset mean is invented. Generic comparison is `descriptive_aligned`,
+with strategy/economics/TF/source/IS-geometry confounders disclosed, and no new
+inference. Legacy nested inference is preserved.
+
+`--filter-baseline` requires exactly two complete v4 inputs, effective Off then
+active, equal effective ticker and full IS/OOS window sets, and the released exact
+non-filter saved projection: generation minus only `execution.entryFilters`,
+analysis/rules/seeds, complete candidates, non-filter identity fields, portable
+target pins, segment preparation facts and operative admission. Filter-dependent
+plan/binding hashes and source locators are not equality requirements; readers
+still validate every saved hash. The three estimands stay separate: **same
+configuration**, **policy reselection with filters**, and **policy and ticker
+allocation on the common IS-eligible pool**. Reselection joins frozen semantic keys
+to each side's saved OOS, including local selections excluded from the common pool;
+selection, finite selected-IS score and pool membership have separate columns.
+
+Fixed primary summaries aggregate tickers only at **variant × economics stratum ×
+exact evaluation-period key**. Variant contains producing strategy identity,
+non-runtime/non-economic scalars, effective filters and TF. Stratum contains
+strategy/version, execution policy, all economics and funding/slippage flags.
+Period keys normalize saved `evaluation_start`/`evaluation_end` to UTC; names,
+requested strings, aligned bar ends and warmup are retained facts, not join keys.
+Duplicate account IDs across inputs and ambiguous duplicate tickers within a
+primary grain fail. Pending/failed declared accounts require `--allow-partial`;
+corrupt completed claims always fail.
+
+For each metric, common membership intersects completed finite ticker sets across
+all variants in that stratum/period cohort. Tables retain the exact cohort/hash,
+expected union, available/common memberships, missing IDs and saved sample facts.
+Empty common sets are unavailable. Equal membership with unequal pins/bounds/TF/
+admission is `descriptive_common_membership`. Trades expose observed sums and
+medians with complete totals unavailable when expected members are missing.
+Cross-period/TF rows list primary estimates and finite count/min/median/max, with
+no pooled mean headline or chaining. Monthly rows remain continuous calendar
+slices with saved opening denominators and partial-month facts; no monthly trade
+count or drawdown is invented.
+
+Fixed neighborhoods require explicit numeric strategy axes; unknown, boolean,
+economic and nonfinite axes fail. Sorted declared values include failed/pending
+configurations, so a failed middle value is never bridged. Edges change exactly
+one axis and retain its actual distance. Comparable edges require the same ticker,
+exact period, target pin, admission and evaluation geometry. Per-edge returns,
+drawdowns and trades retain missingness; neighborhood net-return summaries follow
+the finite-distinct-neighbor convention above. Without axes the table explicitly
+says `not_requested` and gives the command hint.
+
+Concentration groups explicit additive contributions by ticker and time separately.
+It reports signed observed/complete totals, positive gross, absolute negative gross,
+positive shares, the largest positive contributor (canonical ID/UTC tie break) and
+arithmetic total excluding it. No positive contribution means null shares/removal;
+zero net totals are not percentages of net. Field contributions reconcile to the
+finite-support hierarchical candidate mean, with partial-support counts. Screen
+member contributions divide by the total expected common-block count, so they
+reconcile to mean capacity return; an unavailable block contributes no partial
+member subtotal and makes the complete total unavailable. Cash contributes zero.
+Fixed sums saved realized currency P&L only within compatible currency/capital/
+economics/variant/period groups, and shows monthly realized P&L and MTM changes as
+separate channels. It never sums return percentages or overlapping independent runs.
+Exclusion never reranks, reruns or reweights a policy.
 
 ## Dataset and resume contract
 

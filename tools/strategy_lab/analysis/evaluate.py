@@ -403,6 +403,8 @@ def evaluate_scope(
     candidate_policy=None,
     universe=None,
 ) -> AnalysisResult:
+    from copy import deepcopy
+    scope = deepcopy(scope)
     from .candidate_policy import validate_policy_metrics
     from .research_inputs import restrict_universe, attach_research_inputs
     if candidate_policy is not None:

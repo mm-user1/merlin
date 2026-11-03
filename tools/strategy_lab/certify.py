@@ -68,19 +68,7 @@ LEGACY_BRACKET_IDENTITY = {
     "trail": "none",
 }
 SELECTED_TRIAL_NET_PROFIT_BASIS = "initial_capital_1000"
-PROTECTED_CANONICAL_OUTPUTS = tuple(
-    (
-        REPO_ROOT
-        / "tools"
-        / "strategy_lab"
-        / "output"
-        / name
-    ).resolve()
-    for name in (
-        "s06_bracket_mvp_pre_mtm_v1",
-        "s06_bracket_mvp_mtm_v2",
-    )
-)
+from .paths import PROTECTED_CANONICAL_OUTPUTS
 LEGACY_METRIC_COUNT = 20
 WINDOW_PINS = {
     1: (

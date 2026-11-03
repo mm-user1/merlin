@@ -95,6 +95,19 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+`strategy_lab/test_comparative_reports.py` and `test_saved_comparison_families.py`
+own saved field-audit, IS/OOS screen and Fixed comparison witnesses: hierarchical
+finite reductions, exact cohorts/periods, frozen filter reselection, common finite
+set guards, neighborhood support, additive concentration, detached provenance,
+validated account collection, scope authorization, JSON stdout and atomic output.
+The synthetic analysis helpers live in `_analysis_helpers.py`; new tests import
+ordinary helpers, never other test modules or ignored review probes. Module-scoped
+provider packs/results are shared across family checks. Run these two modules with
+the existing analysis/allocation/research-input modules first, then unfiltered
+`tests/strategy_lab` once on the final tree. Scale/read-count/peak-memory probes
+belong to review evidence, without CI timing thresholds. A host lacking symlink
+creation privilege reports that specific test as skipped; Linux review must cover it.
+
 `strategy_lab/test_research_inputs.py` covers the separate offline analysis input
 extension: strict file snapshots/provenance, saved-order universe restriction,
 scope authorization, IS-only policy selection, cross-input freeze, fixed-capacity

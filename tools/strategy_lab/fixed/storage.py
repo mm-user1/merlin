@@ -212,7 +212,7 @@ def read_account(root, account, claim, result_schema=RESULT_SCHEMA):
     return result, values, rows
 
 
-def open_dataset(root, *, allow_partial=False):
+def open_dataset(root, *, allow_partial=False, on_account=None):
     root = Path(root).absolute()
     path = safe_path(root, "manifest.json")
     if not path.exists():
@@ -240,7 +240,10 @@ def open_dataset(root, *, allow_partial=False):
         raise ValueError("incomplete account coverage in complete Fixed manifest.")
     for a in accounts:
         if a["account_id"] in completed:
-            read_account(root, a, completed[a["account_id"]], RESULT_PAIRS[m["schema_version"]])
+            result, curve, rows = read_account(root, a, completed[a["account_id"]], RESULT_PAIRS[m["schema_version"]])
+            if on_account is not None:
+                on_account(deepcopy(a), deepcopy(result), deepcopy(rows))
+            del result, curve, rows
     if not m["complete"] and not allow_partial:
         raise ValueError("Fixed dataset is partial; explicitly use --allow-partial.")
     return m

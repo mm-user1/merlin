@@ -11,7 +11,7 @@ from .dataset import atomic_write, atomic_write_json, artifact_record
 from .filters import protect_output, recorded_roots
 from .fixed.accounting import csv_bytes
 from .fixed.config import DATASET_V2
-from .fixed.storage import open_dataset, read_account, RESULT_V2, safe_path
+from .fixed.storage import open_dataset, safe_path
 
 METRICS = ("net_profit_pct", "max_drawdown_mtm_pct", "total_trades")
 LABELS = ("parameter_set", "period", "instrument_id", "cell", "timeframe_minutes")
@@ -19,7 +19,9 @@ LABELS = ("parameter_set", "period", "instrument_id", "cell", "timeframe_minutes
 
 def compare(baseline, variant, output_dir):
     roots = [Path(baseline).resolve(), Path(variant).resolve()]
-    manifests = [open_dataset(root) for root in roots]
+    captured = [{}, {}]
+    manifests = [open_dataset(root, on_account=lambda a, r, rows, saved=saved: saved.update({a["account_id"]: r}))
+                 for root, saved in zip(roots, captured)]
     if any(m["schema_version"] != DATASET_V2 for m in manifests):
         raise ValueError("comparison requires two complete Fixed v2 datasets; IS/OOS and historical families are unsupported.")
     contracts = [m["contract"] for m in manifests]
@@ -59,8 +61,8 @@ def compare(baseline, variant, output_dir):
             raise ValueError("comparison operative admission rules differ.")
         row = {k: off[k] for k in LABELS}
         row.update(off_account_id=off["account_id"], on_account_id=on["account_id"], candidate_semantic_key=off["candidate"]["semantic_key"])
-        for label, root, m, a in zip(("off", "on"), roots, manifests, (off, on)):
-            result = read_account(root, a, m["completed"][a["account_id"]], RESULT_V2)[0]
+        for label, saved, a in zip(("off", "on"), captured, (off, on)):
+            result = saved[a["account_id"]]
             for metric in METRICS:
                 row[label + "_" + metric] = result["metrics"][metric]
                 row[label + "_" + metric + "_unavailable_reason"] = result["metric_unavailable_reasons"].get(metric, "")
