@@ -195,11 +195,19 @@ scopes and unlock evidence remain separate provenance.
 
 Decision identity is SHA-256 of canonical JSON of that closed projection:
 UTF-8, sorted keys, compact separators, no NaN, Unicode unescaped. Exclude display
-labels/names, paths, scope names/evidence bytes, global hashes, whole ledger/plan
+labels/names, direct source-path fields, scope names/evidence bytes, global hashes, whole ledger/plan
 identity, calendar End, evaluationStart, method list, referenceMethod, seed/draws
 and later rankings. Local prior keys/IDs and consumed scalars remain included.
 Unavailable numeric facts normalize to null, with explicit reasons. An unchanged
 cutoff therefore keeps its identity when only future/global evidence changes.
+
+Direct path exclusion does not make prior Fixed account identities path-independent.
+A filtered Fixed `account_id` hashes the effective filter descriptor, including
+its source locator (`fixed/storage.py`). Regenerating equivalent accounts with a
+different bound filter root can therefore change a history decision identity.
+Relocating an unchanged saved artifact is distinct from regenerating accounts
+with a changed locator. Random pool keys remain unchanged when their own eligible
+roster and settings are unchanged; no account-identity normalization is applied.
 
 | Saved observation | Meaning |
 | --- | --- |
@@ -243,7 +251,11 @@ scripts' secondary cascades. No weights, percentile composites or best-method
 selection are added.
 
 Top/bottom/random select min(K,E), weight 1/K and retain unused slots as cash.
-Bottom reverses the score cascade, retaining ascending ID ties. All-method-eligible
+Bottom takes the last min(K,E) entries of the same published ranking, including
+the highest full IDs within a boundary tie. Top and bottom are disjoint when
+E>=2K; when K<E<2K they overlap in 2K-E entries, and when E<=K both contain every
+eligible ticker (empty at E=0). Equal scores convey no method preference, and
+disjoint controls do not establish predictive ability. All-method-eligible
 weights 1/E (E=0 cash); all-declared weights 1/R. Current abstention is known
 cash; unknown selected outcomes invalidate required returns without replacement.
 `planned_cash_weight` is unused slots only; `cash_weight` also includes abstention.
@@ -271,12 +283,23 @@ flags with sequential plan mapping.
 
 Random outcomes share a context per `(label,target pool-key sequence)`;
 all-declared is computed once per label. Methods reference these contexts for
-midrank. Method-vs-method random deltas are omitted when they share a context.
+midrank. Within-label random block deltas are omitted whenever that block's pool
+keys agree, even if whole-path contexts differ or payoffs are incomplete.
+Identical whole contexts also omit within-label path deltas. Cross-label deltas
+remain present, including legitimate zero distributions.
 Cross-context random block pairing requires equal pool keys; whole-path pairing
 requires equality in every target. Otherwise reason is `different_random_pools`.
 Deterministic deltas remain descriptive when memberships differ, with overlap
 and exclusions visible. Baseline comparisons mean **whole-system comparison:
 configuration plus its own history-based selection**, not isolated F06 causality.
+
+Block concentration groups use numeric chronological block-ID order, retaining
+string IDs in reports. Equal positive contributions designate the earliest block
+as the largest group. Ticker ordering and contribution arithmetic are unchanged.
+
+These corrections retain the v1 schema and method versions. Existing saved
+reports remain immutable; use a new output directory for corrected bottom controls.
+Accepted X bottom semantics are unchanged.
 
 ## Published authority and exact columns
 

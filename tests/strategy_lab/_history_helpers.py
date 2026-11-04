@@ -23,6 +23,36 @@ def plan(root, tickers, request=None, name="plan"):
     return root/name
 
 
+def scalar_control_report(root, monkeypatch, *, unknown=False):
+    """Tied positive counts, changing tc4w pools, and distinct target payoffs."""
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from tools.strategy_lab.selection import open_history_plan, history_evaluate as evaluator
+    from tools.strategy_lab.selection.history_plan import METHODS
+
+    roster = [f"BYBIT_T{i}USDT" for i in range(4)]
+    request = history_request(mode="is_oos", end="2025-04-30", evaluation="2024-09-01",
+        methods=list(METHODS), draws=8)
+    saved = open_history_plan(plan(root, roster, request))
+    blocks = saved.metadata["mapping"]["blocks"]
+    ledger = {(b["id"], t): dict(status="completed", reason=None,
+        value=[1., 2., 4., 8.][i] if b["id"] >= 5 else 1., account_id=None,
+        candidate_id=1, semantic_key="candidate-1", is_net_profit_pct=4., is_total_trades=5., metrics={})
+        for b in blocks for i, t in enumerate(roster)}
+    ledger[1, roster[0]]["is_net_profit_pct"] = None  # Only the first tc4w pool differs.
+    if unknown:
+        ledger[12, roster[-1]].update(status="unknown", reason="nonfinite_oos", value=None)
+    sources = {"off": {}, "on": {}}
+    monkeypatch.setattr(evaluator, "collect_candidates", lambda *a, **k:
+        ({label: deepcopy(ledger) for label in sources}, sources, [], []))
+    monkeypatch.setattr(evaluator, "strategy_settings", lambda *a: {})
+    inputs = [SimpleNamespace(label=n, dataset=SimpleNamespace(root=root/n)) for n in sources]
+    output = root/"report"
+    evaluator.evaluate_history(saved, output, inputs=inputs, history_scopes={n: object() for n in sources},
+        candidate_rule="primary_profit", baseline="off")
+    return output
+
+
 @pytest.fixture(scope="module")
 def history_family(tmp_path_factory):
     work = tmp_path_factory.mktemp("history-family")

@@ -5,7 +5,7 @@ import shutil
 import numpy as np
 import pytest
 
-from _history_helpers import history_family, history_request, plan
+from _history_helpers import history_family, history_request, plan, scalar_control_report
 from _selection_helpers import document, universe, publish, request
 from _fixed_helpers import snapshot
 from _analysis_helpers import mutate_group
@@ -32,6 +32,97 @@ def scalar_projection(method=METHODS[3]):
         candidate_id=j,semantic_key=t,is_net_profit_pct=4.,is_total_trades=10.) for b in blocks for j,t in enumerate(roster)}
     r = history_request(mode="is_oos",methods=list(METHODS))
     return project_decision(r,roster,blocks,4,ledger,method,{}), blocks, ledger, r
+
+
+@pytest.mark.parametrize("method,count,k", [(m, 5, 2) for m in METHODS] + [(METHODS[0], 44, 8)])
+def test_bottom_tied_ranking_tail(method, count, k):
+    p, _, _, _ = scalar_projection(method)
+    roster = [f"BYBIT_T{i:02}USDT" for i in range(count)]
+    p["settings"].update(roster=roster, topN=k)
+    current = next(iter(p["current"].values()))
+    p["current"] = {t: deepcopy(current) for t in roster}
+    for prior in p["prior"]:
+        row = next(iter(prior["rows"].values()))
+        prior["rows"] = {t: deepcopy(row) for t in roster}
+    d = score_history(p)
+    top = {r["ticker"] for r in d["rows"] if r["selected"]}
+    bottom = {r["ticker"] for r in d["rows"] if r["bottom"]}
+    assert d["ordered"] == roster and top == set(roster[:k])
+    assert bottom == set(roster[-k:]) and not top & bottom
+
+
+@pytest.mark.parametrize("eligible_count", range(6))
+def test_bottom_overlap_underfill_and_empty(eligible_count):
+    p, _, _, _ = scalar_projection(METHODS[2])
+    roster = p["settings"]["roster"]
+    for ticker in roster[eligible_count:]:
+        p["current"][ticker].update(candidate_id=None, semantic_key=None, is_net_profit_pct=None, is_total_trades=None)
+    d = score_history(p)
+    top = {r["ticker"] for r in d["rows"] if r["selected"]}
+    bottom = {r["ticker"] for r in d["rows"] if r["bottom"]}
+    assert len(top) == len(bottom) == min(2, eligible_count)
+    assert bottom == set(roster[max(0, eligible_count-2):eligible_count])
+    assert len(top & bottom) == max(0, 2*min(2, eligible_count)-eligible_count)
+    assert all(not r["bottom"] for r in d["rows"] if not r["eligible"])
+
+
+def test_bottom_mixed_score_boundary_tie():
+    p, _, _, _ = scalar_projection(METHODS[2])
+    roster = p["settings"]["roster"]
+    for ticker, score in zip(roster, [3., 2., 1., 1., 1.]):
+        p["current"][ticker]["is_net_profit_pct"] = score
+    d = score_history(p)
+    assert d["ordered"] == roster
+    assert [r["ticker"] for r in d["rows"] if r["bottom"]] == roster[-2:]
+
+
+def table(root, name):
+    import csv
+    with (root/name).open(encoding="utf-8", newline="") as stream:
+        return list(csv.DictReader(stream))
+
+
+def test_bottom_report_payoffs_and_projections(tmp_path, monkeypatch):
+    out = scalar_control_report(tmp_path, monkeypatch)
+    decisions = read(out, "decisions.json")["decisions"]
+    for d in decisions:
+        if d["method"] == METHODS[0]:
+            assert [r["ticker"] for r in d["rows"] if r["bottom"]] == ["BYBIT_T2USDT", "BYBIT_T3USDT"]
+    for label in ("off", "on"):
+        arms = read(out, "summary.json")["datasets"][label]["methods"][METHODS[0]]["arms"]
+        assert arms["bottom_k"]["mean"] == 6. and arms["top_k"]["mean"] == 1.5
+    rows = [r for r in table(out, "blocks.csv") if r["context"] == METHODS[0] and r["arm"] == "bottom_k"]
+    assert len(rows) == 16 and all(r["value"] == "6.0" for r in rows)
+    rows = [r for r in table(out, "decisions.csv") if r["method"] == METHODS[0] and r["bottom"] == "True"]
+    assert len(rows) == 32 and {r["ticker"] for r in rows} == {"BYBIT_T2USDT", "BYBIT_T3USDT"}
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_random_block_omission_and_cross_label_pairing(tmp_path, monkeypatch, unknown):
+    out = scalar_control_report(tmp_path, monkeypatch, unknown=unknown)
+    rows = table(out, "comparisons.csv")
+    within = [r for r in rows if r["level"] == "paired_random_block_distribution" and r["label"] == r["reference_label"]]
+    assert len(within) == 2 and all(r["reason"] == "different_random_pools" for r in within)
+    assert all(json.loads(r["block_key"])[0] == "2024-09-01T00:00:00+00:00" for r in within)
+    cross = [r for r in rows if r["level"] == "paired_random_block_distribution" and r["label"] != r["reference_label"]]
+    assert len(cross) == 32
+    assert all(r["mean"] == r["p05"] == r["p95"] == "0.0" for r in cross if r["reason"] == "")
+    assert sum(r["reason"] == "incomplete_required_observations" for r in cross) == (4 if unknown else 0)
+    paths = [r for r in rows if r["level"] == "paired_random_path_distribution"]
+    assert sum(r["reason"] == "different_random_pools" for r in paths) == 2
+    cross_paths = [r for r in paths if r["label"] != r["reference_label"]]
+    assert len(cross_paths) == 4
+    assert all(r["reason"] == "incomplete_required_observations" if unknown else r["mean"] == "0.0" for r in cross_paths)
+
+
+def test_block_concentration_chronology_and_tied_largest(tmp_path, monkeypatch):
+    out = scalar_control_report(tmp_path, monkeypatch)
+    rows = [r for r in table(out, "concentration.csv") if r["group_kind"] == "block" and r["label"] == "off"
+        and r["context"] == METHODS[0] and r["arm"] == "top_k"]
+    assert [r["group"] for r in rows] == [str(i) for i in range(5, 13)]
+    assert {r["largest_positive_group"] for r in rows} == {"5"}
+    assert {float(r["contribution"]) for r in rows} == {1.5/8}
+    assert {float(r["complete_total"]) for r in rows} == {1.5}
 
 
 def test_hand_cascade_exact_ties_and_closed_projection():

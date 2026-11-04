@@ -73,7 +73,7 @@ def score_history(projection):
         rows.append(dict(ticker=ticker, candidate_facts=deepcopy(facts), history_refs=[[p["block"]["start"], p["block"]["end"], ticker] for p in prior],
             eligible=reason is None, reason=reason, features=features, score=score, rank=None, selected=False, bottom=False))
     eligible = sorted((r for r in rows if r["eligible"]), key=lambda r:(tuple(-v for v in r["score"]), r["ticker"]))
-    bottom = sorted(eligible, key=lambda r:(tuple(r["score"]), r["ticker"]))[:s["topN"]]
+    bottom = eligible[-s["topN"]:]
     for i, r in enumerate(eligible, 1):
         r.update(rank=i, selected=i <= s["topN"], bottom=r in bottom)
     groups = {}

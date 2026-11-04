@@ -248,8 +248,9 @@ def evaluate_history(plan, output_dir, *, fixed_inputs=None, inputs=None, histor
             if left != right:
                 same = dl["pool_key"] == dr["pool_key"]
                 delta = random_values[left]-random_values[right] if same else None
-                tables["comparisons"].append(dict(**common, level="paired_random_block_distribution", arm="random_k", block_key=key,
-                    **(distribution(delta) if same else dict(reason="different_random_pools", mean=None))))
+                if label != ref_label or not same:
+                    tables["comparisons"].append(dict(**common, level="paired_random_block_distribution", arm="random_k", block_key=key,
+                        **(distribution(delta) if same else dict(reason="different_random_pools", mean=None))))
                 if pair in delta_sums:
                     accumulate_paths(delta_sums[pair], delta_valid[pair], delta)
         del random_values
@@ -295,7 +296,7 @@ def evaluate_history(plan, output_dir, *, fixed_inputs=None, inputs=None, histor
         block_parts[row["label"],row["context"],row["arm"]].append((row["block_id"], value/len(targets) if finite(value) else None))
     for identity, parts in block_parts.items():
         complete = all(finite(v) for _,v in parts)
-        for row in concentration(parts, complete=complete, partial_support=not complete):
+        for row in concentration(parts, complete=complete, partial_support=not complete, order_key=int):
             tables["concentration"].append(dict(label=identity[0], context=identity[1], arm=identity[2], group_kind="block",
                 expected_blocks=len(targets), **row))
     durations = Counter((stamp(b["end"]).year-stamp(b["start"]).year)*12+stamp(b["end"]).month-stamp(b["start"]).month for b in targets)
