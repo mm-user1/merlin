@@ -11,6 +11,28 @@ Continuous Fixed research also runs explicit scalar configurations as independen
 accounts, with persisted evaluation curves and offline calendar views. It is a
 separate mode from the candidate-enumeration IS/OOS datasets described below.
 
+## Merlin X ticker-selection research
+
+`python -B -m tools.strategy_lab.selection` prepares a price-only ranking through
+the production Merlin X selector, transforms its frozen calendar into reusable
+Fixed requests, and evaluates saved Fixed or IS/OOS outcomes. The full declared
+universe remains in every outcome block. Controls share persisted random index
+arrays; offline evaluation does not read market packs or rerun X/strategies.
+
+See [Selection schemas and synthetic walkthrough](SELECTION_SCHEMA.md) for the
+three commands, complete request/artifact contracts, exact CSV headers, identity
+boundaries and copyable Fixed/IS-OOS examples. The shipped
+[X request](runspecs/x_selection_example.json) explicitly chooses K=2, a two-month
+cadence, one-month lookback, 30-minute ranking bars, 60-minute trading bars and
+32 random draws. Analysts must choose their own dates, roster and settings before
+examining outcomes; the example is not a recommended trading policy.
+
+Returns are independent reference-capital percentages with fixed arm denominators.
+Known IS abstention leaves cash; missing/failed/nonfinite observations stay unknown.
+The report labels mixed-duration equal-block means and makes no carried-capital,
+portfolio equity/drawdown, significance or validated-edge claim. X membership
+parity with core does not imply production portfolio execution parity.
+
 ## Generic entry filters
 
 One explicit fixed `entryFilters` editor object applies to each new request.

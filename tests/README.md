@@ -111,6 +111,21 @@ the existing analysis/allocation/research-input modules first, then unfiltered
 belong to review evidence, without CI timing thresholds. A host lacking symlink
 creation privilege reports that specific test as skipped; Linux review must cover it.
 
+`strategy_lab/test_selection_ranking.py` and `test_selection_outcomes.py` cover
+Merlin X preparation, frozen evidence and actual random-plan replay, reusable
+Fixed transformation, full outcome matrices, saved v3/v4 IS freeze, and guarded
+reference-return reports. Their shared varied-ticker fixture has real S07
+Off/F06 effects; the default identical-price synthetic pack alone cannot prove
+ranking discrimination. Durable tests assert completed Fixed manifests and exact
+account joins, including multi-month calendars and executable X-ineligible rows.
+For this surface run those two modules with allocation, research-input, Fixed
+and saved-comparison modules first, then unfiltered `tests/strategy_lab` once on
+the final tree and separately `tests/test_ticker_selector.py`. Use the isolated
+launcher below. Bounded scale probes may prepare 44 synthetic tickers and scalar
+reports without executing 44 engine accounts just for scaling. Record read counts,
+actual warnings/skips, and require Linux execution of Windows-skipped symlink
+checks. See [the selection contract](../tools/strategy_lab/SELECTION_SCHEMA.md).
+
 `strategy_lab/test_research_inputs.py` covers the separate offline analysis input
 extension: strict file snapshots/provenance, saved-order universe restriction,
 scope authorization, IS-only policy selection, cross-input freeze, fixed-capacity

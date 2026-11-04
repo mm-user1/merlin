@@ -9,6 +9,13 @@ C:\Users\mt\Desktop\Strategy\S_Python\.venv\Scripts\python.exe <command>
 
 Linux/VPS environments use their configured project Python and native paths.
 
+Strategy Lab's `python -B -m tools.strategy_lab.selection` exposes `prepare`,
+`fixed-request` and `evaluate` for Merlin X ticker-selection research. It reuses
+core ranking and saved Fixed/IS-OOS readers, with frozen random controls and
+independent reference-capital returns. See the
+[selection guide](strategy_lab/SELECTION_SCHEMA.md) for explicit input schemas,
+synthetic workflows, scope restrictions and output interpretation.
+
 ## Baselines and checks
 
 `generate_baseline_s01.py` regenerates the S01 regression evidence after an

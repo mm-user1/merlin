@@ -1,0 +1,21 @@
+{
+  "schema_version": "strategy_lab_x_request_v1",
+  "name": "synthetic-x-fixed",
+  "calendar": {
+    "mode": "fixed",
+    "start": "2024-03-01",
+    "end": "2024-06-15",
+    "tradingTimeframeMinutes": 60
+  },
+  "tickerSelector": {
+    "version": 1,
+    "enabled": true,
+    "method": "meanBarRangePct",
+    "methodVersion": 1,
+    "topN": 2,
+    "rebalanceMonths": 2,
+    "evaluateUnselected": false,
+    "params": {"lookbackMonths": 1, "timeframeMinutes": 30}
+  },
+  "controls": {"seed": 17, "draws": 32}
+}
