@@ -1,5 +1,6 @@
 """Validated saved-family adapters. No execution, availability reranking or curve retention."""
 from copy import deepcopy
+from dataclasses import asdict
 import hashlib
 from pathlib import Path
 import pandas as pd
@@ -30,6 +31,11 @@ def fixed_outcomes(ranking, inputs, parameter_sets, allow_partial):
     tf = m["request"]["effective"]["calendar"]["tradingTimeframeMinutes"]
     step = pd.Timedelta(minutes=tf)
     periods = m["calendar"]["periods"]
+    return collect_fixed(roster, tf, periods, inputs, parameter_sets, allow_partial)
+
+
+def collect_fixed(roster, tf, periods, inputs, parameter_sets, allow_partial):
+    step = pd.Timedelta(minutes=tf)
     expected = {(ticker, p["start"], p["end"]): p["id"] for p in periods for ticker in roster}
     sources, outcomes, roots, identities = {}, {}, [], set()
     require(not set(parameter_sets)-{label for label, _ in inputs}, "unknown parameter-set label.")
@@ -37,6 +43,7 @@ def fixed_outcomes(ranking, inputs, parameter_sets, allow_partial):
         path = Path(path).absolute()
         captured = {}
         def capture(account, result, monthly):
+            require("net_profit_pct" in result["metrics"], "required Fixed net_profit_pct metric unavailable.")
             captured[account["account_id"]] = deepcopy(result["metrics"])
         manifest = storage.open_dataset(path, allow_partial=allow_partial, on_account=capture)
         require(manifest["contract_sha256"] not in identities, "duplicate Fixed input identity.")
@@ -87,9 +94,29 @@ def candidate_outcomes(ranking, inputs, rule, policy):
     tf = m["request"]["effective"]["calendar"]["tradingTimeframeMinutes"]
     step = pd.Timedelta(minutes=tf)
     windows = [w for p in m["calendar"]["periods"] for w in p["windows"]]
+    return collect_candidates(roster, tf, windows, inputs, rule, policy)
+
+
+def collect_candidates(roster, tf, windows, inputs, rule, policy, *, history_scopes=None, history_ids=()):
+    require((rule is None) != (policy is None), "supply exactly one candidate rule or policy.")
+    if policy is not None:
+        policy.verify()
+    step = pd.Timedelta(minutes=tf)
     sources, roots, states, identities = {}, [], {}, set()
     for item in inputs:
         d, scope, label = item.dataset, item.scope, item.label
+        roles = {"evaluation": scope}
+        if history_scopes is not None:
+            roles["history"] = history_scopes[label]
+            require(roles["history"].ticker_cell == scope.ticker_cell, "history/evaluation ticker-cell mismatch.")
+        for role in roles.values():
+            if history_scopes is not None:
+                require(not role.missing_window_ids, "partial scope is not authorized for history evaluation.")
+                resolved = d.resolve_scope(role.name, unlock=bool(role.unlock_evidence),
+                    policy_path=role.unlock_evidence["policy_ref"] if role.unlock_evidence else None)
+                require(role == resolved, "history evaluation requires an unchanged resolved scope.")
+            require(set(roster) <= set(role.tickers), "ranking roster is outside authorized scope.")
+        require("net_profit_pct" in d.metric_index, "required candidate net_profit_pct metric unavailable.")
         require(d.schema_version in ("strategy_lab_dataset_v3", "strategy_lab_dataset_v4") and d.status == "complete", "X requires complete saved Parquet v3/v4 inputs.")
         require(d.manifest_sha256 not in identities, "duplicate candidate dataset identity.")
         identities.add(d.manifest_sha256)
@@ -101,28 +128,44 @@ def candidate_outcomes(ranking, inputs, rule, policy):
             require(rule in RULE_REQUIREMENTS and rule in d.contract.rule_registry["selectable_rules"], "unknown or undeclared candidate rule.")
             require(set(RULE_REQUIREMENTS[rule]) <= set(d.metric_index), "candidate rule metric unavailable.")
         mapped = {}
+        owners = {}
         for w in windows:
-            matches = [s for s in scope.windows if stamp(s.oos_start) == stamp(w["start"]) and stamp(s.oos_end)+step == stamp(w["end"])
+            owner = roles["history"] if history_scopes is not None and w["id"] in history_ids else scope
+            matches = [s for s in owner.windows if stamp(s.oos_start) == stamp(w["start"]) and stamp(s.oos_end)+step == stamp(w["end"])
                 and stamp(s.is_start) == stamp(w["isStart"]) and stamp(s.is_end)+step == stamp(w["start"])]
             require(len(matches) == 1, "ranking window is absent, ambiguous or outside authorized exact IS/OOS scope.")
             mapped[w["id"]] = matches[0]
+            owners[w["id"]] = owner
         _, _, bindings = _read(d.root/"input_bindings.json")
         by_id = {b["instrument_id"]:b for b in bindings["instruments"]}
+        require(set(roster) <= set(by_id), "required instrument bindings unavailable.")
         for ticker in roster:
             instrument_join(by_id[ticker]["input_pin"], ticker, tf)
         sources[label] = dict(**source_facts(d, scope), bindings=bindings,
             unused_tickers=sorted(set(scope.tickers)-set(roster)),
             unused_window_ids=sorted({w.window_id for w in scope.windows}-{w.window_id for w in mapped.values()}))
+        if history_scopes is not None:
+            sources[label]["candidate_semantics"] = dict(rule_registry=deepcopy(d.contract.rule_registry),
+                params=[deepcopy(p) for p in d.geometry.params], axis_names=list(d.geometry.global_axis_names),
+                axis_codes=d.geometry.axis_codes.tolist(), active_masks=d.geometry.active_masks.tolist())
+            sources[label]["scope_roles"] = {name: dict(scope=asdict(role),
+                unused_tickers=sorted(set(role.tickers)-set(roster)),
+                unused_window_ids=sorted({w.window_id for w in role.windows}-
+                    {mapped[i].window_id for i in mapped if (i in history_ids) == (name == "history")}))
+                for name, role in roles.items()}
+            for role in roles.values():
+                if role.unlock_evidence:
+                    roots.append(role.unlock_evidence["policy_ref"])
         roots.extend(saved_roots(d))
         if scope.unlock_evidence:
             roots.append(scope.unlock_evidence["policy_ref"])
-        states[label] = dict(item=item, windows=mapped, neighbours=star_neighbours(d.geometry), access_start=len(d.access_log))
+        states[label] = dict(item=item, windows=mapped, owners=owners, neighbours=star_neighbours(d.geometry), access_start=len(d.access_log))
     outcomes, trace = {i.label:{} for i in inputs}, []
     for w in windows:
         frozen = {}
         for label, state in states.items():
             item = state["item"]; d = item.dataset; window = state["windows"][w["id"]]
-            scope = d.subset_scope(item.scope, tickers=roster, window_ids=[window.window_id])
+            scope = d.subset_scope(state["owners"][w["id"]], tickers=roster, window_ids=[window.window_id])
             views = d.load_is_window(scope, window)
             choices = {}
             for ticker, view in views.items():

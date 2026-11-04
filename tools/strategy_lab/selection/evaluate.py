@@ -42,6 +42,21 @@ def arm_return(members, denominator, cells):
         cash_weight=(denominator-len(selected)+abstained)/denominator if denominator else 1.0)
 
 
+def random_returns(cells, eligible, plan, k):
+    values = np.array([cells[t]["value"] if finite(cells[t]["value"]) else np.nan for t in eligible])
+    return np.sum(values[plan], axis=1)/k
+
+
+def accumulate_paths(sums, valid, values):
+    good = np.isfinite(values)
+    sums += np.where(good, values, 0)
+    valid &= good
+
+
+def midrank(paths, reference):
+    return float((np.sum(paths < reference)+.5*np.sum(paths == reference))/len(paths)) if finite(reference) and np.isfinite(paths).all() else None
+
+
 @dataclass(frozen=True)
 class SelectionResult:
     metadata: dict
@@ -131,12 +146,9 @@ def evaluate_selection(ranking, *, fixed_inputs=None, inputs=None, parameter_set
                             unknown_participation[key] += 1
                         else:
                             contribution[key] += cells[t]["value"]/denominator/block_count
-                values = np.array([cells[t]["value"] if finite(cells[t]["value"]) else np.nan for t in eligible])
-                random = np.sum(values[plan], axis=1)/k
+                random = random_returns(cells, eligible, plan, k)
                 random_values[label] = random
-                good = np.isfinite(random)
-                path_sums[label] += np.where(good, random, 0)
-                path_valid[label] &= good
+                accumulate_paths(path_sums[label], path_valid[label], random)
                 random_stats = distribution(random)
                 blocks.append(dict(level="random_block_distribution", dataset_label=label, block_id=b["id"], block_key=block_key,
                     period_id=period["id"], duration_months=duration, arm="random_k", unit="percent_reference_return",
@@ -168,9 +180,7 @@ def evaluate_selection(ranking, *, fixed_inputs=None, inputs=None, parameter_set
                         comparisons.append(dict(level="paired_block", dataset_label=label, baseline=baseline, arm=arm,
                             block_key=block_key, value=delta, unit="percentage_points", reason=None if delta is not None else "incomplete_pair"))
                     delta = random_values[label]-random_values[baseline]
-                    good = np.isfinite(delta)
-                    delta_sums[label] += np.where(good, delta, 0)
-                    delta_valid[label] &= good
+                    accumulate_paths(delta_sums[label], delta_valid[label], delta)
                     comparisons.append(dict(level="paired_random_block_distribution", dataset_label=label, baseline=baseline,
                         arm="random_k", block_key=block_key, unit="percentage_points", **distribution(delta)))
         previous, previous_plan, previous_roster = arms, plan, eligible
@@ -185,7 +195,7 @@ def evaluate_selection(ranking, *, fixed_inputs=None, inputs=None, parameter_set
         paths = np.where(path_valid[label], path_sums[label]/block_count, np.nan)
         random_summary = distribution(paths)
         x = arm_summaries["x_top_k"]["mean"]
-        random_summary["x_midrank_fraction"] = float((np.sum(paths < x)+.5*np.sum(paths == x))/draws) if finite(x) and path_valid[label].all() else None
+        random_summary["x_midrank_fraction"] = midrank(paths, x)
         summary_labels[label] = dict(arms=arm_summaries, random_path_mean_distribution=random_summary)
         if baseline is not None and label != baseline:
             for arm in arm_summaries:

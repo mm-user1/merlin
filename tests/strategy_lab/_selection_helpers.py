@@ -13,8 +13,8 @@ from tools.strategy_lab.fixed.run import run
 from tools.strategy_lab.generate import generate_dataset
 
 
-def publish(root, *, count=3, late=None, tie=False, future=None, drop=False):
-    times = pd.date_range("2023-12-01", "2024-09-01", freq="5min", inclusive="left", tz="UTC")
+def publish(root, *, count=3, late=None, tie=False, future=None, drop=False, end="2024-09-01", quiet_before=None):
+    times = pd.date_range("2023-12-01", end, freq="5min", inclusive="left", tz="UTC")
     slots = np.arange(len(times))
     instruments = []
     for i in range(count):
@@ -24,6 +24,8 @@ def publish(root, *, count=3, late=None, tie=False, future=None, drop=False):
         close = 100+(6+phase)*np.sin((slots+1)/(24+phase*3))
         values = np.column_stack((opening, np.maximum(opening, close)+.2+phase*.3,
             np.minimum(opening, close)-.2-phase*.3, close, np.ones(len(times))))
+        if quiet_before is not None and i == 0:
+            values[times < pd.Timestamp(quiet_before, tz="UTC"), :4] = 100
         if future is not None:
             values[times >= pd.Timestamp(future, tz="UTC"), 1] += .7*(i+1)
         rules = synthetic_rules(symbol)
@@ -39,7 +41,7 @@ def publish(root, *, count=3, late=None, tie=False, future=None, drop=False):
             source=manifest.build_source_metadata(input_format="synthetic", input_dtype="float64",
                 source_reference="X varied instrument fixture", volume_unit_evidence="synthetic"),
             verification=manifest.build_verification(volume_quote_verified=True, volume_quote_evidence="synthetic",
-                closed_before_utc="2024-09-01T00:00:00Z", closure_evidence="synthetic", closure_source="test")))
+                closed_before_utc=pd.Timestamp(end, tz="UTC").isoformat(), closure_evidence="synthetic", closure_source="test")))
     data.publish_pack(root, instruments, universe=manifest.build_universe())
     return [s.venue+"_"+s.contract for s in instruments]
 

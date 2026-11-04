@@ -8,5 +8,8 @@ with redirect_stdout(sys.stderr):
 from .ranking import prepare_ranking, open_ranking
 from .transform import write_fixed_request
 from .evaluate import evaluate_selection, write_selection
+from .history_plan import prepare_history_plan, open_history_plan, write_history_fixed_request
+from .history_evaluate import evaluate_history
 
-__all__ = ["prepare_ranking", "open_ranking", "write_fixed_request", "evaluate_selection", "write_selection"]
+__all__ = ["prepare_ranking", "open_ranking", "write_fixed_request", "evaluate_selection", "write_selection",
+    "prepare_history_plan", "open_history_plan", "write_history_fixed_request", "evaluate_history"]

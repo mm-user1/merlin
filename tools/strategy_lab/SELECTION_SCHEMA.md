@@ -4,6 +4,8 @@ This research-only interface reuses the production
 [ticker selector](../../docs/TICKER_PORTFOLIOS.md) for live preparation and the
 existing [Fixed and candidate readers](README.md) for saved outcomes. Selection
 code is in `selection/`; it does not change the allocator or execute a strategy.
+The separate [historical selection workflow](HISTORY_SELECTION_SCHEMA.md) consumes
+saved account/candidate histories without requiring an X ranking or market pack.
 
 ## Commands and Python API
 
@@ -234,7 +236,10 @@ Complete headlines and their finite-only descriptions use the same convention.
 These arithmetic and padded-date corrections retain v1 schemas and use current
 Git provenance for recomputation into new output directories. Historical ranking
 and report files are not rewritten. An old internally inconsistent padded-date
-artifact may remain refused; prepare a new artifact rather than repairing it.
+artifact may be newly refused, including padded partial-month artifacts that
+opened under the earlier inconsistent reader. Prepare into a new directory;
+never repair historical evidence in place. Plain consistent historical artifacts
+remain supported.
 
 Baseline comparisons pair identical block keys and, for random controls, identical
 draw indices. Delta is label minus baseline in percentage points, unavailable

@@ -126,6 +126,18 @@ reports without executing 44 engine accounts just for scaling. Record read count
 actual warnings/skips, and require Linux execution of Windows-skipped symlink
 checks. See [the selection contract](../tools/strategy_lab/SELECTION_SCHEMA.md).
 
+`strategy_lab/test_selection_history.py` adds causal historical scorers, offline
+history plans, real S07 Fixed Off/F06 and mixed v3/v4 candidate workflows. Its
+extended `_history_helpers.py` fixture covers actual IS abstention and four-row
+re-entry, independent history/target scope unlocks, current-payoff perturbations,
+saved-array/CSV recomputation, CLI JSON, and the K=8 exact-tie regression. Run it
+with the same focused selection/allocation/research-input/Fixed/saved-comparison
+gate, then full Strategy Lab once and the separate core selector gate. Linux
+must execute `test_history_symlink_ancestors` as well as the existing symlink
+checks. Bounded 44-ticker scalar probes and historical formula/byte-preservation
+comparisons belong to review evidence, with no imports of ignored probes into
+tracked tests and no engine campaign for scale.
+
 `strategy_lab/test_research_inputs.py` covers the separate offline analysis input
 extension: strict file snapshots/provenance, saved-order universe restriction,
 scope authorization, IS-only policy selection, cross-input freeze, fixed-capacity

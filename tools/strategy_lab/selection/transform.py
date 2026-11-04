@@ -11,6 +11,20 @@ from ..filters import recorded_roots, effective
 from ..report_support import new_output, write_bytes, finish_report
 
 
+def substitute_periods(raw, periods, roster, tf, name, warmup_bars, prefix):
+    integer(warmup_bars, 100, 5000, "warmup_bars")
+    g = validate_structure(raw)
+    require(sorted(i["instrument_id"] for i in g["market_data"]["instruments"]) == roster and g["timeframes_minutes"] == [tf],
+        "template must declare the full ranking roster and its single trading TF.")
+    transformed = deepcopy(raw)
+    transformed["run_name"] = name+"--"+raw["run_name"]
+    transformed["generation"]["periods"] = [dict(name=f"{prefix}-period-{p['id']}", start=p["start"],
+        end=(stamp(p["end"])-pd.Timedelta(minutes=tf)).isoformat(), warmup_bars=warmup_bars) for p in periods]
+    transformed["generation"]["expected_run_count"] = len(roster)*len(periods)*len(g["parameter_sets"])
+    validate_structure(transformed)
+    return transformed, g
+
+
 def write_fixed_request(ranking, template, output_dir, *, warmup_bars):
     ranking = ranking if isinstance(ranking, Ranking) else open_ranking(ranking)
     ranking.verify()
@@ -37,12 +51,7 @@ def write_fixed_request(ranking, template, output_dir, *, warmup_bars):
             if listing is not None and stamp(listing) > required:
                 impossible.append(dict(ticker=ticker, period_id=p["id"], listing=listing, required_start=required.isoformat()))
     require(not impossible, f"listing proves impossible execution/warmup cells: {impossible}. Choose a later Start or different explicit universe in a new pre-outcome plan.")
-    transformed = deepcopy(raw)
-    transformed["run_name"] = m["request"]["effective"]["name"]+"--"+raw["run_name"]
-    transformed["generation"]["periods"] = [dict(name=f"x-period-{p['id']}", start=p["start"],
-        end=(stamp(p["end"])-step).isoformat(), warmup_bars=warmup_bars) for p in periods]
-    transformed["generation"]["expected_run_count"] = len(roster)*len(periods)*len(g["parameter_sets"])
-    validate_structure(transformed)
+    transformed, g = substitute_periods(raw, periods, roster, tf, m["request"]["effective"]["name"], warmup_bars, "x")
     roots = [ranking.root, path, m["request"]["path"], m["universe"]["path"],
         *(s["pack_root"] for s in m["pool"]), *recorded_roots(effective(raw))]
     output = new_output(output_dir, roots)

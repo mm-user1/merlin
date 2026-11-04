@@ -13,6 +13,13 @@ separate mode from the candidate-enumeration IS/OOS datasets described below.
 
 ## Merlin X ticker-selection research
 
+Historical ticker selection is also available through `history-plan`,
+`history-fixed-request` and `history-evaluate`. It uses saved full-roster outcomes,
+four adjacent completed blocks and separate histories per configuration/filter.
+See [Historical selection contracts and workflows](HISTORY_SELECTION_SCHEMA.md)
+for the four explicit methods, scope authorization, persisted random controls,
+Fixed preflight requirements and separate same-cell X comparison.
+
 `python -B -m tools.strategy_lab.selection` prepares a price-only ranking through
 the production Merlin X selector, transforms its frozen calendar into reusable
 Fixed requests, and evaluates saved Fixed or IS/OOS outcomes. The full declared

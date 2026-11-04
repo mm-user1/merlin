@@ -202,14 +202,18 @@ def validate_calendar(metadata):
     c = metadata["request"]["effective"]["calendar"]
     selector = metadata["request"]["effective"]["tickerSelector"]
     cal = metadata["calendar"]
+    validate_calendar_parts(c, selector["rebalanceMonths"], cal)
+
+
+def validate_calendar_parts(c, cadence, cal):
+    """Frozen v1 geometry shared by X and history plans; no live builder calls."""
     _keys(cal, "requested_start requested_end exclusive_end periods trailing".split(), "saved calendar")
     periods = cal["periods"]
     require(isinstance(periods, list) and periods, "empty saved calendar.")
-    require(cal == calendar_facts(metadata["request"]["effective"], periods), "calendar endpoint/trailing mismatch.")
+    require(cal == calendar_facts({"calendar": c}, periods), "calendar endpoint/trailing mismatch.")
     start, end = stamp(cal["requested_start"]), stamp(cal["exclusive_end"])
     require(start.day == 1 and start == start.normalize(), "calendar Start must be month-1 UTC.")
     history, width = (c["isMonths"], c["oosMonths"]) if c["mode"] == "is_oos" else (0, 1)
-    cadence = selector["rebalanceMonths"]
     require(cadence % width == 0, "cadence must divide OOS geometry.")
     next_start, wid = start+pd.DateOffset(months=history), 1
     step = pd.Timedelta(minutes=c["tradingTimeframeMinutes"]).value
