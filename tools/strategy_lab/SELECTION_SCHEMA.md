@@ -7,6 +7,10 @@ code is in `selection/`; it does not change the allocator or execute a strategy.
 The separate [historical selection workflow](HISTORY_SELECTION_SCHEMA.md) consumes
 saved account/candidate histories without requiring an X ranking or market pack.
 
+The separate [frozen portfolio workflow](PORTFOLIO_SCHEMA.md) can consume this
+ranking and original saved inputs for actual carried-capital execution. X reports
+here remain independent reference returns; they are not executed portfolio money.
+
 ## Commands and Python API
 
 Run from the repository root with the configured interpreter and an explicit,

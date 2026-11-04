@@ -283,6 +283,36 @@ above remain a separate contract.
 
 ## Ticker portfolio projections
 
+Strategy Lab's separate [carried portfolio output](../tools/strategy_lab/PORTFOLIO_SCHEMA.md)
+computes metrics from actual aggregate currency paths, before display reduction.
+Its true initial anchor is `(evaluationStart, C, C)`. Engine observations are
+labelled by bar open; Lab labels each unchanged balance/equity value at bar close
+(`open + timeframe`). Strict-close OOS/rebalance boundaries have one observation;
+first-bar P&L/fees are retained and warmup is excluded.
+
+Each native aggregate and pooled close uses `math.fsum` over individual funded
+and idle slot atoms. B/K allocation, own-account carry and boundary identities
+are exact. Division rounding is recorded as `fsum([B/K]*K)-B`; it is not profit,
+a fee, a residual account or a cash correction. The period anchor remains B.
+Only trade-to-balance reconciliation uses currency tolerance
+`1e-10 + 1e-12 * max(abs(opening), abs(closing), fsum(abs(trade.net_pnl)))`.
+The positive-opening period growth product uses relative/absolute tolerance
+`1e-12`. Neither tolerance applies to funding identities or detailed reproduction.
+
+Lab aggregate balance DD uses `_max_drawdowns` including the positive initial
+anchor; MTM DD uses `_max_drawdown_mtm_from_equity`. Percentage witnesses retain
+the earliest peak/trough; zero-DD witnesses are the initial anchor. These differ
+from trade-level realized DD and intrabar excursion DD. On finite depletion,
+signed ending capital is held flat through remaining scheduled bars; profit,
+return from initial C and anchored DD remain available, potentially beyond 100%
+loss/DD. Later nonpositive-opening returns are null. Nonfinite accounting fails.
+Production PF's depleted-index availability remains unchanged.
+
+Compact stored samples cannot independently certify exact DD. Detail must
+reexecute and match the full native numerical digest, funding, trades and
+diagnostics exactly. Existing rejection counters are incomplete for lot-floor,
+minimum-quantity and minimum-notional skips: zero counters do not mean no skips.
+
 Portfolio facts retain every realized per-bar balance change (including entry fees),
 opening/window/period/end anchors and original allocations. No lossy downsampling or
 new MTM storage precedes projection. Within each period the checked index grows by

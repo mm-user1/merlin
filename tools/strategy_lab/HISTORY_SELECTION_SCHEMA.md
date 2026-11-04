@@ -7,6 +7,12 @@ an edge or production shared/carried-capital portfolio behavior. The existing
 [X workflow](SELECTION_SCHEMA.md), allocator, engine and historical formats are
 unchanged.
 
+The separate [frozen portfolio workflow](PORTFOLIO_SCHEMA.md) uses this plan and
+original saved inputs for actual capital replay. It may hold membership over
+multiple OOS windows while still using four immediately preceding reference OOS
+observations at each rebalance. This document's per-block reference-return report
+and its immutable historical outputs keep their existing meaning.
+
 ## Commands and direct APIs
 
 Run from the repository root with the configured Python and a new empty output

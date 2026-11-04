@@ -95,6 +95,18 @@ python tools/run_tests.py -- tests/v2
 
 ## Selection and dependencies
 
+`strategy_lab/test_portfolio*.py` covers the Lab frozen-plan portfolio workflow:
+real Fixed/candidate Off/F06 replay, production Fixed/singleton Calendar WFA
+parity, a changing-parameter segment oracle, own-account carry, signed depletion,
+exact slot rounding, native/compact curves, dense replay, scopes and tamper refusals.
+Ordinary reusable request/oracle fixtures live in `_portfolio_helpers.py`.
+Run these focused modules first, then `tests/strategy_lab` and separately
+`tests/test_ticker_selector.py tests/test_portfolio.py tests/test_execution_capital.py
+tests/v2/test_v2_fixed_singleton.py` through the isolated launcher. Use external
+`MERLIN_TEST_ROOT` (T05: `%LOCALAPPDATA%/Temp/merlin-t05-tests` on Windows,
+`/tmp/merlin-t05-tests` on Linux). Linux must execute Windows privilege-skipped
+symlink checks. No full server/UI gate is required for this Lab-only surface.
+
 `strategy_lab/test_comparative_reports.py` and `test_saved_comparison_families.py`
 own saved field-audit, IS/OOS screen and Fixed comparison witnesses: hierarchical
 finite reductions, exact cohorts/periods, frozen filter reselection, common finite

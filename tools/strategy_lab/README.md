@@ -11,6 +11,17 @@ Continuous Fixed research also runs explicit scalar configurations as independen
 accounts, with persisted evaluation curves and offline calendar views. It is a
 separate mode from the candidate-enumeration IS/OOS datasets described below.
 
+## Frozen carried-capital portfolios
+
+`python -B -m tools.strategy_lab.portfolio` prepares a frozen plan from accepted
+X/history sources and saved Fixed or IS/OOS inputs, executes each selected policy
+at actual capital, renders offline reports, and verifies detailed regeneration.
+Accounts close at every OOS boundary, carry their own balances between rebalances,
+and pool only at the declared cadence. This new S07 risk-bracket output family
+keeps existing independent reference-return reports unchanged.
+See [portfolio schemas and executable synthetic workflow](PORTFOLIO_SCHEMA.md)
+for exact requests, four commands, resource limits and interpretation.
+
 ## Merlin X ticker-selection research
 
 Historical ticker selection is also available through `history-plan`,
