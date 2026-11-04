@@ -22,17 +22,19 @@ def distribution(values):
     a = np.asarray(values, dtype=float)
     valid = a[np.isfinite(a)]
     complete = len(valid) == len(a) and len(a) > 0
-    return dict(expected=len(a), finite=len(valid), mean=float(valid.mean()) if complete else None,
+    # Match chronological per-draw accumulation when these values are blocks.
+    return dict(expected=len(a), finite=len(valid), mean=float(np.cumsum(valid)[-1]/len(valid)) if complete else None,
         median=float(np.quantile(valid, .5)) if complete else None, p05=float(np.quantile(valid, .05)) if complete else None,
         p95=float(np.quantile(valid, .95)) if complete else None, reason=None if complete else "incomplete_required_observations")
 
 
 def arm_return(members, denominator, cells):
-    selected = [cells[t] for t in members]
+    selected = [cells[t] for t in sorted(members)]
     missing = [t for t in members if cells[t]["status"] == "unknown"]
     abstained = sum(c["status"] == "abstained" for c in selected)
     active = len(selected)-len(missing)-abstained
-    return dict(value=None if missing else sum(c["value"] for c in selected)/denominator if denominator else 0.0,
+    # Saved random rows use this same canonical-ID float64 reduction.
+    return dict(value=None if missing else float(np.sum([c["value"] for c in selected], dtype=float)/denominator) if denominator else 0.0,
         reason="unknown_required_outcome" if missing else None, unknown_tickers=missing, expected_denominator=denominator,
         selected_count=len(selected), active_count=active, abstained_count=abstained, missing_count=len(missing),
         occupied_weight=len(selected)/denominator if denominator else 0.0,

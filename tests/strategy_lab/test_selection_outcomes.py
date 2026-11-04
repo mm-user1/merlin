@@ -203,11 +203,18 @@ def test_scope_authority_and_detached_unlock_evidence(selection_family, tmp_path
 
 def test_draw_paths_and_paired_deltas_against_scalar_oracle(selection_family, monkeypatch):
     import importlib
+    from tools.strategy_lab.selection.ranking import Ranking
     owner = importlib.import_module("tools.strategy_lab.selection.evaluate")
     f = selection_family
     ranking = open_ranking(f["rankings"]["fixed"])
     roster = f["tickers"]
-    values = [[10., -20., 30.], [-40., 50., -60.]]
+    # Each path pairs 0 with 10. Block quantiles are [0,5,10], path quantiles [5,5,5],
+    # independent of the host's provider fingerprints and generated random plan.
+    values = [[0., 0., 20.], [20., 0., 0.]]
+    draws = ranking.metadata["controls"]["draws"]
+    assert draws % 2 == 0
+    plan = np.tile(np.array([[0,1],[1,2]],dtype=np.uint8),(draws//2,1))
+    monkeypatch.setattr(Ranking,"plan",lambda self,index:plan)
     cells = {label:{(b+1,t):dict(value=v+offset, status="completed", reason=None, account_id=t+str(b),
         semantic_key=None,candidate_id=None,is_net_profit_pct=None,is_total_trades=None,metrics={})
         for b,row in enumerate(values) for t,v in zip(roster,row)} for label,offset in (("off",0),("on",3))}
@@ -219,7 +226,8 @@ def test_draw_paths_and_paired_deltas_against_scalar_oracle(selection_family, mo
     summary = result.summary["datasets"]["off"]["random_path_mean_distribution"]
     assert summary["mean"] == pytest.approx(sum(paths)/len(paths))
     assert [summary[k] for k in ("p05","median","p95")] == pytest.approx(np.quantile(paths,[.05,.5,.95]))
-    assert not np.allclose(np.quantile(paths,[.05,.5,.95]), np.mean([np.quantile(v,[.05,.5,.95]) for v in expected], axis=0))
+    assert [summary[k] for k in ("p05","median","p95")] == [5.,5.,5.]
+    assert np.mean([np.quantile(v,[.05,.5,.95]) for v in expected],axis=0).tolist() == [0.,5.,10.]
     deltas = [r for r in result.tables["comparisons"] if r["level"] == "paired_random_path_distribution"]
     assert len(deltas) == 1 and deltas[0]["mean"] == pytest.approx(3) and deltas[0]["finite"] == 32
     # Unknown unselected outcomes do not invalidate X; controls keep full denominators.
@@ -230,6 +238,97 @@ def test_draw_paths_and_paired_deltas_against_scalar_oracle(selection_family, mo
     assert result.summary["datasets"]["on"]["arms"]["all_declared"]["mean"] is None
     assert result.summary["datasets"]["on"]["random_path_mean_distribution"]["mean"] is None
     assert next(r for r in result.tables["comparisons"] if r["level"] == "paired_random_path_distribution")["mean"] is None
+
+
+def _scalar_case(tmp_path, monkeypatch, values, *, k, late=None, start=None, end="2024-06-15", cadence=2):
+    """Real frozen ranking plus explicit scalar outcomes; no engine runs for arithmetic."""
+    import importlib
+    from _selection_helpers import publish, request, universe
+    from tools.strategy_lab.selection import prepare_ranking
+    tickers = publish(tmp_path/"pack",count=len(values[0]),late=late)
+    raw = request(k=k,draws=64,start=start,end=end,cadence=cadence)
+    prepare_ranking(document(tmp_path,"request.json",raw),tmp_path/"ranking",
+        ticker_list=universe(tmp_path,tickers),data_root=tmp_path/"pack")
+    ranking = open_ranking(tmp_path/"ranking")
+    assert len(ranking.records) == len(values)
+    cells = {"off":{(b+1,t):dict(value=v,status="completed" if v is not None else "unknown",reason=None,
+        account_id=t+str(b),semantic_key=None,candidate_id=None,is_net_profit_pct=None,is_total_trades=None,metrics={})
+        for b,row in enumerate(values) for t,v in zip(tickers,row)}}
+    owner = importlib.import_module("tools.strategy_lab.selection.evaluate")
+    monkeypatch.setattr(owner,"fixed_outcomes",lambda *a,**k:(cells,{},[],[]))
+    return ranking,cells
+
+
+def test_identical_random_membership_exact_tie_and_incomplete_guard(tmp_path, monkeypatch):
+    values = [[-35.574492,-38.220776,-19.151818],[31.612636,-31.927362,8.160016]]
+    ranking,cells = _scalar_case(tmp_path,monkeypatch,values,k=3)
+    for i,record in enumerate(ranking.records):
+        assert [r["instrument"] for r in record["rows"]] != sorted(r["instrument"] for r in record["rows"])
+        assert np.all(ranking.plan(i) == [0,1,2])
+    result = evaluate_selection(ranking,fixed_inputs={"off":"scalar"})
+    summary = result.summary["datasets"]["off"]
+    x,random = summary["arms"]["x_top_k"],summary["random_path_mean_distribution"]
+    assert random["x_midrank_fraction"] == .5
+    assert x["mean"] == random["p05"] == random["median"] == random["p95"] == -14.183632666666664
+    assert x["finite_only_descriptive"]["mean"] == x["mean"]
+    first = next(iter(cells["off"].values()))
+    first.update(value=None,status="unknown",reason="pending")
+    summary = evaluate_selection(ranking,fixed_inputs={"off":"scalar"}).summary["datasets"]["off"]
+    assert summary["arms"]["x_top_k"]["mean"] is None
+    assert summary["random_path_mean_distribution"]["x_midrank_fraction"] is None
+    assert summary["random_path_mean_distribution"]["finite"] == 0
+
+
+def test_identical_random_paths_eight_block_accumulation(tmp_path, monkeypatch):
+    # Eight exactly equal block returns isolate cross-block reduction: np.mean
+    # gives 0.1, but chronological accumulation gives 0.09999999999999999.
+    ranking,_ = _scalar_case(tmp_path,monkeypatch,[[.1,.1]]*8,k=2,
+        start="2024-01-01",end="2024-08-31",cadence=1)
+    result = evaluate_selection(ranking,fixed_inputs={"off":"scalar"})
+    block_values = [r["value"] for r in result.tables["blocks"] if r["arm"] == "x_top_k"]
+    assert block_values == [.1]*8
+    expected = .09999999999999999
+    assert float(np.mean(block_values)) != expected  # Detects a member-order-only fix.
+    summary = result.summary["datasets"]["off"]
+    x,random = summary["arms"]["x_top_k"],summary["random_path_mean_distribution"]
+    assert x["mean"] == x["finite_only_descriptive"]["mean"] == expected
+    assert random["p05"] == random["median"] == random["p95"] == expected
+    assert random["x_midrank_fraction"] == .5
+
+
+def test_midrank_preserves_small_strict_differences_and_ties(tmp_path, monkeypatch):
+    from tools.strategy_lab.selection.ranking import Ranking
+    values = [[1.+2e-8,1.+4e-8,1.]]*2
+    ranking,_ = _scalar_case(tmp_path,monkeypatch,values,k=2)
+    for record in ranking.records:
+        assert sorted(r["instrument"] for r in record["rows"] if r["selected"]) == ["BYBIT_BBBUSDT","BYBIT_CCCUSDT"]
+    # 32 lower, 16 identical-membership, 16 higher paths: (32 + .5*16)/64 = .625.
+    plan = np.array([[0,2]]*32+[[1,2]]*16+[[0,1]]*16,dtype=np.uint8)
+    monkeypatch.setattr(Ranking,"plan",lambda self,index:plan)
+    summary = evaluate_selection(ranking,fixed_inputs={"off":"scalar"}).summary["datasets"]["off"]
+    x,random = summary["arms"]["x_top_k"]["mean"],summary["random_path_mean_distribution"]
+    assert random["p05"] < x < random["p95"]
+    assert np.isclose(random["p05"],x) and np.isclose(random["p95"],x)
+    assert random["x_midrank_fraction"] == .625
+
+
+@pytest.mark.parametrize("empty",[False,True])
+def test_underfilled_and_empty_random_paths_tie_end_to_end(tmp_path, monkeypatch, empty):
+    values = [[None],[None]] if empty else [[.1,.2,99.],[.2,.3,99.]]
+    ranking,_ = _scalar_case(tmp_path,monkeypatch,values,k=len(values[0]),late="2024-05-01")
+    for i in range(2):
+        assert ranking.plan(i).shape == (64,0 if empty else 2)
+    result = evaluate_selection(ranking,fixed_inputs={"off":"scalar"})
+    summary = result.summary["datasets"]["off"]
+    x,random = summary["arms"]["x_top_k"]["mean"],summary["random_path_mean_distribution"]
+    assert x == random["p05"] == random["median"] == random["p95"]
+    assert random["x_midrank_fraction"] == .5
+    blocks = [r for r in result.tables["blocks"] if r["arm"] == "x_top_k"]
+    if empty:
+        assert x == 0 and all(r["cash_weight"] == 1 for r in blocks)
+    else:
+        assert x == pytest.approx((.3/3+.5/3)/2)
+        assert all(r["cash_weight"] == 1/3 and r["expected_denominator"] == 3 for r in blocks)
 
 
 def test_underfill_empty_eligibility_known_cash_and_zero():

@@ -69,6 +69,44 @@ def test_identity_exclusions_and_offline_replay(tmp_path, monkeypatch):
         moved.plan(0)
 
 
+@pytest.mark.parametrize("end,exclusive,trailing",[
+    ("2024-05-31","2024-06-01T00:00:00+00:00",None),
+    ("2024-05-15","2024-05-16T00:00:00+00:00",["2024-05-01T00:00:00+00:00","2024-05-16T00:00:00+00:00"]),
+    ("2024-05-31T00:00:00+00:00","2024-05-31T01:00:00+00:00",["2024-05-01T00:00:00+00:00","2024-05-31T01:00:00+00:00"]),
+])
+def test_padded_end_round_trip_core_parity_and_raw_provenance(tmp_path, monkeypatch, end, exclusive, trailing):
+    from core import ticker_selector, data_input
+    pack = tmp_path/"pack"; tickers = publish(pack)
+    u = universe(tmp_path,tickers)
+    paths = []
+    for name,text in (("plain",end),("padded"," "+end+" ")):
+        path = document(tmp_path,name+".json",request(end=text))
+        original = path.read_bytes()
+        prepare_ranking(path,tmp_path/name,ticker_list=u,data_root=pack)
+        assert path.read_bytes() == original
+        paths.append((tmp_path/name,text,hashlib.sha256(original).hexdigest()))
+    expected = ticker_selector.build_calendar("2024-03-01"," "+end+" ",60,2)
+    for owner,names in ((ticker_selector,("rank_pool","build_calendar","normalize_selector")),
+                        (data_input,("pack_session","_timestamp"))):
+        for name in names:
+            monkeypatch.setattr(owner,name,lambda *a,**k:pytest.fail("live owner called on frozen reopen"))
+    reopened = [open_ranking(path) for path,_,_ in paths]
+    for ranking,(_,text,raw_hash) in zip(reopened,paths):
+        assert ranking.metadata["request"]["raw"]["calendar"]["end"] == text
+        assert ranking.metadata["request"]["file_sha256"] == raw_hash
+        cal = ranking.metadata["calendar"]
+        assert cal["periods"] == expected and cal["exclusive_end"] == exclusive and cal["trailing"] == trailing
+    a,b = reopened
+    assert a.metadata["request"]["file_sha256"] != b.metadata["request"]["file_sha256"]
+    for key in ("calendar","ranking_identity","controls_identity"):
+        assert a.metadata[key] == b.metadata[key]
+    assert [r["ranking_decision_identity"] for r in a.records] == [r["ranking_decision_identity"] for r in b.records]
+    for i in range(len(a.records)):
+        np.testing.assert_array_equal(a.plan(i),b.plan(i))
+    if trailing is None:
+        assert a.records[-1]["period_key"][1] == "2024-06-01T00:00:00+00:00"  # Full May retained.
+
+
 def test_coverage_refusal_and_transform_listing_guard(tmp_path):
     with pytest.raises(ValueError, match="coverage|gap|99%"):
         prepare(tmp_path/"bad", drop=True)

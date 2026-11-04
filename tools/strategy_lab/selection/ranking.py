@@ -41,7 +41,7 @@ def stamp(value, *, end=False):
     t = pd.Timestamp(value)
     require(not pd.isna(t), "timestamp is unavailable.")
     t = t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
-    if end and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+    if end and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
         t += pd.Timedelta(days=1)-pd.Timedelta(microseconds=1)
     return t
 

@@ -76,7 +76,10 @@ formula, complete prior-month bounds, listing exclusions, 99% coverage, price
 validation, ordering and tie breaks. Missing/invalid history propagates failure.
 
 Start must be month-day 1 at 00:00 UTC. Date-only End includes that day; core
-converts it to the next trading-grid boundary. Only full months/OOS windows enter
+converts it to the next trading-grid boundary. Surrounding whitespace is ignored
+only when recognizing date-only End, matching core; raw request text and byte
+hashes remain unchanged. An explicit time-bearing End does not expand to the end
+of its day. Only full months/OOS windows enter
 the calendar; the leftover interval is recorded. Fixed groups monthly windows
 into rebalance periods; IS/OOS groups complete OOS windows and requires cadence
 to be a multiple of OOS width and at least two windows. Final groups may be short.
@@ -172,6 +175,12 @@ the adapter keeps scalar metrics only. Additional declared accounts are recorded
 as unused. Partial datasets require explicit opt-in; pending/failed cells remain
 unknown. Any reader integrity failure still aborts.
 
+Saved Fixed accounts currently require an inclusive **last-bar-open** evaluation
+End, as produced by `fixed-request`. A date-only End saved as end-of-day is
+refused even when its closed-bar range is equivalent. This restriction is
+separate from the ranking request's supported date-only End; broader saved
+endpoint compatibility is not implemented.
+
 Candidate datasets must be complete Parquet v3/v4 (mixed versions allowed).
 Legacy CSV v2 is unsupported. Scope authority must contain every requested ticker
 and exact IS/OOS window; extra authorized tickers/windows are recorded unused.
@@ -212,6 +221,20 @@ quantiles use NumPy's linear method. No averaging block quantiles. Random summar
 require every draw/path finite and expose expected/finite counts when unavailable.
 X's `x_midrank_fraction` is `(count(random<X)+.5*count(random==X))/draws`, null if
 X or any path is incomplete. It is descriptive, not a p-value.
+
+Deterministic and random portfolios sum float64 member returns in canonical-ID
+order with the same NumPy reduction and fixed denominator. Means accumulate
+their input sequence in order (chronological for blocks, draw-index order for
+random distributions). Thus identical memberships across all blocks produce
+exactly equal X and random path values, including underfill and empty cash arms.
+The published X headline is the reference used by midrank; comparisons use exact
+`<` and `==`, without rounding or a tolerance that could merge small differences.
+Complete headlines and their finite-only descriptions use the same convention.
+
+These arithmetic and padded-date corrections retain v1 schemas and use current
+Git provenance for recomputation into new output directories. Historical ranking
+and report files are not rewritten. An old internally inconsistent padded-date
+artifact may remain refused; prepare a new artifact rather than repairing it.
 
 Baseline comparisons pair identical block keys and, for random controls, identical
 draw indices. Delta is label minus baseline in percentage points, unavailable
