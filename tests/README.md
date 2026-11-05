@@ -69,6 +69,15 @@ Renderer/layout is unchanged; no new browser preview is required for this slice.
 
 ## General invocation
 
+Saved-rule replay coverage (T12) extends `test_entry_admission_integration.py`:
+`test_rules_replay_semantics_and_parent_manual`, the explicit saved-policy identity/
+null-notional cases, and independent nonempty current-rule execution witnesses.
+The existing server admission, quantity portfolio, Fixed and S07 launches cover
+saved/manual inheritance, historical provenance, strict Start requests and locator
+refusals. Core default and the real Strategy Lab
+`test_replay_mutations_relocation_and_immutable_completion` remain strict; include
+that slow-marked node explicitly when running the focused shared-consumer gate.
+
 Run from the repository root using the configured project interpreter. On Windows:
 
 ```powershell

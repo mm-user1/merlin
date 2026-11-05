@@ -234,20 +234,44 @@ reads, hashes or resampling. Preview describes parameter space; it does not cert
 file availability, continuity, date-range coverage or warmup sufficiency. Actual
 launches still prepare and fingerprint all consumed candles. No rules cache is used.
 
-Saved replay validates current schema and exact effective decimal semantics:
-instrument/venue/contract/currencies, quantity unit, base step/minimum, minimum
-lots/notional and OKX multiplier/value. Equivalent decimal spelling is accepted.
-Acquisition timestamp/reference, listing time and unused price tick may change
-without changing execution semantics. Root relocation and history extension
-outside consumed candles retain the existing candle-pin rules. Saved provenance
-is preserved. The envelope cap must equal the authoritative saved execution cap.
+Instrument-rule authority depends on the operation:
 
-New manual tests first verify the parent's consumed candles/instrument facts,
-then resolve current rules in the same session and save their own envelope.
-Changed parent rules therefore permit a new manual test but reject reconstruction
-of the old saved execution. Missing/malformed/unknown context blocks reconstruction
-for a current admission profile; stored tables remain readable offline. FT/Stress
-spawned workers receive frame/rules explicitly and never reopen the pack.
+| Operation | Numerical rules |
+| --- | --- |
+| Fresh Start/Queue, Grid/Fixed or portfolio | Current validated pack rules, saved with the execution |
+| Start backtest/download using client-returned envelopes | Strict current-rule comparison; rerun Start after a numerical update |
+| Saved trial/window chart, trades or combined export | That execution's validated saved snapshot |
+| New original-Parquet manual test | Exact parent snapshot and provenance, copied into the new result |
+| Historical saved manual chart/export | Its own snapshot; risk-mode rules may differ from the parent |
+| Locate Pack | The saved execution's compatibility policy; only its locator override changes |
+
+Both shared `replay_input` and `replay_config` default to `rules="current"`.
+Only trusted DB-derived Merlin callers explicitly select `rules="saved"`; request
+payloads cannot select that policy. Strategy Lab retains the strict default for
+generation, resume and consumption. Equivalent decimal spelling is accepted;
+null and zero notional remain distinct under strict comparison.
+
+Saved policy still parses valid supported current rules, including representable
+lot counts and unity OKX ctMult. It requires equal instrument ID, venue, contract,
+base/quote/settlement currencies, quantity unit and ctMult. Compatible numerical
+changes to step, minimum quantity/lots, minimum notional or OKX ctVal do not replace
+the saved values. A saved null remains null and a saved zero remains zero. Invalid
+current metadata or incompatible identity/units refuse. Acquisition provenance and
+unused price ticks may change; execution does not start rounding to ticks.
+
+New original-source manuals verify the parent's consumed target/filter pins, then
+prepare the new interval with parent rules under the existing session/lock boundary.
+They save their own pins and an exact copy of the parent rule envelope. Historical
+risk manuals retain their own numerical rules even when these differ from their
+parent and current pack. Their cap must match both their own fixed parameters and
+the validated parent cap, including Locate Pack for target/filter dependencies.
+Missing, malformed or unknown context refuses without publishing a partial manual.
+FT/Stress workers receive frame/rules explicitly and never reopen the pack.
+
+Consumed candle/filter fingerprints and origins remain strict. Verified relocation
+and history extension outside consumed bounds remain allowed; normal replay never
+rewrites saved provenance, rules or pins. This policy is not a historical rules
+service and does not relax current schema or source validation.
 
 ## Quantity-only portfolio rules
 
@@ -259,12 +283,12 @@ the same target read session with filters absent; spawned FT/Stress workers rece
 RAM frames/rules only. Quantity-only Preview reads neither metadata nor candles.
 
 Saved quantity replay additionally validates actual database portfolio ownership,
-profile, instrument and effective rule semantics. Present-null/unknown context is
-invalid; old ordinary records remain ordinary. Manual tests from these owned children
-verify the parent's quantity semantics before preparing a new interval. Changed
-relevant rules refuse reconstruction; append-only history outside consumed bounds
-and equivalent decimal spellings remain compatible. Relocation changes only the
-locator; offline tables do not require a pack. See [Ticker portfolios](TICKER_PORTFOLIOS.md).
+profile and the same saved-rule compatibility policy above. Present-null/unknown
+context is invalid; old ordinary records remain ordinary. New manuals from owned
+children inherit the exact parent envelope. Historical quantity manuals must retain
+parent-equivalent effective semantics, but may have different acquisition provenance;
+full source-snapshot equality is not required. Relocation changes only the locator;
+offline tables do not require a pack. See [Ticker portfolios](TICKER_PORTFOLIOS.md).
 
 ## Locations, locks and explicit collection
 

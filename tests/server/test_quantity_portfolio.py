@@ -72,15 +72,54 @@ def test_each_config_fixed_quantity_replay_and_manual(client,tmp_path,sid):
     account=record['periods'][0]['accounts'][0];base=f"/api/studies/{account['studyId']}"
     saved=storage.load_study_from_db(account['studyId']);number=saved['trials'][0]['trial_number']
     period=record['periods'][0]
+    from core.data_input import prepare_input
+    from tests._replay_rules_helpers import change_rules
+    from ui.server_data_input import trial_execution
+    from ui.server_services import _run_export_execution
+    original_curve=client.post(f'{base}/trials/{number}/equity',json={}).get_json()
+    original_trades=client.post(f'{base}/trials/{number}/trades',json={}).data
+    execution=trial_execution(saved['study'],saved['trials'][0],'optuna')
+    original,error=_run_export_execution(**execution)
+    assert error is None and original.trades
+    change_rules(pool[0],step='.1',minimum='.02')
+    if sid in (LEGACY[0],LEGACY[2]):
+        current=prepare_input(saved['study']['config_json']['data_input']['source'],date_filter=False,quantity_only=True)
+        different,error=_run_export_execution(**{**execution,'quantity_rules':current.quantity_rules})
+        assert error is None and different.trades and different.trades!=original.trades
+    assert client.post(f'{base}/trials/{number}/equity',json={}).get_json()==original_curve
+    assert client.post(f'{base}/trials/{number}/trades',json={}).data==original_trades
+    assert storage.load_study_from_db(account['studyId'])==saved
     response=client.post(base+'/test',json=dict(dataSource='original_parquet',sourceTab='optuna',
         startDate=period['start'],endDate=(pd.Timestamp(period['end'])-pd.Timedelta(hours=1)).isoformat(),trialNumbers=[number]))
     assert response.status_code==200,response.get_data(as_text=True)
     test_id=response.get_json()['test_id'];manual=storage.load_manual_test_results(account['studyId'],test_id)
     assert 'quantity_execution' in manual['results_json']['config']
     assert 'entry_admission' not in manual['results_json']['config']
+    assert manual['results_json']['config']['quantity_execution']==saved['study']['config_json']['quantity_execution']
     replay=client.post(f'{base}/trials/{number}/equity',json=dict(module='manual_tests',testId=test_id))
     assert replay.status_code==200,replay.get_data(as_text=True)
     assert replay.get_json()['equity'][-1]==pytest.approx(account['closing'])
+    exported=client.post(f'{base}/tests/{test_id}/trials/{number}/mt-trades')
+    assert exported.status_code==200
+    change_rules(pool[0],step='.2')
+    assert client.post(f'{base}/trials/{number}/equity',json=dict(module='manual_tests',testId=test_id)).get_json()==replay.get_json()
+    assert client.post(f'{base}/tests/{test_id}/trials/{number}/mt-trades').data==exported.data
+    assert storage.load_manual_test_results(account['studyId'],test_id)==manual
+    # Historical quantity provenance can differ while effective parent rules agree.
+    from core.engine_v2.admission import AdmissionRules
+    from core.engine_v2.quantity import quantity_envelope
+    historical=deepcopy(manual['results_json'])
+    own=read_quantity_envelope(historical['config']['quantity_execution'])
+    snapshot=json.loads(own.source_rules_json);snapshot['source_reference']='historical manual acquisition'
+    historical['config']['quantity_execution']=quantity_envelope(AdmissionRules.from_entry(dict(
+        instrument_id=own.instrument_id,venue=own.venue,contract=own.contract,instrument_rules=snapshot)))
+    with storage.get_db_connection() as conn:
+        conn.execute('UPDATE manual_tests SET results_json=? WHERE id=?',(json.dumps(historical),test_id));conn.commit()
+    assert client.post(f'{base}/trials/{number}/equity',json=dict(module='manual_tests',testId=test_id)).get_json()==replay.get_json()
+    located=client.post(base+'/locate-parquet-pack',json={'packRoot':pool[0]['pack_root'],'testId':test_id})
+    assert located.status_code==200,located.get_data(as_text=True)
+    assert storage.load_manual_test_results(account['studyId'],test_id)['results_json']['config']=={
+        **historical['config'],'data_input_root_override':pool[0]['pack_root']}
 
 
 @pytest.mark.parametrize('sid',[LEGACY[0],LEGACY[2]])
@@ -106,6 +145,10 @@ def test_owned_wfa_quantity_capital_and_missing_envelope(client,tmp_path,sid,mod
         assert is_response.status_code==200,is_response.get_data(as_text=True)
         assert is_response.get_json()['equity_curve'][0]==237/2
     number=last['window_number'];base=f"/api/studies/{account['studyId']}";facts=account['windows'][-1]
+    from tests._replay_rules_helpers import change_rules
+    original=client.post(f'{base}/wfa/windows/{number}/equity',json={'period':'oos'}).get_json()
+    change_rules(pool[0],step='.1')
+    assert client.post(f'{base}/wfa/windows/{number}/equity',json={'period':'oos'}).get_json()==original
     response=client.post(base+'/test',json=dict(dataSource='original_parquet',sourceTab='portfolio_window',
         windowNumber=number,period='oos',startDate=last['oos_start_date'],endDate=last['oos_end_date'],trialNumbers=[number]))
     assert response.status_code==200,response.get_data(as_text=True)
@@ -113,10 +156,13 @@ def test_owned_wfa_quantity_capital_and_missing_envelope(client,tmp_path,sid,mod
     manual=storage.load_manual_test_results(account['studyId'],test_id)
     assert manual['results_json']['config']['portfolio_source']['initialCapital']==last['oos_execution_capital']
     assert 'quantity_execution' in manual['results_json']['config']
+    assert manual['results_json']['config']['quantity_execution']==saved['study']['config_json']['quantity_execution']
     response=client.post(f'{base}/trials/{number}/equity',json={'module':'manual_tests','testId':test_id})
     assert response.status_code==200,response.get_data(as_text=True)
     assert response.get_json()['equity'][-1]==pytest.approx(facts['closing'])
     assert client.post(f'{base}/tests/{test_id}/trials/{number}/mt-trades').status_code==200
+    change_rules(pool[0],step='.2')
+    assert client.post(f'{base}/trials/{number}/equity',json={'module':'manual_tests','testId':test_id}).get_json()==response.get_json()
     missing=deepcopy(saved['study']);missing['config_json'].pop('quantity_execution')
     with pytest.raises(ValueError,match='quantity_execution'):
         _resolve_stored_execution_context(missing)
@@ -187,9 +233,17 @@ def test_allocation_changes_actual_lots_and_oos_refusal_changes_carry(client,tmp
 
 @pytest.mark.parametrize('mode',['fixed','search'])
 def test_relocation_append_only_offline_and_fail_closed_metadata(client,tmp_path,mode):
-    sid=LEGACY[0];record=launch(client,trading_pack(tmp_path/'pack'),sid,mode=mode,wfa=mode=='search')
+    from tests._replay_rules_helpers import change_rules
+    from core.data_input import prepare_input
+    pool=trading_pack(tmp_path/'pack')
+    old=prepare_input(pool[0],date_filter=False,quantity_only=True)
+    change_rules(pool[0],step='.1')
+    sid=LEGACY[0];record=launch(client,pool,sid,mode=mode,wfa=mode=='search')
     account=record['periods'][0]['accounts'][0];identifier=account['studyId'];base=f'/api/studies/{identifier}'
     saved=storage.load_study_from_db(identifier);cfg=deepcopy(saved['study']['config_json'])
+    fresh=prepare_input(cfg['data_input']['source'],date_filter=False,quantity_only=True)
+    assert cfg['quantity_execution']==fresh.quantity_execution
+    assert fresh.quantity_rules.base_step != (old.quantity_rules.base_step if fresh.quantity_rules.venue=='BYBIT' else '0.001')
     number=saved['trials'][0]['trial_number'] if mode=='fixed' else saved['windows'][0]['window_number']
     route=f'{base}/trials/{number}/equity' if mode=='fixed' else f'{base}/wfa/windows/{number}/equity'
     body={} if mode=='fixed' else {'period':'oos'}
@@ -211,8 +265,14 @@ def test_relocation_append_only_offline_and_fail_closed_metadata(client,tmp_path
     save(cfg)
     changed=trading_pack(tmp_path/'changed',minimum='1')
     response=client.post(base+'/locate-parquet-pack',json={'packRoot':changed[0]['pack_root']})
+    assert response.status_code==200,response.get_data(as_text=True)
+    relocated={**cfg,'data_input_root_override':changed[0]['pack_root']}
+    assert storage.load_study_from_db(identifier)['study']['config_json']==relocated
+    from tests._replay_rules_helpers import change_rules
+    change_rules(changed[0],base='BBB')
+    response=client.post(base+'/locate-parquet-pack',json={'packRoot':changed[0]['pack_root']})
     assert response.status_code==400,response.get_data(as_text=True)
-    assert storage.load_study_from_db(identifier)['study']['config_json']==cfg
+    assert storage.load_study_from_db(identifier)['study']['config_json']==relocated
     appended=trading_pack(tmp_path/'appended',end='2024-07-01')
     response=client.post(base+'/locate-parquet-pack',json={'packRoot':appended[0]['pack_root']})
     assert response.status_code==200,response.get_data(as_text=True)

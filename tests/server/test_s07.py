@@ -40,17 +40,27 @@ def test_optimize_queue_replay_manual_export(client,tmp_path,fixed,enabled):
     base=f"/api/studies/{identity}/trials/{trial['trial_number']}"
     modules=[('optuna','trades'),('oos_test','oos-trades')]
     if not fixed: modules += [('forward_test','ft-trades'),('stress_test','trades')]
+    originals={}
     for module,download in modules:
         a=client.post(base+'/equity',json={'module':module})
         assert a.status_code==200,a.get_data(as_text=True)
         assert a.get_json()==client.post(base+'/equity',json={'module':module}).get_json()
-        assert client.post(base+'/'+download,json={}).status_code==200
+        trades=client.post(base+'/'+download,json={})
+        assert trades.status_code==200
+        originals[module]=(download,a.get_json(),trades.data)
+    from tests._replay_rules_helpers import change_rules
+    change_rules(source,step='.01')
+    for module,(download,curve,trades) in originals.items():
+        assert client.post(base+'/equity',json={'module':module}).get_json()==curve
+        assert client.post(base+'/'+download,json={}).data==trades
+    assert storage.load_study_from_db(identity)==saved
     manual=client.post(f'/api/studies/{identity}/test',json=dict(dataSource='original_parquet',
         startDate='2024-01-10',endDate='2024-01-15',trialNumbers=[trial['trial_number']],sourceTab='optuna'))
     assert manual.status_code==200,manual.get_data(as_text=True)
     test_id=manual.get_json()['test_id']
     own=storage.load_manual_test_results(identity,test_id)['results_json']['config']
     assert own['entryFilters']==config['entryFilters']
+    assert own['entry_admission']==study['config_json']['entry_admission']
     assert client.post(base+'/equity',json=dict(module='manual_tests',testId=test_id)).status_code==200
     assert set(trial['entry_diagnostics']) >= {'is','oos_test'}
     if enabled:

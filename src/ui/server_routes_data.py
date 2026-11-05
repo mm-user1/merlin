@@ -563,7 +563,8 @@ def register_routes(app):
                 prepared = prepare_manual_input(config["data_input"], root_override=str(root),
                     date_filter=True, start=start_date, end=end_date,
                     warmup_bars=execution_context.warmup_bars,
-                    admission_params=execution_context.base_params if "entry_admission" in config else None,
+                    entry_admission=config.get("entry_admission"),
+                    admission_cap=execution_context.base_params.get("maxEntryLeverage"),
                     quantity_execution=config.get("quantity_execution", MISSING),
                     **filter_options)
             except (ValueError, OSError) as exc:

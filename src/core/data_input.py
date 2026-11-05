@@ -283,12 +283,24 @@ def _with_quantity(session, prepared, enabled):
     return replace(prepared, quantity_rules=rules, quantity_execution=quantity_envelope(rules))
 
 
-def _replay_quantity(session, prepared, saved):
+_RULE_IDENTITY = ("instrument_id", "venue", "contract", "base_currency", "quote_currency",
+                  "settlement_currency", "quantity_unit", "ct_mult")
+
+
+def _check_replay_rules(pinned, current, policy):
+    if policy == "current":
+        compatible = pinned.semantic() == current.semantic()
+    else:
+        compatible = all(getattr(pinned, key) == getattr(current, key) for key in _RULE_IDENTITY)
+    if not compatible:
+        raise DataInputError("Effective instrument rules changed incompatibly; saved execution replay refused.")
+
+
+def _replay_quantity(session, prepared, saved, policy):
     from .engine_v2.quantity import read_quantity_envelope
     rules = read_quantity_envelope(saved)
     current = _admission_rules(session, prepared.facts["source"]["instrument_id"])
-    if rules.semantic() != current.semantic():
-        raise DataInputError("Effective instrument quantity rules changed; saved execution replay refused.")
+    _check_replay_rules(rules, current, policy)
     return replace(prepared, quantity_rules=rules, quantity_execution=deepcopy(saved))
 
 
@@ -344,7 +356,10 @@ def _replay(session, pin, source):
 
 
 def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None,
-                 entry_filters=MISSING, entry_filter_inputs=MISSING, filter_root_overrides=None, quantity_execution=MISSING):
+                 entry_filters=MISSING, entry_filter_inputs=MISSING, filter_root_overrides=None, quantity_execution=MISSING,
+                 rules="current"):
+    if rules not in ("current", "saved"):
+        raise DataInputError("Unsupported instrument rules replay policy.")
     source = validate_pin(pin)
     if quantity_execution is not MISSING and (entry_admission is not None or entry_filters is not MISSING):
         raise DataInputError("Conflicting quantity execution context.")
@@ -352,14 +367,13 @@ def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=Non
     def load(session):
         prepared = _replay(session, pin, source)
         if quantity_execution is not MISSING:
-            return _replay_quantity(session, prepared, quantity_execution)
+            return _replay_quantity(session, prepared, quantity_execution, rules)
         if entry_admission is None:
             return prepared
         from .engine_v2.admission import read_admission_envelope
         pinned = read_admission_envelope(entry_admission, admission_cap)
         current = _with_admission(session, prepared, {"maxEntryLeverage": admission_cap})
-        if pinned.semantic() != current.admission_rules.semantic():
-            raise DataInputError("Effective instrument rules changed; saved execution replay refused.")
+        _check_replay_rules(pinned, current.admission_rules, rules)
         return replace(prepared, admission_rules=pinned, entry_admission=deepcopy(entry_admission))
     if entry_filters is not MISSING:
         from .entry_filter_input import prepare_bundle, validate_envelope
@@ -370,18 +384,24 @@ def replay_input(pin, *, root_override=None, cancelled=None, entry_admission=Non
         return load(session)
 
 
-def prepare_manual_input(pin, *, root_override=None, cancelled=None, admission_params=None,
+def prepare_manual_input(pin, *, root_override=None, cancelled=None, entry_admission=None, admission_cap=None,
                          entry_filters=MISSING, parent_filter_inputs=None, filter_root_overrides=None, quantity_execution=MISSING, **range_options):
     source = validate_pin(pin)
-    if quantity_execution is not MISSING and (admission_params is not None or entry_filters is not MISSING):
+    if quantity_execution is not MISSING and (entry_admission is not None or admission_cap is not None or entry_filters is not MISSING):
         raise DataInputError("Conflicting quantity execution context.")
     source["pack_root"] = str(Path(root_override or source["pack_root"]).resolve())
     def load(session):
         parent = _replay(session, pin, source)
         if quantity_execution is not MISSING:
-            _replay_quantity(session, parent, quantity_execution)
-            return _with_quantity(session, _prepare(session, source, **range_options), True)
-        return _with_admission(session, _prepare(session, source, **range_options), admission_params)
+            parent = _replay_quantity(session, parent, quantity_execution, "saved")
+        elif entry_admission is not None or admission_cap is not None:
+            from .engine_v2.admission import read_admission_envelope
+            pinned = read_admission_envelope(entry_admission, admission_cap)
+            _check_replay_rules(pinned, _admission_rules(session, source["instrument_id"]), "saved")
+            parent = replace(parent, admission_rules=pinned, entry_admission=deepcopy(entry_admission))
+        return replace(_prepare(session, source, **range_options),
+            admission_rules=parent.admission_rules, entry_admission=parent.entry_admission,
+            quantity_rules=parent.quantity_rules, quantity_execution=parent.quantity_execution)
     if entry_filters is not MISSING:
         from .entry_filter_input import prepare_bundle, validate_envelope
         validate_envelope(parent_filter_inputs, entry_filters)

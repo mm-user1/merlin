@@ -13,7 +13,7 @@ from tests.fixtures.admission_strategy.strategy import STRATEGY_ID, AdmissionTes
 from tests._data_input_helpers import hold_pack
 
 
-def test_rules_replay_semantics_and_current_manual(tmp_path):
+def test_rules_replay_semantics_and_parent_manual(tmp_path):
     from data_provider import manifest
     source = publish(tmp_path / "pack")
     prepared = prepare_input(source, date_filter=False, admission_params={})
@@ -40,11 +40,94 @@ def test_rules_replay_semantics_and_current_manual(tmp_path):
     manifest.write_manifest(root, document)
     with pytest.raises(DataInputError, match="rules changed"):
         replay_input(prepared.facts, entry_admission=pin, admission_cap=8)
-    manual = prepare_manual_input(prepared.facts, date_filter=False, admission_params={"maxEntryLeverage": 8})
-    assert manual.admission_rules.base_step == "0.2"
+    manual = prepare_manual_input(prepared.facts, date_filter=False, entry_admission=pin, admission_cap=8)
+    assert manual.admission_rules.base_step == "0.1"
+    assert manual.entry_admission == pin and manual.entry_admission is not pin
     assert prepared.entry_admission == pin
     with pytest.raises(ValueError):
         read_admission_envelope(pin, None)
+
+
+@pytest.mark.parametrize('quantity', [False, True])
+@pytest.mark.parametrize('venue', ['BYBIT', 'OKX'])
+def test_saved_rule_policy_retains_snapshot_and_rejects_incompatible_current(tmp_path, quantity, venue):
+    from data_provider import manifest
+    from tests._replay_rules_helpers import change_rules
+    source = publish(tmp_path/'pack', rows=100, venue=venue)
+    prepared = prepare_input(source, date_filter=False,
+        **({'quantity_only': True} if quantity else {'admission_params': {}}))
+    options = (dict(quantity_execution=prepared.quantity_execution) if quantity else
+               dict(entry_admission=prepared.entry_admission, admission_cap=8))
+    change_rules(source, step='0.2', minimum='0.3', provenance='current acquisition')
+    with pytest.raises(DataInputError, match='rules changed'):
+        replay_input(prepared.facts, **options)
+    replay = replay_input(prepared.facts, rules='saved', **options)
+    assert replay.entry_admission == prepared.entry_admission
+    assert replay.quantity_execution == prepared.quantity_execution
+    manual = prepare_manual_input(prepared.facts, date_filter=False, **options)
+    assert manual.entry_admission == prepared.entry_admission
+    assert manual.quantity_execution == prepared.quantity_execution
+    with pytest.raises(DataInputError, match='policy'):
+        replay_input(prepared.facts, rules='unknown', **options)
+    change_rules(source, base='BBB')  # Same contract string and candle pin, valid provider metadata.
+    with pytest.raises(DataInputError, match='incompatibly'):
+        replay_input(prepared.facts, rules='saved', **options)
+    with pytest.raises(DataInputError, match='incompatibly'):
+        prepare_manual_input(prepared.facts, date_filter=False, **options)
+    change_rules(source, base='AAA', step='1e-10', minimum='1e20')
+    with pytest.raises(ValueError, match='unrepresentable'):
+        replay_input(prepared.facts, rules='saved', **options)
+    document = manifest.read_manifest(source['pack_root'])
+    rules = document['instruments'][0]['instrument_rules']
+    rules['quantity_step'] = rules['raw_contract_fields']['qtyStep' if venue == 'BYBIT' else 'lotSz'] = '0.1'
+    rules['minimum_quantity'] = rules['raw_contract_fields']['minOrderQty' if venue == 'BYBIT' else 'minSz'] = '0.1'
+    if venue == 'OKX':
+        for multiplier in ('10', None):
+            rules['raw_contract_fields']['ctMult'] = multiplier
+            manifest.write_manifest(source['pack_root'], document)
+            with pytest.raises(ValueError, match='ctMult'):
+                replay_input(prepared.facts, rules='saved', **options)
+    else:
+        rules['settlement_currency'] = rules['raw_contract_fields']['settleCoin'] = 'USDC'
+        manifest.write_manifest(source['pack_root'], document)
+        with pytest.raises(ValueError):
+            replay_input(prepared.facts, rules='saved', **options)
+
+
+@pytest.mark.parametrize('quantity', [False, True])
+@pytest.mark.parametrize('notional', [None, '0'])
+def test_saved_policy_preserves_null_or_zero_notional(tmp_path, quantity, notional):
+    from tests._replay_rules_helpers import change_rules
+    source = publish(tmp_path/'pack', rows=100, notional=notional)
+    prepared = prepare_input(source, date_filter=False,
+        **({'quantity_only': True} if quantity else {'admission_params': {}}))
+    options = (dict(quantity_execution=prepared.quantity_execution) if quantity else
+               dict(entry_admission=prepared.entry_admission, admission_cap=8))
+    change_rules(source, step='0.1000', notional=None if notional is not None else '0.00')
+    with pytest.raises(DataInputError, match='rules changed'):
+        replay_input(prepared.facts, **options)
+    replay = replay_input(prepared.facts, rules='saved', **options)
+    assert (replay.quantity_rules if quantity else replay.admission_rules).minimum_notional == notional
+    assert replay.quantity_execution == prepared.quantity_execution
+    assert replay.entry_admission == prepared.entry_admission
+
+
+@pytest.mark.parametrize('venue,mutation', [('BYBIT', {'step':'0.2'}), ('BYBIT', {'notional':'1900'}), ('OKX', {'ct_val':'0.2'})])
+def test_saved_rules_have_independent_nonempty_execution_witness(tmp_path, venue, mutation):
+    from tests._replay_rules_helpers import change_rules, assert_current_rules_differ
+    source = publish(tmp_path/'pack', venue=venue, step='1' if venue == 'OKX' else '0.1')
+    prepared = prepare_input(source, date_filter=False, admission_params={})
+    params = {**grid_payload()['fixed_params'], 'signalEvery':10}
+    with installed():
+        original = run_strategy(AdmissionTestStrategy, prepared.frame, params, admission_rules=prepared.admission_rules)
+        change_rules(source, **mutation)
+        current = prepare_input(source, date_filter=False, admission_params={})
+        assert_current_rules_differ(AdmissionTestStrategy, prepared.frame, params, 0, original,
+                                   admission_rules=current.admission_rules)
+        replay = replay_input(prepared.facts, entry_admission=prepared.entry_admission, admission_cap=8, rules='saved')
+        result = run_strategy(AdmissionTestStrategy, replay.frame, params, admission_rules=replay.admission_rules)
+        assert result.trades == original.trades and result.equity_curve == original.equity_curve
+        assert result.entry_diagnostics == original.entry_diagnostics
 
 
 def test_zero_minimum_strict_saved_replay(tmp_path):

@@ -66,10 +66,17 @@ mode:"instrument_rules_v1",rules:...}`. It contains the validated rule snapshot,
 independently of `entry_admission`; transient rule objects and risk/filter/cap fields
 are not serialized. Exact replay requires matching `portfolio_accounts` ownership
 and saved identity for both Fixed and Grid/WFA children. Missing/invalid context,
-changed consumed rule semantics, or an envelope on an unowned study fails clearly.
-Manual tests must originate from a validated owned quantity child and verify its
-source semantics before preparing their own interval. Saved tables remain readable
-offline; relocation preserves original pins. No historical rows are migrated.
+incompatible instrument/unit identity, unsupported current rules, changed consumed
+candles, or an envelope on an unowned study fails clearly. Compatible numerical
+pack-rule updates retain the saved execution rules. Fresh research saves current
+rules; client-returned Start replay and Strategy Lab keep strict current comparison.
+Manual tests must originate from a validated owned quantity child, verify its
+consumed inputs and copy its entire rule envelope before preparing their own interval.
+Historical quantity manuals may retain different acquisition provenance with equal
+parent semantics. Risk-mode manuals instead retain their own numerical snapshot,
+with cap consistency against both own parameters and parent. Saved tables remain
+readable offline; relocation preserves original pins. No historical rows are migrated.
+See the [operation matrix and compatibility checks](PARQUET_INPUTS.md#risk-bracket-instrument-rules).
 
 Every period allocates actual total / Top N to each place; missing eligible tickers
 leave genuine idle cash. WFA selects at constant reference IS capital = original

@@ -190,10 +190,14 @@ def test_parquet_filter_cap_manual_and_pin_refusal(client, tmp_path, blocked_by)
                 assert window["best_params"]["maxEntryLeverage"] == .001
                 assert window["module_status"]["grid_v2"]["candidate_count"] == 1
                 assert window["oos_total_trades"] == 0
-        # Mutate only the synthetic pack to prove strict original-source replay.
+        # Numerical updates retain saved rules; incompatible identity still refuses.
         document = manifest.read_manifest(source["pack_root"])
         rules = document["instruments"][0]["instrument_rules"]
         rules["quantity_step"] = rules["raw_contract_fields"]["qtyStep"] = "0.2"
         manifest.write_manifest(source["pack_root"], document)
         response = client.post(base + "/equity", json={"module": "optuna"})
-        assert response.status_code == 400 and "changed" in response.get_data(as_text=True)
+        assert response.status_code == 200, response.get_data(as_text=True)
+        rules['base_currency'] = rules['quantity_unit'] = rules['raw_contract_fields']['baseCoin'] = 'BBB'
+        manifest.write_manifest(source['pack_root'], document)
+        response = client.post(base + '/equity', json={'module':'optuna'})
+        assert response.status_code == 400 and 'changed' in response.get_data(as_text=True)

@@ -128,7 +128,9 @@ def effective_params(params, prepared):
     return result
 
 
-def replay_config(config, *, cancelled=None):
+def replay_config(config, *, cancelled=None, rules="current"):
+    if rules not in ("current", "saved"):
+        raise DataInputError("Unsupported instrument rules replay policy.")
     if "data_input" not in config:
         return None
     source = validate_pin(config["data_input"])
@@ -144,10 +146,18 @@ def replay_config(config, *, cancelled=None):
             resolve_root(overrides.get(original, original))
         options = dict(entry_filters=effective, entry_filter_inputs=config["entry_filter_inputs"],
                        filter_root_overrides=overrides)
-    return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled,
+    return replay_input(config["data_input"], root_override=str(root), cancelled=cancelled, rules=rules,
                         quantity_execution=config.get("quantity_execution", MISSING),
                         entry_admission=config.get("entry_admission"),
                         admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"), **options)
+
+
+def _validate_manual_cap(config, context):
+    if "entry_admission" in config or context.base_params.get("maxEntryLeverage") is not None:
+        from core.engine_v2.admission import read_admission_envelope
+        envelope = config.get("entry_admission")
+        read_admission_envelope(envelope, (config.get("fixed_params") or {}).get("maxEntryLeverage"))
+        read_admission_envelope(envelope, context.base_params.get("maxEntryLeverage"))
 
 
 def execution_input(study, manual=None):
@@ -156,17 +166,18 @@ def execution_input(study, manual=None):
     else:
         from server_services import _resolve_csv_path, _resolve_stored_execution_context
     config = study.get("config_json") or {}
+    context = _resolve_stored_execution_context(study)
     if manual is not None:
         parent_config = config
         config = (manual.get("results_json") or {}).get("config") or {}
+        _validate_manual_cap(config, context)
         if "quantity_execution" in parent_config or "quantity_execution" in config:
             from core.engine_v2.quantity import read_quantity_envelope
-            _resolve_stored_execution_context(study)
             parent_rules = read_quantity_envelope(parent_config.get("quantity_execution"))
             manual_rules = read_quantity_envelope(config.get("quantity_execution"))
             if parent_rules.semantic() != manual_rules.semantic():
                 raise DataInputError("Manual quantity context disagrees with its owned parent.")
-    prepared = replay_config(config)
+    prepared = replay_config(config, rules="saved")
     if prepared is not None:
         return "", prepared
     if manual is not None:
@@ -231,7 +242,7 @@ def replay_oos_input(study, trial):
             raise ValueError("OOS preparation is outside the parent input pin")
     except (KeyError, TypeError, ValueError) as exc:
         raise DataInputError(f"Invalid parquet_oos_replay: {exc}. OOS reconstruction is blocked.") from exc
-    prepared = replay_config(config)
+    prepared = replay_config(config, rules="saved")
     frame, idx = prepare_dataset_with_warmup(
         prepared.frame, dates["start"], dates["end"], facts["warmup_bars"]
     )
@@ -405,7 +416,9 @@ def register_routes(app):
             if "data_input" not in config:
                 raise DataInputError("This result has no Parquet input pin.")
             parent_config = saved["study"].get("config_json") or {}
-            _resolve_stored_execution_context(saved["study"])
+            context = _resolve_stored_execution_context(saved["study"])
+            if manual is not None:
+                _validate_manual_cap(config, context)
             if manual is not None and ("quantity_execution" in parent_config or "quantity_execution" in config):
                 from core.engine_v2.quantity import read_quantity_envelope
                 parent_rules = read_quantity_envelope(parent_config.get("quantity_execution"))
@@ -418,7 +431,7 @@ def register_routes(app):
             root = resolve_root(raw_root)
             dependency = body.get("dependency", "target")
             if dependency == "target":
-                replay_input(config["data_input"], root_override=str(root),
+                replay_input(config["data_input"], root_override=str(root), rules="saved",
                     quantity_execution=config.get("quantity_execution", MISSING),
                     entry_admission=config.get("entry_admission"),
                     admission_cap=(config.get("fixed_params") or {}).get("maxEntryLeverage"))
