@@ -1,5 +1,4 @@
 """Publish complete portfolios and verify optional dense regeneration."""
-from copy import deepcopy
 import platform
 from pathlib import Path
 
@@ -19,13 +18,20 @@ from .storage import (SCHEMA, LIMITATIONS, ALLOCATION_COLUMNS, TRADE_COLUMNS, wr
     validate_result, open_result, diagnostics)
 
 
-def output_root(p, output, inputs, data_root, overrides):
-    items = []
-    for s in p['sources'].values():
-        items.extend(s['manifest']['contract']['resolved'].get('entry_filters', []) if p['calendar']['family'] == 'fixed'
-            else s['bindings'].get('effective_entry_filters', []))
-    normalized = runtime_roots(items, overrides, existing=True, output=output, target=data_root)
-    roots = [*inputs, data_root, *protected_roots(p)]
+def output_root(p, output, inputs, data_root, overrides, label=None):
+    from core.entry_filters import source_locator
+    items = {name: s['manifest']['contract']['resolved'].get('entry_filters', []) if p['calendar']['family'] == 'fixed'
+        else s['bindings'].get('effective_entry_filters', []) for name, s in p['sources'].items()}
+    require(overrides is None or isinstance(overrides, dict), 'filter_root_overrides must map original locators to local roots.')
+    keys = {source_locator(k) for k in (overrides or {})}
+    # Validate supplied mappings against all known locators without resolving unused originals.
+    supplied = [i for entries in items.values() for i in entries if i['source']['pack_root'] in keys]
+    normalized = runtime_roots(supplied, overrides, existing=True, output=output, target=data_root)
+    roots = [*inputs, data_root, *protected_roots(p), *normalized.values()]
+    relevant = [i for name, entries in items.items() if label is None or name == label for i in entries]
+    locators = {i['source']['pack_root'] for i in relevant}
+    normalized = runtime_roots(relevant, {k: v for k, v in normalized.items() if k in locators},
+        existing=True, output=output, target=data_root)
     return new_output(output, roots), normalized
 
 
@@ -82,8 +88,9 @@ def detail(result, variant, data_root, output_dir, *, filter_root_overrides=None
     selected = [v for v in m['variants'] if v['variant']['id'] == variant]
     require(len(selected) == 1, 'unknown detail variant.')
     saved = selected[0]
-    out, overrides = output_root(p, output_dir, [result], data_root, filter_root_overrides)
-    verify_live(p, data_root, overrides)
+    label = saved['variant']['input']
+    out, overrides = output_root(p, output_dir, [result], data_root, filter_root_overrides, label)
+    verify_live(p, data_root, overrides, label)
     facts, a, t, curves = execute_variant(p, saved['variant'], data_root, overrides, cancelled)
     finish_variant(facts, a)
     for key, value in facts.items():

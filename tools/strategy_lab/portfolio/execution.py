@@ -111,14 +111,16 @@ def execute(ctx, ref, capital):
         reference_capital=ref['params']['initialCapital'], diagnostics=diagnostic)
 
 
-def verify_live(p, data_root, overrides):
+def verify_live(p, data_root, overrides, label=None):
     """Validate every required full-roster contract before any account executes."""
     calls = 0; windows = {w['id']: w for w in p['calendar']['windows']}
-    for label in p['sources']:
-        for group in p['calendar']['groups']:
-            selected = [windows[i] for i in group['windows']]
+    groups = [[windows[i] for i in g['windows']] for g in p['calendar']['groups']] if p['calendar']['family'] == 'fixed' else [list(windows.values())]
+    for name in p['sources']:
+        if label is not None and name != label:
+            continue
+        for selected in groups:
             for ticker in p['calendar']['roster']:
-                ctx = source_context(p, label, ticker, selected, data_root, overrides); calls += 1
+                ctx = source_context(p, name, ticker, selected, data_root, overrides); calls += 1
                 for w in selected:
                     reference(ctx, ticker, w, p['calendar']['timeframe'])
                 del ctx

@@ -3,6 +3,72 @@ import json
 import pytest
 
 
+def check_report(root, m, p, allocations):
+    """Assert rendered rows against saved facts, including HTML cell associations."""
+    import csv
+    import math
+    from html.parser import HTMLParser
+    class Tables(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.tables = []; self.cell = None
+        def handle_starttag(self, tag, attrs):
+            if tag == 'table': self.tables.append([])
+            if tag == 'tr': self.tables[-1].append([])
+            if tag in ('th', 'td'): self.cell = ''
+        def handle_data(self, data):
+            if self.cell is not None: self.cell += data
+        def handle_endtag(self, tag):
+            if tag in ('th', 'td'):
+                self.tables[-1][-1].append(self.cell); self.cell = None
+    html = (root/'index.html').read_text(encoding='utf-8')
+    parser = Tables(); parser.feed(html)
+    tables = {}
+    for name, rendered in zip(('summary', 'windows', 'periods'), parser.tables):
+        with (root/(name+'.csv')).open(encoding='utf-8', newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        assert rendered[0] == list(rows[0])
+        assert rendered[1:] == [[v if v != '' else 'unavailable' for v in r.values()] for r in rows]
+        tables[name] = rows
+        assert 'href="'+name+'.csv"' in html
+    assert set(tables) == {'summary', 'windows', 'periods'}
+    assert 'actual_carried_execution' in html and 'independent_reference_returns' in html
+    assert 'unassigned-slot cash' in html and 'independent reference-capital accounts' in html
+    def value(row, key, expected):
+        assert row[key] == ('' if expected is None else str(expected)), (key, row[key], expected)
+    cal = p['calendar']
+    for v, summary in zip(m['variants'], tables['summary']):
+        vid = v['variant']['id']; label = v['variant']['input']; method = v['variant']['method']
+        for k, n in v['diagnostics'].items(): value(summary, k, n)
+        denominator = len(cal['roster']) if method == 'all_declared' else cal['topN']
+        wr = [r for r in tables['windows'] if r['variant'] == vid]
+        pr = [r for r in tables['periods'] if r['variant'] == vid]
+        assert len(wr) == len(v['windows']) and len(pr) == len(v['periods'])
+        for group, d, period, row in zip(cal['groups'], p['decisions'][vid], v['periods'], pr):
+            common = dict(variant=vid, input=label, method=method, period=group['id'],
+                period_start=group['start'], period_end=group['end'], selection_cutoff=d['cutoff'],
+                roster_size=len(cal['roster']), denominator=denominator, selected_count=len(d['members']),
+                unused_slots=denominator-len(d['members']))
+            for k, n in common.items(): value(row, k, n)
+            assert json.loads(row['held_tickers']) == d['members']
+            for k in ('opening','closing','allocation','allocation_rounding_delta','status','return_pct','reason'):
+                value(row, k, period[k])
+            first = [a for a in allocations if a['variant']==vid and a['window']==group['windows'][0]]
+            value(row, 'unassigned_slot_cash', math.fsum(a['opening'] for a in first if a['status']=='idle') if first else None)
+            for wid in group['windows']:
+                row = next(r for r in wr if r['window']==str(wid))
+                for k,n in common.items(): value(row,k,n)
+                assert json.loads(row['held_tickers']) == d['members']
+                w = next(w for w in cal['windows'] if w['id']==wid)
+                value(row,'window_start',w['start']); value(row,'window_end',w['end'])
+                value(row,'period_status',period['status'])
+                actual = next(w for w in v['windows'] if w['window']==wid)
+                for k in ('opening','closing','return_pct','reason'): value(row,'actual_'+k,actual[k])
+                value(row,'reference_return_pct',next(w['value'] for w in v['reference_windows'] if w['window']==wid))
+                accounts = [a for a in allocations if a['variant']==vid and a['window']==wid]
+                for status in ('abstained','depleted'):
+                    value(row,status+'_accounts',sum(a['status']==status for a in accounts) if accounts else None)
+
+
 def request(source, datasets, *, family='fixed', kind='x', capital=237., cadence=2, buckets=16, method=None):
     method = method or ('merlin_x' if kind == 'x' else 'prior_oos_positive_count')
     inputs = []

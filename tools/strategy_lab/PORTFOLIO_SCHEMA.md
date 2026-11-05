@@ -23,7 +23,12 @@ python -B -m tools.strategy_lab.portfolio detail --result RESULT --variant VARIA
 `run` and `detail` accept `--filter-roots FILE`, using the existing closed
 `{"version":1,"roots":{"/original/filter-pack":"/relocated/filter-pack"}}`
 contract. Original pins and filter origins stay unchanged. Unknown overrides or
-changed contents refuse. Python exports from `tools.strategy_lab.portfolio`:
+changed consumed contents refuse. Detail validates mappings against all known plan
+locators, accepts known unused mappings without reading those sources, and requires
+native absolute destinations even for unused mappings. Only the selected input's
+foreign filter locators require live overrides. All recorded roots, the current
+data root and every supplied override destination remain output-protected.
+Python exports from `tools.strategy_lab.portfolio`:
 
 ```python
 prepare(request_path, output_dir)
@@ -42,6 +47,11 @@ revealed. Historical decisions receive only the permitted closed projection.
 replays consumed pins again at use. Errors/cancellation prevent completion
 publication. Detail reruns one entire variant and publishes only after exact
 reproduction; it neither interpolates nor changes the parent.
+Detail validates the entire saved parent offline, then resolves/preflights only
+the selected input's full declared roster and all required windows. Unselected
+labels' live packs may be absent. IS/OOS preflight loads one union per input/ticker
+and checks every target segment, including abstentions; Fixed checks each distinct
+account/period. Execution-time replay and financial facts are unchanged.
 
 ## Request v1
 
@@ -206,8 +216,28 @@ all financial facts/statuses, bindings, trades, available diagnostics and dense
 digest must match. Even an omitted changed native sample refuses. V1 supplies
 no cross-platform replay tolerance. A different Git commit may reproduce; Git
 alone neither proves nor forbids it. Offline reports remain available if live
-sources are missing. `report.json` identifies its saved execution; summary CSV
-and static HTML link to authoritative artifacts without embedding large tables.
+sources are missing. `report.json` identifies its saved execution; static HTML
+links to authoritative artifacts without embedding trades or native curves.
+
+Reports derive three small CSVs from the fully validated immutable result:
+`summary.csv` retains headline fields and adds the saved diagnostic values;
+`windows.csv` joins `actual_return_pct` to `reference_return_pct` by window ID,
+with period/window UTC bounds, cutoff, input/method, R, denominator K or R,
+held ticker IDs, planned unused slots, period status and available abstained/
+depleted account counts; `periods.csv` shows saved funding, per-slot allocation,
+rounding delta, return/reason and status. HTML shows the same values and labels
+the comparison `actual_carried_execution` / `independent_reference_returns`.
+Reference accounts use independent reference capital with the same held membership
+and denominator; these returns are never compounded into funded money.
+
+Period `unassigned_slot_cash` is the fsum of idle slot openings in the first window
+only, not all uninvested cash. Abstained ticker accounts retain their own funding.
+Rounding delta is not a cash account. Unfunded periods/windows remain visible:
+planned membership/unused slots remain known, while unavailable counts, cash and
+returns remain null. Empty CSV cells and `unavailable` HTML cells mean null,
+not zero. Held ticker arrays use JSON in quoted CSV cells. Numbers preserve saved
+precision; no new canonical status, identity, schema or migration is introduced.
+Every report writes a new output directory, preserving historical reports.
 
 ## Executable synthetic walkthrough
 

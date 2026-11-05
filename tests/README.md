@@ -100,7 +100,16 @@ real Fixed/candidate Off/F06 replay, production Fixed/singleton Calendar WFA
 parity, a changing-parameter segment oracle, own-account carry, signed depletion,
 exact slot rounding, native/compact curves, dense replay, scopes and tamper refusals.
 Ordinary reusable request/oracle fixtures live in `_portfolio_helpers.py`.
-Run these focused modules first, then `tests/strategy_lab` and separately
+The bounded T05-1 report/preflight follow-up additionally covers value-level
+HTML/CSV associations and nulls, genuine Fixed-history Off/F06 singleton parity,
+selected-input detail dependencies, unused/foreign override protection, full-roster
+preflight order/counts, at-use drift, exact overflow sampling and earliest DD ties.
+Its final gate is all six `strategy_lab/test_portfolio*.py` modules through the
+isolated launcher, with `%LOCALAPPDATA%/Temp/merlin-t05-1-code` on Windows and
+`/tmp/merlin-t05-1-code-review` on Linux. Parent full Lab/core results are inherited;
+do not repeat broad gates for this follow-up without a new shared-boundary concern.
+For broader portfolio execution changes, run these focused modules first, then
+the parent preservation gates: `tests/strategy_lab` and separately
 `tests/test_ticker_selector.py tests/test_portfolio.py tests/test_execution_capital.py
 tests/v2/test_v2_fixed_singleton.py` through the isolated launcher. Use external
 `MERLIN_TEST_ROOT` (T05: `%LOCALAPPDATA%/Temp/merlin-t05-tests` on Windows,

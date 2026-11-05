@@ -11,7 +11,7 @@ import pytest
 
 from _selection_helpers import selection_family, document, publish
 from _fixed_helpers import snapshot
-from _portfolio_helpers import request
+from _portfolio_helpers import request, check_report
 from tools.strategy_lab.portfolio import prepare, run, report, detail, open_plan, open_result
 from tools.strategy_lab.portfolio.storage import write_table, ALLOCATION_COLUMNS, TRADE_COLUMNS
 from tools.strategy_lab.dataset import artifact_record
@@ -24,6 +24,143 @@ def saved(selection_family, tmp_path_factory):
     prepare(document(work, 'request.json', raw), work/'plan')
     run(work/'plan', f['pack'], work/'result')
     return dict(f=f, work=work, raw=raw)
+
+
+def test_report_saved_values(saved, tmp_path):
+    parent = saved['work']/'result'; before = snapshot(parent)
+    m, p, a, _ = open_result(parent)
+    assert len(p['calendar']['groups'][0]['windows']) > 1
+    assert {v['variant']['input'] for v in m['variants']} == {'off', 'on'}
+    report(parent, tmp_path/'report')
+    check_report(tmp_path/'report', m, p, a)
+    assert snapshot(parent) == before
+
+
+def test_off_detail_without_other_live_pack(saved, tmp_path):
+    import os
+    s = saved; parent = s['work']/'result'; before = snapshot(parent)
+    original = s['f']['filters'].resolve(); hidden = original.with_name(original.name+'-hidden')
+    scratch = Path(os.environ['MERLIN_TEST_ROOT']).resolve()
+    assert original.is_relative_to(scratch) and hidden.is_relative_to(scratch)
+    assert not original.is_symlink() and not hidden.exists()
+    original.rename(hidden)
+    try:
+        got = detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'detail')
+        m, _, _, _ = open_result(parent)
+        assert got['dense_digest'] == m['variants'][0]['dense_digest']
+    finally:
+        assert hidden.resolve().is_relative_to(scratch) and not original.exists()
+        hidden.rename(original)
+    assert snapshot(parent) == before
+
+
+def test_detail_override_scope_and_protection(saved, tmp_path, monkeypatch):
+    s = saved; parent = s['work']/'result'; before = snapshot(parent)
+    original = str(s['f']['filters']); unused = str(tmp_path/'unused-missing-pack')
+    detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'unused-ok', filter_root_overrides={original: unused})
+    ex = importlib.import_module('tools.strategy_lab.portfolio.execution')
+    def forbidden(*a, **k): pytest.fail('source refusal must precede execution')
+    monkeypatch.setattr(ex, 'execute', forbidden)
+    with pytest.raises(ValueError, match='unknown filter root override'):
+        detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'unknown', filter_root_overrides={str(tmp_path/'unknown'): unused})
+    with pytest.raises(ValueError, match='native absolute'):
+        detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'relative', filter_root_overrides={original:'relative'})
+    with pytest.raises(ValueError, match='conflicting normalized'):
+        detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'conflict',
+            filter_root_overrides={original:unused, original+'/./':str(tmp_path/'different')})
+    for i, root in enumerate((s['f']['filters'], Path(unused))):
+        with pytest.raises(ValueError, match='overlaps'):
+            detail(parent, 'off-merlin_x', s['f']['pack'], root/('output-'+str(i)), filter_root_overrides={original:unused})
+    with pytest.raises(ValueError, match='no pack manifest'):
+        detail(parent, 'on-merlin_x', s['f']['pack'], tmp_path/'missing-selected', filter_root_overrides={original:unused})
+    # Corruption in the unselected variant must still refuse at the complete parent reader.
+    clone = tmp_path/'corrupt'; shutil.copytree(parent, clone)
+    (clone/'curves/on-merlin_x.parquet').write_bytes(b'corrupt')
+    with pytest.raises(ValueError, match='artifact hash'):
+        detail(clone, 'off-merlin_x', s['f']['pack'], tmp_path/'corrupt-detail')
+    assert snapshot(parent) == before
+
+
+def test_detail_foreign_unselected_locator(saved, tmp_path, monkeypatch):
+    from core.entry_filters import source_locator
+    s = saved; parent = s['work']/'result'; before = snapshot(parent)
+    module = importlib.import_module('tools.strategy_lab.portfolio.run'); real = module.open_result
+    original = source_locator(str(s['f']['filters']))
+    foreign = 'c:/foreign/filter-pack' if not Path('C:/').is_absolute() else '/foreign/filter-pack'
+    def foreign_locator(path):
+        m, p, a, t = real(path)  # Validate the entire genuine saved parent before the locator-only seam.
+        p = json.loads(json.dumps(p).replace(original, foreign))
+        return m, p, a, t
+    monkeypatch.setattr(module, 'open_result', foreign_locator)
+    detail(parent, 'off-merlin_x', s['f']['pack'], tmp_path/'off')
+    with pytest.raises(ValueError, match='foreign filter locator'):
+        detail(parent, 'on-merlin_x', s['f']['pack'], tmp_path/'missing-override')
+    # Real selected F06 relocation/reproduction is covered below with original pins intact.
+    assert snapshot(parent) == before
+
+
+@pytest.mark.parametrize('family', ['fixed', 'is_oos'])
+def test_preflight_replay_counts_and_all_windows(selection_family, tmp_path, monkeypatch, family):
+    f = selection_family
+    raw = request(f['rankings'][family], f['fixed' if family=='fixed' else 'candidates'], family=family)
+    prepare(document(tmp_path, 'request.json', raw), tmp_path/'plan')
+    p = open_plan(tmp_path/'plan'); cal = p['calendar']
+    assert len(cal['groups']) > 1
+    if family == 'is_oos':
+        cell = p['ledger']['off'][-1]
+        cell.update(candidate_id=None, status='abstained', value=0., semantic_key=None)
+    ex = importlib.import_module('tools.strategy_lab.portfolio.execution')
+    source, reference = ex.source_context, ex.reference
+    contexts, windows = [], []
+    def context(p, label, ticker, ws, *args):
+        contexts.append((label,ticker)); ctx = source(p,label,ticker,ws,*args)
+        ctx['test_label'] = label; return ctx
+    def ref(ctx,ticker,w,*args):
+        windows.append((ctx['test_label'],ticker,w['id']))
+        return reference(ctx,ticker,w,*args)
+    monkeypatch.setattr(ex,'source_context',context); monkeypatch.setattr(ex,'reference',ref)
+    for label in (None, 'off'):
+        contexts.clear(); windows.clear()
+        count = ex.verify_live(p, f['pack'], {}, label)
+        labels = list(p['sources']) if label is None else [label]
+        expected = len(labels)*len(cal['roster'])*(len(cal['groups']) if family=='fixed' else 1)
+        assert count == len(contexts) == expected
+        assert sorted(windows) == sorted((l,t,w['id']) for l in labels for t in cal['roster'] for w in cal['windows'])
+
+
+@pytest.mark.parametrize('mode', ['run', 'detail'])
+@pytest.mark.parametrize('failure', ['later_label', 'late_window'])
+def test_preflight_refuses_before_first_engine(saved, tmp_path, monkeypatch, mode, failure):
+    s = saved; ex = importlib.import_module('tools.strategy_lab.portfolio.execution')
+    p = open_plan(s['work']/'plan'); last = p['calendar']['windows'][-1]['id']; ticker = p['calendar']['roster'][-1]
+    real_source, real_ref = ex.source_context, ex.reference
+    def source(p,label,*args):
+        if failure=='later_label' and label=='on': raise ValueError('required later input unavailable')
+        return real_source(p,label,*args)
+    def reference(ctx,t,w,*args):
+        if failure=='late_window' and t==ticker and w['id']==last: raise ValueError('required late window invalid')
+        return real_ref(ctx,t,w,*args)
+    def forbidden(*args,**kwargs): pytest.fail('engine ran before full required preflight')
+    monkeypatch.setattr(ex,'source_context',source); monkeypatch.setattr(ex,'reference',reference)
+    monkeypatch.setattr(ex,'execute',forbidden)
+    with pytest.raises(ValueError,match='required (later input|late window)'):
+        if mode=='run': run(s['work']/'plan',s['f']['pack'],tmp_path/'refused')
+        else: detail(s['work']/'result','on-merlin_x',s['f']['pack'],tmp_path/'refused')
+    assert not (tmp_path/'refused/result.json').exists() and not (tmp_path/'refused/detail.json').exists()
+
+
+def test_at_use_replay_still_checks_after_preflight(saved, tmp_path, monkeypatch):
+    ex = importlib.import_module('tools.strategy_lab.portfolio.execution'); real = ex.verify_live
+    def drift(*args, **kwargs):
+        count = real(*args, **kwargs)
+        import tools.strategy_lab.parquet as parquet
+        def changed(*a, **k): raise ValueError('at-use source drift')
+        monkeypatch.setattr(parquet, 'replay', changed)
+        return count
+    monkeypatch.setattr(ex, 'verify_live', drift)
+    with pytest.raises(ValueError, match='at-use source drift'):
+        detail(saved['work']/'result', 'off-merlin_x', saved['f']['pack'], tmp_path/'detail')
+    assert not (tmp_path/'detail/detail.json').exists()
 
 
 def test_sampling_identity_offline_and_runtime_spies(saved, tmp_path, monkeypatch):
@@ -107,13 +244,16 @@ def test_detail_detects_omitted_native_sample(saved, tmp_path, monkeypatch):
     assert not (tmp_path/'detail/detail.json').exists() and snapshot(parent) == before
 
 
-def test_relocation_drift_cancellation_and_new_output(saved, tmp_path):
+def test_relocation_drift_cancellation_and_new_output(saved, tmp_path, monkeypatch):
     from _filter_helpers import publish_filter
     s = saved; before = snapshot(s['f']['pack']); parent = s['work']/'result'
     shutil.copytree(s['f']['pack'], tmp_path/'pack')
     shutil.copytree(s['f']['filters'], tmp_path/'filters')
     detail(parent, 'on-merlin_x', tmp_path/'pack', tmp_path/'detail',
         filter_root_overrides={str(s['f']['filters']): str(tmp_path/'filters')})
+    ex = importlib.import_module('tools.strategy_lab.portfolio.execution')
+    def forbidden(*a, **k): pytest.fail('drift must refuse before execution')
+    monkeypatch.setattr(ex, 'execute', forbidden)
     publish(tmp_path/'changed', future='2024-04-01')
     with pytest.raises(ValueError):
         detail(parent, 'off-merlin_x', tmp_path/'changed', tmp_path/'drift')

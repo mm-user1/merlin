@@ -7,10 +7,58 @@ import pytest
 from _history_helpers import history_family, history_request, plan as history_plan
 from _selection_helpers import document
 from _analysis_helpers import mutate_group
-from _portfolio_helpers import request
-from tools.strategy_lab.portfolio import prepare, open_plan, run, open_result
+from _portfolio_helpers import request, check_report
+from tools.strategy_lab.portfolio import prepare, open_plan, run, open_result, detail, report
 from tools.strategy_lab.portfolio.plan import calendar
 from tools.strategy_lab.selection import open_history_plan
+
+
+def test_fixed_history_actual_singletons_and_report(history_family, tmp_path):
+    from core.engine_v2.runner import run_v2_strategy
+    from tools.strategy_lab.config import _validate_strategy
+    from tools.strategy_lab.filters import effective
+    from tools.strategy_lab.fixed.run import build_execution
+    from tools.strategy_lab.fixed.config import RUNTIME
+    from tools.strategy_lab.parquet import replay
+    from _fixed_helpers import snapshot
+    f = history_family
+    raw = request(f['plans']['fixed'], f['fixed'], kind='history', cadence=1, method='prior_oos_mean')
+    prepare(document(tmp_path, 'request.json', raw), tmp_path/'plan')
+    run(tmp_path/'plan', f['pack'], tmp_path/'result')
+    m, p, rows, trades = open_result(tmp_path/'result'); before = snapshot(tmp_path/'result')
+    assert [g['windows'] for g in p['calendar']['groups']] == [[5], [6], [7], [8]]
+    assert p['calendar']['excluded_history_ids'] == [1,2,3,4]
+    assert m['variants'][0]['metrics'] != m['variants'][2]['metrics']
+    assert any(r['opening'] != r['reference_capital'] for r in rows if r['status']=='executed')
+    variants = {v['id']:v for v in raw['variants']}
+    checked = set()
+    for row in rows:
+        if row['status'] != 'executed': continue
+        variant = variants[row['variant']]
+        period = next(t for v in m['variants'] if v['variant']==variant for t in v['periods'] if t['id']==row['period'])
+        denominator = len(p['calendar']['roster']) if variant['method']=='all_declared' else p['calendar']['topN']
+        assert row['opening'] == row['allocated'] == period['opening']/denominator
+        contract = p['sources'][variant['input']]['manifest']['contract']
+        account = next(a for a in contract['accounts'] if a['account_id']==row['source_account_id'])
+        config, _ = _validate_strategy(contract['request']['generation']['strategy'], parquet=True)
+        filters = effective(contract['request'], config)
+        prepared = replay(account, f['pack'], filters)
+        ps = dict(params={k:v for k,v in account['params'].items() if k not in RUNTIME}, variants=[account['candidate']['variant']])
+        ps['params']['initialCapital'] = row['opening']
+        plan, hooks, params, _ = build_execution(config, ps, prepared, filters)
+        engine = run_v2_strategy(data=hooks.build_execution_data(prepared.frame,params), profile=plan.profile,params=params,
+            trade_start_idx=prepared.trade_start_idx,admission_rules=prepared.admission_rules,
+            entry_filter_context=prepared.entry_filter_context,compute_sharpe_daily=True,compute_max_drawdown_mtm=True)
+        sr = engine.strategy_result
+        assert row['closing']==sr.balance_curve[-1] and row['actual_fingerprint']==plan.plan_fingerprint
+        saved = [t for t in trades if all(t[k]==row[k] for k in ('variant','period','window','rank'))]
+        assert [(t['size'],t['net_pnl']) for t in saved]==[(t.size,t.net_pnl) for t in sr.trades]
+        checked.add(variant['input'])
+    assert checked == {'off','on'} and trades
+    detail(tmp_path/'result','on-prior_oos_mean',f['pack'],tmp_path/'detail')
+    report(tmp_path/'result',tmp_path/'report')
+    check_report(tmp_path/'report',m,p,rows)
+    assert snapshot(tmp_path/'result')==before
 
 
 def test_history_holding_prior_four_single_target_and_future(history_family, tmp_path):

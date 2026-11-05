@@ -113,3 +113,80 @@ def test_first_bar_close_label_and_mtm_only_trough(monkeypatch):
     assert facts['metrics']['balance_dd_pct'] == 1. and facts['metrics']['mtm_dd_pct'] == 20.
     assert facts['metrics']['mtm_witness']['peak'] == int(ts[0])
     assert facts['metrics']['mtm_witness']['trough'] == int(ts[2])
+
+
+def test_compact_overflow_exact_indices_and_earliest_extrema():
+    from tools.strategy_lab.portfolio.accounting import compact, witness
+    ts = np.arange(513, dtype='int64')*10**15
+    balance = 100.+(np.arange(len(ts)) % 7).astype(float)
+    equity = 90.+(np.arange(len(ts)) % 11).astype(float)
+    buckets = 32
+    assert int(ts[-1])*buckets > 2**63-1
+    w = witness(ts, equity)
+    mandatory = [int(ts[9]), int(ts[300]), w['peak'], w['trough']]
+    groups = {}
+    for i, t in enumerate(ts.tolist()):
+        bucket = min(buckets-1, (t-int(ts[0]))*buckets//(int(ts[-1])-int(ts[0])))
+        groups.setdefault(bucket, []).append(i)
+    ordinary = set()
+    for points in groups.values():
+        ordinary.update((points[0], points[-1]))
+        for values in (balance, equity):
+            ordinary.update((min(points, key=lambda i: values[i]), max(points, key=lambda i: values[i])))
+    required = {0, len(ts)-1, *(ts.tolist().index(t) for t in mandatory)}
+    chosen, policy = compact(ts, balance, equity, buckets, mandatory)
+    assert chosen == sorted(ordinary | required)
+    assert policy['ordinary_count'] == len(ordinary)
+    assert policy['saved_count'] == len(ordinary | required)
+    assert policy['mandatory_count'] == len(required)
+    assert policy['additional_mandatory_count'] == len(required-ordinary)
+
+
+def test_earliest_equal_peak_and_drawdown_witness():
+    from tools.strategy_lab.portfolio.accounting import witness, metrics
+    ts = np.arange(6, dtype='int64')*10**15
+    values = np.array([100., 110., 110., 80., 110., 80.])
+    expected = dict(percent=30./110.*100., peak=int(ts[1]), trough=int(ts[3]))
+    assert witness(ts, values) == expected
+    facts = metrics(ts, values, values, 100.)
+    assert facts['balance_witness'] == facts['mtm_witness'] == expected
+    assert facts['balance_dd_amount'] == 30.
+
+
+def test_report_null_depletion_abstention_and_idle_cash(monkeypatch, tmp_path):
+    import importlib
+    from _portfolio_helpers import check_report
+    from tools.strategy_lab.portfolio.run import finish_variant
+    from tools.strategy_lab.portfolio.storage import LIMITATIONS
+    p, v = scalar_plan()
+    p['decisions']['<chosen&>'] = p['decisions'].pop(v['id']); v['id'] = '<chosen&>'
+    for cell in p['ledger']['off']:
+        if cell['ticker']=='T1' and cell['window']==2:
+            cell.update(status='abstained', candidate_id=None, value=0.)
+    p['request']['sourcePlan'] = dict(path=str(tmp_path/'source'))
+    p['request']['candidateSelection'] = None
+    p['sources'] = {}
+    for g, d in zip(p['calendar']['groups'], p['decisions'][v['id']]):
+        d['cutoff'] = g['start']
+    install_execution(monkeypatch, {('T0', 1): -200.})
+    facts, rows, _, _ = execute_variant(p, v, None)
+    facts['reference_windows'][0]['value'] = None  # Unavailable saved reference at the reader seam.
+    for row in rows:
+        if row['status']=='executed':
+            row['diagnostics'] = dict(zero_size_entry_count=0, rejected_fill_count=0, margin_reject_count=0,
+                liquidation_count=0, leverageCapSkippedEntries=0, no_capital_halt=False, maxEntryLeverageUsed=None)
+    executed = next(r for r in rows if r['status']=='executed')
+    executed['diagnostics'] = dict(zero_size_entry_count=7, rejected_fill_count=4, margin_reject_count=2,
+        liquidation_count=1, leverageCapSkippedEntries=3, no_capital_halt=True, maxEntryLeverageUsed=2.5)
+    finish_variant(facts, rows)
+    facts['curve_policy'] = dict(saved_count=10)
+    m = dict(variants=[facts], limitations=LIMITATIONS, execution_identity='fixture', artifacts={})
+    # Reader seam for rare execution-backed states; genuine saved-reader coverage is separate.
+    module = importlib.import_module('tools.strategy_lab.portfolio.report')
+    monkeypatch.setattr(module, 'open_result', lambda _: (m, p, rows, []))
+    module.report(tmp_path/'parent', tmp_path/'report')
+    check_report(tmp_path/'report', m, p, rows)
+    assert '&lt;chosen&amp;&gt;' in (tmp_path/'report/index.html').read_text(encoding='utf-8')
+    assert facts['periods'][1]['status']=='not_funded'
+    assert facts['reference_windows'][0]['value'] is None
+    assert {'abstained','depleted','idle'} <= {r['status'] for r in rows}
