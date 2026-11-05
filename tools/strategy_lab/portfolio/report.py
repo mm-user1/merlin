@@ -67,7 +67,7 @@ def report(result, output_dir):
     body += table(windows)
     body += '<h2>Period funding and status</h2><p>unassigned-slot cash sums idle slot openings in the first window only. It excludes funded abstained ticker accounts. Allocation rounding delta is a diagnostic, not a cash account.</p>'
     body += table(periods)
-    body += '<h2>Interpretation and diagnostics</h2><p>Diagnostics retain saved counter names and aggregation: counters sum, no_capital_halt uses any, maxEntryLeverageUsed is the maximum available leverage.</p>'
+    body += '<h2>Interpretation and diagnostics</h2><p>Diagnostics retain saved counter names and aggregation: counters sum, no_capital_halt uses any, maxEntryLeverageUsed is the maximum observed entry leverage over non-null values; null if none are available.</p>'
     body += ''.join('<p>'+escape(line)+'</p>' for line in m['limitations'])
     body += '<h2>Saved artifacts</h2><ul>'
     for name in ('summary.csv', 'windows.csv', 'periods.csv'):

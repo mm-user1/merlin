@@ -383,6 +383,68 @@ def test_fixed_shared_facts_and_denominators():
     assert shared == _summaries(list(reversed(rows)))[2]
 
 
+def test_fixed_same_roster_contexts_keep_own_facts():
+    from _fixed_helpers import comparison_account
+    from tools.strategy_lab.fixed.compare import _summaries, METRICS
+    p1, p2 = ("2024-01-01", "2024-02-01"), ("2024-02-01", "2024-03-01")
+    # Same two variants and declared tickers everywhere; only context/facts differ.
+    cases = {
+        (p1, "s1"): dict(values=((0., 2.), (4., 6.)), finite=(("A", "B"), ("A", "B")),
+            common=("A", "B"), available_mean=(1., 5.), common_mean=(1., 5.)),
+        (p2, "s1"): dict(values=((10., None), (20., 30.)), finite=(("A",), ("A", "B")),
+            common=("A",), available_mean=(10., 25.), common_mean=(10., 20.)),
+        (p1, "s2"): dict(values=((None, -8.), (-2., None)), finite=(("B",), ("A",)),
+            common=(), available_mean=(-8., -2.), common_mean=(None, None)),
+    }
+    accounts, expected = [], {}
+    for (period, stratum), case in cases.items():
+        variants = {}
+        for x, values in enumerate(case["values"], 1):
+            rows = [comparison_account({"x": x}, ticker, period=period, stratum=stratum, value=value)
+                for ticker, value in zip(("A", "B"), values)]
+            accounts.extend(rows)
+            variants[rows[0]["variant_key"]] = dict(index=x-1, roster={r["ticker"]: r["account_id"] for r in rows})
+        expected[period, stratum] = variants
+    lookup = {r["account_id"]: r for r in accounts}
+    summaries, _, shared = _summaries(accounts)
+    primary = [r for r in summaries if r["level"] == "primary"]
+    assert len(primary) == 3*2*2*len(METRICS)
+    assert len(shared["cohorts"]) == len({r["cohort_id"] for r in primary}) == 3
+    context_ids = {}
+    for row in primary:
+        key = tuple(row["period_key"]), row["stratum_key"]
+        case, variants = cases[key], expected[key]
+        context = shared["cohorts"][row["cohort_id"]]
+        assert (tuple(context["period_key"]), context["stratum_key"]) == key
+        assert context["union_tickers"] == ["A", "B"]
+        assert context["variants"] == {v: info["roster"] for v, info in variants.items()}
+        for v, roster in context["variants"].items():
+            for ticker, aid in roster.items():
+                account = lookup[aid]
+                assert (tuple(account["period_key"]), account["stratum_key"]) == key
+                assert (account["variant_key"], account["ticker"]) == (v, ticker)
+                assert account["metrics"][row["metric"]] == case["values"][variants[v]["index"]][("A", "B").index(ticker)]
+        facts = context["metrics"][row["metric"]]
+        assert facts["finite_tickers"] == {v: list(case["finite"][info["index"]]) for v, info in variants.items()}
+        assert facts["common_tickers"] == list(case["common"])
+        classification = "identical_saved_sample_facts" if case["common"] else "unavailable_common_membership"
+        assert row["sample_classification"] == facts["sample_classification"] == classification
+        index = variants[row["variant_key"]]["index"]
+        selected = case["finite"][index] if row["membership"] == "available" else case["common"]
+        assert row["expected"] == row["expected_count"] == row["cohort_expected_count"] == 2
+        assert row["declared_count"] == row["completed_count"] == 2
+        assert row["finite"] == len(selected) and row["missing"] == 2-len(selected)
+        assert row["mean"] == case[row["membership"]+"_mean"][index]
+        positive = sum(case["values"][index][("A", "B").index(t)] > 0 for t in selected)
+        assert row["positive"] == positive
+        assert row["positive_share_expected"] == row["positive_share_expected_cohort"] == positive/2
+        assert row["positive_share_finite"] == (positive/len(selected) if selected else None)
+        assert row["reason"] == ("empty_common_sample" if not selected else None)
+        assert context_ids.setdefault(key, row["cohort_id"]) == row["cohort_id"]
+    assert len(set(context_ids.values())) == 3
+    assert shared == _summaries(list(reversed(accounts)))[2]
+
+
 def test_fixed_sparse_index_matches_independent_edge_oracle():
     from _fixed_helpers import comparison_account
     from tools.strategy_lab.fixed.compare import _neighbours, METRICS

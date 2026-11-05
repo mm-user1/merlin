@@ -124,6 +124,11 @@ validated account collection, scope authorization, JSON stdout and atomic output
 Follow-up coverage includes Fixed v2 shared-fact joins and denominator contracts,
 explicit disjoint-roster refusal, an independent sparse multi-axis edge oracle,
 nullable frozen-key equality and field v2 interval groups/tie preservation.
+The bounded T07 tests/text gate uses these two comparison modules plus
+`strategy_lab/test_portfolio_accounting.py`: same-roster period/stratum fact joins,
+a 45-point exact bucket-selection witness and observed-leverage report wording.
+Run new tests first, then those three modules; this narrow gate needs no automatic
+full Lab/core/UI rerun. Mutant demonstrations target only the two new test nodes.
 The synthetic analysis helpers live in `_analysis_helpers.py`; new tests import
 ordinary helpers, never other test modules or ignored review probes. Module-scoped
 provider packs/results are shared across family checks. Run these two modules with

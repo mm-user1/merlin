@@ -108,6 +108,11 @@ is unchanged; prefer the Python launcher for ordinary commands.
 
 ## Strategy Lab
 
+`python -B -m tools.strategy_lab.portfolio` exposes `prepare`, `run`, `report`
+and `detail` for frozen-choice carried-capital research. See the
+[portfolio contract](strategy_lab/PORTFOLIO_SCHEMA.md) for inputs, execution and
+saved-result interpretation.
+
 Saved-result reports include candidate `analysis.cli field-audit`, comparative
 `analysis.cli screen` (including strict Off/on diagnostics), and continuous
 `fixed compare`. See [schemas, examples and interpretation](strategy_lab/README.md#saved-result-audits-and-comparative-screens).

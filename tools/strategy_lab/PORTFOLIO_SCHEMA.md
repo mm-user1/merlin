@@ -162,7 +162,7 @@ One row per slot/window of a funded period, including idle slots (null instrumen
 Unfunded periods/windows are explicit in the descriptor, with null returns and
 `nonpositive_opening_capital`. Diagnostics are JSON strings in Parquet, decoded
 to dicts by the Python reader. Counter fields sum; `no_capital_halt` uses any;
-`maxEntryLeverageUsed` uses the maximum available value. Unsupported diagnostics
+`maxEntryLeverageUsed` uses the maximum observed entry leverage over non-null values, null if none are available. Unsupported diagnostics
 remain null. Zero counters do **not** imply no lot-floor/minimum-order skips.
 
 `trades.parquet` contains only executed trades, with columns:

@@ -304,7 +304,9 @@ mean is null, reason explains independent possibly overlapping runs and geometry
 Requested-axis union header: `level`, `center_account_id`, `neighbor_account_id`,
 `ticker`, `period_key`, `axis`, `distance`, `metric`, `center`, `neighbor`,
 `difference`, `comparable`, `status`, `reason` + **N** (deduplicating center/status).
-If every group is singleton, no edge-only columns occur: the exact header is
+If no center has a declared full neighbouring configuration reachable by one
+adjacent requested-axis step, no edge-only columns occur. This includes singleton
+groups and disconnected sparse configurations. The exact edge-free header is
 `level`, `center_account_id`, `ticker`, `period_key`, `metric` + **N**.
 Without requested axes the header is `status`, `reason`, with `not_requested`
 and the axis command hint.

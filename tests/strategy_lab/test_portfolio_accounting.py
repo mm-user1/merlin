@@ -142,6 +142,16 @@ def test_compact_overflow_exact_indices_and_earliest_extrema():
     assert policy['additional_mandatory_count'] == len(required-ordinary)
 
 
+def test_compact_exact_selection_at_float_ratio_boundary():
+    from tools.strategy_lab.portfolio.accounting import compact
+    ts = 1704067200 * 10**9 + np.arange(45, dtype='int64') * (5 * 60 * 10**9)
+    values = 100. + np.arange(45, dtype=float)
+    chosen, _ = compact(ts, values, values, 22, [])
+    # Two points per bucket, then clamped 42/43/44: monotone extrema omit only 43.
+    # The int(ratio * B) replacement also drops 29 at the exact bucket-15 boundary.
+    assert chosen == [i for i in range(45) if i != 43]
+
+
 def test_earliest_equal_peak_and_drawdown_witness():
     from tools.strategy_lab.portfolio.accounting import witness, metrics
     ts = np.arange(6, dtype='int64')*10**15
@@ -186,7 +196,9 @@ def test_report_null_depletion_abstention_and_idle_cash(monkeypatch, tmp_path):
     monkeypatch.setattr(module, 'open_result', lambda _: (m, p, rows, []))
     module.report(tmp_path/'parent', tmp_path/'report')
     check_report(tmp_path/'report', m, p, rows)
-    assert '&lt;chosen&amp;&gt;' in (tmp_path/'report/index.html').read_text(encoding='utf-8')
+    html = (tmp_path/'report/index.html').read_text(encoding='utf-8')
+    assert '&lt;chosen&amp;&gt;' in html
+    assert 'maxEntryLeverageUsed is the maximum observed entry leverage over non-null values; null if none are available.' in html
     assert facts['periods'][1]['status']=='not_funded'
     assert facts['reference_windows'][0]['value'] is None
     assert {'abstained','depleted','idle'} <= {r['status'] for r in rows}
