@@ -778,6 +778,16 @@ def open_dataset(
         path = _safe_path(root, relative, "group")
         if not path.is_file() or relative in records_by_path:
             raise AnalysisError(f"manifest group is missing or duplicate: {relative!r}.")
+        if schema == "strategy_lab_dataset_v2":
+            from ..dataset import validate_artifact_record
+            shape = record.get("shape")
+            if (not isinstance(shape, list) or any(type(n) is not int for n in shape)
+                    or not isinstance(record.get("dtype"), str) or record["dtype"] != "float64"
+                    or not isinstance(identity.get("dtype"), str) or identity["dtype"] != "float64"):
+                raise AnalysisError(f"group {relative!r} has invalid declared shape/dtype or identity dtype.")
+            if not validate_artifact_record(root, record,
+                    expected_shape=(geometry.count, len(segment_axis), len(metric_axis)), expected_dtype=identity["dtype"]):
+                raise AnalysisError(f"group {relative!r} artifact verification failed (size/hash/shape/dtype).")
         records_by_path[str(relative).replace("\\", "/")] = record
     group_records: dict[tuple[str, int], Mapping[str, Any]] = {}
     for symbol in tickers:

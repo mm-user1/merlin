@@ -1,5 +1,7 @@
 """Lab transport for core filter descriptors, saved facts and runtime locators."""
 from pathlib import Path
+import ntpath
+import os
 
 from .config import canonical_sha256, _keys
 from .dataset import load_json
@@ -49,12 +51,20 @@ def read_overrides(path):
     return value["roots"]
 
 
+def native_locator(value):
+    """Match core's lexical locator classification before resolving a host path."""
+    value = os.fspath(value)
+    if ntpath.isabs(value) and (ntpath.splitdrive(value)[0] or value.startswith("\\\\")):
+        return os.name == "nt"
+    return Path(value).is_absolute()
+
+
 def protect_output(output, roots):
     """Foreign-host recorded locators are metadata, never cwd-relative paths."""
     output = Path(output).resolve()
     for value in roots:
         root = Path(value)
-        if root.is_absolute():
+        if native_locator(value):
             root = root.resolve()
             if output.is_relative_to(root) or root.is_relative_to(output):
                 raise ValueError("output overlaps a dataset or target/filter source root.")
@@ -71,7 +81,7 @@ def runtime_roots(items, overrides, *, existing, output, target):
         key = source_locator(key)
         if key not in original:
             raise ValueError("unused or unknown filter root override.")
-        if not isinstance(value, str) or not value.strip() or not Path(value).is_absolute():
+        if not isinstance(value, str) or not value.strip() or not native_locator(value):
             raise ValueError("filter root override destination must be a native absolute directory.")
         destination = str(Path(value).resolve())
         if key in normalized and normalized[key] != destination:
@@ -82,7 +92,7 @@ def runtime_roots(items, overrides, *, existing, output, target):
     roots = [str(target)]
     for key in original:
         location = normalized.get(key, key)
-        if not Path(location).is_absolute():
+        if not native_locator(location):
             raise ValueError("foreign filter locator requires a native absolute override before source I/O.")
         roots.append(location)
     protect_output(output, roots)

@@ -40,10 +40,10 @@ def test_final_claim_index_recovery(fixed_pack, tmp_path, monkeypatch, error):
     out = tmp_path / "out"
     write_index = runner.write_index
 
-    def interrupted_index(root, manifest):
+    def interrupted_index(root, manifest, facts=None):
         if len(manifest["completed"]) == len(manifest["contract"]["accounts"]):
             raise error("final claim saved, index interrupted")
-        write_index(root, manifest)
+        write_index(root, manifest, facts)
 
     monkeypatch.setattr(runner, "write_index", interrupted_index)
     with pytest.raises(error, match="index interrupted"):
@@ -182,6 +182,7 @@ def test_series_interruption_resume_and_memory_scope(fixed_pack, tmp_path, monke
     assert all(after[n] == v for n,v in completed.items())
     assert all(r() is None for r in refs)
     final = open_dataset(out)
+    assert_complete_index(out, final)
     assert len(final["completed"]) == 16
     assert [a["parameter_set"] for a in final["contract"]["accounts"]] == ["base"]*8 + ["lower_risk"]*8
     assert {a["timeframe_minutes"] for a in final["contract"]["accounts"]} == {5,60}
@@ -190,10 +191,12 @@ def test_series_interruption_resume_and_memory_scope(fixed_pack, tmp_path, monke
 
 
 def test_claim_failure_leaves_recoverable_files(fixed_pack, tmp_path, monkeypatch):
-    path=save_request(tmp_path, request());out=tmp_path/"out"
+    raw=request(series=True);g=raw['generation']
+    g['parameter_sets']=g['parameter_sets'][:1];g['timeframes_minutes']=[60];g['expected_run_count']=4
+    path=save_request(tmp_path, raw);out=tmp_path/"out"
     original = runner.atomic_write_json;failed=[]
     def crash(path, payload):
-        if path.name == "manifest.partial.json" and payload["completed"] and not failed:
+        if path.name == "manifest.partial.json" and len(payload["completed"])==2 and not failed:
             failed.append(True)
             raise OSError("interrupted before account claim")
         original(path, payload)
@@ -201,9 +204,18 @@ def test_claim_failure_leaves_recoverable_files(fixed_pack, tmp_path, monkeypatc
     with pytest.raises(OSError, match="before account claim"):
         runner.run(path, fixed_pack, out)
     m=open_dataset(out, allow_partial=True)
-    assert not m["completed"] and list(out.glob("accounts/*/result.json"))
+    assert len(m["completed"])==1 and len(list(out.glob("accounts/*/result.json")))==2
+    rows=list(csv.DictReader((out/'series-index.csv').open(encoding='utf-8',newline='')))
+    assert [r['status'] for r in rows]==['complete','failed','pending','pending']
+    assert rows[1]['reason']=='OSError: interrupted before account claim'
+    from tools.strategy_lab.fixed.storage import METRICS
+    assert all(rows[1][k]=='' for k in (*METRICS,'observation_count','result','curve','monthly','html'))
+    committed={n:v for n,v in snapshot(out).items() if n.startswith(tuple('accounts/'+i for i in m['completed']))}
     monkeypatch.setattr(runner, "atomic_write_json", original)
     assert runner.run(path, fixed_pack, out, resume=True)["complete"]
+    assert_complete_index(out,open_dataset(out))
+    after=snapshot(out)
+    assert all(after[n]==v for n,v in committed.items())
 
 
 def test_deterministic_failure_stops_every_resume(fixed_pack, tmp_path, monkeypatch):

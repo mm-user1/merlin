@@ -5,6 +5,7 @@ import gc
 import hashlib
 import json
 import subprocess
+import sys
 import weakref
 from pathlib import Path
 
@@ -60,6 +61,82 @@ def test_reader_uses_declared_axes_nonzero_ids_and_structural_is_view(tmp_path):
     assert not hasattr(view, "load_oos")
     assert not view.metrics["net_profit_pct"].flags.writeable
     assert before == {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize('damage', ['value', 'missing_hash', 'bad_hash', 'missing_size', 'bad_size', 'null_shape', 'missing_identity_dtype', 'shape', 'dtype'])
+def test_legacy_groups_verified_at_open(tmp_path, damage, capsys):
+    root=_synthetic_dataset(tmp_path);manifest=json.loads((root/'manifest.json').read_text())
+    group=manifest['groups'][0];path=root/group['path']
+    if damage=='value':
+        size=path.stat().st_size;array=np.load(path);array[0,0,0]+=1.;np.save(path,array)
+        assert path.stat().st_size==size
+    elif damage=='missing_hash':group.pop('sha256')
+    elif damage=='bad_hash':group['sha256']='0'*64
+    elif damage=='missing_size':group.pop('size')
+    elif damage=='bad_size':group['size']+=1
+    elif damage=='null_shape':group['shape']=None
+    elif damage=='missing_identity_dtype':manifest['identity'].pop('dtype')
+    elif damage=='shape':group['shape']=[1,2,len(METRICS)]
+    else:group['dtype']='float32'
+    _write_json(root/'manifest.json',manifest)
+    with pytest.raises(AnalysisError,match='group .*'+('shape/dtype' if damage in ('null_shape','missing_identity_dtype','dtype') else 'verification')):
+        open_dataset(root)
+    assert analysis_main(['field-audit','--dataset',str(root),'--scope','development','--output',str(tmp_path/'out')])==2
+    error=capsys.readouterr()
+    assert group['path'] in error.err and 'Traceback' not in error.err and not error.out
+    assert not (tmp_path/'out').exists()
+    if damage=='value':
+        result=subprocess.run([sys.executable,'-B','-m','tools.strategy_lab.analysis.cli','field-audit',
+            '--dataset',str(root),'--scope','development','--output',str(tmp_path/'out')],capture_output=True,text=True)
+        assert result.returncode==2 and group['path'] in result.stderr and 'Traceback' not in result.stderr
+        assert not result.stdout and not (tmp_path/'out').exists()
+
+
+def test_legacy_verification_offline_scope(tmp_path, monkeypatch):
+    import tools.strategy_lab.config as config
+    from tools.strategy_lab import dataset as storage
+    root=_synthetic_dataset(tmp_path)
+    monkeypatch.setattr(config,'_validate_strategy',lambda *a,**k:pytest.fail('offline reader discovered strategy'))
+    real=storage.validate_artifact_record;claims=[]
+    def verify(*a,**k): claims.append(a[1]['path']);return real(*a,**k)
+    monkeypatch.setattr(storage,'validate_artifact_record',verify)
+    dataset=open_dataset(root)
+    assert len(claims)==len(dataset.group_records) and dataset.access_log==[]
+    with pytest.raises(ScopeLockedError):dataset.resolve_scope('holdout')
+    scope=dataset.resolve_scope();view=dataset.load_is_window(scope,scope.windows[0])
+    assert view['AAA'].metrics['net_profit_pct'].tolist()==[0.,3.,1.,2.]
+    process=subprocess.run([sys.executable,'-B','-c',
+        "import sys; from tools.strategy_lab.analysis.dataset import open_dataset; "
+        "open_dataset(sys.argv[1]); "
+        "assert 'tools.strategy_lab.config' not in sys.modules; "
+        "assert not any(n == 'strategies' or n.startswith('strategies.') or 'grid_v2' in n for n in sys.modules)",
+        str(root)],capture_output=True,text=True)
+    assert process.returncode==0,process.stderr
+    assert not process.stdout and not process.stderr
+
+
+def test_legacy_symlinked_group_refused(tmp_path):
+    root=_synthetic_dataset(tmp_path)
+    manifest=json.loads((root/'manifest.json').read_text())
+    source=root/manifest['groups'][0]['path'];target=source.with_name('contained.npy');target.write_bytes(source.read_bytes())
+    source.unlink()
+    try: source.symlink_to(target)
+    except OSError as exc: pytest.skip(f'host symlink privilege unavailable: {exc}')
+    with pytest.raises(AnalysisError,match='verification'):open_dataset(root)
+
+
+@pytest.mark.parametrize('error',[KeyError,TypeError])
+@pytest.mark.parametrize('command',['analyze','allocate','field-audit','screen'])
+def test_analysis_cli_propagates_programming_errors(tmp_path, monkeypatch, capsys, error, command):
+    import tools.strategy_lab.analysis.cli as cli
+    def broken(*a,**k):raise error('injected programming defect')
+    monkeypatch.setattr(cli,'open_dataset',broken)
+    labelled=command in ('allocate','screen')
+    args=[command,'--dataset',('a=' if labelled else '')+str(tmp_path/'data'),'--scope','development','--output',str(tmp_path/'out')]
+    if labelled:args+=['--rule','primary_profit']
+    with pytest.raises(error,match='injected programming defect'):cli.main(args)
+    assert 'Strategy Lab analysis error:' not in capsys.readouterr().err
+    assert not (tmp_path/'out').exists()
 
 
 def test_outside_worktree_dataset_uses_code_repository_git_facts(tmp_path):

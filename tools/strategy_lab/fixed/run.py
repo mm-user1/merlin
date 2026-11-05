@@ -1,5 +1,4 @@
 """One-account-at-a-time preparation, reference execution and durable claims."""
-from copy import deepcopy
 from dataclasses import asdict
 import importlib
 from pathlib import Path
@@ -166,6 +165,7 @@ def run(request, data_root, output, *, resume=False, preflight_only=False, filte
     elif output.exists() and any(output.iterdir()):
         raise ValueError("refusing nonempty output without a Fixed manifest.")
     started = time.perf_counter()
+    index_facts = {}
     sets = {p["name"]: p for p in resolved["parameter_sets"]}
     accounts, seen = [], set()
     for index, cell in enumerate(cells(raw, resolved)):
@@ -194,7 +194,7 @@ def run(request, data_root, output, *, resume=False, preflight_only=False, filte
         m = {"schema_version":SCHEMA_PAIRS[raw["schema_version"]], "complete":False, "contract":contract,
             "request_sha256":canonical_sha256(raw), "contract_sha256":contract_identity(contract), "completed":{}, "failure":None}
         atomic_write_json(partial, m)
-        write_index(output, m)
+        write_index(output, m, index_facts)
     if preflight_only:
         return {"complete":False, "completed":len(m["completed"]), "accounts":len(accounts), "preflight_seconds":time.perf_counter()-started}
     for a in m["contract"]["accounts"]:
@@ -210,19 +210,17 @@ def run(request, data_root, output, *, resume=False, preflight_only=False, filte
                 claim = publish_account(output, a, execution, provenance)
             del execution
             # Mutate a copy so a failed claim write cannot be mistaken for publication.
-            claimed = deepcopy(m)
-            claimed["completed"][ident] = claim
-            claimed["failure"] = None
+            claimed = {**m, "completed": {**m["completed"], ident: claim}, "failure": None}
             atomic_write_json(partial, claimed)
             m = claimed
         except (Exception, KeyboardInterrupt) as exc:
             m["failure"] = {"account_id":ident, "reason":f"{type(exc).__name__}: {exc}"}
             atomic_write_json(partial, m)
-            write_index(output, m)
+            write_index(output, m, index_facts)
             raise
-        write_index(output, m)
+        write_index(output, m, index_facts)
     # Resume may have no remaining accounts after the final claim was saved.
-    write_index(output, m)
+    write_index(output, m, index_facts)
     m["complete"] = True
     atomic_write_json(complete, m)
     return {"complete":True, "no_op":False, "completed":len(accounts), "accounts":len(accounts), "seconds":time.perf_counter()-started}

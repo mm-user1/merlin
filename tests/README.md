@@ -180,6 +180,20 @@ source-verifying resume/no-op, historical offline reads and resealed contradicti
 CLI tests execute every example cell, follow static report links with the source
 pack hidden, and exercise a bounded deterministic core quantity refusal. The
 examples use short periods, avoiding long-period synthetic compounding overflow.
+T06 integrity/bookkeeping coverage extends existing lifecycle cases with failed
+claim CSV semantics and recovery, linear run/resume result-read and filter-summary
+counts, and real Fixed-v2 live-plan drift before partial/completed output writes.
+Legacy v2 analysis covers original group hash/size/shape/dtype claims, malformed
+metadata, offline scope protection and symlink refusal. Portfolio malformed inputs
+exit 2; analysis programming errors propagate. Locator tests use each host's core
+lexical rules; POSIX UNC behavior must run on Linux, not count as a Windows pass.
+For this bounded maintenance patch, run the affected Lab modules including
+`test_portfolio_guards.py`, then all `tests/strategy_lab` on Windows and Linux.
+Use `%LOCALAPPDATA%/Temp/merlin-t06-tests` or `/tmp/merlin-t06-code-review` through
+the isolated launcher. No full core/UI gate is assigned absent a concrete shared
+boundary concern. Same-host base/head byte and canonical read-only evidence belongs
+in task scratch/evidence; tracked tests require neither canonical packs nor a base
+checkout and never import ignored probes.
 
 Generic-filter coverage adds `strategy_lab/test_filters_fixed.py`,
 `test_filters_replay.py`, `test_filters_parquet.py`, `test_filter_comparison.py`

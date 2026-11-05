@@ -117,6 +117,14 @@ Historical reads, reports and comparison need no packs or live strategy registry
 They verify exact schema pairs, effective declarations, envelopes/origins, target
 ownership and artifacts without translating old formats. Foreign-host recorded
 roots remain metadata, never paths interpreted under the current working directory.
+Native-path checks follow core's lexical Windows/POSIX classification before
+resolution. On POSIX, Windows drive paths and raw/normalized UNC locators require
+a native override; a foreign override destination is refused before resolution can
+erase its UNC prefix. Windows drive/UNC paths remain native on Windows. Ambiguous
+double-slash spellings follow the current Python/core classifier, not a universal
+double-slash rule. Offline protection ignores foreign metadata while retaining
+native root overlap protection, including resolved aliases. Portfolio detail also
+retains its documented acceptance/protection of known unused override mappings.
 New Fixed CSV/account/series views expose `entry_filter_state`, `entry_filter_key`
 and core saved description text; the key is SHA-256 of the canonical effective list,
 including `[]` for Off. Full settings and source facts remain in saved evidence.
@@ -374,6 +382,15 @@ still needs memory proportional to its interval. Recorded RSS is the native **pr
 lifetime peak**, or null if unavailable, not a per-account allocation guarantee.
 Preparation/execution timers and consumed row counts accompany it. There is no input
 cache budget, persistent frame cache, hard row limit or speculative parallelism.
+Within one run, series-index projection memoizes only result scalar metrics/counts
+by account ID plus committed result hash, and static filter summaries by account
+ID. Status, failure reason, visibility and links always come from the current
+committed manifest. Resume still validates every claimed account before reuse;
+standalone reports use the same projection owner. Contract data is shared read-only
+while claim mappings are copied for publication. Initial/progress/failure/final
+index writes and completed write-free no-op behavior remain unchanged. Result reads
+and static summary work are linear per invocation; full manifest serialization and
+CSV rewrites remain potentially quadratic over a campaign, with no speedup promise.
 
 ## IS/OOS candidate research
 
@@ -729,7 +746,18 @@ spec owns scopes, aggregation, trade gates, rule membership, tie-breaking,
 evidence thresholds, outlier treatment, and bootstrap parameters. Rules see IS
 data only until candidate IDs are frozen; OOS labels load afterward.
 
-Supported readers dispatch by schema/version. A missing metric makes only its
+Supported readers dispatch by schema/version. Legacy CSV `strategy_lab_dataset_v2`
+opens verify every declared group against its original size/hash/shape/dtype claim,
+using validated candidate/segment/metric dimensions and float64 semantics. Malformed
+claims and corrupt groups now refuse before analysis publication; even a symlinked
+group pointing inside the dataset is refused, matching v3/v4 verification. Checks
+are sequential with mmap metadata inspection; they neither unlock scopes nor add
+metric-access log entries. Valid historical schema/numerics remain unchanged and
+need no packs, migration or resealing. Canonical refusals require disposition, not
+automatic repair. At-use checks remain; unsupported concurrent writers do not gain
+snapshot isolation. Existing v3/v4 verification is not repeated by this check.
+
+A missing metric makes only its
 dependent rules `unsupported_for_dataset`; a non-finite candidate observation
 makes that candidate unavailable; finite zero remains data. Headline means
 equal-weight valid tickers inside each UTC OOS block and then equal-weight
@@ -969,6 +997,11 @@ discovery chatter to stderr for existing `validate`, `run`, and `report` command
 Their JSON payloads and saved files are unchanged; `run` retains its two JSON
 payload lines. Existing analysis/allocate may similarly move reader chatter to
 stderr. This is scoped to these entry points, not a global registry change.
+Analysis commands report expected ValueError/OSError input/publication refusals
+with exit 2; unexpected KeyError/TypeError programming failures propagate for
+diagnosis. Portfolio request validation rejects non-object input members and
+capital values unrepresentable as finite positive floats locally, without an
+additional editor cap or a broader CLI catch.
 
 Public Python entry points:
 

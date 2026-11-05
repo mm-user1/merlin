@@ -11,14 +11,12 @@ import os
 import uuid
 from numbers import Integral, Real
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from core.grid_v2 import GridV2Plan, GridV2ResultRow
-
-from .config import canonical_json_bytes, semantic_key_digest
-from .data_quality import QUALITY_COLUMNS
+if TYPE_CHECKING:
+    from core.grid_v2 import GridV2Plan, GridV2ResultRow
 
 
 DATASET_SCHEMA_VERSION = "strategy_lab_dataset_v2"
@@ -86,6 +84,8 @@ def _jsonable(value: Any) -> Any:
 
 
 def project_candidates(plan: GridV2Plan, versions: Mapping[str, Any]) -> dict[str, Any]:
+    from .config import semantic_key_digest
+
     table = plan.candidate_table
     global_axes = tuple(table.axis_names)
     candidates: list[dict[str, Any]] = []
@@ -160,6 +160,8 @@ def project_candidates(plan: GridV2Plan, versions: Mapping[str, Any]) -> dict[st
 
 
 def validate_candidate_projection(payload: Mapping[str, Any], plan: GridV2Plan) -> None:
+    from .config import semantic_key_digest
+
     if payload.get("schema_version") != CANDIDATE_SCHEMA_VERSION:
         raise DatasetError("candidates.json schema version mismatch.")
     if payload.get("candidate_count") != plan.deduped_candidate_count:
@@ -301,6 +303,8 @@ def atomic_write(path: Path, writer: Callable[[Path], None]) -> None:
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
+    from .config import canonical_json_bytes
+
     data = canonical_json_bytes(payload) + b"\n"
 
     def write(temporary: Path) -> None:
@@ -321,6 +325,8 @@ def atomic_write_quality_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> N
 
 
 def quality_csv_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
+    from .data_quality import QUALITY_COLUMNS
+
     handle = io.StringIO(newline="")
     writer = csv.DictWriter(handle, fieldnames=QUALITY_COLUMNS, lineterminator="\n")
     writer.writeheader()

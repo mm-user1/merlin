@@ -25,11 +25,16 @@ def request(raw):
     _keys(raw['sourcePlan'], ['kind', 'path'], 'sourcePlan')
     require(raw['sourcePlan']['kind'] in ('x', 'history'), 'invalid source plan kind.')
     _text(raw['sourcePlan']['path'], 'source path')
-    require(type(raw['initialCapital']) in (int, float) and math.isfinite(raw['initialCapital']) and raw['initialCapital'] > 0,
-        'initialCapital must be finite and positive.')
+    require(type(raw['initialCapital']) in (int, float), 'initialCapital must be finite and positive.')
+    try:
+        capital = float(raw['initialCapital'])
+    except OverflowError as exc:
+        raise ValueError('initialCapital must be finite and positive.') from exc
+    require(math.isfinite(capital) and capital > 0, 'initialCapital must be finite and positive.')
     integer(raw['rebalanceMonths'], 1, 120000, 'rebalanceMonths')
     integer(raw['curveBuckets'], 1, 4096, 'curveBuckets')
     require(isinstance(raw['inputs'], list) and raw['inputs'], 'inputs required.')
+    require(all(isinstance(i, dict) for i in raw['inputs']), 'each inputs member must be an object.')
     labels([(i.get('label'), i.get('dataset')) for i in raw['inputs']])
     fixed = 'parameterSet' in raw['inputs'][0]
     for item in raw['inputs']:

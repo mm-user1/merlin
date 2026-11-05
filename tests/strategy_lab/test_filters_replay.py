@@ -20,6 +20,90 @@ from _filter_helpers import packs, fixed_request, publish_filter, save_request, 
 runner = importlib.import_module("tools.strategy_lab.fixed.run")
 
 
+def test_native_locator_lexical_classification(tmp_path):
+    import ntpath
+    import os
+    from core.entry_filters import source_locator
+    from tools.strategy_lab.filters import native_locator, protect_output
+    for value in (r'\\server\share\filters','//server/share/filters',r'C:\Research\Filters','//tmp/Data',str(tmp_path)):
+        # Classify using the running host's ntpath semantics, as core does.
+        windows=ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0] or value.startswith('\\\\'))
+        expected=(os.name=='nt') if windows else Path(value).is_absolute()
+        assert native_locator(value)==expected
+        assert native_locator(source_locator(value))==expected
+    for root in (tmp_path/'native', tmp_path/'native/child'):
+        with pytest.raises(ValueError,match='overlaps'):protect_output(tmp_path/'native', [root])
+
+
+@pytest.mark.skipif(Path('C:/').is_absolute(),reason='POSIX foreign-destination and metadata behavior requires POSIX')
+def test_posix_foreign_roots_and_override_destinations(tmp_path):
+    from core.entry_filters import source_locator
+    from tools.strategy_lab.filters import protect_output
+    for foreign in (r'\\server\share\filters','//server/share/filters',r'C:\Research\Filters'):
+        original=source_locator(foreign);items=[dict(source=dict(pack_root=original))]
+        with pytest.raises(ValueError,match='foreign filter locator'):
+            runtime_roots(items,None,existing=True,output=tmp_path/'out',target=tmp_path/'data')
+        with pytest.raises(ValueError,match='native absolute'):
+            runtime_roots(items,{foreign:foreign},existing=True,output=tmp_path/'out',target=tmp_path/'data')
+        assert runtime_roots(items,{foreign:str(tmp_path/'native')},existing=True,output=tmp_path/'out',target=tmp_path/'data')=={original:str(tmp_path/'native')}
+        # A foreign UNC must not become local /server/share during offline overlap checks.
+        protect_output('/server/share/filters/report',[foreign])
+
+
+@pytest.mark.parametrize('complete',[False,True])
+def test_real_fixed_v2_live_plan_drift_refuses_before_writes(packs,tmp_path,monkeypatch,complete):
+    import core.grid_v2 as grid
+    target,filters=packs;raw=fixed_request(filters);path=save_request(tmp_path,raw);out=tmp_path/'out'
+    runner.run(path,target,out,preflight_only=not complete)
+    frozen=open_dataset(out,allow_partial=True)['contract']['accounts'][0]
+    cfg,resolved=resolve(raw);items=effective(raw)
+    before=snapshot(out)
+    monkeypatch.setattr(grid,'GRID_V2_PLAN_IDENTITY_SCHEMA_VERSION','grid_v2_plan_identity_test_drift')
+    prepared=runner.replay(frozen,target,items)
+    plan,_,params,candidate=runner.build_execution(cfg,resolved['parameter_sets'][0],prepared,items)
+    assert params==frozen['params'] and candidate==frozen['candidate']
+    assert plan.plan_fingerprint!=frozen['plan_fingerprint']
+    def forbidden(*a,**k):pytest.fail('live plan drift reached execution or publication')
+    monkeypatch.setattr(runner,'execute_account',forbidden)
+    monkeypatch.setattr(runner,'atomic_write_json',forbidden)
+    monkeypatch.setattr(runner,'write_index',forbidden)
+    with pytest.raises(ValueError,match='replayed live singleton plan differs from frozen account'):
+        runner.run(path,target,out,resume=not complete)
+    assert snapshot(out)==before
+
+
+@pytest.mark.parametrize('n',[4,8])
+def test_fixed_index_work_is_linear_through_run_resume(packs,tmp_path,monkeypatch,n):
+    import tools.strategy_lab.filters as filters_module
+    raw=fixed_request(packs[1]);g=raw['generation'];ps=g['parameter_sets'][0]
+    g['parameter_sets']=[dict(ps,name='set'+str(i),params=dict(ps['params'],riskPerTrade=1.+i)) for i in range(n)]
+    g['expected_run_count']=n;path=save_request(tmp_path,raw);out=tmp_path/'out'
+    reads=[];summaries=[];read=Path.read_text;summary=filters_module.summary;execute=runner.execute_account
+    def reading(p,*a,**k):
+        if p.name=='result.json' and p.is_relative_to(out):reads.append(p)
+        return read(p,*a,**k)
+    def summarizing(*a,**k):summaries.append(True);return summary(*a,**k)
+    calls=[]
+    def interrupted(*a,**k):
+        calls.append(True)
+        if len(calls)==n//2+1:raise KeyboardInterrupt('half complete')
+        return execute(*a,**k)
+    monkeypatch.setattr(Path,'read_text',reading);monkeypatch.setattr(filters_module,'summary',summarizing)
+    monkeypatch.setattr(runner,'execute_account',interrupted)
+    with pytest.raises(KeyboardInterrupt,match='half complete'):runner.run(path,packs[0],out)
+    # Two required validation/HTML reads plus one index projection per newly committed account.
+    assert len(reads)==3*(n//2)
+    assert len(summaries)==n+n//2  # One static index summary per declared account, plus account HTML.
+    reads.clear();summaries.clear();monkeypatch.setattr(runner,'execute_account',execute)
+    assert runner.run(path,packs[0],out,resume=True)['complete']
+    assert len(reads)==2*(n//2)+3*(n-n//2)  # Resumed claim validation + one scalar projection.
+    assert len(summaries)==n+(n-n//2)
+    from tools.strategy_lab.fixed.report import index_rows
+    m=open_dataset(out);rows=index_rows(out,m)
+    assert all(r['status']=='complete' and r['reason']=='' for r in rows)
+    assert any(r['total_trades']>0 for r in rows)
+
+
 def test_saved_origin_extension_and_consumed_mutation(packs, tmp_path, monkeypatch):
     target, original = packs
     filters = tmp_path / "source"; shutil.copytree(original, filters)
@@ -62,9 +146,9 @@ def test_shared_locator_relocation_and_final_claim_recovery(packs, tmp_path, mon
     raw["generation"]["execution"]["entryFilters"]["items"].append(extra)
     path = save_request(tmp_path, raw); out = tmp_path / "out"
     writer = runner.write_index
-    def fail(root, manifest):
+    def fail(root, manifest, facts=None):
         if manifest["completed"]: raise KeyboardInterrupt("final claim saved")
-        writer(root, manifest)
+        writer(root, manifest, facts)
     monkeypatch.setattr(runner, "write_index", fail)
     with pytest.raises(KeyboardInterrupt): runner.run(path, target, out)
     partial = open_dataset(out, allow_partial=True)
@@ -101,14 +185,18 @@ def test_override_refusals_before_io(packs, tmp_path, monkeypatch, case):
     assert not (tmp_path / "out").exists()
 
 
-def test_foreign_saved_locator_and_raw_windows_override(packs, tmp_path, monkeypatch):
+@pytest.mark.parametrize('spelling', ['drive', 'raw_unc', 'normalized_unc'])
+def test_foreign_saved_locator_and_raw_windows_override(packs, tmp_path, monkeypatch, spelling):
     from core.entry_filters import canonical
     target, filters = packs; raw = fixed_request(filters); path = save_request(tmp_path, raw); out = tmp_path / "out"
     runner.run(path, target, out, preflight_only=True)
     manifest = open_dataset(out, allow_partial=True); account = manifest["contract"]["accounts"][0]
     prepared = runner.replay(account, target, effective(raw))
     # Model a preflight authored on another host, retaining identical consumed facts.
-    foreign = "C:\\Research\\Filter-Pack" if not Path("C:/").is_absolute() else "/foreign/filter-pack"
+    if Path('C:/').is_absolute() and spelling!='drive':
+        pytest.skip('foreign UNC replay requires POSIX; Windows lexical acceptance is tested separately')
+    foreign = {'drive':"C:\\Research\\Filter-Pack", 'raw_unc':r'\\server\share\filters',
+        'normalized_unc':'//server/share/filters'}[spelling] if not Path("C:/").is_absolute() else "/foreign/filter-pack"
     raw["generation"]["execution"]["entryFilters"]["items"][0]["source"]["pack_root"] = foreign
     cfg, resolved = resolve(raw); items = resolved["entry_filters"]
     envelope = deepcopy(account["entry_filter_inputs"])

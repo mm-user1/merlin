@@ -85,7 +85,9 @@ def account_html(root, account, claim, destination, result_schema=RESULT_SCHEMA,
     text_file(destination, page("Fixed account " + account["instrument_id"], content + "<p>" + " · ".join(links) + "</p>"))
 
 
-def index_rows(root, manifest):
+def index_rows(root, manifest, facts=None):
+    # One run owns these compact immutable projections; mutable row state is never cached.
+    facts = {} if facts is None else facts
     rows = []
     for a in manifest["contract"]["accounts"]:
         ident = a["account_id"]
@@ -95,8 +97,11 @@ def index_rows(root, manifest):
             "status":"pending", "reason":"", **{k:a["params"][k] for k in ECONOMICS}}
         if ident in manifest["completed"]:
             claim = manifest["completed"][ident]
-            result = load_json(safe_path(root, claim["result.json"]["path"]), "result")
-            row.update(status="complete", **result["metrics"], observation_count=result["observation_count"],
+            key = ("result", ident, claim["result.json"]["sha256"])
+            if key not in facts:
+                result = load_json(safe_path(root, claim["result.json"]["path"]), "result")
+                facts[key] = {**result["metrics"], "observation_count": result["observation_count"]}
+            row.update(status="complete", **facts[key],
                 result=claim["result.json"]["path"], curve=claim["curve.parquet"]["path"], monthly=claim["monthly.csv"]["path"],
                 html=f"accounts/{ident}/report.html")
         elif manifest["failure"] and manifest["failure"]["account_id"] == ident:
@@ -104,14 +109,17 @@ def index_rows(root, manifest):
         if manifest["schema_version"] == DATASET_V2:
             from ..filters import summary
             contract = manifest["contract"]
-            row.update(summary(contract["request"]["generation"]["execution"]["entryFilters"],
-                contract["resolved"]["entry_filters"], a["entry_filter_inputs"], a["input_pin"]))
+            key = ("filter", ident)
+            if key not in facts:
+                facts[key] = summary(contract["request"]["generation"]["execution"]["entryFilters"],
+                    contract["resolved"]["entry_filters"], a["entry_filter_inputs"], a["input_pin"])
+            row.update(facts[key])
         rows.append({k:row.get(k, "") for k in index_columns(manifest)})
     return rows
 
 
-def write_index(root, manifest):
-    data = csv_bytes(index_rows(root, manifest), index_columns(manifest))
+def write_index(root, manifest, facts=None):
+    data = csv_bytes(index_rows(root, manifest, facts), index_columns(manifest))
     atomic_write(safe_path(root, "series-index.csv"), lambda p:p.write_bytes(data))
 
 

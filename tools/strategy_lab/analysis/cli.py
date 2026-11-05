@@ -156,7 +156,7 @@ def _run(args):
                 args.output,
                 dataset_roots=tuple(item.dataset.root for item in inputs),
             )
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError) as exc:
         print(f"Strategy Lab analysis error: {exc}", file=sys.stderr)
         return None
     return publication
