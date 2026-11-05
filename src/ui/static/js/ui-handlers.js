@@ -3174,6 +3174,7 @@ function bindGridControls() {
   }
 
   [
+    'dateFilter', 'startDate', 'startTime', 'endDate', 'endTime', 'warmupBars',
     'gridSeed',
     'gridTopCandidates',
     'gridMinQuota',

@@ -1868,7 +1868,14 @@ function normalizeQueueTimeframeToken(rawToken) {
 }
 
 function extractQueueTimeframeLabel(item) {
-  const firstSource = getQueueSources(item)[0];
+  const sources = getQueueSources(item);
+  if (sources.some(source => source?.type === 'parquet')) {
+    const parquet = window.ParquetInput;
+    if (!parquet?.validSource || !parquet?.label || !sources.every(source => parquet.validSource(source))) return 'TF';
+    const timeframes = new Set(sources.map(source => source.timeframe_minutes));
+    return timeframes.size > 1 ? 'Mixed TF' : parquet.label(sources[0].timeframe_minutes);
+  }
+  const firstSource = sources[0];
   const fileName = getPathFileName(firstSource?.path || '');
   if (!fileName) return 'TF';
 

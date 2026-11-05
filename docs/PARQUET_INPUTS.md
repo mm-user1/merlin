@@ -39,8 +39,9 @@ remain unchanged. Choose timeframes and use Add Selected to merge source pairs;
 the action never removes previously added sources. CSV browsing, directory
 navigation, filter pack selection and relocation do not show Ticker Sets.
 
-Source changes immediately invalidate Grid Preview and schedule a fresh metadata
-request. Usable counts belong to the current strategy, admission source, warmup
+Source, Date Filter, start/end date/time and Warmup Bars edits immediately invalidate
+Grid Preview and schedule a fresh debounced metadata request. Usable counts belong
+to the current strategy, admission source, dates, warmup
 and optimizer/filter settings; obsolete replies are ignored even during debounce.
 Full-enumeration V2 displays an unavailable count until a matching Preview exists,
 without treating a retained legacy budget as the candidate population. This does
@@ -54,6 +55,14 @@ use PQ/PQs and CSV/CSVs, with separate counts for mixed sources and an explicit
 unsupported-source label. Failed source messages appear in the existing run-message
 area as well as the retained item error; Queue state and set completion rules
 remain unchanged.
+
+New automatic ordinary WFA set names use every selected Parquet source's typed
+timeframe: one shared duration is labeled in exact days, otherwise exact hours,
+otherwise minutes (for example `3D`, `1h`, `90m`). Distinct durations show **Mixed TF**.
+The pending Queue details `Set Name:` reflects this name before execution. Mixed
+CSV/Parquet or invalid typed sources fall back to `TF`; pure CSV filename parsing
+is unchanged. Existing created set names, owner names and stored Queue labels are
+not renamed. Portfolio naming and automatic-set membership rules are unchanged.
 
 Start keeps per-source details in the collapsed **Coverage and warmup (UTC)**
 section. Metadata coverage is advisory and reads no candle rows. Execution rechecks the

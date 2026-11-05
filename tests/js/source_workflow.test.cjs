@@ -10,7 +10,8 @@ class Element {
   append(...nodes) { this.children.push(...nodes); }
   appendChild(node) { this.append(node); return node; }
   replaceChildren() { this.children=[]; }
-  addEventListener(name, fn) { this.handlers[name]=fn; }
+  addEventListener(name, fn) { (this.handlers[name] ||= []).push(fn); }
+  fire(name, event={}) { for (const fn of this.handlers[name] || []) fn({target:this,...event}); }
   setAttribute(name, value) { this[name]=value; }
   removeAttribute(name) { delete this[name]; }
   querySelectorAll(selector) { return selector==='tr[tabindex]' ? this.children.filter(n=>n.tabIndex===0) : []; }
@@ -66,7 +67,7 @@ async function selectionAndPreview() {
   delete c.config.parameterMode;c.mode='grid';
   // The first request is obsolete as soon as selection changes, before debounce.
   pending=tick();const old=previews.at(-1);
-  get('selectedFilesList').children[0].children[0].handlers.click();
+  get('selectedFilesList').children[0].children[0].fire('click');
   assert.equal(c.lastGridPreview,null);assert.equal(get('queueAutoCreateSet').disabled,true);
   old.resolve(preview);await pending;assert.equal(c.lastGridPreview,null);
   item=c.collectQueueItem();assert.equal(item.planned_candidate_count,undefined);assert.match(item.label,/count unavailable/);assert(!item.label.includes('748000'));
@@ -101,7 +102,7 @@ async function sets() {
   dropdown.value='Main';dropdown.onchange();assert.deepEqual([...p.model.selected],[0]);assert.equal(dropdown.value,'');
   dropdown.value='Additional';dropdown.onchange();assert.deepEqual([...p.model.selected],[1]);assert(p.model.checked[0][0]);assert.equal(p.model.durations[0],10);
   // Real Ctrl row event extends the set; Add merges pairs and leaves prior pairs.
-  get('parquetGrid').firstChild.children[1].handlers.click({ctrlKey:true});
+  get('parquetGrid').firstChild.children[1].fire('click',{ctrlKey:true});
   await p.add();assert.equal(p.sources().length,2);
   await p.add();assert.equal(p.sources().length,2);
   pending=p.load('/other');assert.equal(dropdown.hidden,true);
@@ -144,7 +145,8 @@ async function queueCompletion() {
     const {c,get}=environment();
     const item={id:'work',mode:'wfa',strategyId:'s07',strategyConfig:{engine:'v2'},sources:[source(),source('TEST_B'),source('TEST_C'),source('TEST_D')],
       config:{...c.config,...(fixed?{parameterMode:'fixed'}:{})},wfa:{isPeriodDays:90,oosPeriodDays:30},studySet:{configured:true,autoCreate:true}};
-    let finished=false, calls=0, sets=[];
+    let finished=false, calls=0, sets=[], names=[];
+    item.sources.forEach((s,i)=>{s.timeframe_minutes=fixed ? (i%2 ? 120 : 60) : 30;});
     const queue={items:[item]};
     Object.assign(c,{AbortController,FormData,ensureQueueStateLoaded:async()=>{},getQueueForUi:()=>queue,loadQueue:()=>queue,
       countQueuePendingItems:()=>1,findNextPendingQueueItem:()=>finished?null:item,
@@ -153,14 +155,90 @@ async function queueCompletion() {
       persistItemProgress:async(id,patch)=>Object.assign(item,patch),finalizeQueueItem:async(id,status,patch)=>{Object.assign(item,patch);finished=true;},
       generateOptimizationRunId:()=> 'synthetic',
       runWalkForwardRequest:async form=>{assert.equal(JSON.parse(form.get('source')).type,'parquet');calls++;if(calls===4)throw Error('Coverage ends before requested End; extend the pack.');return {study_id:calls===1?'study-a':'study-b'};},
-      createAnalyticsSetRequest:async(name,ids)=>{sets.push(clone(ids));return {id:7,name};},
+      createAnalyticsSetRequest:async(name,ids)=>{names.push(name);sets.push(clone(ids));return {id:7,name};},
       showQueueError:message=>{throw Error(message);}});
     await c.runQueue();
     assert.equal(calls,4);assert.equal(item.sourceCursor,4);assert.equal(item.successCount,3);assert.equal(item.failureCount,1);
     assert.deepEqual(sets,[['study-a','study-b']]);assert.match(item.lastError,/Coverage ends/);
+    assert.equal(names[0].split(' · ')[2],fixed ? 'Mixed TF' : '30m');
     assert.match(get('optimizerResults').textContent,/Partial: 1/);assert.match(get('optimizerResults').textContent,/extend the pack/);
+    item.studySet.createdSetName='Owner renamed set';
     await c.finalizeQueueStudySetIfNeeded(item,item.studySet);assert.equal(sets.length,1);
+    assert.equal(item.studySet.createdSetName,'Owner renamed set');
   }
 }
-(async()=>{await selectionAndPreview();await sets();await filters();await queueCompletion();console.log('Source events, Preview races/counts, typed Queue completion, Ticker Sets and filter defaults/races passed');})()
+function typedNames() {
+  const {c}=environment();
+  const token=sources=>c.extractQueueTimeframeLabel({sources});
+  for (const [minutes,expected] of [[30,'30m'],[60,'1h'],[1440,'1D'],[90,'90m'],[4320,'3D']]) {
+    assert.equal(token([source('TEST_A',minutes)]),expected);
+    assert.equal(token([source('TEST_A',minutes),source('TEST_B',minutes)]),expected);
+  }
+  for (const values of [[60,120],[120,60,120]]) assert.equal(token(values.map(tf=>source('TEST_A',tf))),'Mixed TF');
+  const csv={type:'path',path:'/data/TEST_A, 15m 2024-01-01.csv'};
+  assert.equal(token([csv]),'15m');
+  for (const tf of [undefined,null,'30',0,-5,7,Infinity,153722870]) assert.equal(token([source('TEST_A',tf),{...source(),timeframe_minutes:tf}]),'TF');
+  for (const sources of [[csv,source()],[source(),csv],[source(),{type:'future'}]]) assert.equal(token(sources),'TF');
+  for (const helpers of [undefined,{}, {validSource:c.ParquetInput.validSource}]) {
+    c.ParquetInput=helpers;assert.equal(token([source()]),'TF');assert.equal(token([csv]),'15m');
+  }
+}
+async function previewInputs() {
+  const {c,get,tick,previews,timers}=environment();
+  Object.assign(c,{syncGridBudgetHelp(){},syncGridAllocationUi(){},syncGridObjectiveUi(){}});
+  const ids=['dateFilter','startDate','startTime','endDate','endTime','warmupBars'];
+  c.gatherFormState=()=>({start:get('startDate').value||'2024-01-01',end:get('endDate').value||'2024-02-01',
+    ...Object.fromEntries(ids.slice(0,5).map(id=>[id,id==='dateFilter'?get(id).checked:get(id).value]))});
+  c.buildCurrentOptimizerConfig=state=>({...clone(c.config),fixed_params:state || c.gatherFormState()});
+  c.setSelectedCsvPaths(['/data.csv']);
+  c.bindGridControls();c.bindGridControls();
+  const settle=async()=>{const pending=tick();previews.at(-1).resolve(preview);await pending;};
+  for (const id of ids) {
+    assert.equal(get(id).handlers.input.length,1);assert.equal(get(id).handlers.change.length,1);
+    for (const event of ['input','change']) {
+      get(id).value=id==='warmupBars'?'201':id+' edited';get(id).checked=!get(id).checked;
+      get(id).fire(event);
+      assert.equal(c.lastGridPreview,null);assert.equal(c.lastGridPreviewConfigKey,null);
+      assert.equal(get('gridPreviewSummary').textContent,'');assert.equal(timers.size,1);
+      assert.equal(c.getCurrentPlannedGridCandidates(c.buildCurrentOptimizerConfig()),null);
+      assert.match(c.collectQueueItem().label,/count unavailable/);
+      assert(!c.collectQueueItem().label.includes('748000'));
+      await settle();assert.equal(c.collectQueueItem().planned_candidate_count,840);
+      assert.deepEqual(clone(previews.at(-1).args[0].fixed_params),c.gatherFormState());
+      assert.equal(previews.at(-1).args[2],Number(get('warmupBars').value)||1000);
+    }
+  }
+  for (const late of [false,true]) for (const error of [false,true]) {
+    get('startDate').fire('input');const oldWait=tick(),old=previews.at(-1);
+    get('startDate').value='2025-01-01';get('startDate').fire('input');
+    get('warmupBars').value='333';get('warmupBars').fire('change');assert.equal(timers.size,1);
+    if (late) await settle();
+    const before=get('gridPreviewSummary').textContent;
+    if(error) old.reject(Error('obsolete error'));else old.resolve({...preview,planned_candidate_count:999});
+    await oldWait;assert.equal(get('gridPreviewSummary').textContent,before);assert.equal(get('gridPreviewError').textContent,'');
+    assert.equal(c.lastGridPreview?.planned_candidate_count,late?840:undefined);
+    if (!late) await settle();
+    assert.equal(previews.at(-1).args[2],333);
+  }
+  get('endTime').value='bad time';get('endTime').fire('change');let waiting=tick();
+  previews.at(-1).reject(Error('Invalid end time'));await waiting;
+  assert.match(get('gridPreviewError').textContent,/Invalid end time/);assert.equal(c.lastGridPreview,null);
+  get('endTime').value='12:30';get('endTime').fire('input');await settle();assert.equal(get('gridPreviewError').textContent,'');
+  c.mode='fixed';c.config.parameterMode='fixed';get('warmupBars').value='0';get('warmupBars').fire('input');
+  assert.equal(c.getQueueGridPlannedFacts(c.collectQueueItem()).count,1);await settle();assert.equal(previews.at(-1).args[2],1000);
+  delete c.config.parameterMode;c.mode='grid';get('dateFilter').fire('change');await settle();
+  assert.equal(c.collectQueueItem().planned_candidate_count,840);
+  // Real Queue load and final UI refresh coalesce their notifications into one
+  // request, after programmatic values have been restored. Unrelated widgets stubbed.
+  Object.assign(c,{ensureQueueStateLoaded:async()=>{},ensureQueueItemStrategyLoaded:async()=>{},
+    applyQueueConfigFallback(){},applyQueueUiSnapshot(){},applyQueueParameterMode(){},applyQueueParameterTies(){},
+    applyQueueDatabaseTarget:async()=>{},setInputValue:(id,value)=>{get(id).value=String(value);},
+    syncBudgetInputs(){},toggleWFSettings(){},toggleAdaptiveWFSettings(){},triggerControlEvent(){},
+    syncOptimizerModeUI(){},syncMinProfitFilterUI(){},syncScoreFilterUI(){}});
+  await c.loadQueueItemIntoForm('restored',{itemSnapshot:{id:'restored',sources:[source()],warmupBars:456,config:c.config}});
+  assert.equal(timers.size,1);const count=previews.length;await settle();
+  assert.equal(previews.length,count+1);assert.equal(previews.at(-1).args[2],456);
+  assert.equal(previews.at(-1).args[3].type,'parquet');
+}
+(async()=>{await selectionAndPreview();await sets();await filters();await queueCompletion();typedNames();await previewInputs();console.log('Source events, Preview races/counts, typed Queue completion, Ticker Sets and filter defaults/races passed');})()
   .catch(error=>{console.error(error);process.exitCode=1;});

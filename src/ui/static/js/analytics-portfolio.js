@@ -153,6 +153,10 @@
     target.innerHTML = entries.map(([label,value])=>`<div class="summary-card"><div class="value">${escape(value)}</div><div class="label">${label}</div></div>`).join('')
       + (window.EntryDiagnostics?.card(data.entry_diagnostics) || '');
   }
+  function selectedRows(state) {
+    const focus = rows.find(r=>r.study_id===state.focusedStudyId);
+    return focus ? [focus] : rows.filter(r=>state.checkedStudyIds.has(r.study_id));
+  }
   function visuals(state) {
     if (!current) {
       if (el('portfolioSelectorSettings')) el('portfolioSelectorSettings').hidden = true;
@@ -161,7 +165,7 @@
     }
     if (detailPending) return true;
     const focus = rows.find(r=>r.study_id===state.focusedStudyId);
-    const selected = focus ? [focus] : rows.filter(r=>state.checkedStudyIds.has(r.study_id));
+    const selected = selectedRows(state);
     const token = ++curveEpoch;
     if (focus?.unavailable || !selected.length) {
       clear(focus?.reason || 'No data to display'); finish(); return true;
@@ -208,7 +212,7 @@
     lastState = null; lastCallbacks = null;
     if (el('portfolioSelectorSettings')) el('portfolioSelectorSettings').hidden = true;
   }
-  window.AnalyticsPortfolio = {setsChanged,renderTable,visuals,active:()=>!!current,rows:()=>rows,setShowUnselected,describe,reset,
+  window.AnalyticsPortfolio = {setsChanged,renderTable,visuals,selectedRows,active:()=>!!current,rows:()=>rows,setShowUnselected,describe,reset,
     detailPending:()=>detailPending, leaving:()=>leaving, finish};
   document.addEventListener('DOMContentLoaded',()=>el('portfolioShowUnselected')?.addEventListener('change',e=>setShowUnselected(e.target.checked)));
 })();

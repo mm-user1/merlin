@@ -2319,7 +2319,8 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
     const wfaModes = Array.isArray(info.wfa_modes) ? info.wfa_modes : [];
     const isOosPeriods = Array.isArray(info.is_oos_periods) ? info.is_oos_periods : [];
     const dataPeriods = Array.isArray(info.data_periods) ? info.data_periods : [];
-    const filterPopulation = window.EntryFilters?.population({ studies: AnalyticsState.studies,
+    const filterPopulation = window.AnalyticsPortfolio?.active() ? window.AnalyticsPortfolio.selectedRows(AnalyticsState)
+      : window.EntryFilters?.population({ studies: AnalyticsState.studies,
       context: getVisibleOrderedStudyIds().map(id => getStudyMap().get(id)).filter(Boolean),
       focusedId: AnalyticsState.focusedStudyId, mode: window.AnalyticsSets?.getViewMode() || 'allStudies',
       sets: AnalyticsState.sets, focusedSetId: AnalyticsState.focusedSetId, checkedSetIds: AnalyticsState.checkedSetIds });
@@ -2338,6 +2339,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   }
 
   function renderResearchInfo() {
+    if (window.AnalyticsPortfolio?.detailPending()) return;
     const container = document.getElementById('analyticsResearchInfo');
     if (!container) return;
     const rows = buildResearchInfoRows(AnalyticsState.researchInfo || {});
@@ -2645,7 +2647,7 @@ function resolveAnalyticsWfaPeriods(wfaSettings = {}) {
   function renderTableWithCurrentState() {
     if (window.AnalyticsPortfolio?.renderTable(AnalyticsState, {selection:onTableSelectionChange,
       focus:onTableFocusToggle, sort:onTableSortChange, view:onTableViewChange,
-      complete:() => { renderTableSubtitle(); renderTableHeaderMeta(); }})) {
+      complete:() => { renderTableSubtitle(); renderTableHeaderMeta(); renderResearchInfo(); }})) {
       renderResearchInfo();
       hideFocusSidebar();
       renderTableHeaderMeta();

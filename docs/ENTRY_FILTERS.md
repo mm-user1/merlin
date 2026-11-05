@@ -177,5 +177,16 @@ Empty is `?`; any malformed new context dominates as Unavailable. Equal effectiv
 settings show their description, all Off shows Filter Off, otherwise Mixed. Display
 never reads packs.
 
+In an active portfolio view (whole run, period or combined ordinary/portfolio
+selection), Entry Filters uses the chart's focused displayed Summary row, otherwise
+its checked rows. It compares the saved server descriptions by effective key;
+idle/unfunded rows retain their saved description. Hidden or unchecked rows do not
+contribute, and missing saved metadata is Unavailable. Focus still takes priority
+when all checks are cleared. No focus and no checked rows shows `?`.
+While portfolio detail is pending, Research Info retains its last completed values
+and refreshes on completion. A current failed detail request clears the population
+to `?`; obsolete replies cannot replace it. Exit and database reset restore the
+ordinary or empty context. Other Research Info rows retain their existing scope.
+
 See [Parquet inputs](PARQUET_INPUTS.md), [V2 architecture](engine_v2/ARCHITECTURE.md)
 and [verification guidance](../tests/README.md).
