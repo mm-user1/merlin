@@ -313,9 +313,11 @@ return 400 before pack IO or writes, after the existing study/test ownership and
 missing-pin checks. Valid strings retain their original path semantics; relocation
 still verifies the pin and changes only the root override.
 
-The default root is repository-relative `data/parquet-data/`, ignored by Git.
+The default OHLCV pack root is repository-relative `data/parquet-data/market-data/`,
+ignored by Git. Its parent `data/parquet-data/` is a container, not an OHLCV pack.
 Merlin does not create a fake pack or download when it is absent. Other roots must
-be inside the existing configured CSV allowed roots or this resolved default root.
+be inside the existing configured CSV allowed roots, the resolved
+`data/parquet-data/` container or the configured default pack root.
 Resolved containment checks apply to browse, execution and relocation, including
 symlink/traversal aliases. Ordinary folders are navigable without provider calls
 or `.pack-lock` creation. Packs require writable lock-file access even for reads.

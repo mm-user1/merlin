@@ -37,7 +37,7 @@ The request/Queue namespace is separate from fixed strategy parameters:
 F06 · Candle Direction uses ordinary closed candles. Defaults are Confirm Bars 2,
 timeframe 4h and exactly `OKX_BTC-USDT-SWAP`. A new filter uses the current Parquet
 directory (the remembered Parquet directory in CSV mode), otherwise the server's
-resolved `data/parquet-data` default. Its actual path is populated and metadata
+resolved `data/parquet-data/market-data` default. Its actual path is populated and metadata
 loaded through normal allowed-root browsing. A missing pack or BTC instrument
 shows an actionable inline message, retaining the chosen path and exact instrument;
 there is no venue fallback or automatic substitution. Browse remains available.

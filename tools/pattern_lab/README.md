@@ -290,6 +290,42 @@ delimiter and whitespace is invalid. Manifest paths are relative POSIX paths und
 `ohlcv/`; absolute paths, `..`, backslashes, duplicates and resolved symlink
 escapes are rejected on every platform.
 
+### Working dataset organization
+
+The owner's local working datasets use stable, date-free roots beneath
+`docs/_work/pattern-lab-data/`:
+
+```text
+pattern-lab-data/
+  README.md
+  DATA_LOCATIONS.md
+  market-data/                  OHLCV pack root passed to readers/collectors
+    manifest.json
+    README.md
+    updates.jsonl
+    .pack-lock
+    ohlcv/                      original 5m Parquet files
+  auxiliary/
+    funding-bybit/             independent sealed Funding snapshot
+    oi-bybit-5m/               independent sealed 5min OI snapshot
+  _staging/                    temporary acquisition/migration outputs only
+```
+
+Each auxiliary root contains its own manifest, provenance, completion seal and
+`series/` directory. Keep dates and exact identities in metadata and the local
+`DATA_LOCATIONS.md`, not in working directory names. Higher OHLCV timeframes
+are derived from the same 5m pack at read time, not stored as duplicate packs.
+Additional auxiliary datasets can follow `type-provider[-interval]` naming;
+this naming convention does not imply collector support for new data types.
+
+Auxiliary updates still create a new snapshot in a separate temporary root;
+verify it before replacing an idle working snapshot. A stable path is not an
+immutable identity: new requests must bind the current snapshot content IDs.
+Splitting a combined snapshot changes snapshot IDs but can preserve every series
+file and series ID exactly. Do not rewrite historical request pins or reports.
+Local path changes do not automatically synchronize a VPS or Merlin's separate
+data/configuration. Check the actual host's roots before launching work.
+
 ## Parquet schema v1
 
 | Column | Arrow type | Meaning |
@@ -970,6 +1006,23 @@ network latency, retries and metadata. A 30-day update is about 13 minutes of pa
 alone. Effective smaller pages increase these estimates. Bounded instrument and page
 progress is logged to stderr so a multi-hour job is visibly progressing.
 
+## Monthly refresh convention
+
+Unless the owner explicitly specifies a different date, monthly data refreshes
+target **00:00 UTC on the second day of the new month, exclusive**. For example,
+the November 2026 refresh uses `2026-11-02T00:00:00Z`, retaining the entire first
+day so the owner can select November 1 as the UI end date on timeframes through
+1D. Native collector and read APIs retain their existing half-open `[start, end)`
+semantics; this convention does not change UI or engine date conversion.
+
+Before declaring OHLCV ready, verify pack integrity and coverage, plus all 288
+5m rows and one complete 1D candle for that first day for every included ticker.
+The target must be safely closed under the collector's existing rules; never
+publish partial or future candles to satisfy the convention. Refresh only the
+data families authorized for the task: an OHLCV refresh does not authorize
+Funding/OI acquisition. This is an operational default, not an automatic schedule
+or permission to use additional dates in a frozen experiment.
+
 ## Update, merge and no-op semantics
 
 Before updating, the existing managed manifest is validated and every declared
@@ -1355,7 +1408,7 @@ from tools.pattern_lab import study
 
 result = study.run_study(
     request="tools/pattern_lab/configs/example_study_two_green_30m.json",
-    data_root="docs/_work/pattern-lab-data",
+    data_root="docs/_work/pattern-lab-data/market-data",
     output_root="runs/two-green-30m",
     workers=1,
 )

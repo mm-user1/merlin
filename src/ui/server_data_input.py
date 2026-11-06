@@ -14,7 +14,8 @@ from core.data_input import (
     inspect_pack, is_pack_directory, preview_admission_rules,
 )
 
-DEFAULT_PARQUET_ROOT = Path(__file__).resolve().parents[2] / "data" / "parquet-data"
+PARQUET_DATA_ROOT = Path(__file__).resolve().parents[2] / "data" / "parquet-data"
+DEFAULT_PARQUET_ROOT = PARQUET_DATA_ROOT / "market-data"
 
 
 def allowed_roots():
@@ -22,7 +23,7 @@ def allowed_roots():
         from . import server_services as services
     else:
         import server_services as services
-    return [*services.CSV_ALLOWED_ROOTS, DEFAULT_PARQUET_ROOT.resolve()]
+    return [*services.CSV_ALLOWED_ROOTS, PARQUET_DATA_ROOT.resolve(), DEFAULT_PARQUET_ROOT.resolve()]
 
 
 def resolve_root(raw, *, must_exist=True):
