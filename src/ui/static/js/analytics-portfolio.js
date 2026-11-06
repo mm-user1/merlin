@@ -6,6 +6,9 @@
   const el = id => document.getElementById(id);
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const percent = value => value == null ? 'N/A' : `${Number(value).toFixed(1)}%`;
+  const timeframe = value => Number.isSafeInteger(value) && value > 0
+    ? value % 1440 === 0 ? `${value / 1440}D` : value % 60 === 0 ? `${value / 60}h` : `${value}m`
+    : `${value}m`;
   function pending(detail = false) {
     document.querySelector('.main-area')?.classList.add('analytics-portfolio-view');
     const table = el('analyticsSummaryTable')?.closest('.table-card');
@@ -64,7 +67,7 @@
       state.focusedStudyId = null;
     }
     current = next;
-    if (!next) { key = ''; rows = []; epoch++; curveEpoch++; }
+    if (!next) { restoredChecks = null; key = ''; rows = []; epoch++; curveEpoch++; }
   }
   function drawTable(state, callbacks) {
     const toggle = el('portfolioShowUnselected');
@@ -90,6 +93,7 @@
     const nextKey = JSON.stringify([state.dbName,current,ordinary]);
     if (nextKey === key) { if (!detailPending) drawTable(state, callbacks); return true; }
     key = nextKey;
+    const restore = restoredChecks; restoredChecks = null;
     const token = ++epoch;
     ++curveEpoch; state.focusedStudyId = null;
     pending(true);
@@ -103,8 +107,7 @@
           ...values.flatMap((v,i)=>v.periodRows.filter(row=>current.portfolios[i].periods.includes(row.portfolioSelection.periods[0])))];
         hasUnselected = !!current.scope?.period && values[0].selector.evaluateUnselected === true
           && rows.some(row=>row.portfolioRank == null);
-        state.checkedStudyIds = restoredChecks || new Set(rows.filter(r=>!r.unavailable && (!current.scope?.period || r.portfolioRank != null)).map(r=>r.study_id));
-        restoredChecks = null;
+        state.checkedStudyIds = restore || new Set(rows.filter(r=>!r.unavailable && (!current.scope?.period || r.portfolioRank != null)).map(r=>r.study_id));
         const settings = el('portfolioSelectorSettings');
         if (settings) {
           settings.hidden = false;
@@ -114,7 +117,7 @@
             ['Rebalance Every', `${cfg.rebalanceMonths} month(s)`],
             ['Evaluate Unselected', cfg.evaluateUnselected ? 'On' : 'Off'],
             ['Lookback', `${cfg.params.lookbackMonths} month(s)`],
-            ['Ranking Timeframe', `${cfg.params.timeframeMinutes}m`]
+            ['Ranking Timeframe', timeframe(cfg.params.timeframeMinutes)]
           ] : [['Settings', 'Mixed']];
           settings.querySelector('.settings-list').innerHTML = entries.map(([label,value])=>
             `<div class="setting-item"><span class="key">${escape(label)}</span><span class="val">${escape(value)}</span></div>`).join('');
@@ -198,7 +201,7 @@
     const population = focused ? [focused] : window.AnalyticsSets.getViewMode() === 'setCheckboxes'
       ? state.sets.filter(s=>state.checkedSetIds.has(s.id)) : [];
     const descriptions = population.map(s=>s.selector?.enabled
-      ? `X · Top ${s.selector.topN} · Every ${s.selector.rebalanceMonths}m · ${s.selector.params.lookbackMonths}m / ${s.selector.params.timeframeMinutes}m` : 'Off');
+      ? `X · Top ${s.selector.topN} · Every ${s.selector.rebalanceMonths}m · ${s.selector.params.lookbackMonths}m / ${timeframe(s.selector.params.timeframeMinutes)}` : 'Off');
     return new Set(descriptions).size > 1 ? 'Mixed' : descriptions[0] || 'Off';
   }
   function reset() {

@@ -22,7 +22,7 @@ function environment() {
   const elements=new Map();
   const get=id=>{if(!elements.has(id)) elements.set(id,new Element());return elements.get(id);};
   const timers=new Map(); let timer=0;
-  const c={console, document:{getElementById:get,createElement:tag=>new Element(tag),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){}},
+  const c={console, structuredClone, document:{getElementById:get,createElement:tag=>new Element(tag),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){}},
     sessionStorage:{getItem:()=>null,setItem(){}},setTimeout:fn=>{timers.set(++timer,fn);return timer;},clearTimeout:id=>timers.delete(id),
     localStorage:{getItem:()=>null,setItem(){}}, clonePreset:clone};
   c.window=c; vm.createContext(c);
@@ -240,5 +240,63 @@ async function previewInputs() {
   assert.equal(previews.length,count+1);assert.equal(previews.at(-1).args[2],456);
   assert.equal(previews.at(-1).args[3].type,'parquet');
 }
-(async()=>{await selectionAndPreview();await sets();await filters();await queueCompletion();typedNames();await previewInputs();console.log('Source events, Preview races/counts, typed Queue completion, Ticker Sets and filter defaults/races passed');})()
+async function portfolioCollection() {
+  const {c,get,load}=environment();load('ticker-selector.js');
+  get('enableTickerSelector').checked=true;get('selectorTimeframe').value='30m';
+  get('selectorTopN').value='2';get('selectorRebalance').value='3';get('selectorLookback').value='4';
+  const queue={items:[],nextIndex:9},calls=[];
+  Object.assign(c,{loadQueue:()=>queue,isQueueLoaded:()=>true,isQueueRunning:()=>false,
+    getQueuePendingCount:()=>queue.items.length,addToQueue:async item=>calls.push(['add',item]),runQueue:async()=>calls.push(['run']),
+    saveQueue:async()=>{throw Error('Collector must not persist');}});
+  const read=c.TickerSelector.read;let reads=0;c.TickerSelector.read=()=>{reads++;return read();};
+  const sources=[source('TEST_A',5),source('TEST_B',15)];c.ParquetInput.restore(sources);
+  const snapshot=()=>JSON.stringify({queue,sources:c.getSelectedDataSources(),selector:read()});
+  const before=snapshot();const item=c.collectQueueItem();
+  assert.equal(item,null);assert.equal(reads,1);assert.equal(snapshot(),before);assert.equal(calls.length,0);
+  assert.equal(get('optimizerResults').textContent,'Ticker Selector requires one trading timeframe for all selected instruments. Choose the same timeframe for every instrument, or turn off Ticker Selector.');
+  await c.submitOptimization({preventDefault(){}});assert.deepEqual(calls,[]);assert.equal(snapshot(),before);
+  // Existing validation messages retain precedence before the new selector read.
+  reads=0;c.getDatabaseTargetValidationError=()=> 'Select a database';assert.equal(c.collectQueueItem(),null);
+  assert.equal(reads,0);assert.equal(get('optimizerResults').textContent,'Select a database');c.getDatabaseTargetValidationError=()=>'';
+  get('enableTickerSelector').checked=false;
+  const ordinary=c.collectQueueItem();assert(ordinary);assert.equal(c.extractQueueTimeframeLabel(ordinary),'Mixed TF');
+  get('enableTickerSelector').checked=true;
+  for (const pool of [[source('TEST_A',5)],[source('TEST_A',5),source('TEST_B',5)]]) {
+    c.ParquetInput.restore(pool);reads=0;const valid=c.collectQueueItem();assert(valid);assert.equal(reads,1);
+    assert.equal(valid.tickerSelector.params.timeframeMinutes,30);assert.equal(valid.sources[0].timeframe_minutes,5);
+  }
+  await c.submitOptimization({preventDefault(){}});assert.deepEqual(calls.map(x=>x[0]),['add','run']);
+  calls.length=0;c.ParquetInput.restore(sources);
+  const stored=c.normalizeQueueItem({...ordinary,id:'stored',label:'Historical 5m caption',tickerSelector:read()},9);
+  assert.equal(stored.label,'Historical 5m caption');queue.items.push(stored);
+  await c.submitOptimization({preventDefault(){}});assert.deepEqual(calls,[['run']]);
+  assert.equal(queue.items[0].label,'Historical 5m caption');assert.equal(queue.nextIndex,9);
+  // Stored transport still submits the original pool and exposes server refusal.
+  c.FormData=FormData;c.fetch=async(url,options)=>{
+    assert.equal(url,'/api/portfolio');assert.deepEqual(JSON.parse(options.body.get('sources')),sources);
+    return {ok:false,json:async()=>({error:'The portfolio pool must use one trading timeframe.'})};
+  };
+  await assert.rejects(c.TickerSelector.execute(stored,null,'synthetic'),/pool must use one trading timeframe/);
+}
+function portfolioCaptions() {
+  const {c}=environment();
+  const make=sources=>({index:2,strategyId:'s07',mode:'wfa',sources,config:{parameterMode:'fixed'},
+    tickerSelector:{enabled:true,topN:2,rebalanceMonths:3},wfa:{isPeriodMonths:2,oosPeriodMonths:1},label:''});
+  for (const [tf,label] of [[5,'5m'],[15,'15m'],[90,'90m'],[60,'1h'],[240,'4h'],[1440,'1D'],[4320,'3D']]) {
+    const raw=make([source('TEST_A',tf)]),value=c.normalizeQueueItem(raw,2);
+    assert.match(value.label,new RegExp(' · '+label+' · '));
+    assert.match(value.label,/Top 2 \/ 3m · WFA 2m\/1m/);assert.equal(value.sources[0].timeframe_minutes,tf);
+    raw.label='Owner historical caption';assert.equal(c.normalizeQueueItem(raw,2).label,raw.label);
+  }
+  const csv={type:'path',path:'/TEST_A, 15m 2024-01-01.csv'};
+  for (const [pool,label] of [[[source(),source('TEST_B',15)],'Mixed TF'],[[source('TEST_A',7)],'TF'],
+    [[{...source(),timeframe_minutes:undefined}],'TF'],[[source(),csv],'TF'],[[csv],'15m']]) {
+    assert(c.normalizeQueueItem(make(pool),2).label.includes(' · '+label+' · '));
+  }
+  c.ParquetInput=undefined;assert(c.normalizeQueueItem(make([source()]),2).label.includes(' · TF · '));
+  const html=fs.readFileSync(path.join(root,'src/ui/templates/index.html'),'utf8');
+  assert(html.indexOf('/static/js/parquet-input.js')<html.indexOf('/static/js/queue.js'));
+  assert(html.includes('/static/js/ticker-selector.js'));
+}
+(async()=>{await selectionAndPreview();await sets();await filters();await queueCompletion();typedNames();await previewInputs();await portfolioCollection();portfolioCaptions();console.log('Source events, Preview races/counts, typed Queue completion, Ticker Sets and filter defaults/races passed');})()
   .catch(error=>{console.error(error);process.exitCode=1;});

@@ -17,6 +17,15 @@ the inclusive End; no incomplete trailing month is traded. WFA requires at least
 global OOS windows and rebalance cadence divisible by OOS months. Each required
 IS/OOS/rebalance boundary must align with the epoch trading grid.
 
+When collecting a new selector-enabled job, Add to Queue and direct Run with no
+pending Queue refuse multiple distinct valid Parquet trading timeframes before
+creating the item. Choose one common trading timeframe or turn the selector Off.
+Ranking and Entry Filter timeframes remain independent. Existing source/form
+validation keeps precedence; the server still validates the full portfolio pool.
+Stored jobs remain readable and execute independently of current form edits,
+including the server's existing refusal for an invalid saved pool. Selector Off
+still permits ordinary mixed-timeframe jobs.
+
 ## Selector and data admission
 
 The version-1 `tickerSelector` envelope saves `enabled`, `method`, `methodVersion`,
@@ -101,7 +110,19 @@ period focus shows tickers/idle places. Show Unselected sits before Group Dates 
 appears only for periods with saved comparison entries from Evaluate Unselected runs.
 Turning it off hides and unchecks comparisons.
 Unavailable rows remain focusable but cannot be checked. Leaving portfolio scope restores
-the outer Summary checks. Ordinary focused-set behavior and All Studies remain unchanged.
+the outer Summary checks, including partial and empty mixed selections when outer
+set membership stays unchanged during temporary focus. An ordinary-view exit clears
+the transition snapshot; a later fresh checked-set mixture selects its eligible rows.
+An asynchronous mixed restoration belongs only to the request that starts it:
+superseded or failed requests cannot retain a subset for a later population/retry.
+Ordinary focused-set behavior and All Studies remain unchanged.
+
+New PF Queue captions and both Analytics selector descriptions format positive
+integer candle durations as exact days, otherwise exact hours, otherwise minutes
+(for example `3D`, `4h`, `90m`). Month cadence/lookback/IS/OOS tokens remain months.
+Stored names and nonempty Queue labels are unchanged. Defensive regenerated PF
+captions use `Mixed TF` for distinct valid trading durations and the existing `TF`
+fallback for invalid/mixed typed input; that display does not enable such portfolios.
 
 During scope or projection loading, the previous chart/cards remain dimmed with
 `Loading...` and `aria-busy`; they are not the newly selected result. Old Summary

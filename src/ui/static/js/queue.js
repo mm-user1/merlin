@@ -2154,6 +2154,13 @@ function collectQueueItem() {
     return null;
   }
 
+  const tickerSelector = window.TickerSelector?.read();
+  if (tickerSelector?.enabled && window.ParquetInput?.validSource
+      && new Set(sources.filter(window.ParquetInput.validSource).map(source => source.timeframe_minutes)).size > 1) {
+    showQueueError('Ticker Selector requires one trading timeframe for all selected instruments. Choose the same timeframe for every instrument, or turn off Ticker Selector.');
+    return null;
+  }
+
   const wfToggle = document.getElementById('enableWF');
   const wfEnabled = Boolean(wfToggle && wfToggle.checked && !wfToggle.disabled);
   const optimizerMode = config.optimization_mode === 'grid' ? 'grid' : 'optuna';
@@ -2169,7 +2176,7 @@ function collectQueueItem() {
     mode,
     strategyId: window.currentStrategyId,
     strategyConfig: clonePreset(window.currentStrategyConfig || {}),
-    tickerSelector: window.TickerSelector?.read(),
+    tickerSelector,
     sources,
     warmupBars: Number(document.getElementById('warmupBars')?.value) || 1000,
     config,
@@ -2229,9 +2236,9 @@ function collectQueueItem() {
 function generateQueueLabel(item) {
   if (item.tickerSelector?.enabled) {
     const selector = item.tickerSelector;
-    const tf = item.sources?.[0]?.timeframe_minutes;
+    const tf = extractQueueTimeframeLabel(item);
     const wfa = item.mode === 'wfa' ? ` · WFA ${item.wfa?.isPeriodMonths}m/${item.wfa?.oosPeriodMonths}m` : '';
-    return `#${item.index || '?'} · PF ${item.strategyConfig?.name || item.strategyId} · ${tf}m · X Top ${selector.topN} / ${selector.rebalanceMonths}m${wfa} · ${item.config?.parameterMode === 'fixed' ? 'Fixed' : 'Grid'}`;
+    return `#${item.index || '?'} · PF ${item.strategyConfig?.name || item.strategyId} · ${tf} · X Top ${selector.topN} / ${selector.rebalanceMonths}m${wfa} · ${item.config?.parameterMode === 'fixed' ? 'Fixed' : 'Grid'}`;
   }
   const index = item.index || '?';
 

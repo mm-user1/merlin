@@ -167,4 +167,75 @@ async function main(){
   assert.equal(requests.length,0);
   console.log('Portfolio/coordinator delayed loading, counters, selection, errors and reset: passed');
 }
-main().catch(error=>{console.error(error);process.exitCode=1;});
+async function restoration() {
+  c.fetchAnalyticsSetEquityRequest=async()=>payload(103);
+  const second={id:10,name:'Second ordinary',study_ids:['second'],metrics:{}};
+  c.fetchAnalyticsSetsRequest=async()=>({sets:[pf,ordinary,second]});
+  const click=id=>fire(el('analyticsSetsTableWrap').querySelector(`[data-set-id="${id}"]`),'click');
+  const focus=id=>fire(el('analyticsSetsTableWrap').querySelector(`[data-set-id="${id}"]`),'click',{altKey:true});
+  const mixed=()=>{const value=detail(null);value.periodRows=[1,2,3,4].map(i=>({...value.rows[i],study_id:'period-'+i,portfolioSelection:{periods:[i]}}));return value;};
+  async function reset() {
+    assert.equal(requests.length,0);
+    const load=api.loadSummary();
+    await reply(take('/api/analytics/summary'),{db_name:'restore.db',studies:['ordinary','second'].map(id=>({study_id:id,study_name:id,is_wfa:true,entry_filters:on})),research_info:{wfa_studies:2}});
+    await load;
+  }
+  async function projection(ids,periods) {
+    assert.deepEqual([...state.checkedStudyIds].sort(),[...ids,...periods.map(i=>'period-'+i)].sort());
+    assert.deepEqual([...c.AnalyticsTable.getCheckedStudyIds()].sort(),[...state.checkedStudyIds].sort());
+    if(!ids.length&&!periods.length){assert(!requests.some(r=>r.url==='/api/portfolios/equity'));return;}
+    const request=take('/api/portfolios/equity'),body=JSON.parse(request.options.body);
+    assert.deepEqual(body.studyIds.sort(),[...ids].sort());assert.deepEqual(body.portfolios.map(p=>p.selection.periods[0]).sort(),[...periods].sort());
+    await reply(request,payload(120));filters(on.text);
+  }
+  async function enterMixed(){click(8);click(7);await reply(take('/api/portfolios/pf'),mixed());counts([5,5,5]);await projection(['ordinary'],[1,2,3,4]);}
+  async function checkRows(ids) {
+    const changes=el('analyticsSummaryTable').querySelectorAll('.analytics-row-check').filter(node=>node.checked!==ids.includes(node.dataset.studyId));
+    for (const [index,node] of changes.entries()) {
+      node.checked=ids.includes(node.dataset.studyId);fire(node,'change');
+      if(index<changes.length-1 && requests.some(r=>r.url==='/api/portfolios/equity')) await reply(take('/api/portfolios/equity'),payload(120));
+    }
+  }
+  async function temporaryFocus(){focus(7);await ready(null);focus(7);assert(c.AnalyticsPortfolio.detailPending());}
+  // Reported ordinary-exit leak, partial periods, and a repeated fresh entry.
+  for(const partial of [false,true]) {
+    await reset();focus(7);await ready(null);focus(8);await tick();focus(8);click(8);
+    if(partial)c.AnalyticsSets.handlePeriodGesture(7,2,{});else click(7);
+    await reply(take('/api/portfolios/pf'),mixed());counts(partial?[2,2,2]:[5,5,5]);
+    await projection(['ordinary'],partial?[2]:[1,2,3,4]);
+    click(7);click(7);await reply(take('/api/portfolios/pf'),mixed());counts([5,5,5]);await projection(['ordinary'],[1,2,3,4]);
+  }
+  // Mixed subsets and empty checks must survive temporary focus, including a
+  // same-key render while the restoration request is pending.
+  for(const empty of [false,true]) {
+    await reset();await enterMixed();await checkRows(empty?[]:['ordinary','period-2']);
+    await projection(empty?[]:['ordinary'],empty?[]:[2]);
+    await temporaryFocus();api.renderTableWithCurrentState();
+    assert.equal(requests.filter(r=>r.url==='/api/portfolios/pf').length,1);
+    await reply(take('/api/portfolios/pf'),mixed());counts([empty?0:2,5,5]);
+    await projection(empty?[]:['ordinary'],empty?[]:[2]);if(empty)filters('?');
+  }
+  // A request owns its snapshot at start, even if it never completes successfully.
+  for(const failure of [false,true]) {
+    await reset();await enterMixed();await checkRows(['ordinary','period-2']);await projection(['ordinary'],[2]);
+    await temporaryFocus();const old=take('/api/portfolios/pf');
+    if(failure){await reply(old,{error:'restoration failed'},false);counts([0,0,0]);filters('?');api.renderTableWithCurrentState();}
+    else click(10);
+    await reply(take('/api/portfolios/pf'),mixed());counts(failure?[5,5,5]:[6,6,6]);
+    await projection(failure?['ordinary']:['ordinary','second'],[1,2,3,4]);
+    if(!failure){await reply(old,mixed());counts([6,6,6]);assert.equal(requests.length,0);}
+  }
+  // Rendering uses only Analytics' existing scripts; month cadence stays months.
+  const html=fs.readFileSync(path.join(root,'src/ui/templates/analytics.html'),'utf8');
+  assert(!html.includes('/static/js/parquet-input.js'));assert(!html.includes('/static/js/utils.js'));
+  for(const [minutes,label] of [[5,'5m'],[15,'15m'],[30,'30m'],[90,'90m'],[60,'1h'],[240,'4h'],[1440,'1D'],[4320,'3D'],[0,'0m'],[-60,'-60m'],['60','60m'],[undefined,'undefinedm'],[1.5,'1.5m']]) {
+    selector.params.timeframeMinutes=minutes;await reset();focus(7);
+    await reply(take('/api/portfolios/pf'),detail(null));
+    const info=el('analyticsResearchInfo').children.find(n=>n.children[0]?.textContent==='Ticker Selector').children[1].textContent;
+    assert.equal(info,`X · Top 8 · Every 1m · 4m / ${label}`);
+    assert(el('portfolioSelectorSettings').querySelector('.settings-list').innerHTML.includes(`<span class="key">Ranking Timeframe</span><span class="val">${label}</span>`));
+    await reply(take('/api/portfolios/equity'),payload(120));
+  }
+  assert.equal(requests.length,0);console.log('Mixed restoration lifetime, superseded/failure recovery, canonical sidebar rendering: passed');
+}
+main().then(restoration).catch(error=>{console.error(error);process.exitCode=1;});
