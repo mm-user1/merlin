@@ -1,5 +1,19 @@
 # Tests
 
+## Compact configuration studies
+
+`tests/pattern_lab/test_configuration_{contracts,coordinator,study,artifacts}.py`
+cover staged admission, native financial/ID parity, 1/2/6-worker economic bytes,
+bounded reorder credits, failure sanitation, calendar/Sharpe/display semantics,
+offline public projection and malformed ZIP/gzip/compact consistency refusals.
+Run them through `tools/run_tests.py` using the external roots documented below.
+`_configuration_capacity.py` is an explicitly synthetic compact-only fixture
+recipe (seed 20261112, 3200 configurations/9600 results), not native validation.
+The manual capacity and native memory measurements belong in task evidence;
+CI has no timing assertions. Linux review uses the focused suite with only the
+small 2-worker case, plus exact Windows artifact verification. No Node/browser
+gate applies to this backend.
+
 ## Saved chart and trade reconstruction (T11)
 
 `server/test_reconstruction.py` observes original strategy executions for CSV

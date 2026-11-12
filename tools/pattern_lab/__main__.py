@@ -54,7 +54,8 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # structured JSON status; the older data commands keep their existing behavior
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report")
+CONFIGURATION_COMMANDS = ("configuration-study", "configuration-verify", "configuration-public")
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -233,6 +234,15 @@ def build_parser() -> argparse.ArgumentParser:
     account_command.add_argument("--workers", type=int, default=1)
     account_command.add_argument("--retention-profile", choices=("standard", "debug"), default="standard")
     account_command.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
+    configuration = commands.add_parser("configuration-study", help="Run all configurations on independent IS/HO1/HO2 stages.")
+    for flag in ("request", "data-root", "output-root"):
+        configuration.add_argument("--"+flag, type=Path, required=True)
+    configuration.add_argument("--workers", type=int, choices=range(1,7), default=1)
+    configuration.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
+    for command in ("configuration-verify", "configuration-public"):
+        compact = commands.add_parser(command, help="Verify or project a compact result offline.")
+        compact.add_argument("--run-root", type=Path, required=True)
+        if command == "configuration-public":compact.add_argument("--output-root", type=Path, required=True)
     account_report = commands.add_parser("account-report", help="Rebuild account metrics/report offline into a new directory.")
     for flag in ("run-root", "output-root"):
         account_report.add_argument("--" + flag, type=Path, required=True)
@@ -414,6 +424,24 @@ def _run(args: argparse.Namespace) -> int:
         )
         _emit(pack_data.slice_metadata(loaded))
         return EXIT_OK
+    if args.command in CONFIGURATION_COMMANDS:
+        from .configuration_study import run_configuration_study, verify_configuration_study, export_public_results
+        from .accounts.contracts import require
+        if args.command == "configuration-verify":
+            _emit(verify_configuration_study(args.run_root))
+        else:
+            if args.command == "configuration-study":
+                roots={}
+                for binding in args.auxiliary_root:
+                    alias,separator,path=binding.partition('=')
+                    require(separator and alias and path and alias not in roots,'auxiliary-root requires unique ALIAS=PATH')
+                    roots[alias]=Path(path)
+                result=run_configuration_study(args.request,data_root=args.data_root,output_root=args.output_root,
+                    workers=args.workers,auxiliary_roots=roots or None)
+            else:result=export_public_results(args.run_root,output_root=args.output_root)
+            _emit(dict(status='complete',runRoot=str(result.root),counts=result.metadata['counts'],
+                       identities=result.metadata['identities'],synthetic=result.metadata['synthetic']))
+        return EXIT_OK
     if args.command == "account-study":
         from .account_study import run_account_study
         from .accounts.contracts import require
@@ -484,6 +512,10 @@ def _run(args: argparse.Namespace) -> int:
 
 def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
     """Explain a failure on stderr, and add structured JSON where it is contracted."""
+    if command in CONFIGURATION_COMMANDS:
+        # Stored or worker exceptions may contain owner-only outcomes. Never
+        # serialize their messages, context, causes or worker traceback here.
+        exc = PatternLabDataError("Configuration operation failed; inspect sanitized technical status.")
     if command in JSON_STATUS_COMMANDS:
         payload = {
             "status": "failed",

@@ -1,5 +1,11 @@
 # Tools
 
+Pattern Lab's [configuration-study backend](pattern_lab/configuration_study/README.md)
+runs full declared IS/HO1/HO2 rosters and publishes bounded compact results.
+Use `configuration-study`, `configuration-verify` and `configuration-public` under
+`python -B -m tools.pattern_lab`; its synthetic example is
+`tools/pattern_lab/examples/configuration_synthetic.py`.
+
 Run repository tools from the project root. On Windows, use the configured
 project interpreter:
 

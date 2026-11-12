@@ -1,5 +1,10 @@
 # Pattern Lab research guide
 
+For native all-configuration IS/HO1/HO2 execution and offline compact results,
+see [configuration studies](configuration_study/README.md). This backend retains
+exact metrics and display curves; full account studies remain the replay evidence
+format. It generates no HTML.
+
 Pattern Lab is local, research-only tooling for evaluating signals, entry
 filters and ticker-selection methods before developing a strategy in Merlin.
 Merlin and Strategy Lab do not import it.
