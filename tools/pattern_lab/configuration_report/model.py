@@ -35,7 +35,7 @@ def presentation_options(value, metadata):
     else:
         value = deepcopy(value)
     require(len(canonical(value).encode()) <= MAX_OPTIONS, 'presentation byte bound')
-    closed(value, ('schema', 'specificationIdentity'), ('title', 'subtitle', 'parameterLabels', 'initialSelection'))
+    closed(value, ('schema', 'specificationIdentity'), ('title', 'subtitle', 'parameterLabels', 'filterParameters', 'initialSelection'))
     require(value['schema'] == SCHEMA and value['specificationIdentity'] == metadata['identities']['specification'], 'presentation identity/schema')
     for name, limit in [('title', 512), ('subtitle', 2048)]:
         if name in value:
@@ -52,8 +52,15 @@ def presentation_options(value, metadata):
         seen.add(path)
         for key in set(label) - {'path'}:
             require(type(label[key]) is str and bool(label[key].strip()) and len(label[key]) <= 128, 'parameter label text')
+    filters = value.get('filterParameters', [])
+    require(type(filters) is list, 'filter parameters')
+    seen = set()
+    for path in filters:
+        require(type(path) is str and path in paths and path not in seen
+                and path not in ('/allocationId', '/timeframeMinutes'), 'unique strategy scalar pointer')
+        seen.add(path)
     ids = value.get('initialSelection', [metadata['configurations'][0]['configurationId']])
     known = {r['configurationId'] for r in metadata['configurations']}
     require(type(ids) is list and len(ids) <= 12 and all(type(i) is str and i in known for i in ids), 'initial selection')
     require(len(ids) == len(set(ids)), 'duplicate selection')
-    return {**value, 'initialSelection': ids}
+    return {**value, 'filterParameters': filters, 'initialSelection': ids}

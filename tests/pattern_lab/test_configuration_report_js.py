@@ -2,6 +2,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -13,6 +14,8 @@ from ._configuration_report_helpers import synthetic
 def test_shipped_javascript_decoder(tmp_path):
     node=shutil.which('node')
     if node is None:
+        if sys.platform != 'win32':
+            pytest.fail('Node is required for the shipped decoder gate on Linux')
         pytest.skip('Node is not installed on this Windows host; Linux review requires this harness with Node')
     source=synthetic(tmp_path/'owner',per_tf=1)
     public=export_public_results(source,output_root=tmp_path/'public')

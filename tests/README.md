@@ -4,12 +4,19 @@
 
 `test_configuration_report.py` covers the API/CLI, sidecars, publication cleanup,
 source preservation, relocation/CRLF determinism and sanitized exceptions.
+Presentation tests also cover explicit ordered strategy filters, absent/empty
+equivalence, scalar-pointer refusals and unchanged financial blocks. Labels alone
+do not enable controls. T01B-1 browser evidence adds stable status-overlay geometry,
+base-only/compact chosen controls and one bounded capacity smoke; it does not
+recertify the parent's three-sample performance measurements.
 `test_configuration_report_payload.py` checks exact native gzip/metric/status/ID
 copying, stored-only assembly, public omission, escaping and bounds.
 `test_configuration_report_js.py` runs the exact shipped decoder through
 `configuration_report_node.cjs`: corruption, bounded streams, native shapes,
 identity checks and cache sharing. Missing Windows Node is an explicit skip;
-Linux review requires Node. Node checks do not substitute for a real browser.
+Linux review fails when Node is absent. Existing Web Crypto is preserved on Node
+versions exposing a getter; the fallback is defined only when absent. Node checks
+do not substitute for a real browser.
 
 Use `tools/run_tests.py` with external storage, these three modules, the four
 configuration-study modules below and `test_pattern_lab_cli.py`. The documented

@@ -45,9 +45,22 @@ Labels/units are nonempty strings up to 128 characters. `initialSelection` allow
 up to twelve unique existing configuration IDs; the default is the first canonical
 configuration, never a performance ranking. All validation precedes output writes.
 
-Varying scalar allocation paths, excluding only `/allocationId` and
-`/timeframeMinutes`, define generic dimensions. Supplied label order defines the
-heading, and labelled varying dimensions precede lexical remaining filters.
+Optional `filterParameters` is an ordered list of unique scalar allocation
+pointers. Omitted and empty lists normalize identically to `[]`: only Universe,
+Ticker, Timeframe, search and reset appear. Each explicit pointer adds one control,
+including deliberately chosen constants, using its label or the generic fallback.
+Unknown/non-scalar pointers, duplicates and `/allocationId` or `/timeframeMinutes`
+are refused before output. Other `*Id` paths are allowed. `parameterLabels` controls
+heading names/order independently and never enables filters. Without labels,
+varying scalar paths define heading dimensions. All settings remain searchable.
+
+Choose filters before an experiment and record them in its presentation/protocol.
+If the owner supplies no list, the preparing analyst may leave it empty or choose
+two or three main declared strategy/grid parameters before examining outcomes;
+this requires no extra approval or trials. Two or three is guidance, not a schema
+limit. For HA, Reward/risk, HA run and Hold days may be useful when actually present.
+The renderer never chooses filters from field names, values or outcomes.
+
 Missing/null/string/numeric/boolean values remain distinct. Details retain full
 allocation/provider/policy/features and source/auxiliary bindings. Active visible
 stage execution facts load from the native metric member; absent synthetic facts
@@ -131,3 +144,7 @@ Compact verification certifies integrity/consistency, not full execution replay.
 Synthetic compact fixtures show an automatic banner. Native runs over artificial
 prices have `synthetic=false`; label those explicitly in the presentation subtitle.
 Owner visual acceptance is separate from automated browser/cross-host checks.
+Loading and actionable failure feedback overlays the existing chart without
+reserving a row above the title or moving the workspace. Success hides the status;
+readiness remains available through the diagnostic state. The synthetic banner
+is independent and remains visible for synthetic sources.

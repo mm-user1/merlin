@@ -126,3 +126,54 @@ def test_cli_success(source,tmp_path,capsys):
     from tools.pattern_lab.__main__ import main
     assert main(['configuration-report','--run-root',str(source),'--output-root',str(tmp_path/'report')])==0
     assert json.loads(capsys.readouterr().out)['status']=='complete'
+
+
+@pytest.mark.parametrize('filters', [None, {}, 'policy', [1], ['/unknown'],
+    ['/policy'], ['/features'], ['/policy~2mode'], ['/policy/mode', '/policy/mode'],
+    ['/allocationId'], ['/timeframeMinutes']])
+def test_filter_refusals_before_output(source, tmp_path, filters):
+    meta = load_configuration_study(source).metadata
+    value = dict(schema=model.SCHEMA, specificationIdentity=meta['identities']['specification'],
+                 filterParameters=filters)
+    with pytest.raises(PatternLabDataError):
+        render_configuration_report(source, output_root=tmp_path/'refused', presentation=value)
+    assert not (tmp_path/'refused').exists()
+
+
+def test_explicit_filters_preserve_data_and_empty_equivalence(source, tmp_path):
+    meta = load_configuration_study(source).metadata
+    labels = [dict(path='/policy/rewardRisk', label='Reward/risk')]
+    options = dict(schema=model.SCHEMA, specificationIdentity=meta['identities']['specification'],
+                   parameterLabels=labels)
+    omitted = render_configuration_report(source, output_root=tmp_path/'omitted', presentation=options)
+    empty = render_configuration_report(source, output_root=tmp_path/'empty',
+                                       presentation={**options, 'filterParameters': []})
+    assert omitted.read_bytes() == empty.read_bytes()
+    assert omitted.with_suffix('.json').read_bytes() == empty.with_suffix('.json').read_bytes()
+    base, blocks, _ = extract(omitted)
+    assert base['presentation']['filterParameters'] == []  # Labels alone enable none.
+    paths = ['/provider/providerId', '/policy/rewardRisk', '/policy/stopUpdates']
+    chosen = render_configuration_report(source, output_root=tmp_path/'chosen',
+                                        presentation={**options, 'filterParameters': paths})
+    selected, selected_blocks, _ = extract(chosen)
+    assert selected['presentation']['filterParameters'] == paths
+    assert selected['presentation']['parameterLabels'] == labels
+    assert selected_blocks == blocks
+    for key in ('metadata', 'stages', 'rows', 'index', 'annotations'):
+        assert selected[key] == base[key]
+    assert selected['presentation']['initialSelection'] == base['presentation']['initialSelection']
+
+
+def test_filter_pointer_scalar_types_and_escaping(source):
+    meta = deepcopy(load_configuration_study(source).metadata)
+    # Presentation validation against heterogeneous bounded allocation metadata.
+    meta['request']['allocations'] = [dict(flag=False, nullable=None, number=1,
+        text='1', providerId='custom', **{'a/b~c': True}), dict(flag=True)]
+    paths = ['/flag', '/nullable', '/number', '/text', '/providerId', '/a~1b~0c']
+    options = dict(schema=model.SCHEMA, specificationIdentity=meta['identities']['specification'],
+                   filterParameters=paths)
+    assert model.presentation_options(options, meta)['filterParameters'] == paths
+    assert dict(model.scalars(meta['request']['allocations'][0]))['/a~1b~0c'] is True
+    for path in ('/a/b~c', '/a~1b~2c', '/absent'):
+        with pytest.raises(PatternLabDataError):
+            model.presentation_options({**options, 'filterParameters': [path]}, meta)

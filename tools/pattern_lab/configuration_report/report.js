@@ -19,7 +19,7 @@
       params:Core.scalarPaths(allocationMap.get(c.allocationId)), roles:roles.filter(r=>r!=='reference'), isDefault:roles.includes('reference'), stages:{}};
   });
   const byId=Object.fromEntries(accounts.map(a=>[a.id,a]));
-  const data={accounts, parameters:(labels.length?labels.map(l=>l.path):varying).map(parameter), filters:[...new Set([...labels.map(l=>l.path).filter(p=>varying.includes(p)),...varying])].map(parameter),
+  const data={accounts, parameters:(labels.length?labels.map(l=>l.path):varying).map(parameter), filters:manifest.presentation.filterParameters.map(parameter),
     stages:Object.fromEntries(manifest.stages.map(s=>[s.stageId,s])), meta:{id:request.studyId,title:manifest.presentation.title||request.studyId, subtitle:manifest.presentation.subtitle||`${instruments.length} instruments / ${new Set(accounts.map(a=>a.tf)).size} timeframes / Independent IS / HO1 / HO2 accounts`,
     context:'Saved resolved configuration. Compact integrity verification cannot replay full execution.', initialSelection:manifest.presentation.initialSelection}};
   const loader=new Core.Loader(manifest,i=>$('block-'+i).textContent);
@@ -161,7 +161,7 @@
       (f.universe==='all'||f.universe==='finalists'&&a.roles.length||f.universe==='default'&&a.isDefault||f.universe==='selected'&&state.selected.includes(a.id)) &&
       (!f.ticker||a.symbol===f.ticker)&&(!f.timeframe||String(a.tf)===f.timeframe)&&
       Object.entries(f.params).every(([k,v])=>!v||Core.key(a.params[k])===v)&&
-      (!f.search||`${a.id} ${accountLabel(a)}`.toLowerCase().includes(f.search.toLowerCase())));
+      (!f.search||`${a.id} ${accountLabel(a)} ${JSON.stringify(a.params)}`.toLowerCase().includes(f.search.toLowerCase())));
     if (state.sort) rows.sort((a,b)=>{
       const m=tableMetrics.find(m=>m.key===state.sort.key);
       const av=metricValue(a,state.sort.stage,m),bv=metricValue(b,state.sort.stage,m);
@@ -391,7 +391,7 @@
   function display(){hover=null;$('tooltip').hidden=true;renderStages();renderSelection();renderCards();renderInspector();patchTable();renderSingle();draw();}
   function render(){
     generation++;requested=true;ready=false;errorState=null;activeSeries=[];activeFacts=null;
-    $('load-status').textContent='Loading selected saved data?';display();pump();
+    $('load-status').hidden=false;$('load-status').textContent='Loading selected saved data.';display();pump();
   }
   async function loadStage(stage,token){
     if(loadedStages.has(stage))return;
@@ -432,8 +432,8 @@
           }
         }
         if(state.focus){const [i,j]=locations.get(state.focus+'|'+factStage+'|metrics');activeFacts={stage:factStage,...decoded.get(i).records[j].execution};}
-        activeSeries=series;ready=true;$('load-status').textContent='Ready / saved full-stage metrics / compact integrity only';display();
-      }catch(error){if(token===generation){activeSeries=[];activeFacts=null;errorState=typeof DecompressionStream!=='function'||!globalThis.crypto?.subtle?'Open this standalone report in an installed Chrome or Edge with Web Crypto and DecompressionStream enabled.':'Saved report data failed integrity or resource validation';ready=false;$('load-status').textContent=errorState;display();}}
+        activeSeries=series;ready=true;$('load-status').textContent='';$('load-status').hidden=true;display();
+      }catch(error){if(token===generation){activeSeries=[];activeFacts=null;errorState=typeof DecompressionStream!=='function'||!globalThis.crypto?.subtle?'Open this standalone report in an installed Chrome or Edge with Web Crypto and DecompressionStream enabled.':'Saved report data failed integrity or resource validation. Reopen a verified report or ask its author to rebuild it.';ready=false;$('load-status').hidden=false;$('load-status').textContent=errorState;display();}}
     }}finally{busy=false;}
   }
   function populate(){

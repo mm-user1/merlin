@@ -1,7 +1,11 @@
 /* Run the shipped decoder without a browser. This does not certify trusted gestures. */
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),zlib=require('node:zlib');
-globalThis.crypto=require('node:crypto').webcrypto;
+if (!globalThis.crypto?.subtle) {
+  Object.defineProperty(globalThis, 'crypto', {
+    value: require('node:crypto').webcrypto, configurable: true
+  });
+}
 vm.runInThisContext(fs.readFileSync(path.resolve(__dirname,'../../tools/pattern_lab/configuration_report/core.js'),'utf8'));
 const Core=globalThis.ConfigurationReportCore;
 const sha=raw=>require('node:crypto').createHash('sha256').update(raw).digest('hex');

@@ -32,3 +32,7 @@
 #results tbody tr.virtual-spacer,#results tbody tr.virtual-spacer td{background:transparent;position:static;box-shadow:none;border:0;padding:0;line-height:0}
 .settings-panel pre,#attribution{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.5 var(--mono)}
 #synthetic-banner{background:#fff5df;border:1px solid #e1d2ae;padding:10px;border-radius:6px}
+
+/* Status overlays the chart; explicit parameter controls share its surrounding flex row. */
+#load-status{position:absolute;z-index:6;top:12px;left:12px;right:12px;width:fit-content;max-width:calc(100% - 24px);margin:0;padding:8px 12px;background:#fff5df;border:1px solid #e1d2ae;border-radius:6px;font-size:13px}
+.parameter-filters{display:contents}
