@@ -95,10 +95,25 @@ def test_offline_called_names_and_annotation_isolation(tmp_path,monkeypatch):
     with pytest.raises(PatternLabDataError):export_public_results(public.root,output_root=tmp_path/'again')
 
 
-def test_late_stage_admission_before_any_output(tmp_path):
+def test_late_stage_admission_before_any_output(tmp_path,monkeypatch):
+    import tools.pattern_lab.configuration_study.runner as runner
     doc=inputs(tmp_path/'pack',count=1)
-    doc['stages'][-1]['endUtc']='2030-01-01T00:00:00Z'
-    with pytest.raises(PatternLabDataError):run_configuration_study(doc,data_root=tmp_path/'pack',output_root=tmp_path/'out')
+    later='2030-01-01T00:00:00Z';reserve='2030-02-01T00:00:00Z'
+    doc['stages'][-1]['endUtc']=later
+    doc['stages'][-1]['protocol']['development']['end_utc']=later
+    doc['stages'][-1]['protocol']['reserved']['start_utc']=later
+    for stage in doc['stages']:stage['protocol']['reserved']['end_utc']=reserve
+    normalize_request(doc)
+    def denied(*a,**kw):raise AssertionError('late admission reached output or execution')
+    for name in ('fresh_directory','run_account_job'):monkeypatch.setattr(runner,name,denied)
+    monkeypatch.setattr(runner.workers_module,'SpawnJobPool',denied)
+    admitted=[];original=runner.metadata_admission_failures
+    def observed(entries,span):
+        failures=original(entries,span);admitted.append(bool(failures));return failures
+    monkeypatch.setattr(runner,'metadata_admission_failures',observed)
+    with pytest.raises(PatternLabDataError,match='configuration stage metadata admission failed'):
+        run_configuration_study(doc,data_root=tmp_path/'pack',output_root=tmp_path/'out',workers=2)
+    assert admitted==[False,False,True]
     assert not (tmp_path/'out').exists()
 
 

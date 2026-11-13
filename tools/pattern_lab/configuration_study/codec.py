@@ -91,7 +91,10 @@ class Archive:
                     end[3]==end[4]==len(expected) and end[4]<65535 and
                     end[5]<0xffffffff and end[6]<0xffffffff and end[5]+end[6]==size-22,
                     'ordinary ZIP end record; ZIP64/comments refused')
+            require(end[5]==sum(46+len(name.encode('ascii')) for name in expected),
+                    'canonical ZIP central directory extent; trailing records refused')
             boundary=_directory_start(f,size,expected)
+            require(boundary==end[6],'ZIP central directory start disagreement')
             with zipfile.ZipFile(f) as archive:
                 infos=archive.infolist()
                 require([i.filename for i in infos]==list(expected),'exact canonical ZIP member order')

@@ -64,6 +64,69 @@ enumeration decodes no curves; access decodes only the selected chunk. Archive
 offsets are reused. This is not lazy opening or native execution revalidation;
 there is no full-array cache, replay, pack read or current-source-pin requirement.
 
+Stored `study.request` must be an object with three stage objects, each containing
+an object protocol. The loader checks these shapes before request normalization:
+stored request/protocol paths never cause an external read or filesystem probe.
+This applies to sealed verification/public export and the writer's unsealed check.
+New execution requests still accept request files and relative protocol paths.
+
+### Concrete synthetic reader output
+
+The following excerpts come from the native synthetic example's public artifact,
+configuration `oi` for `BYBIT_AAAUSDT`, target TF 30 minutes. These are artificial
+prices executed by native accounts, not real market results or capacity fixtures.
+The result excerpt omits `execution` and other metric fields; curve and price
+wrappers below are complete. Variables shorten the repeated exact IDs:
+
+```python
+cid = "0edce3f961346bd97d7ef36dda996ae15d904b4213f976bdf03d0e3d07f83c43"
+rid = "3171e68fd8d8e9fc971b27f58307facb45ae8499180a19f67382e9f1e355f557"
+
+# Excerpt of stored.result(cid, "IS"):
+{
+    "configurationId": cid, "resultId": rid, "stageId": "IS", "status": "complete",
+    "metrics": {
+        "metricsVersion": "configuration-metrics.1", "initialCapital": 10000.0,
+        "finalCapital": 13107.38766635553, "returnPct": 31.0738766635553, "trades": 7,
+    },
+}
+
+# Complete stored.curve(cid, "IS"):
+{
+    "configurationId": cid, "resultId": rid, "stageId": "IS",
+    "curve": {
+        "curveVersion": "configuration-curves.1", "valueScale": 100,
+        "timeMs": [1577894400000, 1578096000000],
+        "equityQ": [0, 3107], "balanceQ": [0, 3107], "cashGaps": [],
+        "status": "available", "endpoint": "observedClose",
+    },
+}
+
+# Complete stored.price("BYBIT_AAAUSDT", "IS"):
+{
+    "instrumentId": "BYBIT_AAAUSDT", "stageId": "IS",
+    "price": {
+        "curveVersion": "configuration-curves.1", "valueScale": 100,
+        "status": "available", "anchorPrice": 128.0, "anchorTimeMs": 1577894400000,
+        "lastObservedTimeMs": 1578096000000, "coverageGaps": [],
+        "sourceFingerprint": "224392314aefe3c85dc685d76ee531fbcdda097a5167ec68d889ec04bce4e3fd",
+        "timeMs": [1577894400000, 1577923200000, 1578009600000, 1578096000000],
+        "priceQ": [0, 0, 0, 0],
+    },
+}
+
+# Complete stored.result(cid, "HO2") on the public projection:
+{"status": "withheld", "configurationId": cid, "stageId": "HO2"}
+```
+
+Times are UTC epoch milliseconds. Capital is in account quote-currency units;
+`returnPct` is full-precision percent. Divide Q values by `valueScale` to obtain
+percent returns: 3107 means 31.07%, not capital or a fraction of one. `anchorPrice`
+is the actual first base-bar open; priceQ expresses its uncosted percentage change.
+These periodic synthetic prices return to the anchor at the displayed boundaries.
+Never substitute display samples for the exact financial metrics. Withheld
+responses contain no financial fields, resultId or curve/price wrapper.
+
 Configuration IDs hash normalized allocation without allocationId, instrument,
 used sources and resolved used auxiliary bindings. Snapshot aliases/content pins
 are excluded from logical IDs. Result IDs add stage and exact bounds. Separate
@@ -89,6 +152,15 @@ Exactly six files: `study.json` (`pattern-lab.configuration-study.v1`, formatVer
 Root JSON <=16 MiB each. Ordinary ZIP_STORED <=128 MiB, <=65,534 members; no ZIP64,
 descriptors, comments, extras, directories or links. Exact names, contiguous
 extents, local/central headers, CRC/SHA, sizes, IDs/counts and types are checked.
+The central-directory length must equal the sum of `46 + ASCII name length` for
+its entries; trailing ZIP64 records or padding are refused without scanning payloads.
+
+Normalization preflights `3 * instruments * (2 * sum(ceil(A[tf] / 16)) + 1)`
+base members, rounding each target-TF allocation group separately and including
+one shared price member per instrument/stage. The limit is 65,534. Four instruments
+with 200 allocations at each of four TFs need 1,260 base members. This is a lower
+bound when byte limits force extra splits: actual writer and JSON/byte guards
+still apply; admission does not guarantee that every byte budget will fit.
 
 Order: stage IS/HO1/HO2, lexical instrument, numeric target TF, lexical config ID.
 Each group emits metrics/curves pairs of <=16 results (earlier split only for the

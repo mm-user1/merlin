@@ -179,7 +179,13 @@ def _load(root,*,sealed=True):
     require(study['schema']==SCHEMA and type(study['formatVersion']) is int and study['formatVersion']==1,'compact schema/version')
     require(study['visibility'] in ('owner','public') and type(study['synthetic']) is bool and
         study['verificationLevel']=='compact' and study['fullExecutionRetained'] is False and study['limitation']==LIMITATION,'compact verification contract')
-    normalized=normalize_request(study['request']);doc=normalized.document;rows=configurations(doc)
+    stored=study['request']
+    require(type(stored) is dict,'stored request must be an object')
+    stages=stored.get('stages')
+    require(type(stages) is list and len(stages)==len(STAGES),'stored stages must contain IS/HO1/HO2 objects')
+    require(all(type(s) is dict and type(s.get('protocol')) is dict for s in stages),
+            'stored stage protocols must be objects')
+    normalized=normalize_request(stored);doc=normalized.document;rows=configurations(doc)
     require(doc==study['request'] and rows==study['configurations'],'canonical configuration metadata')
     closed(study['identities'],('specification','dataInput','implementation'))
     require(study['identities']['specification']==normalized.identity and

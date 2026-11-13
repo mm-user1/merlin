@@ -1,5 +1,6 @@
 """Closed staged requests, native normalization and outcome-independent identities."""
 from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
 
 from ..accounts.contracts import require, identifier
@@ -7,11 +8,11 @@ from ..account_study.common import closed, json_text, parse_json, read_json
 from ..account_study.request import normalize_request as native_request
 from ..study.contracts import semantic_digest
 from data_provider.manifest import to_epoch_ms
+from .codec import MAX_MEMBERS
 
 SCHEMA = 'pattern-lab.configuration-study-request.v1'
 STAGES = ('IS', 'HO1', 'HO2')
 MAX_JSON = 16*1024*1024
-MAX_MEMBERS = 65534
 
 
 def owned(value):
@@ -71,8 +72,9 @@ def configuration_payload(doc, instrument, allocation):
 
 
 def configurations(doc):
-    count = len(doc['instruments'])*len(doc['allocations'])
-    require(count*3*2 <= MAX_MEMBERS*16, 'planned roster exceeds member capacity')
+    by_timeframe=Counter(a['timeframeMinutes'] for a in doc['allocations'])
+    base_members=len(STAGES)*len(doc['instruments'])*(2*sum((n+15)//16 for n in by_timeframe.values())+1)
+    require(base_members <= MAX_MEMBERS, 'planned roster exceeds member capacity')
     rows=[]; size=0
     for instrument in doc['instruments']:
         seen=set()
@@ -139,6 +141,7 @@ def normalize_annotations(value, study):
     seen=set()
     for a in doc['annotations']:
         closed(a,('instrumentId','allocationId','role','methodId','methodDescription','selectedFromStage'))
+        require(all(type(a[k]) is str for k in ('instrumentId','allocationId')),'annotation reference IDs must be strings')
         require((a['instrumentId'],a['allocationId']) in known,'unknown annotation configuration')
         require(a['role'] in ('return','stability','reference') and a['selectedFromStage']=='IS','annotation role/stage')
         require(all(type(a[k]) is str and a[k].strip() for k in ('methodId','methodDescription')),'annotation method metadata')

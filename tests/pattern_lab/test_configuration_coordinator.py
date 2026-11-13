@@ -6,17 +6,23 @@ from tools.pattern_lab.configuration_study import runner
 
 
 def test_delayed_first_job_does_not_refill(monkeypatch,tmp_path):
-    progress=runner.Progress(tmp_path,8,3);submitted=[];events=[]
+    progress=runner.Progress(tmp_path,8,3);submitted=[];consumed=[];outstanding=[]
+    events=iter([2,1,0,5,4,3,7,6])
+    def observe():
+        outstanding.append(len(submitted)-len(consumed))
+        assert 0<=outstanding[-1]<=3
     class Pool:
-        def submit(self,key,job):submitted.append(key)
+        def submit(self,key,job):submitted.append(int(key));observe()
         def take(self):
-            if not events:events.extend([2,1,0])
-            i=events.pop(0)
-            assert len(submitted)==3
+            observe();i=next(events)
+            assert i in submitted
+            if i in (2,1,0):assert submitted==[0,1,2] and consumed==[]
             return 'result',str(i),[i]
     monkeypatch.setattr(runner,'extract_unit',lambda record,*a:record)
-    group=[dict(configurationId=str(i)) for i in range(3)]
-    assert list(runner.execute_group(group,lambda c:c,dict(stageId='IS'),Pool(),3,progress,dict(extractionSeconds=0)))==[0,1,2]
+    group=[dict(configurationId=str(i)) for i in range(8)]
+    for unit in runner.execute_group(group,lambda c:c,dict(stageId='IS'),Pool(),3,progress,dict(extractionSeconds=0)):
+        consumed.append(unit);observe()
+    assert submitted==consumed==list(range(8)) and max(outstanding)==3
     assert progress.state['maximumCompactBuffer']==19
 
 
