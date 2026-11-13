@@ -1,5 +1,32 @@
 # Tests
 
+## Comparative configuration reports
+
+`test_configuration_report.py` covers the API/CLI, sidecars, publication cleanup,
+source preservation, relocation/CRLF determinism and sanitized exceptions.
+`test_configuration_report_payload.py` checks exact native gzip/metric/status/ID
+copying, stored-only assembly, public omission, escaping and bounds.
+`test_configuration_report_js.py` runs the exact shipped decoder through
+`configuration_report_node.cjs`: corruption, bounded streams, native shapes,
+identity checks and cache sharing. Missing Windows Node is an explicit skip;
+Linux review requires Node. Node checks do not substitute for a real browser.
+
+Use `tools/run_tests.py` with external storage, these three modules, the four
+configuration-study modules below and `test_pattern_lab_cli.py`. The documented
+pre-existing import-isolation failure is explicitly deselected in this report
+task. Linux additionally deselects the six-worker native case and retains the
+small two-worker check. No full preservation/UAC gate is assigned to this renderer.
+
+`_configuration_report_browser.py` drives installed Chrome via trusted CDP mouse/
+key input, with configurable executable and task-owned external profile. It
+retains Chrome's sandbox. Real-browser delivery checks include file:// CSP,
+Crypto/gzip, all revision 09 gestures at 1440/1920x1080, hidden-stage isolation,
+async races, metrics/status mapping, gaps, off-screen selection and screenshots.
+The unchanged `_configuration_capacity.py` recipe drives three-sample build/open
+and 20-action measurements. Record process/heap/cache memory separately; no timing
+assertions belong in ordinary CI. Exact saved Windows bundles and output hashes
+are additional cross-host inputs, never dependencies of tracked CI tests.
+
 ## Compact configuration studies
 
 `tests/pattern_lab/test_configuration_{contracts,coordinator,study,artifacts}.py`

@@ -55,7 +55,7 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
 CONFIGURATION_COMMANDS = ("configuration-study", "configuration-verify", "configuration-public")
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS + ("configuration-report",)
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -234,6 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
     account_command.add_argument("--workers", type=int, default=1)
     account_command.add_argument("--retention-profile", choices=("standard", "debug"), default="standard")
     account_command.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
+    comparative = commands.add_parser("configuration-report", help="Render a verified compact configuration study offline.")
+    comparative.add_argument("--run-root", type=Path, required=True)
+    comparative.add_argument("--output-root", type=Path, required=True)
+    comparative.add_argument("--annotations", type=Path)
+    comparative.add_argument("--presentation", type=Path)
     configuration = commands.add_parser("configuration-study", help="Run all configurations on independent IS/HO1/HO2 stages.")
     for flag in ("request", "data-root", "output-root"):
         configuration.add_argument("--"+flag, type=Path, required=True)
@@ -424,6 +429,12 @@ def _run(args: argparse.Namespace) -> int:
         )
         _emit(pack_data.slice_metadata(loaded))
         return EXIT_OK
+    if args.command == "configuration-report":
+        from .configuration_report import render_configuration_report
+        path = render_configuration_report(args.run_root, output_root=args.output_root,
+            annotations=args.annotations, presentation=args.presentation)
+        _emit({"status": "complete", "command": args.command, "report": str(path)})
+        return EXIT_OK
     if args.command in CONFIGURATION_COMMANDS:
         from .configuration_study import run_configuration_study, verify_configuration_study, export_public_results
         from .accounts.contracts import require
@@ -512,7 +523,9 @@ def _run(args: argparse.Namespace) -> int:
 
 def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
     """Explain a failure on stderr, and add structured JSON where it is contracted."""
-    if command in CONFIGURATION_COMMANDS:
+    if command == "configuration-report":
+        exc = PatternLabDataError("Configuration report generation failed; no completed report was published.")
+    elif command in CONFIGURATION_COMMANDS:
         # Stored or worker exceptions may contain owner-only outcomes. Never
         # serialize their messages, context, causes or worker traceback here.
         exc = PatternLabDataError("Configuration operation failed; inspect sanitized technical status.")
@@ -540,6 +553,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _run(args)
     except KeyboardInterrupt:
+        if command == "configuration-report":
+            _emit({"status": "interrupted", "command": command, "error_code": "interrupted",
+                   "error": "Configuration report generation was interrupted; no completed report was published."})
+            print("pattern-lab: Configuration report generation was interrupted; no completed report was published.", file=sys.stderr)
+            return EXIT_INTERRUPTED
         # An explicit boundary for the study commands only; nothing else changes.
         if command not in STUDY_COMMANDS:
             raise

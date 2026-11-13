@@ -3,7 +3,9 @@
 Runs every declared configuration independently over IS, HO1 and HO2 through
 native accounts. Retains exact metrics and display curves, not full execution
 evidence. It cannot supply Universe Selection replay or native account report
-regeneration/import. No HTML is generated. Full native studies remain available.
+regeneration/import. This backend generates no HTML. Full native studies remain
+available. [Comparative reports](../configuration_report/README.md) rebuild
+standalone owner/public HTML from compact results without another execution.
 
 ## API
 

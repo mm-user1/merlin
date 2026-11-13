@@ -6,6 +6,12 @@ Use `configuration-study`, `configuration-verify` and `configuration-public` und
 `python -B -m tools.pattern_lab`; its synthetic example is
 `tools/pattern_lab/examples/configuration_synthetic.py`.
 
+Its [comparative report renderer](pattern_lab/configuration_report/README.md)
+adds `configuration-report --run-root COMPACT --output-root NEW_REPORT`, with
+optional `--annotations` and `--presentation`. It copies native saved gzip blocks
+into a standalone offline HTML. Create a public compact artifact first with
+`configuration-public`; owner reports contain HO2 behind a lazy global reveal.
+
 Run repository tools from the project root. On Windows, use the configured
 project interpreter:
 
