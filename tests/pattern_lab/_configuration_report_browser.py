@@ -106,6 +106,17 @@ class Browser:
 
     def key(self, key, code=None, modifiers=0):
         params = dict(key=key, code=code or key, modifiers=modifiers)
+        # Chromium's native defaults (scrolling/Space/selects) need the virtual
+        # key code as well as the DOM key/code used by application listeners.
+        virtual = {'ArrowLeft':37, 'ArrowUp':38, 'ArrowRight':39, 'ArrowDown':40,
+                   'Home':36, 'End':35, 'Tab':9, 'Escape':27, 'Enter':13,
+                   'Space':32, 'Equal':187, 'Minus':189}.get(params['code'])
+        if params['code'].startswith('Key') and len(params['code']) == 4:
+            virtual = ord(params['code'][-1])
+        if params['code'].startswith('Digit') and len(params['code']) == 6:
+            virtual = ord(params['code'][-1])
+        if virtual is not None:
+            params['windowsVirtualKeyCode'] = virtual
         for kind in ('keyDown', 'keyUp'):
             self.call('Input.dispatchKeyEvent', dict(type=kind, **params))
         self.gestures.append(dict(method='Input.dispatchKeyEvent', **params))

@@ -1,6 +1,6 @@
 # Comparative configuration reports
 
-Rebuild a standalone revision 09 comparison from a sealed compact configuration
+Rebuild a standalone comparison from a sealed compact configuration
 study, without market packs, auxiliary snapshots, accounts, network or execution.
 Existing account, selection and event-study reports retain their own routes.
 
@@ -86,15 +86,52 @@ breaks at nulls/coverage gaps, never forward-fills. No-observation accounts have
 no line or numerical hover value; empty prices are unavailable.
 
 Checkboxes collect configurations; plain rows/chips activate them. Normal Up/Down
-browse selected chips. Alt+row browses filtered/sorted rows in single view;
-Alt+chip browses the selected set. Escape/exit/repeated Alt/plain activation exits
+browse displayed selected chips. Alt+row browses filtered/sorted rows in single view;
+Alt+chip browses matching selected configurations. Escape/exit/repeated Alt/plain activation exits
 single view. Shift applies the anchor's check state across a range; Ctrl toggles
 all filtered rows. Tri-state header selection preserves outside-filter marks.
-Clear/Ctrl+Alt+D clear all marks without hiding HO2. More than twelve selected
+Clear/Ctrl+Alt+D clear all marks and chart filters without hiding HO2. More than twelve matching selected
 preserves every mark and displays a chart-limit explanation, with single browsing
 still available. A small DOM row window bounds renderer memory; all operations
 use the complete logical roster, including off-screen rows. Focus-only navigation
 patches affected controls; keyboard input fields retain their native behavior.
+
+Chart ticker/timeframe cards filter checkbox membership independently of table
+filters: OR within each group, AND between groups. Only cards scroll horizontally;
+Finalists +, Profitable, Save filtered and Reset filters remain fixed alongside
+them. Finalists + adds every annotated return/stability finalist, excluding
+reference-only rows, and exits Single View/manual price focus. Add listed finalists
+remains scoped to the table. Neither action invents annotations.
+
+Profitable requires an available, finite, strictly positive saved return in IS
+and HO1, plus HO2 when revealed, regardless of the chart stage tab. Unavailable,
+no-observation and zero returns fail. Newly revealed metrics resolve before matches
+are reconciled; pending data shows loading feedback. Active filters remain
+removable when no matches remain. Reset filters preserves membership. Save filtered
+replaces membership with every match, including above the twelve-line limit or
+in Single View, then clears chart filters/Single View. Order, colors, stage/zoom
+and table filters are preserved. Subsequent HO2 reveal does not uncheck saved rows.
+
+Standard USDT-SWAP labels use short symbols, with contract/venue disambiguation;
+full instrument IDs remain searchable. Matching selected rows are light green,
+with stronger emphasis for committed focus. Hover previews cards/chips and curves
+without changing membership, committed focus, table or details. Pointer leave,
+geometry changes and actual resize clear preview. A stationary click commits;
+movement beyond four pixels pans. Saved-point markers respect gaps and stages.
+
+Account lines are solid; active lines are stronger. Real Price draws one series
+per instrument/stage, with a solid dark active price and dashed context prices.
+Manual price focus preserves the active account; account activation restores
+automatic pairing. Left/Right chooses price only when enabled with choices and
+outside both horizontal table regions. Shift+Left/Right pans the focused chart;
+wheel/plus/minus zoom, Home/double-click reset. The Y axis is on the right.
+
+Physical Ctrl+Alt shortcuts work across keyboard layouts: E reveals/hides owner
+HO2, G toggles details/top, F toggles selected-route Single View, T toggles price,
+D clears selection, and Digit1 toggles only the hover table. Editable controls,
+composition, AltGraph and the modal retain their guards. Escape closes help first,
+otherwise exits Single View or clears preview. Shortcuts help contains focus and
+returns it to the invoking control.
 
 ## Schemas, determinism and publication
 

@@ -96,3 +96,80 @@ def adversarial(root, *, hidden_variant=0):
     writer.finish(dict(recipe='report-adversarial-v1'),dict(completedResults=3*len(rows)))
     return root
 
+
+def interactions(root, *, instruments=20):
+    """Small valid UI fixture: stage disagreement, SWAP collisions and card overflow.
+
+    Synthetic compact records only. Positive stored return with noObservedBars is
+    deliberately admitted by the existing schema; the UI must honor its status.
+    """
+    from data_provider.manifest import to_epoch_ms
+    from tools.pattern_lab.configuration_study.request import normalize_request, configurations
+    from tools.pattern_lab.configuration_study.artifacts import Writer, groups
+    from tools.pattern_lab.configuration_study.metrics import DAY, annualized
+    from ._configuration_capacity import request, unit
+    assert instruments >= 4
+    doc = request(2).document
+    doc['instruments'] = ['BYBIT_AAA-USDT-SWAP', 'OKX_AAA-USDT-SWAP',
+                          'OKX_BBB-USDT-SWAP', 'BYBIT_CCCUSDT'] + [
+                              f'OKX_T{i:02d}-USDT-SWAP' for i in range(instruments-4)]
+    doc['allocations'] = doc['allocations'][:4]
+    for i, allocation in enumerate(doc['allocations']):
+        allocation['timeframeMinutes'] = 45 if i < 2 else 90
+        allocation['allocationId'] = 'ui-'+str(i)
+    for stage, left, right in zip(doc['stages'], ['2020-01-01', '2020-04-01', '2020-07-01'],
+                                 ['2020-04-01', '2020-07-01', '2020-10-01']):
+        stage['startUtc'], stage['endUtc'] = left+'T00:00:00Z', right+'T00:00:00Z'
+        stage['protocol']['development'] = dict(start_utc=stage['startUtc'], end_utc=stage['endUtc'])
+        stage['protocol']['reserved']['start_utc'] = stage['endUtc']
+    normalized = normalize_request(doc); doc = normalized.document; rows = configurations(doc)
+    ordinal = {c['configurationId']: i for i, c in enumerate(rows)}
+    root.mkdir(parents=True, exist_ok=False)
+    writer = Writer(root, normalized, {'fixture': 'report-interactions-v1'}, synthetic=True)
+    for stage in doc['stages']:
+        start, end = (to_epoch_ms(stage[k], k) for k in ('startUtc', 'endUtc'))
+        def units(group):
+            for c in group:
+                n = ordinal[c['configurationId']]; case = n % 10; sid = stage['stageId']
+                u = unit(c, stage, n); m = u['metric']['metrics']; curve = u['curve']['curve']
+                pct = -2 if case == 0 and sid == 'HO2' or case == 3 and sid == 'IS' else 0 if case == 1 and sid == 'HO1' else 4+n/5
+                final = 10000*(1+pct/100); ret = 100*(final/10000-1)
+                m.update(finalCapital=final, netPnl=final-10000, grossPnl=final-10000+m['fees'], returnPct=ret)
+                m['annualizedProfitPct'], m['annualizedProfitStatus'], m['annualizedProfitShortSpan'] = annualized(ret, (end-start)/DAY)
+                curve['equityQ'][-1] = curve['balanceQ'][-1] = round(ret*100)
+                if case == 2 and sid == 'HO1' or case == 4 and sid == 'HO2':
+                    cov = m['coverage']; cov.update(observedBars=0, missingBars=cov['expectedBars'],
+                        missingHeadSlots=cov['expectedBars'], missingTailSlots=cov['expectedBars'],
+                        firstObservedOpenMs=None, lastObservedCloseMs=None)
+                    m.update(performanceStatus='noObservedBars', mtmMaxDdPct=None, balanceMaxDdPct=None,
+                        dailySharpe=None, dailySharpeStatus='tooFewObservations', dailySharpeObservations=0,
+                        dailySharpeActiveDays=0, annualizedProfitPct=None, annualizedProfitStatus='noObservedBars')
+                    curve.update(timeMs=[start], equityQ=[0], balanceQ=[0], cashGaps=[],
+                                 status='noObservedBars', endpoint='unavailable')
+                yield u
+        for (instrument, tf), group in groups(rows):
+            writer.group(stage['stageId'], instrument, tf, units(group))
+    for j, instrument in enumerate(doc['instruments']):
+        for stage in sorted(doc['stages'], key=lambda s:s['stageId']):
+            start, end = (to_epoch_ms(stage[k], k) for k in ('startUtc', 'endUtc'))
+            times = list(range(start, end, DAY))+[end]
+            values = [round(i*(j+1)*4) for i in range(len(times))]
+            values[10] = None
+            writer.price(dict(instrumentId=instrument, stageId=stage['stageId'], price=dict(
+                curveVersion='configuration-curves.1', valueScale=100, status='available', timeMs=times,
+                priceQ=values, anchorPrice=100., anchorTimeMs=start, lastObservedTimeMs=end,
+                coverageGaps=[dict(startMs=times[10], endMs=times[11])], sourceFingerprint=None)))
+    writer.finish(dict(recipe='report-interactions-v1'), dict(completedResults=3*len(rows)))
+    return root
+
+
+def interaction_annotations(metadata):
+    """All except the final reference-only row are supplied IS finalists."""
+    rows = metadata['configurations']
+    return dict(schema='pattern-lab.configuration-annotations.v1',
+        specificationIdentity=metadata['identities']['specification'], annotations=[dict(
+            instrumentId=c['instrumentId'], allocationId=c['allocationId'],
+            role='reference' if i == len(rows)-1 else 'return' if i % 2 else 'stability',
+            selectedFromStage='IS', methodId='synthetic-ui',
+            methodDescription='Artificial UI annotations, no research selection claim.') for i, c in enumerate(rows)])
+

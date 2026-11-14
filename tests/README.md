@@ -18,6 +18,17 @@ Linux review fails when Node is absent. Existing Web Crypto is preserved on Node
 versions exposing a getter; the fallback is defined only when absent. Node checks
 do not substitute for a real browser.
 
+The separate maintained `configuration_report_interactions.cjs` harness executes
+the actual embedded core/report scripts with a small DOM shim. Its pytest caller
+uses synthetic owner, public and unannotated reports with twenty instruments,
+multiple timeframes, symbol collisions and deliberately different IS/HO1/HO2
+outcomes/statuses. Checks cover chart/table independence, finalist scope,
+availability, Save filtered above the limit/in Single View then Reveal with a
+real nonpositive-HO2 row, hidden-stage races, route ends, swatches, membership,
+empty controls and full instrument search. The fixture has an always-running
+Python discrimination test. The UI and decoder Node gates are separate; neither
+exact-bundle decoder checks nor a browser shim run certify native Node execution.
+
 Use `tools/run_tests.py` with external storage, these three modules, the four
 configuration-study modules below and `test_pattern_lab_cli.py`. The documented
 pre-existing import-isolation failure is explicitly deselected in this report
@@ -27,12 +38,20 @@ small two-worker check. No full preservation/UAC gate is assigned to this render
 `_configuration_report_browser.py` drives installed Chrome via trusted CDP mouse/
 key input, with configurable executable and task-owned external profile. It
 retains Chrome's sandbox. Real-browser delivery checks include file:// CSP,
-Crypto/gzip, all revision 09 gestures at 1440/1920x1080, hidden-stage isolation,
+Crypto/gzip, gestures at 1440/1920x1080, hidden-stage isolation,
 async races, metrics/status mapping, gaps, off-screen selection and screenshots.
 The unchanged `_configuration_capacity.py` recipe drives three-sample build/open
 and 20-action measurements. Record process/heap/cache memory separately; no timing
 assertions belong in ordinary CI. Exact saved Windows bundles and output hashes
 are additional cross-host inputs, never dependencies of tracked CI tests.
+T02 adds default-scroll toolbar checks with twenty instruments at 1024/1440/1920,
+native horizontal scrolling in both table regions, trusted checkbox click/Space,
+layout-independent physical shortcuts, hover/marker/gap/style checks and stationary
+resize invalidation. Native CDP key delivery includes Windows virtual key codes
+so browser default actions execute. This browser evidence is source-bound and
+reviewed separately when Linux has no browser. T02 uses one bounded capacity smoke
+with the unchanged recipe, not a new three-sample certification. Actual public
+GEX020 previews are inspectable; actual owner assembly is metadata/hash-only.
 
 ## Compact configuration studies
 

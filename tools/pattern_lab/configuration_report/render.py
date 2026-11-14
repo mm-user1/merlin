@@ -11,7 +11,7 @@ from ..configuration_study.metrics import month_equivalents
 from data_provider.manifest import to_epoch_ms
 from .model import canonical, presentation_options
 
-VERSION = 'configuration-report.2'
+VERSION = 'configuration-report.3'
 ASSETS = Path(__file__).parent
 SOURCES = ('__init__.py', 'core.js', 'model.py', 'render.py', 'report.css', 'report.js', 'template.html')
 MAX_HTML = 256 * 1024 * 1024
