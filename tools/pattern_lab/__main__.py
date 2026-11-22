@@ -339,6 +339,66 @@ def _emit(payload) -> None:
     sys.stdout.write(pack_manifest.dumps_json(payload) + "\n")
 
 
+def _strategy_screen_report_command(args):
+    """Generation and bounded notification have separate dispositions."""
+    import os
+    from .strategy_screen_report import render_strategy_screen_report
+    from .strategy_screen_report.render import (
+        FAILURE, INTERRUPTED, UNCERTAIN, PublicationUnknown, PublicationInterrupted,
+    )
+
+    def discard_buffer(stream):
+        # Prevent buffered shutdown from retrying a broken pipe (exit 120).
+        # Only this command's failed stream is affected; no retry on that pipe.
+        try:
+            with open(os.devnull, 'wb') as sink:
+                os.dup2(sink.fileno(), stream.fileno())
+        except (Exception, KeyboardInterrupt):
+            pass
+
+    def diagnostic(message):
+        try:
+            sys.stderr.write('pattern-lab: ' + message + '\n')
+            sys.stderr.flush()
+        except (Exception, KeyboardInterrupt):
+            discard_buffer(sys.stderr)
+
+    code = EXIT_OK; message = None; unknown = False
+    try:
+        pack_data.require_pyarrow()
+        path = render_strategy_screen_report(args.run_root, output_root=args.output_root,
+            presentation=args.presentation, export_view_data=args.export_view_data)
+    except PublicationInterrupted:
+        code = EXIT_INTERRUPTED; message = UNCERTAIN; unknown = True
+    except PublicationUnknown:
+        code = EXIT_ERROR; message = UNCERTAIN; unknown = True
+    except KeyboardInterrupt:
+        code = EXIT_INTERRUPTED; message = INTERRUPTED
+    except Exception:
+        code = EXIT_ERROR; message = FAILURE
+    if code == EXIT_OK:
+        payload = dict(status='complete', command=args.command, report=str(path))
+    else:
+        payload = dict(status='interrupted' if code == EXIT_INTERRUPTED else 'failed',
+            command=args.command, error_code='interrupted' if code == EXIT_INTERRUPTED else PatternLabDataError.error_code,
+            error=message)
+        if unknown:
+            payload['publicationState'] = 'unknown'
+    try:
+        _emit(payload)
+        sys.stdout.flush()
+    except (Exception, KeyboardInterrupt) as notification:
+        if code == EXIT_OK:
+            interrupted = isinstance(notification, KeyboardInterrupt)
+            code = EXIT_INTERRUPTED if interrupted else EXIT_ERROR
+            message = ('Strategy Screen report was published; completion notification '
+                       + ('was interrupted.' if interrupted else 'failed.'))
+        discard_buffer(sys.stdout)
+    if message is not None:
+        diagnostic(message)
+    return code
+
+
 def _http_options(args: argparse.Namespace) -> dict:
     return {
         "okx_rps": args.okx_rps,
@@ -443,12 +503,6 @@ def _run(args: argparse.Namespace) -> int:
             timeframe_minutes=args.timeframe_minutes,
         )
         _emit(pack_data.slice_metadata(loaded))
-        return EXIT_OK
-    if args.command == "strategy-screen-report":
-        from .strategy_screen_report import render_strategy_screen_report
-        path = render_strategy_screen_report(args.run_root, output_root=args.output_root,
-            presentation=args.presentation, export_view_data=args.export_view_data)
-        _emit({"status": "complete", "command": args.command, "report": str(path)})
         return EXIT_OK
     if args.command in SCREEN_COMMANDS:
         from .strategy_screen import run_strategy_screen, verify_strategy_screen, analyze_strategy_screen
@@ -590,14 +644,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     command = getattr(args, "command", "")
+    if command == "strategy-screen-report":
+        return _strategy_screen_report_command(args)
     try:
         return _run(args)
     except KeyboardInterrupt:
-        if command == "strategy-screen-report":
-            message = "Strategy Screen report generation was interrupted; no completed report was published."
-            _emit({"status": "interrupted", "command": command, "error_code": "interrupted", "error": message})
-            print("pattern-lab: " + message, file=sys.stderr)
-            return EXIT_INTERRUPTED
         if command == "configuration-report":
             _emit({"status": "interrupted", "command": command, "error_code": "interrupted",
                    "error": "Configuration report generation was interrupted; no completed report was published."})

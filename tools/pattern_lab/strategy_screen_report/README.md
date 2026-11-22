@@ -111,6 +111,10 @@ inclusive/right exclusive, except the final right edge. Zero occupies a nonnegat
 bin. Empty data shows N/A/n=0; all-zero has at least [0,step]. Extreme representable
 ranges use occupied sparse bins at true positions with bounded ticks; unrepresentable
 geometry is refused, never clipped or coarsened.
+Membership compares the actual indexed binary64 boundaries, including adjacent
+representable observations. Both languages use `lo + i * step` for each edge;
+neighboring intervals share exactly the same boundary. Subnormal negative values
+extend the domain below zero rather than disappearing through division underflow.
 
 Monthly contributions and cumulative paths have independent availability. Missing
 prefixes break cumulative paths without suppressing later exact contributions.
@@ -130,6 +134,13 @@ state, adaptive earlier-return hues and independent viewport/reset controls.
 A matrix selection presets chart filters in one direction; chart changes never
 alter aggregate scopes. Hover/pin, keyboard, wheel zoom and drag pan use a cached
 base canvas and separate overlay, without idle polling or a line-count cap.
+Scatter axes include the criteria even without classifiable points. Inspected
+earlier/recent metrics use their own availability, with reasons, account coverage
+and effective trade minimum. Evidence labels distinguish verified native execution,
+compact-only fixtures and explicitly identified legacy analytical previews.
+Matrix arrows follow rendered row/column coordinates, skipping holes and stopping
+at boundaries within the same matrix. Distribution metric changes retain focus and
+the individual chart viewport without scrolling.
 
 Output must be new or empty, disjoint in both directions from input and any
 presentation path, and outside protected src/data/tests trees. Components are
@@ -140,11 +151,27 @@ or dangling. Siblings are permitted.
 
 Inputs/options are validated before creating output parents. Unique temporary
 files are checked and destinations claimed exclusively. report.json is published
-last and is the completion point. Handled failures clean only owned files and
-new empty directories; competing files and pre-existing empty roots survive.
+last and is the completion point. A successful final replacement confirms publication.
+If that call raises, one bounded reconciliation distinguishes the exact receipt
+from the intact owned empty claim. The former confirms success; the latter permits
+cleanup of owned incomplete files and new empty directories. Competing files and
+pre-existing empty roots survive. An inconclusive or interrupted read preserves
+output for inspection and reports unknown publication; retrying into that nonempty
+directory is refused. No read failure can prove that a report was not published.
 This is not a crash-atomic filesystem snapshot or an adversarial concurrency claim.
 Public errors expose a fixed message without private cause/context; interrupts
-remain KeyboardInterrupt. CLI failure/interruption use exits 2/130 and fixed JSON.
+remain fresh KeyboardInterrupt instances. Unknown publication uses the fixed message
+`Strategy Screen report publication could not be confirmed; output was preserved for inspection.`
+CLI failure/interruption use exits 2/130 and fixed JSON; uncertainty also includes
+`publicationState=unknown`. Either replacement or reconciliation interruption selects
+the interrupted outcome. Normal publication still returns the HTML path and exit 0.
+
+CLI success notification includes stdout write and flush. A notification failure
+or interrupt preserves the report, returns 2/130 and attempts one fixed stderr
+diagnostic stating that publication succeeded but notification failed/interrupted.
+It never attempts another stdout payload. Secondary diagnostic failures preserve
+the determined disposition; a broken buffered pipe cannot change it to shutdown
+exit 120. These semantics apply only to the Strategy Screen report command.
 
 Receipt schema is `pattern-lab.strategy-screen-report.v1`; view schema is
 `pattern-lab.strategy-screen-report-view.v1`. Receipts bind the input completion
@@ -156,7 +183,8 @@ verification or authenticity against coherent rewriting.
 The explicit dependency list is `render.DEPENDENCIES`: native reader/facts/analytics/
 request, configuration validation/request/codec/curves/metrics, account contracts/
 request/common/containers/codec/metrics, study contracts/rules and provider data/
-manifest helpers, plus all report Python/JS/CSS/template files. Source digests
+manifest helpers, account preparation, auxiliary request/features/model and study
+spec validators, plus all report Python/JS/CSS/template files. Source digests
 normalize CRLF to LF. Deterministic files contain no clock, host or absolute paths.
 
 Canonical script-safe JSON uses sorted compact ASCII keys/values, finite numbers
@@ -174,11 +202,20 @@ four Configuration Study, three Configuration Report and CLI modules. The sole
 assigned historical deselection is the CLI pyarrow import-isolation case.
 No full suite or Windows elevation is implied by this renderer.
 
-Real file:// Chrome layout/focus and three complete 3,200-setting build/open samples
+Real file:// Chrome layout/focus and complete 3,200-setting build/open samples
 are separate evidence; Node shims do not certify browser layout. The bounded
 synthetic recipe is `tests.pattern_lab._strategy_screen_report_helpers.compact_report_input`
 with capacity=True, per_cell=200 and missing=True: 4 instruments × 4 TFs × 200
 settings, 6,400 results and 12+10 months. It is not a market experiment.
 Owner Firefox visual/focus review remains separate. Engineering tests do not
 establish a trading edge.
+
+The bounded correctness follow-up uses stored ordinary/auxiliary compact inputs,
+one regenerated legacy preview and one complete capacity build/open per role.
+The versioned browser helper measures 20 prescribed gesture epochs after draining
+pending work: sum actual chart callback CPU durations once per callback, including
+combined base/overlay work and hit testing. Overlay-only gestures never reuse a
+previous draw duration. No-redraw epochs report zero with zero callback count.
+Raw counts/durations, linear p95, settling wall time and browser/heap memory are
+separate evidence; callback CPU is not GPU/compositor completion.
 

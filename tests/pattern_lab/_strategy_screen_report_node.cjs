@@ -55,3 +55,58 @@ assert.ok(monthly['month-detail'].includes('distribution'));
 console.log(JSON.stringify({ok:true,node:process.version,scopes:Object.keys(data.scopes).length,settings:data.detail.settings.length,
  checks:['actual shipped scripts','all scope views','native metric deltas','matrix transitions','low activity independent of classification','gap segments','exact linked endpoints','hues','stable ties','monthly inspector']}));
 
+
+// F3: shipped interval labels must share the indexed binary64 boundary.
+{
+ const i=2**51+1,lo=0,step=10,hi=(i+5)*step;
+ const h={lo,hi,step,bins:i+5,indices:[i,i+1],counts:[1,1],n:2};
+ const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{distributions:{returnPct:h}}]))}}};
+ const markup=screen.views(d,{...screen.initial(),fieldView:'distribution',distribution:'returnPct'},['field-content'])['field-content'];
+ const intervals=[...markup.matchAll(/aria-label="1 settings in ([^"]+)"/g)].slice(0,2).map(m=>m[1].replaceAll(',','').replace('%','').split(' to ').map(Number));
+ assert.equal(intervals[0][1],intervals[1][0]);
+ const value=22517998136852496;
+ assert.ok(intervals[0][0]<=value&&value<intervals[0][1]);
+ assert.deepEqual(intervals,[[lo+i*step,lo+(i+1)*step],[lo+(i+1)*step,lo+(i+2)*step]]);
+}
+// F4: identity, never presentation text or the compact marker alone, owns wording.
+for(const [schema,implementation,synthetic,label] of [
+ ['pattern-lab.strategy-screen.v1',{native:true},false,'Native account evidence'],
+ ['pattern-lab.strategy-screen.v1',{fixture:true},true,'Synthetic compact fixture; no native execution'],
+ ['gex021.exact-facts.v1',{legacyFixture:true},false,'Legacy analytical evidence; no native completion seal']]){
+ const d={...data,synthetic,meta:{...data.meta,nativeSchema:schema,nativeImplementation:implementation,subtitle:'Native account evidence'}};
+ const markup=screen.views(d,screen.initial(),['definitions']).definitions;
+ assert.ok(markup.includes(label));if(schema.startsWith('gex'))assert.ok(!markup.includes('Native account evidence'));
+}
+// F5: independently inspect coordinates, thresholds, counts and paired accessible fields.
+for(const threshold of [-10,-30,0,1e308])for(const count of [0,1]){
+ const d={...data,meta:{...data.meta,criteria:{...data.meta.criteria,annualizedProfitPct:threshold,mtmMaxDdPct:0}},detail:{...data.detail,settings:[]}};
+ if(count){
+  const s=structuredClone(data.detail.settings[0]);
+  for(const p of Object.values(s.periods))Object.assign(p,{annualizedProfitPct:threshold,mtmMaxDdPct:0,classification:{valid:true,lowActivity:false}});
+  d.detail.settings=[s];
+ }
+ const markup=screen.views(d,screen.initial(),['field-content'])['field-content'];
+ assert.ok(!/NaN|Infinity/.test(markup));
+ assert.equal([...markup.matchAll(/<circle /g)].length,count*2);
+ assert.equal([...markup.matchAll(new RegExp(`${count} shown / ${count} selected.*?0 unavailable`,'g'))].length,2);
+ for(const m of markup.matchAll(/<path d="M60,([^H]+)H([^V]+)V24"/g)){
+  assert.ok(+m[1]>=24&&+m[1]<=317);assert.ok(+m[2]>=60&&+m[2]<=740);
+ }
+ for(const m of markup.matchAll(/<line class="plot-grid" x1="([^"]+)" x2="([^"]+)" y1="([^"]+)" y2="([^"]+)"/g)){
+  assert.ok(+m[1]>=60&&+m[2]<=740);assert.ok(+m[3]>=24-1e-10&&+m[4]<=317+1e-10);
+ }
+ for(const m of markup.matchAll(/cx="([^"]+)" cy="([^"]+)"/g)){assert.ok(+m[1]>=60&&+m[1]<=740);assert.ok(+m[2]>=24&&+m[2]<=317);}
+ if(!count)assert.ok(markup.includes('No settings'));
+}
+for(const unavailable of ['earlier','recent']){
+ const s=structuredClone(data.detail.settings[0]),other=unavailable==='earlier'?'recent':'earlier';
+ for(const p of Object.values(s.periods))Object.assign(p,{annualizedProfitPct:0,mtmMaxDdPct:0,trades:0,classification:{valid:true,lowActivity:true},coverageComplete:true,effectiveCriteria:{minClosedTrades:37},availability:{annualizedProfitPct:{available:true},mtmMaxDdPct:{available:true},trades:{available:true}}});
+ s.periods[unavailable].annualizedProfitPct=null;s.periods[unavailable].classification.valid=false;
+ s.periods[unavailable].availability.annualizedProfitPct={available:false,reason:'shortSpan'};
+ const d={...data,detail:{...data.detail,settings:[s]}};
+ const markup=screen.views(d,screen.initial(),['field-content'])['field-content'];
+ const points=[...markup.matchAll(/<circle[^>]+aria-label="([^"]+)"/g)];assert.equal(points.length,1);
+ assert.ok(points[0][0].includes('tabindex="0"'));
+ for(const text of ['N/A (shortSpan)','MTM DD 0.0%','0 trades','Coverage complete','Trade minimum 37'])assert.ok(points[0][1].includes(text),text);
+}
+console.log(JSON.stringify({ok:true,corrections:['F3 indexed sparse boundaries','F4 three evidence identities','F5 empty/extreme coordinates and paired accessible availability']}));

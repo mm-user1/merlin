@@ -10,6 +10,9 @@ Rebuild a standalone two-period HTML with the separate
 `strategy-screen-report --run-root SCREEN --output-root NEW_REPORT`, optionally
 `--presentation FILE --export-view-data`. It fully verifies compact evidence and
 uses saved statistics; it does not read market data or execute accounts.
+The report preserves uncertain final publication for inspection. Confirmed
+publication and CLI notification have separate outcomes; see the report guide
+for fixed diagnostics, exit codes and receipt attribution.
 
 For native all-configuration IS/HO1/HO2 execution and offline compact results,
 see [configuration studies](configuration_study/README.md). This backend retains

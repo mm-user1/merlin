@@ -9,9 +9,11 @@ globalThis.SSRDetails = function(h){
   const plotted=p=>!!p?.classification?.valid&&finite(p.annualizedProfitPct)&&finite(p.mtmMaxDdPct);
   function fieldLimits(data){
     const facts=data.detail.settings.flatMap(s=>Object.values(s.periods)).filter(plotted),c=data.meta.criteria;
-    return {xmax:Math.ceil(Math.max(c.mtmMaxDdPct+5,...facts.map(p=>p.mtmMaxDdPct))/10)*10,
-      lo:Math.floor(Math.min(0,...facts.map(p=>p.annualizedProfitPct))/10)*10,
-      hi:Math.ceil(Math.max(c.annualizedProfitPct+10,...facts.map(p=>p.annualizedProfitPct))/10)*10};
+    const low=Math.min(0,c.annualizedProfitPct,...facts.map(p=>p.annualizedProfitPct)),
+      high=Math.max(0,c.annualizedProfitPct,...facts.map(p=>p.annualizedProfitPct)),
+      right=Math.max(10,c.mtmMaxDdPct,...facts.map(p=>p.mtmMaxDdPct));
+    const rounded=(v,up)=>{const r=(up?Math.ceil(v/10):Math.floor(v/10))*10;return finite(r)?(up?Math.max(r,v):Math.min(r,v)):v;};
+    return {xmax:rounded(right,true),lo:rounded(low,false),hi:high===low?10:rounded(high,true)};
   }
   function fieldCohort(data,state){
     const earlier=data.meta.periods[0],scope=data.scopes[state.scope],group=state.fieldGroup||'all';
@@ -36,20 +38,23 @@ globalThis.SSRDetails = function(h){
     const scope=data.scopes[state.scope],earlier=data.meta.periods[0],group=state.fieldGroup||'all';
     const selected=fieldCohort(data,state),total=data.detail.settings.filter(s=>scope.cells.includes(s.cell)).length;
     const c=data.meta.criteria,{xmax,lo,hi}=fieldLimits(data);
-    const W=760,H=365,L=60,R=20,T=24,B=48,x=v=>L+v/xmax*(W-L-R),y=v=>T+(hi-v)/(hi-lo)*(H-T-B);
+    const magnitude=Math.max(Math.abs(lo),Math.abs(hi),1),span=hi/magnitude-lo/magnitude;
+    const W=760,H=365,L=60,R=20,T=24,B=48,x=v=>L+v/xmax*(W-L-R),y=v=>T+(hi/magnitude-v/magnitude)/span*(H-T-B);
     const colors={interesting:'#176a62',profitable:'#75a99b',loss:'#b4493f'};
     const filters=[...categories.slice(1),['lowActivity',data.meta.activityLabel]];
     const controls=`<div class="field-key field-filters" role="group" aria-label="Settings group in the earlier period"><span>Group in ${esc(earlier.label)}</span>${filters.map(([key,label])=>`<button data-field-group="${key}" aria-pressed="${group===key}"><i ${key==='lowActivity'?'class="hollow"':`style="background:${colors[key]}"`}></i>${label}</button>`).join('')}${group!=='all'?'<button data-field-group="all">All</button>':''}<label class="field-color-toggle"><input type="checkbox" id="same-field-colors" ${state.sameFieldColors?'checked':''}> Use ${esc(earlier.short)} colors</label></div>`;
     return `${controls}<div class="scope-plots">${data.meta.periods.map(per=>{
       const rows=selected.filter(s=>plotted(s.periods[per.id]));
       const axes=Array.from({length:6},(_,i)=>{
-        const xv=xmax*i/5,yv=lo+(hi-lo)*i/5;
+        const f=i/5,xv=xmax*f,yv=lo*(1-f)+hi*f;
         return `<line class="plot-grid" x1="${x(xv)}" x2="${x(xv)}" y1="${T}" y2="${H-B}"/><text x="${x(xv)}" y="${H-B+20}" text-anchor="middle">${num(xv,0)}%</text><line class="plot-grid" x1="${L}" x2="${W-R}" y1="${y(yv)}" y2="${y(yv)}"/><text x="${L-9}" y="${y(yv)+4}" text-anchor="end">${num(yv,0)}%</text>`;
       }).join('');
       const points=rows.map(s=>{
         const p=s.periods[per.id],colorPeriod=state.sameFieldColors?s.periods[earlier.id]:p,color=colors[category(colorPeriod)]||'#808b88';
         const label=`${data.scopes[s.cell].label} · ${s.label}`,other=data.meta.periods.find(q=>q.id!==per.id),op=s.periods[other.id];
-        const tip=`${label}\n${per.label}: Ann. return ${pct(p.annualizedProfitPct,true)} · MTM DD ${pct(p.mtmMaxDdPct)} · ${num(p.trades,0)} trades\n${other.label}: ${op?.classification.valid?`Ann. return ${pct(op.annualizedProfitPct,true)} · MTM DD ${pct(op.mtmMaxDdPct)}`:'N/A'}`;
+        const metric=(q,k,format)=>q?.availability?.[k]?.available?format(q[k]):`N/A (${q?.availability?.[k]?.reason||'noAvailableValue'})`;
+        const account=q=>`Ann. return ${metric(q,'annualizedProfitPct',v=>pct(v,true))} · MTM DD ${metric(q,'mtmMaxDdPct',pct)} · ${metric(q,'trades',v=>num(v,0))} trades · Coverage ${q?.coverageComplete?'complete':'incomplete'} · Trade minimum ${num(q?.effectiveCriteria?.minClosedTrades,0)}`;
+        const tip=`${label}\n${per.label}: ${account(p)}\n${other.label}: ${account(op)}`;
         return `<circle class="setting-point" tabindex="0" role="img" data-setting="${esc(s.id)}" data-tip="${esc(tip)}" aria-label="${esc(tip)}" cx="${x(p.mtmMaxDdPct)}" cy="${y(p.annualizedProfitPct)}" r="4.5" fill="${p.classification.lowActivity===true?'white':color}" stroke="${color}" stroke-width="1.5"/>`;
       }).join('');
       return `<div><div class="plot-title"><strong>${esc(per.label)}</strong><small>${rows.length} shown / ${selected.length} selected${group!=='all'?` · ${total-selected.length} filtered out`:''} · ${selected.length-rows.length} unavailable</small></div><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(per.label)}: annualized return versus MTM drawdown"><rect x="${L}" y="${T}" width="${x(c.mtmMaxDdPct)-L}" height="${y(c.annualizedProfitPct)-T}" fill="#edf5f1"/>${axes}<line class="plot-zero" x1="${L}" x2="${W-R}" y1="${y(0)}" y2="${y(0)}"/><path d="M${L},${y(c.annualizedProfitPct)}H${x(c.mtmMaxDdPct)}V${T}" fill="none" stroke="#7da69b" stroke-dasharray="4 4"/><text x="${L+8}" y="${T+14}">Return ≥ ${c.annualizedProfitPct}% · DD ≤ ${c.mtmMaxDdPct}%</text>${points}${!rows.length?`<text x="${W/2}" y="${H/2}" text-anchor="middle">${selected.length?'No available results in this period':'No settings in this earlier-period group'}</text>`:''}<text x="${W/2}" y="${H-5}" text-anchor="middle">MTM drawdown %</text><text x="${L}" y="14">Annualized return %</text></svg></div>`;

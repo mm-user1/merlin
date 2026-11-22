@@ -163,13 +163,17 @@ def test_genuine_full_february_zero_trades_retains_low_activity(tmp_path):
     r=run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=tmp_path/'screen')
     v=build_view(r,presentation_options(None,r.metadata))
     p=v['detail']['settings'][0]['periods']['earlier'];b=v['scopes']['all']['periods']['earlier']
-    assert p['returnPct']==p['trades']==0 and p['coverageComplete']
+    assert p['returnPct']==p['trades']==p['mtmMaxDdPct']==0 and p['coverageComplete']
     assert p['annualizedProfitPct'] is None and p['classification']['lowActivity'] is True
     assert p['classification']['valid'] is False
     assert b['profitable']['pct']==0 and b['profitable']['missing']==1 and b['profitable']['available']==0
     assert b['failures']['activity']==0 and b['lowActivity']==1
     assert b['distributions']['returnPct']['counts']==[1]
     assert b['distributions']['annualizedProfitPct']['n']==0
+    html=render_strategy_screen_report(r.root,output_root=tmp_path/'february-report',export_view_data=True,
+        presentation=dict(schema=PRESENTATION,artifactIdentity=r.metadata['artifactIdentity'],
+                          subtitle='Artificial-price native execution fixture; not market research'))
+    assert json.loads((html.parent/'view-data.json').read_bytes())['detail']['settings'][0]['periods']['earlier']==p
 
 
 @pytest.mark.parametrize('exception',[RuntimeError,KeyboardInterrupt])
@@ -211,3 +215,150 @@ def test_dangling_ancestor_marker_is_not_followed(reader,tmp_path,monkeypatch):
     assert not (parent/'out').exists()
 
 
+
+@pytest.mark.parametrize('installed,observation,replace_kind,read_kind', [
+    (installed, observation, replace_kind, read_kind)
+    for installed in (False, True) for observation in ('readable','denied','interrupted')
+    for replace_kind in (OSError, KeyboardInterrupt)
+    for read_kind in ([KeyboardInterrupt] if observation=='interrupted' else [PermissionError])
+])
+def test_publication_outcome_controls(reader,tmp_path,monkeypatch,installed,observation,replace_kind,read_kind):
+    out=tmp_path/'out';replace=render.os.replace;open_file=Path.open;attempted=False
+    def fault(source,dest):
+        nonlocal attempted
+        if dest.name!='report.json':return replace(source,dest)
+        attempted=True
+        if installed:replace(source,dest)
+        raise replace_kind('PRIVATE_REPLACE')
+    def observe(path,*args,**kwargs):
+        if attempted and path==out/'report.json' and args==('rb',) and observation!='readable':
+            raise read_kind('PRIVATE_RECONCILE')
+        return open_file(path,*args,**kwargs)
+    with monkeypatch.context() as m:
+        m.setattr(render.os,'replace',fault);m.setattr(Path,'open',observe)
+        if installed and observation=='readable':
+            assert render_strategy_screen_report(reader.root,output_root=out)==out/'report.html'
+        else:
+            interrupted=replace_kind is KeyboardInterrupt or observation=='interrupted'
+            unknown=observation!='readable'
+            expected=KeyboardInterrupt if interrupted else PatternLabDataError
+            with pytest.raises(expected) as caught:render_strategy_screen_report(reader.root,output_root=out)
+            assert caught.value.args==(render.UNCERTAIN if unknown else render.INTERRUPTED if interrupted else render.FAILURE,)
+            assert caught.value.__cause__ is caught.value.__context__ is None
+            assert isinstance(caught.value,(render.PublicationUnknown,render.PublicationInterrupted))==unknown
+    if observation!='readable' or installed:
+        assert (out/'report.html').exists()
+        raw=(out/'report.json').read_bytes()
+        if installed:assert json.loads(raw)['html']['sha256']==render.sha((out/'report.html').read_bytes())
+        else:assert raw==b''
+    else:assert not out.exists()
+
+
+@pytest.mark.parametrize('name',['report.html','view-data.json','report.json'])
+@pytest.mark.parametrize('kind',[OSError,KeyboardInterrupt])
+def test_before_replace_clean_and_sanitized(reader,tmp_path,monkeypatch,name,kind):
+    out=tmp_path/'out';out.mkdir();replace=render.os.replace
+    def fault(source,dest):
+        if dest.name==name:raise kind('PRIVATE_BEFORE_REPLACE')
+        return replace(source,dest)
+    monkeypatch.setattr(render.os,'replace',fault)
+    with pytest.raises(KeyboardInterrupt if kind is KeyboardInterrupt else PatternLabDataError) as caught:
+        render_strategy_screen_report(reader.root,output_root=out,export_view_data=True)
+    assert caught.value.args==(render.INTERRUPTED if kind is KeyboardInterrupt else render.FAILURE,)
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert out.is_dir() and not list(out.iterdir())
+
+
+def test_matching_unowned_receipt_is_not_completion(reader,tmp_path,monkeypatch):
+    original=render.publish_file;out=tmp_path/'out'
+    def collide(source,dest,owned):
+        if dest.name=='report.json':dest.write_bytes(source.read_bytes())
+        original(source,dest,owned)
+    monkeypatch.setattr(render,'publish_file',collide)
+    with pytest.raises(PatternLabDataError,match='generation failed'):
+        render_strategy_screen_report(reader.root,output_root=out)
+    assert list(out.iterdir())==[out/'report.json']
+    assert json.loads((out/'report.json').read_bytes())['schema']=='pattern-lab.strategy-screen-report.v1'
+
+
+@pytest.mark.parametrize('phase',['write','partial','flush','emit'])
+@pytest.mark.parametrize('kind',[OSError,KeyboardInterrupt])
+@pytest.mark.parametrize('stderr_fault',[None,'write','flush'])
+def test_cli_published_notification_boundary(reader,tmp_path,monkeypatch,phase,kind,stderr_fault):
+    import io
+    from tools.pattern_lab import __main__ as cli
+    class Stream(io.StringIO):
+        def __init__(self,phase):super().__init__();self.phase=phase;self.calls=0
+        def write(self,s):
+            self.calls+=1
+            if self.phase=='partial':super().write(s[:5])
+            if self.phase in ('write','partial'):raise kind('PRIVATE_STREAM')
+            return super().write(s)
+        def flush(self):
+            if self.phase=='flush':raise kind('PRIVATE_FLUSH')
+    stdout=Stream(phase);stderr=Stream(stderr_fault);out=tmp_path/'out'
+    with monkeypatch.context() as m:
+        m.setattr(sys,'stdout',stdout);m.setattr(sys,'stderr',stderr)
+        if phase=='emit':
+            def fail(payload):raise kind('PRIVATE_EMIT')
+            m.setattr(cli,'_emit',fail)
+        assert cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(out)])==(130 if kind is KeyboardInterrupt else 2)
+    receipt=json.loads((out/'report.json').read_bytes())
+    assert receipt['html']['sha256']==render.sha((out/'report.html').read_bytes())
+    assert stderr.calls==1 and stdout.calls<=1
+    if stderr_fault!='write':
+        assert 'was published; completion notification' in stderr.getvalue()
+        assert 'PRIVATE' not in stderr.getvalue()
+
+
+@pytest.mark.parametrize('unknown,interrupted',[(False,False),(False,True),(True,False),(True,True)])
+def test_cli_failed_notification_preserves_generation_disposition(reader,tmp_path,monkeypatch,unknown,interrupted):
+    import io
+    from tools.pattern_lab import __main__ as cli
+    import tools.pattern_lab.strategy_screen_report as package
+    kind=(render.PublicationInterrupted if interrupted else render.PublicationUnknown) if unknown else (KeyboardInterrupt if interrupted else PatternLabDataError)
+    def fail(*a,**k):raise kind('PRIVATE_GENERATION')
+    output=io.StringIO();error=io.StringIO()
+    with monkeypatch.context() as m:
+        m.setattr(package,'render_strategy_screen_report',fail);m.setattr(sys,'stdout',output);m.setattr(sys,'stderr',error)
+        assert cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(tmp_path/'out')])==(130 if interrupted else 2)
+    payload=json.loads(output.getvalue())
+    assert payload['status']==('interrupted' if interrupted else 'failed')
+    assert payload.get('publicationState')==('unknown' if unknown else None)
+    assert payload['error']==(render.UNCERTAIN if unknown else render.INTERRUPTED if interrupted else render.FAILURE)
+    class Broken(io.StringIO):
+        def write(self,s):raise KeyboardInterrupt('PRIVATE_SECONDARY')
+        def flush(self):raise OSError('PRIVATE_FLUSH')
+    with monkeypatch.context() as m:
+        m.setattr(package,'render_strategy_screen_report',fail);m.setattr(sys,'stdout',Broken());m.setattr(sys,'stderr',Broken())
+        assert cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(tmp_path/'out')])==(130 if interrupted else 2)
+
+
+def test_actual_buffered_closed_pipe_preserves_published_report(reader,tmp_path):
+    import os,subprocess
+    out=tmp_path/'out';read_fd,write_fd=os.pipe();os.close(read_fd)
+    env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1');env.pop('PYTHONUNBUFFERED',None)
+    try:
+        child=subprocess.run([sys.executable,'-B','-X','utf8','-m','tools.pattern_lab','strategy-screen-report',
+            '--run-root',str(reader.root),'--output-root',str(out)],stdout=write_fd,stderr=subprocess.PIPE,env=env,timeout=60)
+    finally:os.close(write_fd)
+    assert child.returncode==2,child.stderr
+    assert child.stderr.decode().strip()=='pattern-lab: Strategy Screen report was published; completion notification failed.'
+    receipt=json.loads((out/'report.json').read_bytes())
+    assert receipt['html']['sha256']==render.sha((out/'report.html').read_bytes())
+
+
+def test_current_validation_sources_and_change_sensitivity(reader,tmp_path,monkeypatch):
+    names=['accounts/preparation.py','auxiliary/request.py','auxiliary/features.py','auxiliary/model.py','study/spec.py']
+    original=render.sources()
+    for name in names:
+        key='tools/pattern_lab/'+name
+        assert original[key]==render.sha((render.REPO/key).read_bytes().replace(b'\r\n',b'\n'))
+    # Substitute a small source root, never mutate the protected real files.
+    copy=tmp_path/'source'
+    for name in original:
+        p=copy/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes((render.REPO/name).read_bytes())
+    monkeypatch.setattr(render,'REPO',copy);monkeypatch.setattr(render,'PACKAGE',copy/'tools/pattern_lab/strategy_screen_report')
+    for name in names:
+        key='tools/pattern_lab/'+name;p=copy/key;p.write_bytes(p.read_bytes()+b'\n# source attribution witness\n')
+        assert render.sources()[key]!=original[key]

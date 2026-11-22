@@ -112,7 +112,7 @@
     const x0=28,w=290,h=108,top=16,unit=metric==='monthlyContribution'?' pp':'%';
     const x=v=>x0+(v-d.lo)/(d.hi-d.lo)*w;
     const bars=d.counts.map((n,j)=>{
-      const i=d.indices[j],a=d.lo+i*d.step,b=a+d.step,width=w/d.bins;
+      const i=d.indices[j],a=d.lo+i*d.step,b=d.lo+(i+1)*d.step,width=w/d.bins;
       return `<rect tabindex="0" role="img" x="${x(a)}" y="${top+h-n/Math.max(1,maxCount)*h}" width="${Math.max(.01,width*.92)}" height="${n/Math.max(1,maxCount)*h}" fill="${b<=0?'#bc8a83':'#639d8f'}" data-tip="${esc(period)}&#10;${num(a)}${unit} to ${num(b)}${unit}${i===d.bins-1?' (inclusive)':' (upper exclusive)'}&#10;${n} settings" aria-label="${n} settings in ${num(a)} to ${num(b)}${unit}"/>`;
     }).join('');
     return `<svg viewBox="0 0 340 160" aria-label="${esc(period)} distribution"><line x1="${x0}" x2="${x0+w}" y1="${top+h}" y2="${top+h}" stroke="#cdd7d1"/><text x="2" y="${top+4}">${maxCount}</text><text x="9" y="${top+h}">0</text>${bars}<line x1="${x(0)}" x2="${x(0)}" y1="${top}" y2="${top+h}" stroke="#6b7f75" stroke-dasharray="2 3"/><text x="${x0}" y="148">${num(d.lo,0)}${unit}</text><text x="${x(0)}" y="148" text-anchor="middle">0${unit}</text><text x="${x0+w}" y="148" text-anchor="end">${num(d.hi,0)}${unit}</text></svg>`;
@@ -130,9 +130,15 @@
     const cells=w=>!w?'Not declared':`<b>${pct(w.medianReturnPct.value,true)}</b><small>Contribution ${pp(w.medianContributionPp.value)} · n=${w.medianContributionPp.n}<br>Positive ${ratio(w.profitable)} · ${pct(w.profitable.pct)}<br>Return available ${w.available}/${w.declared} · exact windows ${w.exactWindowAvailable}<br>Median trades ${num(w.medianTrades.value,1)} · n=${w.medianTrades.n}<br>${esc(w.reason||w.returnPct.reason||'')}</small>`;
     return `<table class="compare"><thead><tr><th>Continuous window</th>${data.meta.periods.map(p=>`<th>${esc(p.label)}</th>`).join('')}</tr></thead><tbody><tr><td>Latest three declared months</td>${data.meta.periods.map(p=>`<td><small>${esc(p.tail)}</small>${cells(s.periods[p.id].tail)}</td>`).join('')}</tr>${data.meta.segments.map(seg=>`<tr><td>${esc(seg.label)}</td>${data.meta.periods.map(p=>`<td>${cells(s.periods[p.id].segments[seg.key])}</td>`).join('')}</tr>`).join('')}<tr><td>New-only evidence<br>${esc(data.meta.previousReviewEndUtc||'No previous review cutoff')}</td>${data.meta.periods.map(p=>`<td>${cells(s.periods[p.id].newOnly)}</td>`).join('')}</tr></tbody></table><p class="note">Returns use window-opening equity; contributions use original period capital. Segments belong only to their declared period. No reset, annualization or new trade hurdle.</p>`;
   }
+  function evidenceLabel(data){
+    const m=data.meta;
+    if(m.nativeImplementation?.legacyFixture===true)return 'Legacy analytical evidence; no native completion seal';
+    if(m.nativeSchema==='pattern-lab.strategy-screen.v1'&&m.nativeImplementation)return data.synthetic?'Synthetic compact fixture; no native execution':'Native account evidence';
+    return 'Evidence identity unavailable';
+  }
   function definitions(data){
     const m=data.meta;
-    return `<div class="definitions-grid"><section><h3>Experiment & execution</h3><dl><dt>Periods</dt><dd>${m.periods.map(p=>`${esc(p.label)}: ${esc(p.start)} to ${esc(p.end)} (UTC, end exclusive) · ${p.months} months`).join('<br>')}</dd><dt>Markets</dt><dd>${m.tickers.map(esc).join(' · ')}; ${m.timeframes.map(tf).join(' / ')}</dd><dt>Criteria</dt><dd>Annualized return ≥ ${num(m.criteria.annualizedProfitPct)}%; MTM DD ≤ ${num(m.criteria.mtmMaxDdPct)}%. Trade minima by timeframe: ${Object.entries(m.tradeMinima).map(([t,v])=>`${tf(Number(t))}: ${v}`).join(' · ')}</dd><dt>Execution and costs</dt><dd>Independent accounts in each period. Each normalized recipe below records its actual capital, policy, costs and sources; settings may differ. Funding features are not cashflows; slippage is omitted.</dd><dt>Evidence</dt><dd>${esc(m.nativeSchema)} · ${data.synthetic?'Synthetic compact fixture; no native execution':'Native account evidence'}<br>${esc(m.limitation)}</dd></dl>${Object.entries(m.recipes).map(([id,r])=>`<details><summary>${esc(id)}</summary><pre>${esc(JSON.stringify(r.recipe,null,2))}</pre></details>`).join('')}</section><section><h3>Metrics & interpretation</h3><p>Breadth uses all declared settings and gives cells equal weight. Supporting counts are pooled; available and missing observations remain distinct. Medians pool eligible settings; n is the available count.</p><p>Success retained uses matched classifiable pairs and separate earlier-success and nonsuccess denominators. Its footer copies the saved retention difference. These are descriptive fractions, not probabilities of future success.</p><p>Monthly contributions use original period capital; cumulative observations are exact from-start month closes. Latest means the last three declared months without skipping missing evidence. Own/common best-month subtraction is saved arithmetic attribution, not a rerun.</p><p>Whole return distributions include only completed full-coverage settings eligible for the selected metric. Individual return ranking uses per-field availability. Low activity is known independently of classifiability. Failure reasons overlap; unknown is not failure.</p><p>Card colors use shared scales: shares red 0%, neutral 40–60%, green 100%; annualized return red −20%, neutral 0%, green +20%; DD neutral through 10%, red 60%; trades/month red 0, neutral 10–20, green 40. N/A is gray. Colors do not change classification.</p><p>Settings are correlated. Group summaries are not portfolios. Linked independent periods are illustrations, not continuous executions or validated trading edges.</p></section></div>`;
+    return `<div class="definitions-grid"><section><h3>Experiment & execution</h3><dl><dt>Periods</dt><dd>${m.periods.map(p=>`${esc(p.label)}: ${esc(p.start)} to ${esc(p.end)} (UTC, end exclusive) · ${p.months} months`).join('<br>')}</dd><dt>Markets</dt><dd>${m.tickers.map(esc).join(' · ')}; ${m.timeframes.map(tf).join(' / ')}</dd><dt>Criteria</dt><dd>Annualized return ≥ ${num(m.criteria.annualizedProfitPct)}%; MTM DD ≤ ${num(m.criteria.mtmMaxDdPct)}%. Trade minima by timeframe: ${Object.entries(m.tradeMinima).map(([t,v])=>`${tf(Number(t))}: ${v}`).join(' · ')}</dd><dt>Execution and costs</dt><dd>Independent accounts in each period. Each normalized recipe below records its actual capital, policy, costs and sources; settings may differ. Funding features are not cashflows; slippage is omitted.</dd><dt>Evidence</dt><dd>${esc(m.nativeSchema)} · ${evidenceLabel(data)}<br>${esc(m.limitation)}</dd></dl>${Object.entries(m.recipes).map(([id,r])=>`<details><summary>${esc(id)}</summary><pre>${esc(JSON.stringify(r.recipe,null,2))}</pre></details>`).join('')}</section><section><h3>Metrics & interpretation</h3><p>Breadth uses all declared settings and gives cells equal weight. Supporting counts are pooled; available and missing observations remain distinct. Medians pool eligible settings; n is the available count.</p><p>Success retained uses matched classifiable pairs and separate earlier-success and nonsuccess denominators. Its footer copies the saved retention difference. These are descriptive fractions, not probabilities of future success.</p><p>Monthly contributions use original period capital; cumulative observations are exact from-start month closes. Latest means the last three declared months without skipping missing evidence. Own/common best-month subtraction is saved arithmetic attribution, not a rerun.</p><p>Whole return distributions include only completed full-coverage settings eligible for the selected metric. Individual return ranking uses per-field availability. Low activity is known independently of classifiability. Failure reasons overlap; unknown is not failure.</p><p>Card colors use shared scales: shares red 0%, neutral 40–60%, green 100%; annualized return red −20%, neutral 0%, green +20%; DD neutral through 10%, red 60%; trades/month red 0, neutral 10–20, green 40. N/A is gray. Colors do not change classification.</p><p>Settings are correlated. Group summaries are not portfolios. Linked independent periods are illustrations, not continuous executions or validated trading edges.</p></section></div>`;
   }
   const detail=globalThis.SSRDetails({esc,num,pct,pp,finite,tf,tone,cardColor,overviewDelta,distributions,concentration,recent,histogram});
   function views(data,state,keys=null){
@@ -249,7 +255,7 @@
   });
   $('compact-mode').onchange=e=>dispatch({type:'compact',value:e.target.checked});
   new ResizeObserver(sizeCompactMatrices).observe($('matrix'));
-  document.addEventListener('change',e=>{if(e.target.id==='same-field-colors'){dispatch({type:'sameFieldColors',value:e.target.checked});$('same-field-colors')?.focus({preventScroll:true});}if(e.target.id==='distribution-metric')dispatch({type:'distribution',value:e.target.value});if(e.target.id==='show-extremes')dispatch({type:'showExtremes',value:e.target.checked});});
+  document.addEventListener('change',e=>{if(e.target.id==='same-field-colors'){dispatch({type:'sameFieldColors',value:e.target.checked});$('same-field-colors')?.focus({preventScroll:true});}if(e.target.id==='distribution-metric'){dispatch({type:'distribution',value:e.target.value});$('distribution-metric')?.focus({preventScroll:true});}if(e.target.id==='show-extremes')dispatch({type:'showExtremes',value:e.target.checked});});
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'){$('tooltip').hidden=true;return;}
     const overviewCard=e.target.closest('[data-overview-metric]');
@@ -260,9 +266,17 @@
     }
     const month=e.target.closest('[data-month]');if(month&&(e.key==='Enter'||e.key===' ')){e.preventDefault();month.dispatchEvent(new MouseEvent('click',{bubbles:true}));return;}
     const cell=e.target.closest('[data-matrix-scope]');if(!cell||e.ctrlKey||e.altKey||e.metaKey)return;
-    const buttons=[...cell.closest('[data-matrix-view]').querySelectorAll('[data-matrix-scope]')],i=buttons.indexOf(cell),n=data.meta.timeframes.length+1;
-    const offset={ArrowLeft:-1,ArrowRight:1,ArrowUp:-n,ArrowDown:n}[e.key];
-    if(offset){e.preventDefault();buttons[Math.max(0,Math.min(buttons.length-1,i+offset))].focus();}
+    const direction={ArrowLeft:[0,-1],ArrowRight:[0,1],ArrowUp:[-1,0],ArrowDown:[1,0]}[e.key];
+    if(direction){
+      e.preventDefault();
+      const table=cell.closest('table'),td=cell.closest('td'),[dr,dc]=direction;
+      let row=td.parentElement.rowIndex+dr,column=td.cellIndex+dc;
+      while(row>=0&&row<table.rows.length&&column>=0&&column<table.rows[row].cells.length){
+        const next=table.rows[row].cells[column].querySelector('[data-matrix-scope]');
+        if(next){next.focus({preventScroll:true});break;}
+        row+=dr;column+=dc;
+      }
+    }
   });
   function tooltip(target,x,y){const tip=$('tooltip');tip.textContent=target.dataset.tip;tip.hidden=false;const w=tip.offsetWidth,h=tip.offsetHeight;tip.style.left=Math.max(5,Math.min(x+14+w>innerWidth?x-w-14:x+14,innerWidth-w-5))+'px';tip.style.top=Math.max(5,Math.min(y+12,innerHeight-h-5))+'px';}
   let highlightedSetting=null;

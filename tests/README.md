@@ -15,11 +15,21 @@ Only the existing CLI pyarrow import-isolation deselection is assigned; actual
 
 Separate local evidence verifies frozen analytical parity, genuine ordinary and
 auxiliary offline API/CLI regeneration with live entry points blocked, installed
-Chrome file:// behavior at 1440/1920, and three complete 3,200-setting builds/opens.
+Chrome file:// behavior at 1440/1920, and complete 3,200-setting builds/opens.
 The compact-only capacity helper includes valid missing observations and is not
 native execution. Resource limits, receipt/source attribution and field mapping
 are in the [report guide](../tools/pattern_lab/strategy_screen_report/README.md).
 Chrome/Node do not replace the owner's Firefox visual/focus review.
+The bounded report correction adds publication blind/readable controls, private
+interrupt sanitization, a real buffered CLI closed-pipe subprocess, current verifier
+attribution and per-observation binary64 interval oracles. Actual generated Node
+checks cover legacy/native labels, empty/extreme scatter bounds and paired accessible
+availability. Trusted Chrome checks sparse matrix coordinates, Enter activation and
+replacement-select focus at nonzero scroll. The corrected helper times a fixed
+20-gesture population using fresh per-action sums of drawing callback CPU durations,
+with callback-count controls, separate settling/memory and retained target misses.
+Use pinned compact examples and one capacity smoke per role for this follow-up;
+the predecessor's three-sample campaign remains historical evidence.
 
 ## Strategy Screen backend
 

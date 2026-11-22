@@ -12,9 +12,19 @@ from ..strategy_screen import load_strategy_screen, verify_strategy_screen
 from .model import canonical, presentation_options, view_bytes
 from .payload import build_view
 
-VERSION = 'strategy-screen-report.1'
+VERSION = 'strategy-screen-report.2'
 FAILURE = 'Strategy Screen report generation failed; no completed report was published.'
 INTERRUPTED = 'Strategy Screen report generation was interrupted; no completed report was published.'
+UNCERTAIN = 'Strategy Screen report publication could not be confirmed; output was preserved for inspection.'
+
+
+class PublicationUnknown(PatternLabDataError):
+    """The final replacement was attempted but its outcome could not be observed."""
+
+
+class PublicationInterrupted(KeyboardInterrupt):
+    """Interrupted final replacement or reconciliation with an unknown outcome."""
+
 MAX_HTML = 64 * 1024 * 1024
 PACKAGE = Path(__file__).resolve().parent
 REPO = PACKAGE.parents[2]
@@ -31,6 +41,9 @@ DEPENDENCIES = (
     'tools/pattern_lab/account_study/common.py', 'tools/pattern_lab/account_study/containers.py',
     'tools/pattern_lab/account_study/request.py', 'tools/pattern_lab/accounts/contracts.py',
     'tools/pattern_lab/study/contracts.py',
+    'tools/pattern_lab/accounts/preparation.py', 'tools/pattern_lab/study/spec.py',
+    'tools/pattern_lab/auxiliary/request.py', 'tools/pattern_lab/auxiliary/features.py',
+    'tools/pattern_lab/auxiliary/model.py',
 )
 
 
@@ -93,15 +106,18 @@ def assemble_html(raw):
 
 
 def publish_file(temporary, destination, owned):
-    with destination.open('xb'):
-        pass
-    owned.append(destination)
+    with destination.open('xb') as stream:
+        info = os.fstat(stream.fileno())
+        owned['claims'][destination] = (info.st_dev, info.st_ino)
+    if destination.name == 'report.json':
+        owned['receiptAttempted'] = True
     os.replace(temporary, destination)
 
 
 def publish(output, files):
     """All content already validated; only task-owned files/directories are cleaned."""
-    directories = []; owned = []; temporary = []
+    directories = []; owned = {'claims': {}, 'receiptAttempted': False}; temporary = []
+    interrupted = False; unknown = False
     try:
         missing = []; current = output
         while not current.exists():
@@ -118,26 +134,38 @@ def publish(output, files):
             publish_file(path, output/name, owned)
         # The receipt is last. No fallible cleanup/diagnostics after this commit point.
         return output/'report.html'
-    except BaseException:
+    except (Exception, KeyboardInterrupt) as error:
+        interrupted = isinstance(error, KeyboardInterrupt)
         # A wrapper can raise after the successful final replace. The owned,
         # exact receipt is the completion point, not the wrapper's return.
-        if output/'report.json' in owned:
+        receipt = output/'report.json'
+        if owned['receiptAttempted']:
+            unknown = True
             try:
-                if (output/'report.json').read_bytes() == files[-1][1]:
+                with receipt.open('rb') as stream:
+                    info = os.fstat(stream.fileno())
+                    observed = stream.read(len(files[-1][1]) + 1)
+                if observed == files[-1][1]:
                     return output/'report.html'
-            except OSError:
-                pass
-        for path in reversed(owned + temporary):
+                if observed == b'' and (info.st_dev, info.st_ino) == owned['claims'][receipt]:
+                    unknown = False
+            except (Exception, KeyboardInterrupt) as diagnostic:
+                interrupted |= isinstance(diagnostic, KeyboardInterrupt)
+    if not unknown:
+        for path in reversed(list(owned['claims']) + temporary):
             try:
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except (OSError, KeyboardInterrupt) as cleanup:
+                interrupted |= isinstance(cleanup, KeyboardInterrupt)
         for directory in reversed(directories):
             try:
                 directory.rmdir()
-            except OSError:
-                pass
-        raise
+            except (OSError, KeyboardInterrupt) as cleanup:
+                interrupted |= isinstance(cleanup, KeyboardInterrupt)
+    # No private exception remains active, including diagnostic/cleanup interrupts.
+    if unknown:
+        raise (PublicationInterrupted if interrupted else PublicationUnknown)(UNCERTAIN)
+    raise (KeyboardInterrupt if interrupted else PatternLabDataError)(INTERRUPTED if interrupted else FAILURE)
 
 
 def _render(run_root, output_root, presentation, export_view_data):
@@ -170,11 +198,18 @@ def _render(run_root, output_root, presentation, export_view_data):
 
 
 def render_strategy_screen_report(run_root, *, output_root, presentation=None, export_view_data=False):
+    unknown = False; interrupted = False
     try:
         return _render(run_root, output_root, presentation, export_view_data)
+    except PublicationInterrupted:
+        unknown = interrupted = True
+    except PublicationUnknown:
+        unknown = True
     except KeyboardInterrupt:
-        raise
+        interrupted = True
     except Exception:
         pass
     # Outside the private handler: neither __cause__ nor __context__ leaks details.
-    raise PatternLabDataError(FAILURE)
+    if unknown:
+        raise (PublicationInterrupted if interrupted else PublicationUnknown)(UNCERTAIN)
+    raise (KeyboardInterrupt if interrupted else PatternLabDataError)(INTERRUPTED if interrupted else FAILURE)

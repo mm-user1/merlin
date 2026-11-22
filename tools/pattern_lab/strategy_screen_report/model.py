@@ -80,13 +80,22 @@ def quantiles(saved):
 def histogram_scale(values, step=10):
     """Zero-aligned domain; keep huge sparse ranges bounded and representable."""
     require(finite(step) and step > 0, 'histogram step')
+    step = float(step)
     values = [v for v in values if finite(v)]
     if not values:
         return dict(lo=0, hi=step, step=step, bins=1)
     lo = min(0, math.floor(min(values) / step) * step)
     hi = max(step, math.ceil(max(values) / step) * step)
+    if lo > min(values):
+        lo -= step
+    if hi < max(values):
+        hi += step
     require(all(finite(v) for v in (lo, hi, hi-lo)) and lo < hi, 'histogram range')
     count = round((hi-lo) / step)
+    hi = lo + count * step
+    if hi < max(values):
+        count += 1
+        hi = lo + count * step
     # JS must distinguish neighboring true edges; refusing overflow never coarsens bins.
     require(0 < count <= 2**52 and lo + step > lo and hi - step < hi, 'histogram precision')
     return dict(lo=lo, hi=hi, step=step, bins=count)
@@ -96,7 +105,20 @@ def histogram(values, saved, scale):
     values = [v for v in values if finite(v)]
     require(len(values) == saved['n'], 'histogram population differs from native statistics')
     lo, hi, step, count = (scale[k] for k in ('lo', 'hi', 'step', 'bins'))
-    occupied = Counter(min(count-1, math.floor((v-lo)/step)) for v in values)
+    lo, hi, step = float(lo), float(hi), float(step)
+    def index(v):
+        require(lo <= v <= hi, 'histogram out of range')
+        # Binary search the actual indexed binary64 boundaries. At most 52
+        # comparisons even for a huge sparse grid; no dense edges or epsilon.
+        left, right = 0, count
+        while left + 1 < right:
+            middle = (left + right) // 2
+            if v < lo + middle * step:
+                right = middle
+            else:
+                left = middle
+        return left
+    occupied = Counter(index(v) for v in values)
     require(all(0 <= i < count for i in occupied), 'histogram out of range')
     indices = list(range(count)) if count <= 256 else sorted(occupied)
     return {**quantiles(saved), **scale, 'indices': indices,

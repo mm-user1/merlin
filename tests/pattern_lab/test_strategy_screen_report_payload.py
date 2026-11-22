@@ -127,3 +127,33 @@ def test_inconsistent_calendar_and_nonfinite_view_refused(reader):
     with pytest.raises(ValueError):view_bytes({'value':float('nan')})
 
 
+
+@pytest.mark.parametrize('values,edges,counts', [
+    ([-10,-1e-16,0,10],[-10,0,10],[2,2]),
+    ([-10,__import__('math').nextafter(10,-float('inf')),10,20],[-10,0,10,20],[1,1,2]),
+    ([__import__('math').nextafter(0,-float('inf')),0,10],[-10,0,10],[1,2]),
+])
+def test_rounded_boundary_regressions(values,edges,counts):
+    h=histogram(values,stats(values),histogram_scale(values))
+    assert h['edges']==edges and h['counts']==counts
+
+
+@pytest.mark.parametrize('lo,hi,step', [(-42,54,6),(-1e12,1e12,10),(0,(2**51+6)*10,10)])
+def test_each_float_against_direct_boundary_oracle(lo,hi,step):
+    import math
+    lo,hi,step=float(lo),float(hi),float(step)
+    count=round((hi-lo)/step);scale=dict(lo=lo,hi=lo+count*step,step=step,bins=count)
+    indices={0,1,count//2,count-2,count-1}
+    if lo==0:indices.add(2**51+1)
+    for i in sorted(indices):
+        edge=lo+i*step
+        for value in [math.nextafter(float(edge),-math.inf),float(edge),math.nextafter(float(edge),math.inf)]:
+            if not lo<=value<=scale['hi']:continue
+            result=histogram([value],stats([value]),scale)
+            actual=result['indices'][result['counts'].index(1)]
+            # Inspect a bounded neighborhood directly, independent of search/quotient.
+            expected=[j for j in range(max(0,i-2),min(count,i+3))
+                if lo+j*step<=value and (value<lo+(j+1)*step or j==count-1 and value==scale['hi'])]
+            assert expected==[actual],(value,actual,expected)
+    value=scale['hi'];result=histogram([value],stats([value]),scale)
+    assert result['indices'][result['counts'].index(1)]==count-1
