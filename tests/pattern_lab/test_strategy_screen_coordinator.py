@@ -38,14 +38,14 @@ def test_delayed_first_job_keeps_credit(monkeypatch,tmp_path):
 
 @pytest.mark.parametrize('point',['plan','progress','writer','pool','prepare','execute','generation'])
 def test_failed_owned_lifecycle(monkeypatch,tmp_path,point):
-    doc=build_inputs(tmp_path/'pack');out=tmp_path/'screen';original=runner.save_json
+    doc=build_inputs(tmp_path/'pack');out=tmp_path/'screen';original=runner.save_bytes
     def fail(*a,**kw):raise RuntimeError('private financial information')
     workers=1
     if point=='plan':
         def save(path,value):
             if path.name=='study.json':fail()
             return original(path,value)
-        monkeypatch.setattr(runner,'save_json',save)
+        monkeypatch.setattr(runner,'save_bytes',save)
     elif point=='progress':monkeypatch.setattr(runner,'Progress',fail)
     elif point=='writer':monkeypatch.setattr(runner,'Writer',fail)
     elif point=='pool':
@@ -143,7 +143,7 @@ def test_reservation_and_uncertain_completion(monkeypatch,tmp_path,point):
     if point in ('initialClock','reservationDenied'):assert not out.exists()
     elif point=='reservationRace':assert [p.name for p in out.iterdir()]==['owner.txt']
     elif point=='firstPublicationClock':
-        state=read_json(out/'status.json');assert state['state']=='failed' and state['plan']['configurations']
+        state=read_json(out/'status.json');assert state['state']=='failed' and state['plan']['file']=='study.json'
     else:
         monkeypatch.undo()
         assert artifacts.completion_valid(out) and verify_strategy_screen(out)['ok']
@@ -182,9 +182,9 @@ def test_persisted_receive_and_append_attribution(tmp_path,monkeypatch,case):
     state=read_json(out/'status.json');ordered=configurations(normalize_request(doc).document)
     assert stopped==[True] and state['currentGroup']==dict(periodId='recent',cellId=ordered[0]['cellId'])
     if case in ('one','keyed','bufferedAppend'):
-        assert state['currentJob']==dict(periodId='recent',**ordered[1 if case=='bufferedAppend' else 0])
+        assert state['currentJob']==dict(periodId='recent',**{k:ordered[1 if case=='bufferedAppend' else 0][k] for k in ('cellId','configurationId')})
     else:assert state['currentJob'] is None
-    assert state.get('affectedJobs',[])==([dict(periodId='recent',**c) for c in ordered[:2]] if case=='several' else [])
+    assert state.get('affectedJobs',[])==([dict(periodId='recent',**{k:c[k] for k in ('cellId','configurationId')}) for c in ordered[:2]] if case=='several' else [])
     assert state['completedResults']==(1 if case=='bufferedAppend' else 0)
     assert 'PRIVATE_UNKNOWN_ID' not in (out/'status.json').read_text()
     assert state['reasonCode']==('nativeWorkerReceiveFailed' if case=='timeout' else 'nativeWorkerTransportFailed' if case=='transport'
@@ -267,10 +267,190 @@ def test_real_empty_earlier_span_fails_after_six_recent_accounts(tmp_path,monkey
     with pytest.raises(PatternLabDataError):runner.run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=out,workers=2)
     state=read_json(out/'status.json')
     assert state['state']=='failed' and state['completedResults']==6 and state['plannedResults']==12
-    assert state['reasonCode']=='nativePreparationRejected' and state['currentJob']['periodId']=='earlier'
-    assert state['currentJob']['cellId'] and not (out/'completion.json').exists()
+    assert state['reasonCode']=='nativePreparationRejected' and state['currentGroup']['periodId']=='earlier' and state['currentJob'] is None
+    assert state['currentGroup']['cellId'] and not (out/'completion.json').exists()
     for check in (load_strategy_screen,verify_strategy_screen):
         with pytest.raises(PatternLabDataError):check(out)
     with pytest.raises(PatternLabDataError):analyze_strategy_screen(out,output_root=tmp_path/'analysis')
     assert not (tmp_path/'analysis').exists()
     assert pools and all(not pool.live_workers() for pool in pools)
+
+
+@pytest.mark.parametrize('point',['firstWrite','visibleFirstWrite','writer','clock'])
+def test_production_limit_admission_and_two_failure_states(tmp_path,monkeypatch,point):
+    import json,os
+    from copy import deepcopy
+    from tools.pattern_lab.strategy_screen import artifacts
+    from tools.pattern_lab.strategy_screen.request import normalize_request,configurations,MAX_JSON
+    from tools.pattern_lab.account_study.common import json_text
+    doc=build_inputs(tmp_path/'pack');doc['notes']=''
+    n=normalize_request(doc);rows=configurations(n.document)
+    newline=b'\r\n' if os.name=='nt' else b'\n'
+    def physical(value):return json_text(value).encode()+newline
+    initial=dict(schema='pattern-lab.strategy-screen-plan.v1',request=n.document,configurations=rows)
+    fallback=dict(state='failed',phase='initialize',reasonCode='strategyScreenOperationFailed',currentJob=None,
+        currentGroup=None,affectedJobs=[],plannedResults=2*len(rows),completedResults=0,requestedWorkers=1,
+        plan=dict(request=n.document,configurations=rows),requestIdentity=n.identity)
+    # Independent serialized envelopes; one ASCII notes byte adds one byte.
+    padding=MAX_JSON-max(len(physical(initial)),len(physical(fallback)))
+    doc['notes']='n'*padding;n=normalize_request(doc)
+    plan,plan_raw,fallback_raw,identity=runner.execution_budget(n,configurations(n.document),1)
+    assert max(len(plan_raw),len(fallback_raw))==MAX_JSON
+    bigger=deepcopy(doc);bigger['notes']+='n'
+    with pytest.raises(PatternLabDataError):runner.execution_budget(normalize_request(bigger),rows,1)
+    del bigger
+    out=tmp_path/'out';save=runner.save_bytes
+    def failure(*a,**kw):raise OSError('PRIVATE_SIZE_ERROR')
+    if point in ('firstWrite','visibleFirstWrite'):
+        def write(path,raw):
+            if path.name=='study.json':
+                if point=='visibleFirstWrite':save(path,raw)
+                failure()
+            return save(path,raw)
+        monkeypatch.setattr(runner,'save_bytes',write)
+    elif point=='writer':monkeypatch.setattr(runner,'Writer',failure)
+    else:monkeypatch.setattr(runner.time,'monotonic',failure)
+    with pytest.raises(PatternLabDataError):runner.run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=out)
+    state=artifacts.read_json(out/'status.json')
+    assert state['state']=='failed' and not (out/'completion.json').exists()
+    if point in ('firstWrite','visibleFirstWrite'):
+        assert (out/'status.json').read_bytes()==fallback_raw
+        assert state['plan']['request']==n.document and state['plan']['configurations']==rows
+    else:
+        assert state['plan']==dict(file='study.json',requestIdentity=identity)
+        assert artifacts.read_json(out/'study.json')['request']==n.document
+    assert (out/'status.json').stat().st_size<=MAX_JSON
+
+
+@pytest.mark.parametrize('old_size',[16777216,16777088])
+def test_old_admitted_sizes_refused_before_missing_parents(tmp_path,old_size):
+    from ._strategy_screen_helpers import request
+    from tools.pattern_lab.strategy_screen.request import normalize_request,configurations,MAX_JSON
+    from tools.pattern_lab.account_study.common import json_text
+    doc=request();doc['notes']='';n=normalize_request(doc)
+    size=len(json_text(dict(request=n.document,configurations=configurations(n.document))).encode())
+    doc['notes']='n'*(old_size-size)
+    assert len(json_text(dict(request=normalize_request(doc).document,configurations=configurations(n.document))).encode())==old_size
+    out=tmp_path/'missing/deep/screen'
+    with pytest.raises(PatternLabDataError):runner.run_strategy_screen(doc,data_root=tmp_path/'absent-pack',output_root=out)
+    assert not (tmp_path/'missing').exists()
+
+
+def test_worst_case_failure_projection_is_bounded():
+    from tools.pattern_lab.strategy_screen.artifacts import json_bytes
+    from tools.pattern_lab.strategy_screen.request import MAX_JSON
+    # Even 16MiB decimal counters are far above the finite request roster cap.
+    job=dict(periodId='earlier',cellId='f'*64,configurationId='f'*64,allocationId='discarded'*10000,instrumentId='discarded'*10000)
+    state=dict(phase='groupCheck',reasonCode='nativeWorkerTransportFailed',currentJob=job,currentGroup=job,
+        affectedJobs=[job]*6,plannedResults=MAX_JSON,completedResults=MAX_JSON,requestedWorkers=6,effectiveWorkers=6,
+        maximumInFlight=6,maximumCompactBuffer=22,workerCleanupFailed=True,writerCleanupFailed=True)
+    raw=json_bytes(runner.failure_status(state,'f'*64))
+    assert len(raw)<2500<MAX_JSON and b'discarded' not in raw
+
+
+@pytest.mark.parametrize('point',['group','shutdown','publish'])
+def test_group_pool_and_publish_failures_clear_job_ownership(tmp_path,monkeypatch,point):
+    from tools.pattern_lab.strategy_screen import artifacts
+    doc=build_inputs(tmp_path/'pack');out=tmp_path/'screen';checks=[]
+    original=runner.check_generation
+    def check(sources):
+        checks.append(1)
+        if (point=='group' and len(checks)==2) or (point=='publish' and len(checks)==5):raise OSError('private primary')
+        return original(sources)
+    monkeypatch.setattr(runner,'check_generation',check)
+    if point=='shutdown':
+        class Pool:
+            worker_pids=[];thread_evidence={}
+            def __init__(self,*a):self.jobs=[]
+            def start(self):pass
+            def submit(self,key,job):self.jobs.append((key,job))
+            def take(self):
+                key,job=self.jobs.pop(0);return 'result',key,runner.run_account_job(job)
+            def shutdown(self,*,abort):raise RuntimeError('private cleanup' if abort else 'private primary')
+        monkeypatch.setattr(runner.workers_module,'SpawnJobPool',Pool)
+    with pytest.raises(PatternLabDataError):runner.run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=out,workers=2 if point=='shutdown' else 1)
+    state=artifacts.read_json(out/'status.json')
+    assert state['phase']==dict(group='groupCheck',shutdown='shutdown',publish='publish')[point]
+    assert state['currentJob'] is None and state['affectedJobs']==[]
+    assert state['completedResults']==(6 if point=='group' else 12)
+    assert bool(state['currentGroup'])==(point=='group')
+    if point=='shutdown':assert state['workerCleanupFailed'] is True
+    if point=='publish':
+        assert artifacts.read_json(out/'study.json')['schema']==artifacts.SCHEMA
+        assert state['plan']['requestIdentity']==artifacts.normalize_request(doc).identity
+    assert not (out/'completion.json').exists()
+
+
+def test_live_provider_mismatch_never_seals(tmp_path,monkeypatch):
+    import json
+    from dataclasses import replace
+    original=runner.run_account_job
+    def mismatched(job):
+        records=original(job);record=records[0];provenance=json.loads(record.result.commands.provenance)
+        provenance['recipe']['entryRunLength']+=1
+        commands=replace(record.result.commands,provenance=provenance)
+        return [replace(record,result=replace(record.result,commands=commands,commandId=commands.identity))]
+    monkeypatch.setattr(runner,'run_account_job',mismatched)
+    with pytest.raises(PatternLabDataError):run(tmp_path/'mismatch',auxiliary=True)
+    out=tmp_path/'mismatch/screen'
+    assert not (out/'completion.json').exists() and read_json(out/'status.json')['completedResults']==0
+
+
+def test_real_manifest_io_translation_after_admission(tmp_path,monkeypatch):
+    from pathlib import Path
+    from tools.pattern_lab import manifest
+    doc=build_inputs(tmp_path/'pack');out=tmp_path/'out';prepare=runner.prepare_scope;read=Path.read_text;causes=[]
+    def missing(path,*a,**kw):
+        if path==manifest.manifest_path(tmp_path/'pack'):raise FileNotFoundError('PRIVATE_MANIFEST')
+        return read(path,*a,**kw)
+    def prepare_io(*a,**kw):
+        with monkeypatch.context() as patch:
+            patch.setattr(Path,'read_text',missing)
+            try:return prepare(*a,**kw)
+            except PatternLabDataError as error:causes.append(type(error.__cause__));raise
+    monkeypatch.setattr(runner,'prepare_scope',prepare_io)
+    with pytest.raises(PatternLabDataError) as caught:runner.run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=out)
+    error=caught.value
+    assert causes==[FileNotFoundError] and error.__context__ is error.__cause__ is None
+    assert 'PRIVATE_MANIFEST' not in repr(error.args)+repr(vars(error))
+    state=read_json(out/'status.json')
+    assert state['phase']=='prepare' and state['reasonCode']=='strategyScreenOperationFailed'
+
+
+def native_empty_error():
+    import numpy as np
+    from tools.pattern_lab import data
+    try:
+        data.prepare_series(instrument_id='BYBIT_AAAUSDT',venue='BYBIT',contract='AAAUSDT',quote_currency='USDT',
+            timestamps=np.array([0],dtype=np.int64),ohlcv=np.array([[100.,102.,98.,100.,1000.]]),
+            start_ms=0,end_ms=86400000,warmup_start_ms=0,timeframe_minutes=1440)
+    except PatternLabDataError as error:return error
+    raise AssertionError('native empty guard did not raise')
+
+
+@pytest.mark.parametrize('case',['native','missingParquet','nestedIo','suppressed','cycle','depth','traceback','unknownCallee'])
+def test_bounded_preparation_origin_classifier(tmp_path,monkeypatch,case):
+    from tools.pattern_lab import data
+    error=native_empty_error()
+    assert error.__cause__ is None and error.__context__ is None
+    if case=='missingParquet':
+        try:data.read_ohlcv_rows(tmp_path/'missing.parquet')
+        except PatternLabDataError as actual:error=actual
+    elif case=='nestedIo':
+        error.__cause__=PatternLabDataError('wrapper');error.__cause__.__cause__=OSError('private')
+    elif case=='suppressed':error.__context__=OSError('suppressed');error.__suppress_context__=True
+    elif case=='cycle':error.__cause__=error
+    elif case=='depth':
+        for _ in range(runner._CHAIN_LIMIT):
+            outer=PatternLabDataError('wrapper');outer.__cause__=error;error=outer
+    elif case=='traceback':
+        def recurse(n):
+            if n:recurse(n-1)
+            else:raise error
+        try:recurse(runner._TRACEBACK_LIMIT)
+        except PatternLabDataError as actual:error=actual
+    elif case=='unknownCallee':
+        def unknown(*a,**kw):raise PatternLabDataError('unknown')
+        monkeypatch.setattr(data,'input_fingerprint',unknown)
+        error=native_empty_error()
+    assert runner.preparation_reason(error)==('nativePreparationRejected' if case in ('native','suppressed') else 'strategyScreenOperationFailed')

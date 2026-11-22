@@ -2,11 +2,12 @@
 from copy import deepcopy
 from pathlib import Path
 import stat
+import os
 import zipfile
 
 from ..accounts.contracts import require
 from .. import PatternLabDataError
-from ..account_study.common import closed, json_text, parse_json, file_hash, write_json, digest_id
+from ..account_study.common import closed, json_text, parse_json, file_hash, digest_id
 from ..account_study.containers import zip_info
 from ..configuration_study import codec
 from ..study.contracts import semantic_digest
@@ -57,9 +58,20 @@ def reserve(path):
     return path
 
 
+def json_bytes(value):
+    raw=(json_text(value)+('\r\n' if os.name=='nt' else '\n')).encode('utf-8')
+    require(len(raw)<=MAX_JSON,'root JSON byte bound')
+    return raw
+
+
+def save_bytes(path,raw):
+    path=Path(path);temporary=path.with_name(path.name+'.tmp')
+    temporary.write_bytes(raw)
+    os.replace(temporary,path)
+
+
 def save_json(path,value):
-    require(len(json_text(value).encode())+1<=MAX_JSON,'root JSON byte bound')
-    write_json(path,value)
+    save_bytes(path,json_bytes(value))
 
 
 def read_json(path):

@@ -87,3 +87,28 @@ def compact(root,per_cell=2,*,capacity=False,implementation=None):
         for i,c in enumerate(configurations(doc)):writer.append(compact_unit(c,p,i+(13 if p['periodId']=='recent' else 0)))
     writer.finish({'fixture':'invented numeric compact-only; no native execution'},dict(plannedResults=2*len(configurations(doc))))
     return load_strategy_screen(root)
+
+
+
+def contradict_coverage(unit,case):
+    """Resealable retained-fact witnesses; April keeps aggregate/end equations."""
+    from tools.pattern_lab.strategy_screen.facts import analytical_month
+    months=unit['months'];cov=unit['metrics']['coverage'];day=86400000
+    if case=='firstHead':cov['firstObservedOpenMs']+=day
+    elif case=='missingTotal':cov['missingHeadSlots']=1;cov['firstObservedOpenMs']+=day
+    elif case=='april':
+        cov['firstObservedOpenMs']+=day;cov['missingHeadSlots']=1
+        months[1]['observedBars']-=1;cov['observedBars']-=1;cov['missingBars']+=1;unit['audit']['pathPoints']-=1
+    elif case=='oneDistinct':
+        delta=months[0]['observedBars']-1;months[0]['observedBars']=1
+        cov['observedBars']-=delta;cov['missingBars']+=delta;unit['audit']['pathPoints']-=delta
+    elif case=='june':
+        last=months[-1];last['closingSampleMs']=last['startMs']+day;last['closingExact']=False
+        cov['lastObservedCloseMs']=last['closingSampleMs'];cov['missingTailSlots']=29
+        # Reconcile the global missing total while leaving the impossible 30
+        # June observations. Earlier months have feasible sparse counts.
+        months[1]['observedBars']-=29;cov['observedBars']-=29;cov['missingBars']+=29;unit['audit']['pathPoints']-=29
+    else:raise AssertionError(case)
+    prefix=True
+    for row in months:
+        row.update(analytical_month(row,unit['metrics']['initialCapital'],prefix));prefix=prefix and row['exact']

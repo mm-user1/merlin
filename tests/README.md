@@ -1155,3 +1155,17 @@ Parquet workers/routes, admission/filters, FT/Stress, Fixed and Grid plan reuse/
 Results/trades/export and Start/Queue JavaScript suites. The portfolio guide documents
 the contracts. Owner browser verification of actual layout, focus, inline periods,
 Queue execution and Results remains separate from the handler harness.
+
+
+Strategy Screen correction coverage in the existing facts/artifacts/coordinator
+modules isolates live command-to-decision/feature/component/slice links, with a
+shared-binding two-feature control and one fingerprint per binding. Endpoint
+coverage tests include resealed April/June contradictions, native head/tail gaps,
+first-close boundary ownership, unobserved accounts and a two-day period grid.
+Production 16 MiB tests independently measure physical CRLF/LF JSON bytes and
+exercise prepublication embedded failure versus postpublication plan reference,
+including final metadata replacement before seal. Failure tests retain group and
+pool attribution, bounded sanitized IDs, native error-origin/I/O discrimination,
+and the real two-worker 6/12 empty-span case. Run these sequentially with external
+temporary storage; keep failed-run receipts. They do not certify real Windows
+symlink capability, browser appearance or Linux portability.

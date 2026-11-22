@@ -193,7 +193,9 @@ with mtime zero inside an ordinary ZIP_STORED archive. ZIP64 is refused.
 Bounds are 16 MiB per root JSON, 8 MiB decoded member, 512 MiB aggregate decoded,
 128 MiB archive including directory, and 65,534 members. Calendar/roster/metadata
 estimates precede execution; actual limits are enforced before publication. An
-individual calendar is bounded to 8,192 months and aggregate account-month
+Physical root JSON is canonical ASCII-escaped UTF-8 plus CRLF on Windows or LF
+on other platforms. Admission and atomic publication use the same checked bytes.
+An individual calendar is bounded to 8,192 months and aggregate account-month
 planning is additionally bounded. There is no precision reduction or truncation.
 
 Workers are 1..6; one uses direct AccountJobs, larger counts reuse the existing
@@ -215,8 +217,17 @@ or half of an analysis pair is not a recognizable artifact; ordinary siblings
 remain valid. This is a bounded existing-output guard under single-writer use,
 not a general filesystem race sandbox.
 
-Once exclusively reserved, failures retain sanitized status and reconstructible plan
-coordinates where writable, close owned resources, and do not seal. Atomic
+Before reservation, execution budgets both the actual initial plan and a fixed
+full-roster initialization-failure envelope against the physical JSON limit.
+Until the first plan publication returns successfully, failures write that exact
+precomputed envelope. After acknowledgement, failure status references local
+`study.json` and the normalized request identity; it never duplicates the roster.
+The reference works for the initial plan and for final study metadata published
+before sealing. This admission applies only to new execution, not stored readers.
+Later failure status retains bounded period/cell/configuration IDs (no display
+labels), counters, worker count, at most six affected jobs, allowlisted phase/reason
+and optional fixed cleanup flags. No exception names, messages or graphs are saved.
+Owned resources close and unsuccessful runs do not seal. Atomic
 completion is the commit point; a late load/return failure cannot invalidate it.
 An existing or uncertain completion marker prevents failed-state rewriting even
 when its contents cannot temporarily be read. A failed reservation never grants
@@ -226,6 +237,19 @@ failures keep period/cell context; each buffered append sets its own coordinate.
 Completed counts advance only after a successful append. Unwritable storage and
 hard process stops cannot guarantee a saved failed status.
 Source generations are checked around dispatch and immediately before sealing.
+Group checks clear precise job ownership and retain only the owning group. Normal
+pool shutdown and publication clear group/job ownership. Cleanup failures do not
+replace primary failure attribution.
+
+Preparation classification follows at most 16 explicit-cause/unsuppressed-context
+exceptions, with cycle detection, and at most 64 traceback frames per exception.
+Typed OSError takes precedence. Only a domain error whose actual raising frame
+is the pinned native in-memory `data.prepare_series` function is recognized as
+`nativePreparationRejected`; other origins and traversal limits produce
+`strategyScreenOperationFailed`. The private classifier inspects types and code
+identities, never messages, filenames, line numbers or locals. It cannot classify
+all legitimate native rejections without a richer provider API. Interrupts still
+propagate after cleanup; public errors contain no private cause/context.
 
 `load` checks sealed structural/content integrity and fresh-copy access without
 per-result central-directory reparsing or a permanent raw-result cache. `verify`
@@ -237,9 +261,19 @@ history cannot be authenticated by these checks.
 
 Live extraction checks normalized native policy/window/candle declarations,
 HA/filter or auxiliary provider/feature/component metadata, actual dependency
-bindings and native identity links before pruning. Extraction, writer admission
+bindings and native identity links before pruning. Actual HA/scalar command
+provenance joins the declared provider, decision identity and feature identity map.
+Every feature joins its consumed slice (one fingerprint per binding, reused for
+compact attribution). Component IDs/declarations, scalar source feature identity,
+native candle provenance and ordered filter references must agree, including empty
+v2 decisions. These live checks do not rehash command arrays or reread snapshots. Extraction, writer admission
 and stored verification all recompute the native preparation/account equations
-and validate recorded execution rules against the target header. Terminal counts
+and validate recorded execution rules against the target header. Observed coverage
+joins first-open/head and last-close/tail on the period grid. Each month's count
+fits the grid interval from max(month-start, first-open) through its closing sample.
+The first-close month must contain that observation, with at least two observations
+when its closing sample is later. Head plus tail cannot exceed total missing bars
+for observed accounts; native unobserved head/tail semantics remain separate. Terminal counts
 and fees belong to the month derived from the last observed close; equity's
 separate boundary convention is retained. Exact observed closing endpoints impose
 a DD floor using the full prefix of monthly maxima, with native tolerance. Signed

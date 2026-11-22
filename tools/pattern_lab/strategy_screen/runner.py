@@ -17,7 +17,60 @@ from ..study.bracket_rules import normalize_rules
 from ..study import workers as workers_module
 from .request import normalize_request, configurations, child_request, cell_id
 from .facts import extract
-from .artifacts import Writer, save_json, safe_path, output_path, load_strategy_screen
+from .artifacts import Writer, save_json, save_bytes, json_bytes, safe_path, output_path, load_strategy_screen
+
+
+_PREPARE_CODE=data.prepare_series.__code__
+_CHAIN_LIMIT=16
+_TRACEBACK_LIMIT=64
+
+
+def preparation_reason(error):
+    """Recognize only the pinned in-memory guard, never infer from error text."""
+    seen=set();recognized=False
+    for _ in range(_CHAIN_LIMIT):
+        if id(error) in seen:return 'strategyScreenOperationFailed'
+        seen.add(id(error))
+        if isinstance(error,OSError):return 'strategyScreenOperationFailed'
+        tb=error.__traceback__;origin=None
+        for _ in range(_TRACEBACK_LIMIT):
+            if tb is None:break
+            origin=tb.tb_frame.f_code;tb=tb.tb_next
+        if tb is not None:return 'strategyScreenOperationFailed'
+        recognized |= isinstance(error,PatternLabDataError) and origin is _PREPARE_CODE
+        error=error.__cause__ if error.__cause__ is not None else None if error.__suppress_context__ else error.__context__
+        if error is None:return 'nativePreparationRejected' if recognized else 'strategyScreenOperationFailed'
+    return 'strategyScreenOperationFailed'
+
+
+def execution_budget(normalized,rows,workers):
+    """Execution-only admission; both physical envelopes precede reservation."""
+    identity=normalized.identity
+    plan=dict(schema='pattern-lab.strategy-screen-plan.v1',request=normalized.document,configurations=rows)
+    fallback=dict(state='failed',phase='initialize',reasonCode='strategyScreenOperationFailed',currentJob=None,
+        currentGroup=None,affectedJobs=[],plannedResults=2*len(rows),completedResults=0,requestedWorkers=workers,
+        plan=dict(request=normalized.document,configurations=rows),requestIdentity=identity)
+    return plan,json_bytes(plan),json_bytes(fallback),identity
+
+
+def failure_status(state,identity):
+    # IDs are fixed-size hashes; period is one of two literal roles. At most six
+    # in-flight jobs, with no display labels or exception-derived strings.
+    def coordinate(value):
+        return None if value is None else {k:value[k] for k in ('periodId','cellId','configurationId') if k in value}
+    phases=('initialize','prepare','groupCheck','execute','receive','extract','append','shutdown','publish')
+    reasons=('strategyScreenOperationFailed','nativePreparationRejected','nativeWorkerLost',
+        'nativeWorkerTransportFailed','nativeWorkerReceiveFailed','nativeWorkerJobFailed')
+    result=dict(state='failed',phase=state['phase'] if state['phase'] in phases else 'initialize',
+        reasonCode=state.get('reasonCode') if state.get('reasonCode') in reasons else reasons[0],
+        currentGroup=coordinate(state.get('currentGroup')),currentJob=coordinate(state.get('currentJob')),
+        affectedJobs=[coordinate(v) for v in state.get('affectedJobs',[])[:6]],
+        plan=dict(file='study.json',requestIdentity=identity))
+    for key in ('plannedResults','completedResults','requestedWorkers','effectiveWorkers','maximumInFlight','maximumCompactBuffer'):
+        if key in state:result[key]=state[key]
+    for key in ('workerCleanupFailed','writerCleanupFailed'):
+        if state.get(key):result[key]=True
+    return result
 
 
 def implementation(auxiliary):
@@ -161,6 +214,7 @@ def _run(request,*,data_root,output_root,workers,auxiliary_roots):
     normalized=normalize_request(request);doc=normalized.document
     integer(workers,'workers',1);require(workers<=6,'workers must be 1..6')
     rows=configurations(doc);pack=safe_path(data_root);output=output_path(output_root,pack)
+    plan,plan_bytes,fallback_bytes,request_identity=execution_budget(normalized,rows,workers)
     groups={cell_id(c['instrumentId'],c['timeframeMinutes']):[r for r in rows if r['cellId']==cell_id(c['instrumentId'],c['timeframeMinutes'])] for c in doc['cells']}
     children={(p['periodId'],cell_id(c['instrumentId'],c['timeframeMinutes'])):child_request(doc,c,p) for p in doc['periods'] for c in doc['cells']}
     snapshots=admit_auxiliary(doc,children.values(),auxiliary_roots,output,pack)
@@ -178,7 +232,7 @@ def _run(request,*,data_root,output_root,workers,auxiliary_roots):
         raw={e['instrument_id']:e for e in manifest.read_manifest(pack)['instruments']}
         rules={c['instrumentId']:normalize_rules(raw[c['instrumentId']]) for c in doc['cells']}
         require(session.inspect(verify=True)['verification_check']['ok'],'pack integrity admission')
-        root=output;writer=pool=None;owned=False
+        root=output;writer=pool=None;owned=False;plan_published=False
         state=dict(state='running',phase='initialize',currentJob=None,plannedResults=2*len(rows),completedResults=0,
             requestedWorkers=workers,maximumInFlight=0,maximumCompactBuffer=0,startedUtc=datetime.now(timezone.utc).isoformat())
         timings=dict(preparationSeconds=0.,extractionSeconds=0.,directExecutionSeconds=0.);physical={};started=time.perf_counter()
@@ -186,7 +240,9 @@ def _run(request,*,data_root,output_root,workers,auxiliary_roots):
             root.parent.mkdir(parents=True,exist_ok=True)
             root.mkdir(exist_ok=False)
             owned=True
-            save_json(root/'study.json',dict(schema='pattern-lab.strategy-screen-plan.v1',request=doc,configurations=rows))
+            save_bytes(root/'study.json',plan_bytes)
+            plan_published=True
+            del plan,plan_bytes
             progress=Progress(root,state);writer=Writer(root,normalized,source)
             effective=min(workers,max(len(g) for g in groups.values()));state['effectiveWorkers']=effective
             with workers_module.single_threaded_children():
@@ -196,32 +252,36 @@ def _run(request,*,data_root,output_root,workers,auxiliary_roots):
                 for period in reversed(doc['periods']):
                     for cid,group in groups.items():
                         child=children[(period['periodId'],cid)];instrument=child['instruments'][0];local_physical={}
-                        state.update(phase='prepare',currentJob=dict(periodId=period['periodId'],cellId=cid),
+                        state.update(phase='prepare',currentJob=None,
                             currentGroup=dict(periodId=period['periodId'],cellId=cid),affectedJobs=[])
                         tick=time.perf_counter()
                         try:bindings,deps=prepare_scope(session,child,instrument,entries,snapshots,local_physical)
-                        except PatternLabDataError:
-                            state['reasonCode']='nativePreparationRejected';raise
+                        except Exception as exc:
+                            state['reasonCode']=preparation_reason(exc);raise
                         timings['preparationSeconds']+=time.perf_counter()-tick
                         amap={a['allocationId']:a for a in child['allocations']}
                         def make_job(c):
                             aid=c['allocationId']
                             return AccountJob(instrument,(amap[aid],),tuple(child['windows']),{aid:bindings[aid]},
                                 rules[instrument],source['sources'],None if deps is None else {aid:deps[aid]})
+                        state.update(phase='groupCheck',currentJob=None,affectedJobs=[])
                         check_generation(source['sources'])
                         for unit in execute_group(group,make_job,period,child,pool,effective,progress,timings):writer.append(unit)
+                        state.update(phase='groupCheck',currentJob=None,affectedJobs=[])
                         check_generation(source['sources']);del bindings,deps
                         physical[period['periodId']+':'+cid]=local_physical
-                if pool is not None:pool.shutdown(abort=False);pool=None
-            state.update(phase='publish',currentJob=None);timings['elapsedSeconds']=time.perf_counter()-started
+                if pool is not None:
+                    state.update(phase='shutdown',currentJob=None,currentGroup=None,affectedJobs=[])
+                    pool.shutdown(abort=False);pool=None
+            state.update(phase='publish',currentJob=None,currentGroup=None,affectedJobs=[]);timings['elapsedSeconds']=time.perf_counter()-started
             writer.finish(dict(physicalInputs=physical,timings=timings),state,before_completion=lambda:check_generation(source['sources']))
         except BaseException as exc:
             if pool is not None:
                 try:pool.shutdown(abort=True)
-                except BaseException as cleanup:state['workerCleanupErrorType']=type(cleanup).__name__
+                except BaseException:state['workerCleanupFailed']=True
             if writer is not None:
                 try:writer.close()
-                except BaseException as cleanup:state['writerCleanupErrorType']=type(cleanup).__name__
+                except BaseException:state['writerCleanupFailed']=True
             # A read/hash error does not prove that atomic publication failed.
             # Only known absence authorizes mutation of an owned run.
             uncommitted=False
@@ -230,10 +290,9 @@ def _run(request,*,data_root,output_root,workers,auxiliary_roots):
                 except FileNotFoundError:uncommitted=True
                 except OSError:pass
             if uncommitted:
-                state.update(state='failed',errorType=type(exc).__name__)
-                state.setdefault('reasonCode','strategyScreenOperationFailed')
-                state['plan']=dict(request=doc,configurations=rows)
-                try:save_json(root/'status.json',state)
+                try:
+                    if plan_published:save_json(root/'status.json',failure_status(state,request_identity))
+                    else:save_bytes(root/'status.json',fallback_bytes)
                 except Exception:pass  # Unwritable storage cannot promise a saved status.
             raise
     return load_strategy_screen(root)

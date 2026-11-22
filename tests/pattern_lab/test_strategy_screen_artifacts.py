@@ -217,3 +217,51 @@ def test_byte_bounds_extra_files_and_missing_completion(tmp_path,monkeypatch):
     with pytest.raises(PatternLabDataError):load_strategy_screen(reader.root)
     artifacts.seal(reader.root);monkeypatch.setattr(artifacts.codec,'MAX_TOTAL',10)
     with pytest.raises(PatternLabDataError,match='aggregate'):load_strategy_screen(reader.root)
+
+
+@pytest.mark.parametrize('case',['april','june'])
+def test_resealed_endpoint_capacity(tmp_path,valid_native_screen,case):
+    import shutil
+    from ._strategy_screen_helpers import contradict_coverage
+    reader=valid_native_screen;root=tmp_path/'copy';shutil.copytree(reader.root,root)
+    cid=next(c['configurationId'] for c in reader.configurations if c['allocationId']=='rr4')
+    def change(blocks):
+        unit=next(r['facts'] for b in blocks for r in b['records'] if 'facts' in r and
+            r['facts']['configurationId']==cid and r['facts']['periodId']=='recent')
+        contradict_coverage(unit,case)
+    rewrite(root,change)
+    assert artifacts.completion_valid(root)
+    for check in (load_strategy_screen,verify_strategy_screen):
+        with pytest.raises(PatternLabDataError,match='endpoint capacity'):check(root)
+
+
+def test_stored_consumers_never_apply_execution_budget(tmp_path,valid_native_screen,monkeypatch):
+    import shutil
+    from tools.pattern_lab.strategy_screen import runner
+    root=tmp_path/'copy';shutil.copytree(valid_native_screen.root,root)
+    def forbidden(*a,**kw):raise AssertionError('execution admission reached from old reader')
+    monkeypatch.setattr(runner,'execution_budget',forbidden)
+    assert load_strategy_screen(root) and verify_strategy_screen(root)['ok']
+
+
+@pytest.mark.parametrize('envelope',['plan','fallback'])
+def test_physical_json_production_limit_and_unicode(tmp_path,envelope):
+    import os
+    from ._strategy_screen_helpers import request
+    from tools.pattern_lab.strategy_screen.request import normalize_request,configurations,MAX_JSON
+    from tools.pattern_lab.account_study.common import json_text
+    n=normalize_request(request());rows=configurations(n.document)
+    value=(dict(schema='pattern-lab.strategy-screen-plan.v1',request=n.document,configurations=rows) if envelope=='plan' else
+        dict(state='failed',phase='initialize',reasonCode='strategyScreenOperationFailed',currentJob=None,currentGroup=None,affectedJobs=[],
+            plannedResults=2*len(rows),completedResults=0,requestedWorkers=1,plan=dict(request=n.document,configurations=rows),requestIdentity=n.identity))
+    doc=value['request'] if envelope=='plan' else value['plan']['request'];doc['notes']='\u00e9\U0001f680'
+    newline='\r\n' if os.name=='nt' else '\n'
+    raw=lambda:(json_text(value)+newline).encode('utf-8')
+    doc['notes']+='n'*(MAX_JSON-len(raw()))
+    path=tmp_path/'boundary.json';artifacts.save_json(path,value)
+    assert path.read_bytes()==raw() and path.stat().st_size==MAX_JSON
+    assert artifacts.read_json(path)==value
+    doc['notes']+='n'
+    with pytest.raises(PatternLabDataError,match='byte bound'):artifacts.save_json(path,value)
+    path.write_bytes(raw())
+    with pytest.raises(PatternLabDataError,match='byte bound'):artifacts.read_json(path)

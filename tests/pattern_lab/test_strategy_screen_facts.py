@@ -143,6 +143,8 @@ def test_recorded_rule_semantics_even_with_recomputed_account_id(native_records,
     ([1,31,59,60],[100,100,50,200],[0,50]),
     ([1,31,33,60],[200,50,200,200],[75,0]),
     ([1,31],[200,50],[75,None]),
+    ([3,31,58],[200,50,-10],[75,105]),
+    ([31,33,59],[200,50,100],[0,75]),
 ])
 def test_two_month_extraction_signed_path_oracle(native_records,closes,values,expected):
     """Inject explicit numerical paths into a truthful native metadata envelope.
@@ -252,7 +254,8 @@ def test_coarse_fully_observed_jan_mar_2026_has_inexact_internal_months(tmp_path
     assert recent['classification']['classifiable']
     assert recent['metrics']['coverage']['expectedBars']==recent['metrics']['coverage']['observedBars']==45
     assert any(not m['exact'] for m in recent['months'])
-    assert recent['months'][0]['closingExact'] is False
+    assert [m['observedBars'] for m in recent['months']]==[15,14,16]
+    assert [m['closingExact'] for m in recent['months']]==[False,False,True]
 
 
 def test_zero_expected_and_flat_cash_gap_are_not_exact_observations():
@@ -315,3 +318,83 @@ def test_native_availability_and_terminal_tail(case):
         assert [m['terminalTradeCount'] for m in unit['months']]==[0,1,0]
         assert unit['months'][1]['observedBars']==0 and unit['months'][1]['terminalExitFees']>0
         assert unit['months'][0]['closingEquity']==unit['months'][-1]['closingEquity']==result.finalBalance
+
+
+@pytest.fixture(scope='module')
+def shared_binding_record(native_records):
+    from copy import deepcopy
+    from dataclasses import replace
+    from tools.pattern_lab.auxiliary.commands import build_auxiliary_commands
+    from tools.pattern_lab.accounts import execute_account
+    record,c,p,child=next(v for v in native_records[1][1] if v[1]['allocationId']=='rr7')
+    child=deepcopy(child);a=next(a for a in child['allocations'] if a['allocationId']=='rr7')
+    a['auxiliaryFeatures'].append(dict(a['auxiliaryFeatures'][0],featureId='second',maxAgeMs=172800000))
+    a['entryFilter']=dict(allOf=[dict(componentId='first',providerId='scalarCondition',version='1',
+        featureId='fundingLevel',long=dict(operator='gt',threshold=-1),short=dict(operator='lt',threshold=1)),
+        dict(componentId='second',providerId='scalarCondition',version='1',featureId='second',
+        long=dict(operator='gt',threshold=-1),short=dict(operator='lt',threshold=1))])
+    commands,decisions=build_auxiliary_commands(record.prepared,a,record.auxiliaryEvidence['dependencies'])
+    result=execute_account(record.prepared,commands,record.result.policy,record.result.window,record.result.rules)
+    record=replace(record,result=result,auxiliaryEvidence=dict(record.auxiliaryEvidence,decisions=decisions))
+    return record,c,p,child
+
+
+@pytest.mark.parametrize('case',['haProvider','scalarProvider','decisionId','featureMap','version','slice',
+    'componentSource','filterDecision','filterOrder','outerComponent','secondSlice'])
+def test_isolated_native_provenance_links(native_records,shared_binding_record,case):
+    import json
+    from copy import deepcopy
+    from dataclasses import replace
+    from tools.pattern_lab import PatternLabDataError
+    from tools.pattern_lab.strategy_screen.facts import live_declarations
+    record,c,p,child=(next(v for v in native_records[1][1] if v[1]['allocationId']=='rr2')
+        if case=='haProvider' else shared_binding_record)
+    live_declarations(record,c,child)
+    evidence=deepcopy(record.auxiliaryEvidence);meta=evidence['decisions']['metadata']
+    commands=record.result.commands;provenance=json.loads(commands.provenance)
+    if case=='haProvider':provenance['recipe']['entryRunLength']+=1
+    elif case=='scalarProvider':provenance['declaration']['long']['threshold']+=1
+    elif case=='decisionId':provenance['auxiliaryPreparation']['componentEvidenceId']='0'*64
+    elif case=='featureMap':provenance['auxiliaryPreparation']['features']['second']='0'*64
+    elif case=='version':provenance['auxiliaryPreparation']['version']='2'
+    elif case=='slice':
+        other=next(v[0] for v in native_records[1][1] if v[1]['allocationId']=='rr7' and v[2]['periodId']!=p['periodId'])
+        assert evidence['dependencies']['funding']['content']['series']==other.auxiliaryEvidence['dependencies']['funding']['content']['series']
+        evidence['dependencies']=deepcopy(other.auxiliaryEvidence['dependencies'])
+    elif case=='componentSource':
+        assert meta['features']['second']['identity']!=meta['features']['fundingLevel']['identity']
+        meta['components'][0]['metadata']['source']['featureIdentity']=meta['features']['second']['identity']
+    elif case in ('filterDecision','filterOrder'):
+        filt=json.loads(commands.entryFilter.provenance)
+        if case=='filterDecision':filt['componentEvidenceId']='0'*64
+        else:filt['components'].reverse()
+        commands=replace(commands,entryFilter=replace(commands.entryFilter,provenance=filt))
+    elif case=='outerComponent':meta['components'][0]['componentId']='different'
+    else:meta['features']['second']['metadata']['consumedSliceFingerprint']='0'*64
+    commands=replace(commands,provenance=provenance)
+    record=replace(record,auxiliaryEvidence=evidence,result=replace(record.result,commands=commands,commandId=commands.identity))
+    reason={'haProvider':'actual provider','scalarProvider':'actual provider','decisionId':'command decision','featureMap':'command decision',
+        'version':'command decision','slice':'consumed slice','secondSlice':'consumed slice','componentSource':'component source',
+        'filterDecision':'filter decision','filterOrder':'filter decision','outerComponent':'outer component'}[case]
+    with pytest.raises(PatternLabDataError,match=reason):live_declarations(record,c,child)
+
+
+def test_shared_binding_fingerprint_computed_once(shared_binding_record,monkeypatch):
+    from tools.pattern_lab.auxiliary import model
+    from tools.pattern_lab.strategy_screen.facts import extract
+    calls=[];original=model.fingerprint
+    def counted(value):calls.append(value);return original(value)
+    monkeypatch.setattr(model,'fingerprint',counted)
+    unit=extract(*shared_binding_record)
+    assert len(calls)==len(unit['execution']['auxiliary'])==1
+
+
+@pytest.mark.parametrize('case,reason',[('firstHead','first observation'),('april','endpoint capacity'),
+    ('june','endpoint capacity'),('missingTotal','missing counts'),('oneDistinct','first observation equity')])
+def test_observation_endpoint_contradictions(native_records,case,reason):
+    from tools.pattern_lab import PatternLabDataError
+    from tools.pattern_lab.strategy_screen.facts import extract,validate
+    from ._strategy_screen_helpers import contradict_coverage
+    args=next(v for v in native_records[0][1] if v[1]['allocationId']=='rr4' and v[2]['periodId']=='recent')
+    unit=extract(*args);contradict_coverage(unit,case)
+    with pytest.raises(PatternLabDataError,match=reason):validate(unit,*args[1:],synthetic=False)

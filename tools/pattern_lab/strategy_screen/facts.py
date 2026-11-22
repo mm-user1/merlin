@@ -107,24 +107,51 @@ def live_declarations(record, configuration, child):
     require(p.identity==r.preparationId==bundle.preparationId and bundle.identity==r.commandId,'native identity links')
     require((bundle.mode,bundle.stopUpdates)==(r.policy.mode,r.policy.stopUpdates),'native command policy')
     provenance=json.loads(bundle.provenance)
+    fingerprints={}
     if 'auxiliaryInputs' in child:
+        from ..auxiliary.model import fingerprint
         from ..auxiliary.request import components
         from ..auxiliary.study import check_binding
         evidence=record.auxiliaryEvidence
         require(type(evidence) is dict,'native v2 evidence')
         meta=evidence['decisions']['metadata']
+        provider=a['provider']
+        expected_provider=(dict(provider='haCommands',version='1',recipe=provider['recipe'])
+            if provider['providerId']=='haRun' else dict(provider='scalarCondition',version='1',declaration=provider))
+        require({k:v for k,v in provenance.items() if k!='auxiliaryPreparation'}==expected_provider,
+            'native actual provider declaration')
+        require(provenance.get('auxiliaryPreparation')==dict(version='1',componentEvidenceId=evidence['decisions']['identity'],
+            features={k:v['identity'] for k,v in meta['features'].items()}),'native command decision links')
         require(meta['provider']==a['provider'],'native auxiliary provider declaration')
         require({k:v['metadata']['feature'] for k,v in meta['features'].items()}==
             {f['featureId']:f for f in a['auxiliaryFeatures']},'native auxiliary feature declarations')
         expected=sorted(components(a['entryFilter']),key=lambda c:c['componentId'])
         require([c['metadata']['component'] for c in meta['components']]==expected,'native auxiliary component declarations')
         require((bundle.entryFilter is not None)==bool(expected),'native auxiliary filter presence')
+        for component,declared in zip(meta['components'],expected):
+            require(component['componentId']==declared['componentId'],'native outer component identity')
+            if declared['providerId']=='candleDirection':
+                feature=next(f for f in a['features'] if f['requestId']==declared['requestId'])
+                source=next(v for v in p.inputs if v.inputId==feature['inputId'])
+                expected_source=dict(provider='candleDirection',version='1',request=feature,
+                    sourceHeader=source.header,inputFingerprint=source.inputFingerprint)
+            else:expected_source=dict(featureIdentity=meta['features'][declared['featureId']]['identity'])
+            require(component['metadata']['source']==expected_source,'native component source link')
+        if expected:
+            require(json.loads(bundle.entryFilter.provenance)==dict(provider='derivedTargetDecision',version='1',
+                componentEvidenceId=evidence['decisions']['identity'],
+                components=[dict(componentId=c['componentId'],identity=c['identity']) for c in meta['components']]),
+                'native filter decision links')
         bindings={b['inputId']:b for b in child['auxiliaryInputs']}
         deps=evidence['dependencies']
         require(set(deps)=={f['bindingId'] for f in a['auxiliaryFeatures']},'native dependency roster')
         for bid,dep in deps.items():
             require(dep['coveragePolicy']==bindings[bid]['coveragePolicy'],'native dependency coverage')
             check_binding(bindings[bid],configuration['instrumentId'],dep['content'])
+            fingerprints[bid]=fingerprint(dep['content'])
+        for feature in a['auxiliaryFeatures']:
+            require(meta['features'][feature['featureId']]['metadata']['consumedSliceFingerprint']==fingerprints[feature['bindingId']],
+                'native feature consumed slice link')
     else:
         require(record.auxiliaryEvidence is None,'native v1 auxiliary evidence')
         require(provenance==dict(provider='haCommands',version='1',recipe=a['provider']['recipe']),
@@ -136,6 +163,7 @@ def live_declarations(record, configuration, child):
             source=next(v for v in p.inputs if v.inputId==declared['inputId'])
             require(json.loads(actual.provenance)==dict(provider='candleDirection',version='1',request=declared,
                 sourceHeader=source.header,inputFingerprint=source.inputFingerprint),'native filter declaration')
+    return fingerprints
 
 
 def extract(record, configuration, period, child):
@@ -144,7 +172,7 @@ def extract(record, configuration, period, child):
         allocationId=configuration['allocationId'], windowId=period['periodId']), 'native labels')
     require((r.window.startMs, r.window.endMs) == tuple(month_boundary(period[k]) for k in ('startUtc','endUtc')),
             'native period bounds')
-    live_declarations(record,configuration,child)
+    fingerprints=live_declarations(record,configuration,child)
     metrics = extract_metrics(record)
     path, trades = r.path.to_pydict(), r.trades.to_pylist()
     gross = math.fsum(t['grossPnl'] for t in trades)
@@ -190,11 +218,10 @@ def extract(record, configuration, period, child):
     if dd is not None: near(dd,metrics['mtmMaxDdPct'],'carried-peak native DD')
     aux = []
     if record.auxiliaryEvidence:
-        from ..auxiliary.model import fingerprint
         bindings = {b['inputId']:b for b in child['auxiliaryInputs']}
         for bid, dep in sorted(record.auxiliaryEvidence['dependencies'].items()):
             b = bindings[bid]
-            aux.append(dict(inputId=bid,coveragePolicy=dep['coveragePolicy'],consumedSliceFingerprint=fingerprint(dep['content']),
+            aux.append(dict(inputId=bid,coveragePolicy=dep['coveragePolicy'],consumedSliceFingerprint=fingerprints[bid],
                 snapshotContentId=b['expectedSnapshotContentId'],source=b['sources'].get('*',b['sources'].get(configuration['instrumentId']))))
     unit = dict(factsVersion=VERSION,configurationId=configuration['configurationId'],
         resultId=result_id(configuration['configurationId'],period),periodId=period['periodId'],status='complete',
@@ -252,10 +279,15 @@ def validate(unit, config, period, child, *, synthetic):
     initial=m['initialCapital']; prefix=True; previous=initial; previous_balance=initial;peak_bound=initial
     start=slots[0]['startMs'];step=config['timeframeMinutes']*60000
     end=slots[-1]['endMs'];coverage=m['coverage'];last=coverage['lastObservedCloseMs']
+    first=coverage['firstObservedOpenMs'];first_close=None
     if coverage['observedBars']:
+        require(type(first) is int and first==start+coverage['missingHeadSlots']*step and
+            start<=first<first+step<=last and coverage['missingHeadSlots']+coverage['missingTailSlots']<=coverage['missingBars'],
+            'first observation/grid/missing counts')
+        first_close=first+step
         require(type(last) is int and start<last<=end and (last-start)%step==0 and
             coverage['missingTailSlots']==(end-last)//step,'last observation/grid/tail')
-    else: require(last is None and m['exitReasons'].get('terminal',0)==0,'unobserved terminal')
+    else: require(first is None and last is None and m['exitReasons'].get('terminal',0)==0,'unobserved terminal')
     require(months[-1]['closingSampleMs']==last,'final observed sample')
     owner=trade_month(last,slots,end) if m['exitReasons'].get('terminal',0) else None
     latest=None
@@ -273,7 +305,13 @@ def validate(unit, config, period, child, *, synthetic):
         if row['observedBars']:
             require(last is not None and type(row['closingSampleMs']) is int and slot['startMs']<row['closingSampleMs']<=min(slot['endMs'],last) and
                 (row['closingSampleMs']-start)%step==0,'observed month sample')
+            capacity=(row['closingSampleMs']-start)//step-(max(slot['startMs'],first)-start)//step
+            require(0<row['observedBars']<=capacity,'observed month endpoint capacity')
         else: require(row['closingSampleMs']==latest,'empty month sample carry')
+        if first_close is not None and slot['startMs']<first_close<=slot['endMs']:
+            require(row['observedBars']>0 and row['closingSampleMs']>=first_close and
+                (row['observedBars']==1 if row['closingSampleMs']==first_close else row['observedBars']>=2),
+                'first observation equity month')
         if last is not None and slot['startMs']<last<=slot['endMs']:
             require(row['observedBars']>0 and row['closingSampleMs']==last,'last observation equity month')
         latest=row['closingSampleMs']
