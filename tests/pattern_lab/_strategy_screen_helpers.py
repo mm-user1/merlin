@@ -112,3 +112,48 @@ def contradict_coverage(unit,case):
     prefix=True
     for row in months:
         row.update(analytical_month(row,unit['metrics']['initialCapital'],prefix));prefix=prefix and row['exact']
+
+
+
+def live_boundary_case(root,case,monkeypatch):
+    """Mutate small live metadata before execution; keep native ID equations real."""
+    import json
+    from dataclasses import replace
+    from tools.pattern_lab import PatternLabDataError
+    from tools.pattern_lab.auxiliary import commands as aux
+    from tools.pattern_lab.accounts.execution import account_identity
+    from tools.pattern_lab.account_study.codec import preparation_facts
+    from tools.pattern_lab.study.contracts import semantic_digest
+    from tools.pattern_lab.strategy_screen import facts,runner,verify_strategy_screen
+    from tools.pattern_lab.strategy_screen.artifacts import read_json
+    root.mkdir();doc=request(auxiliary=True);doc['allocations']=doc['allocations'][:1]
+    doc['cells'][0]['allocationIds']=['rr2'];build_inputs(root/'pack',document=doc)
+    original=aux.build_auxiliary_commands;trace=[]
+    def commands(*args):
+        bundle,decisions=original(*args);provenance=json.loads(bundle.provenance)
+        assert not decisions['metadata']['features'] and not decisions['metadata']['components']
+        if case=='nullDecision':
+            decisions['identity']=provenance['auxiliaryPreparation']['componentEvidenceId']=None
+        elif case=='schema':decisions['metadata']['schema']='pattern-lab.auxiliary-decisions.v2'
+        elif case=='projection':decisions['metadata']['projection']='derived-target-decision.2'
+        elif case=='provider':provenance['recipe']['entryRunLength']+=1
+        else:assert case=='control'
+        return replace(bundle,provenance=provenance),decisions
+    def inspect(record,*args):
+        r=record.result
+        assert semantic_digest(preparation_facts(record.prepared))==r.preparationId==r.commands.preparationId
+        assert r.commandId==r.commands.identity and account_identity(record.prepared,r.commands,r.policy,r.window,r.rules)==r.identity
+        event=dict(nativeEquations=True);trace.append(event)
+        try:return facts.extract(record,*args)
+        except PatternLabDataError as error:event['reason']=str(error);raise
+    with monkeypatch.context() as patch:
+        patch.setattr(aux,'build_auxiliary_commands',commands);patch.setattr(runner,'extract',inspect)
+        try:reader=runner.run_strategy_screen(doc,data_root=root/'pack',output_root=root/'screen')
+        except PatternLabDataError as error:
+            assert error.__cause__ is error.__context__ is None
+            assert error.args==('Strategy Screen rejected or failed; see sanitized owned status if created.',)
+            assert getattr(error,'filename',None) is None and 'reason' not in vars(error)
+            verified=False
+        else:verified=verify_strategy_screen(reader.root)['ok']
+    return dict(verified=verified,trace=trace,status=read_json(root/'screen/status.json'),
+        sealed=(root/'screen/completion.json').exists())

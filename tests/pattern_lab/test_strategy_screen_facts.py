@@ -78,9 +78,9 @@ def test_live_declaration_refusal(native_records,mutation):
         elif mutation=='auxRoster':deps.clear()
         elif mutation in ('auxProvider','emptyV2Provider'):meta['provider']['providerId']='wrong'
         elif mutation=='auxFeature':next(iter(meta['features'].values()))['metadata']['feature']['maxAgeMs']+=1
-        else:meta['components'].append(dict(metadata=dict(component={'componentId':'invented'})))
+        else:meta['components'].append(dict(identity='0'*64,metadata=dict(component={'componentId':'invented'})))
         record=replace(record,auxiliaryEvidence=evidence)
-    with pytest.raises(PatternLabDataError):extract(record,c,p,child)
+    with pytest.raises(PatternLabDataError,match='native auxiliary component declarations' if mutation=='auxComponent' else None):extract(record,c,p,child)
 
 
 @pytest.mark.parametrize('mutation',['terminalMonth','terminalFee','ddFloor','lastSample','tailSlots','lastGrid'])
@@ -398,3 +398,61 @@ def test_observation_endpoint_contradictions(native_records,case,reason):
     args=next(v for v in native_records[0][1] if v[1]['allocationId']=='rr4' and v[2]['periodId']=='recent')
     unit=extract(*args);contradict_coverage(unit,case)
     with pytest.raises(PatternLabDataError,match=reason):validate(unit,*args[1:],synthetic=False)
+
+
+@pytest.mark.parametrize('category',['decision','feature','component'])
+@pytest.mark.parametrize('value',[None,'','a'*63,'g'*64])
+def test_live_evidence_digest_shapes(shared_binding_record,category,value):
+    import json
+    from copy import deepcopy
+    from dataclasses import replace
+    from tools.pattern_lab import PatternLabDataError
+    from tools.pattern_lab.strategy_screen.facts import live_declarations
+    record,c,p,child=shared_binding_record
+    live_declarations(record,c,child)
+    evidence=deepcopy(record.auxiliaryEvidence);decisions=evidence['decisions'];meta=decisions['metadata']
+    commands=record.result.commands;provenance=json.loads(commands.provenance);filt=json.loads(commands.entryFilter.provenance)
+    if category=='decision':
+        decisions['identity']=provenance['auxiliaryPreparation']['componentEvidenceId']=filt['componentEvidenceId']=value
+    elif category=='feature':
+        meta['features']['fundingLevel']['identity']=value
+        provenance['auxiliaryPreparation']['features']['fundingLevel']=value
+        meta['components'][0]['metadata']['source']['featureIdentity']=value
+    else:meta['components'][0]['identity']=filt['components'][0]['identity']=value
+    commands=replace(commands,provenance=provenance,entryFilter=replace(commands.entryFilter,provenance=filt))
+    record=replace(record,auxiliaryEvidence=evidence,result=replace(record.result,commands=commands,commandId=commands.identity))
+    with pytest.raises(PatternLabDataError,match='invalid evidence identity'):live_declarations(record,c,child)
+
+
+def test_empty_compact_coverage_requires_both_full_missing_edges(monkeypatch):
+    from copy import deepcopy
+    from tools.pattern_lab import PatternLabDataError
+    from tools.pattern_lab.configuration_study import metrics
+    from tools.pattern_lab.strategy_screen import facts
+    from tools.pattern_lab.strategy_screen.request import normalize_request,configurations,child_request
+    from ._strategy_screen_helpers import compact_unit
+    captured=[];original=metrics.extract_metrics
+    def observe(record):
+        result=original(record);captured.append(result);return result
+    with monkeypatch.context() as patch:
+        patch.setattr(metrics,'extract_metrics',observe)
+        test_native_availability_and_terminal_tail('noObservations')
+    m,=captured;doc=request();doc['cells'][0].update(instrumentId='OKX_AAA-USDT-SWAP',allocationIds=['rr2'])
+    doc['allocations']=doc['allocations'][:1];doc.update(segments=[],previousReviewEndUtc=None)
+    doc=normalize_request(doc).document;c,=configurations(doc);p=doc['periods'][0]
+    child=child_request(doc,doc['cells'][0],p);unit=compact_unit(c,p);unit['metrics']=m;initial=m['initialCapital']
+    assert unit['execution']['kind']=='syntheticFixture'
+    unit['terminal']=dict(status=m['terminalStatus'],finalFlat=True,finalBalance=m['finalCapital'])
+    unit['audit'].update(tradesChecked=0,pathPoints=0,grossPnl=0.,netPnl=0.,fees=0.,monthlyReconstructedDd=None,terminalTrades=0,terminalExitFees=0.)
+    for i,row in enumerate(unit['months']):
+        row.update(openingEquity=initial,closingEquity=initial,openingBalance=initial,closingBalance=initial,minEquity=initial,maxEquity=initial,
+            openingSampleMs=row['startMs'] if i==0 else None,closingSampleMs=None,openingExact=i==0,closingExact=False,observedBars=0,
+            closedTrades=0,diagnosticPnl=0.,diagnosticContributionPp=0.,localDrawdownPct=0.,localDrawdownStatus='available',
+            carriedPeakMaxDdPct=None,carriedPeakStatus='noObservedBars')
+        row.update(facts.analytical_month(row,initial,i==0))
+    cov=m['coverage'];assert cov['observedBars']==0 and cov['missingHeadSlots']==cov['missingTailSlots']==cov['expectedBars']==91
+    facts.validate(unit,c,p,child,synthetic=True)
+    for key in ('missingHeadSlots','missingTailSlots'):
+        for delta in (-1,1):
+            broken=deepcopy(unit);broken['metrics']['coverage'][key]+=delta
+            with pytest.raises(PatternLabDataError,match='unobserved missing edge counts'):facts.validate(broken,c,p,child,synthetic=True)

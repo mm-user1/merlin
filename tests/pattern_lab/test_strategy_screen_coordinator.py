@@ -323,17 +323,25 @@ def test_production_limit_admission_and_two_failure_states(tmp_path,monkeypatch,
 
 
 @pytest.mark.parametrize('old_size',[16777216,16777088])
-def test_old_admitted_sizes_refused_before_missing_parents(tmp_path,old_size):
+def test_old_admitted_sizes_refused_before_missing_parents(tmp_path,monkeypatch,old_size):
     from ._strategy_screen_helpers import request
     from tools.pattern_lab.strategy_screen.request import normalize_request,configurations,MAX_JSON
     from tools.pattern_lab.account_study.common import json_text
-    doc=request();doc['notes']='';n=normalize_request(doc)
+    doc=build_inputs(tmp_path/'pack');doc['notes']='';n=normalize_request(doc)
     size=len(json_text(dict(request=n.document,configurations=configurations(n.document))).encode())
     doc['notes']='n'*(old_size-size)
     assert len(json_text(dict(request=normalize_request(doc).document,configurations=configurations(n.document))).encode())==old_size
     out=tmp_path/'missing/deep/screen'
-    with pytest.raises(PatternLabDataError):runner.run_strategy_screen(doc,data_root=tmp_path/'absent-pack',output_root=out)
-    assert not (tmp_path/'missing').exists()
+    original=runner.execution_budget;reasons=[]
+    def observe(*a,**kw):
+        try:return original(*a,**kw)
+        except PatternLabDataError as error:reasons.append(str(error));raise
+    monkeypatch.setattr(runner,'execution_budget',observe)
+    with pytest.raises(PatternLabDataError) as caught:runner.run_strategy_screen(doc,data_root=tmp_path/'pack',output_root=out)
+    assert reasons==['account: root JSON byte bound'], 'intended execution budget did not reject'
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert caught.value.args==('Strategy Screen rejected or failed; see sanitized owned status if created.',)
+    assert not out.exists() and not (tmp_path/'missing').exists()
 
 
 def test_worst_case_failure_projection_is_bounded():
@@ -382,18 +390,25 @@ def test_group_pool_and_publish_failures_clear_job_ownership(tmp_path,monkeypatc
 
 
 def test_live_provider_mismatch_never_seals(tmp_path,monkeypatch):
-    import json
-    from dataclasses import replace
-    original=runner.run_account_job
-    def mismatched(job):
-        records=original(job);record=records[0];provenance=json.loads(record.result.commands.provenance)
-        provenance['recipe']['entryRunLength']+=1
-        commands=replace(record.result.commands,provenance=provenance)
-        return [replace(record,result=replace(record.result,commands=commands,commandId=commands.identity))]
-    monkeypatch.setattr(runner,'run_account_job',mismatched)
-    with pytest.raises(PatternLabDataError):run(tmp_path/'mismatch',auxiliary=True)
-    out=tmp_path/'mismatch/screen'
-    assert not (out/'completion.json').exists() and read_json(out/'status.json')['completedResults']==0
+    from ._strategy_screen_helpers import live_boundary_case
+    result=live_boundary_case(tmp_path/'mismatch','provider',monkeypatch)
+    assert [e.get('reason') for e in result['trace']]==['account: native actual provider declaration'], 'intended provider guard did not reject'
+    assert not result['verified'] and not result['sealed']
+    assert result['status']['state']=='failed' and result['status']['completedResults']==0
+
+
+@pytest.mark.parametrize('case,reason',[('control',None),('nullDecision','invalid evidence identity'),
+    ('schema','native decision schema'),('projection','native decision projection')])
+def test_public_live_decision_format(tmp_path,monkeypatch,case,reason):
+    from ._strategy_screen_helpers import live_boundary_case
+    result=live_boundary_case(tmp_path/case,case,monkeypatch)
+    if reason is None:
+        assert result['verified'] and result['sealed'] and result['status']['completedResults']==2
+        assert len(result['trace'])==2 and all(e==dict(nativeEquations=True) for e in result['trace'])
+    else:
+        assert result['trace']==[dict(nativeEquations=True,reason='account: '+reason)]
+        assert not result['verified'] and not result['sealed']
+        assert result['status']['state']=='failed' and result['status']['completedResults']==0
 
 
 def test_real_manifest_io_translation_after_admission(tmp_path,monkeypatch):

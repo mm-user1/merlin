@@ -36,6 +36,17 @@ Frozen analytical parity and exact ordinary/auxiliary offline archive verificati
 are separate hash-pinned local review helpers. No Linux/cross-host, new browser,
 full application or UAC recertification gate is claimed for this Windows task.
 
+Live evidence format tests mutate the native command builder before execution and
+check real preparation/command/account equations, the precise inner rejection,
+zero successful appends and sanitized public errors. Linked malformed evidence
+digests cannot pass merely because references agree. Empty-window tests combine
+genuine native metrics with an explicit synthetic compact envelope and check both
+missing edges above/below the full expected count. Size-admission negatives use
+valid synthetic packs and observe the real budget reason. Bounded local review
+controls bypass only the intended budget/provider guard and require the maintained
+test's own assertion to fail; unrelated missing-data or account-ID errors do not
+count as coverage. These tests do not depend on ignored review scripts.
+
 ## Comparative configuration reports
 
 `test_configuration_report.py` covers the API/CLI, sidecars, publication cleanup,

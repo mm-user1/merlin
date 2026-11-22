@@ -192,7 +192,7 @@ with mtime zero inside an ordinary ZIP_STORED archive. ZIP64 is refused.
 
 Bounds are 16 MiB per root JSON, 8 MiB decoded member, 512 MiB aggregate decoded,
 128 MiB archive including directory, and 65,534 members. Calendar/roster/metadata
-estimates precede execution; actual limits are enforced before publication. An
+estimates precede execution; actual limits are enforced before publication.
 Physical root JSON is canonical ASCII-escaped UTF-8 plus CRLF on Windows or LF
 on other platforms. Admission and atomic publication use the same checked bytes.
 An individual calendar is bounded to 8,192 months and aggregate account-month
@@ -266,14 +266,18 @@ provenance joins the declared provider, decision identity and feature identity m
 Every feature joins its consumed slice (one fingerprint per binding, reused for
 compact attribution). Component IDs/declarations, scalar source feature identity,
 native candle provenance and ordered filter references must agree, including empty
-v2 decisions. These live checks do not rehash command arrays or reread snapshots. Extraction, writer admission
+v2 decisions. Decision, feature and component evidence IDs must be 64 lowercase
+hexadecimal characters; returned decision schema/projection must be the supported
+auxiliary-decisions.v1 / derived-target-decision.1 pair, even for empty v2.
+These live checks do not rehash command arrays or reread snapshots. Extraction, writer admission
 and stored verification all recompute the native preparation/account equations
 and validate recorded execution rules against the target header. Observed coverage
 joins first-open/head and last-close/tail on the period grid. Each month's count
 fits the grid interval from max(month-start, first-open) through its closing sample.
 The first-close month must contain that observation, with at least two observations
 when its closing sample is later. Head plus tail cannot exceed total missing bars
-for observed accounts; native unobserved head/tail semantics remain separate. Terminal counts
+for observed accounts. With zero observations, each missing edge count equals the
+whole expected count; their sum is deliberately not bounded by that count. Terminal counts
 and fees belong to the month derived from the last observed close; equity's
 separate boundary convention is retained. Exact observed closing endpoints impose
 a DD floor using the full prefix of monthly maxima, with native tolerance. Signed

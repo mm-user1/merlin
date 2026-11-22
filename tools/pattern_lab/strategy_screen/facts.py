@@ -115,6 +115,11 @@ def live_declarations(record, configuration, child):
         evidence=record.auxiliaryEvidence
         require(type(evidence) is dict,'native v2 evidence')
         meta=evidence['decisions']['metadata']
+        digest_id(evidence['decisions']['identity'])
+        require(meta['schema']=='pattern-lab.auxiliary-decisions.v1','native decision schema')
+        require(meta['projection']=='derived-target-decision.1','native decision projection')
+        for feature in meta['features'].values():digest_id(feature['identity'])
+        for component in meta['components']:digest_id(component['identity'])
         provider=a['provider']
         expected_provider=(dict(provider='haCommands',version='1',recipe=provider['recipe'])
             if provider['providerId']=='haRun' else dict(provider='scalarCondition',version='1',declaration=provider))
@@ -287,7 +292,10 @@ def validate(unit, config, period, child, *, synthetic):
         first_close=first+step
         require(type(last) is int and start<last<=end and (last-start)%step==0 and
             coverage['missingTailSlots']==(end-last)//step,'last observation/grid/tail')
-    else: require(first is None and last is None and m['exitReasons'].get('terminal',0)==0,'unobserved terminal')
+    else:
+        require(first is None and last is None and m['exitReasons'].get('terminal',0)==0,'unobserved terminal')
+        require(coverage['missingHeadSlots']==coverage['missingTailSlots']==coverage['expectedBars'],
+            'unobserved missing edge counts')
     require(months[-1]['closingSampleMs']==last,'final observed sample')
     owner=trade_month(last,slots,end) if m['exitReasons'].get('terminal',0) else None
     latest=None
