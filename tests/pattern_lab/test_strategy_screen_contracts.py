@@ -6,6 +6,13 @@ from tools.pattern_lab.strategy_screen.request import configurations,child_reque
 from ._strategy_screen_helpers import request
 
 
+@pytest.mark.parametrize('overrides',[{1440:1},{True:1},{1440.0:1},{'01440':1},{'60':1},{1440:1,'1440':2}])
+def test_original_override_key_types_and_no_mutation(overrides):
+    doc=request();doc['criteria']['minClosedTradesByTimeframe']=overrides;before=deepcopy(doc)
+    with pytest.raises(PatternLabDataError):normalize_request(doc)
+    assert doc==before and list(doc['criteria']['minClosedTradesByTimeframe'])==list(overrides)
+
+
 def test_native_defaults_and_v2_presence():
     for auxiliary in (False,True):
         doc=normalize_request(request(auxiliary=auxiliary)).document

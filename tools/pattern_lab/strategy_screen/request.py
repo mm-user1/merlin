@@ -106,6 +106,12 @@ class StrategyScreenRequest:
 
 def normalize_request(value):
     if isinstance(value, StrategyScreenRequest): value = value.document
+    # JSON ownership must not turn caller integer/bool keys into legal strings.
+    if isinstance(value, dict) and isinstance(value.get('criteria'), dict):
+        overrides = value['criteria'].get('minClosedTradesByTimeframe', {})
+        require(type(overrides) is dict and all(type(k) is str and k.isascii() and
+            k.isdecimal() and not k.startswith('0') for k in overrides),
+            'canonical declared timeframe key')
     doc, base = owned(value)
     closed(doc, ('schema', 'studyId', 'allocations', 'sources', 'cells', 'periods', 'criteria'),
            ('segments', 'previousReviewEndUtc', 'auxiliaryInputs', 'notes'))

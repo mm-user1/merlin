@@ -1,5 +1,7 @@
 """Exact monthly extraction; compact checks never claim full execution replay."""
 from dataclasses import asdict
+from decimal import Decimal, ROUND_CEILING
+import json
 import math
 import numpy as np
 
@@ -10,6 +12,9 @@ from ..account_study.codec import preparation_facts
 from ..configuration_study.metrics import extract_metrics
 from ..configuration_study.validation import metric_row, finite_json
 from ..configuration_study.request import result_id as metric_result_id
+from ..study.contracts import semantic_digest
+from ..study.bracket_rules import ExecutionRules
+from data_provider.data import validate_fingerprint_header
 from .request import calendar, result_id, month_boundary, child_request
 
 VERSION = 'strategy-screen-facts.1'
@@ -57,12 +62,89 @@ def trade_month(exit_ms, months, end):
     require(False, 'trade outside declared calendar')
 
 
+def native_identities(execution, allocation, period):
+    """Native semantic equations, without constructing proxy accounts or arrays."""
+    preparation = dict(schema='pattern-lab.account.v1', preparationVersion='1', alignmentVersion='1',
+        seed='segment-first-real-open-close;pine-rma;neutral-break;priorBars-mask',
+        validity='next-scheduled-close-exclusive', targetId='target',
+        inputs=sorted(execution['inputs'],key=lambda v:v['inputId']),
+        requests=sorted(allocation['features'],key=lambda f:f['requestId']))
+    require(semantic_digest(preparation)==execution['preparationId'],'native preparation identity')
+    account = dict(schema='pattern-lab.account.v1', preparationId=execution['preparationId'],
+        commandId=execution['commandId'], policy=allocation['policy'],
+        window=dict(startMs=month_boundary(period['startUtc']),endMs=month_boundary(period['endUtc'])),
+        rules=execution['rules'])
+    require(semantic_digest(account)==execution['accountId'],'native account identity')
+    # Same recorded-rules semantics as accounts.execution.validate_inputs. That
+    # API also requires full prepared arrays/commands, unavailable in compact data.
+    r=ExecutionRules(**execution['rules']);h=next(v['header'] for v in execution['inputs'] if v['inputId']=='target')
+    require(r.venue==h['venue'] and r.contract==h['contract'] and
+        r.quote_currency==r.settlement_currency==h['quote_currency']=='USDT','rules instrument')
+    integer(r.minimum_lots,'minimum_lots',1)
+    require(r.minimum_lots<=2**53 and r.enforce_minimum_quantity is True and
+        type(r.enforce_minimum_notional) is bool and r.enforce_minimum_notional==(r.minimum_notional is not None),'rules limits/flags')
+    for name in ('base_step','base_minimum','quantity_step','minimum_quantity'):
+        value=getattr(r,name)
+        require(isinstance(value,str) and math.isfinite(float(value)) and float(value)>0,'rules quantity')
+    step,minimum=Decimal(r.base_step),Decimal(r.base_minimum)
+    factor=Decimal(r.ct_val) if r.venue=='OKX' else Decimal(1)
+    require((r.venue=='OKX' and r.ct_mult=='1' and factor>0 and r.quantity_unit=='contracts') or
+        (r.venue=='BYBIT' and r.ct_val is None and r.ct_mult is None and r.quantity_unit==r.base_currency),'rules conversion')
+    require(Decimal(r.quantity_step)*factor==step and Decimal(r.minimum_quantity)*factor==minimum and
+        int((minimum/step).to_integral_value(rounding=ROUND_CEILING))==r.minimum_lots,'rules normalization')
+    if r.minimum_notional is not None:
+        require(isinstance(r.minimum_notional,str) and math.isfinite(float(r.minimum_notional)) and
+            float(r.minimum_notional)>=0,'minimum notional')
+
+
+def live_declarations(record, configuration, child):
+    r=record.result;p=record.prepared;bundle=r.commands
+    a=next(a for a in child['allocations'] if a['allocationId']==configuration['allocationId'])
+    require(asdict(r.policy)==a['policy'] and p.targetId=='target' and
+        p.target.header['instrument_id']==configuration['instrumentId'],'native policy/target declaration')
+    require(preparation_facts(p)['requests']==sorted(a['features'],key=lambda f:f['requestId']),
+        'native candle declarations')
+    require(p.identity==r.preparationId==bundle.preparationId and bundle.identity==r.commandId,'native identity links')
+    require((bundle.mode,bundle.stopUpdates)==(r.policy.mode,r.policy.stopUpdates),'native command policy')
+    provenance=json.loads(bundle.provenance)
+    if 'auxiliaryInputs' in child:
+        from ..auxiliary.request import components
+        from ..auxiliary.study import check_binding
+        evidence=record.auxiliaryEvidence
+        require(type(evidence) is dict,'native v2 evidence')
+        meta=evidence['decisions']['metadata']
+        require(meta['provider']==a['provider'],'native auxiliary provider declaration')
+        require({k:v['metadata']['feature'] for k,v in meta['features'].items()}==
+            {f['featureId']:f for f in a['auxiliaryFeatures']},'native auxiliary feature declarations')
+        expected=sorted(components(a['entryFilter']),key=lambda c:c['componentId'])
+        require([c['metadata']['component'] for c in meta['components']]==expected,'native auxiliary component declarations')
+        require((bundle.entryFilter is not None)==bool(expected),'native auxiliary filter presence')
+        bindings={b['inputId']:b for b in child['auxiliaryInputs']}
+        deps=evidence['dependencies']
+        require(set(deps)=={f['bindingId'] for f in a['auxiliaryFeatures']},'native dependency roster')
+        for bid,dep in deps.items():
+            require(dep['coveragePolicy']==bindings[bid]['coveragePolicy'],'native dependency coverage')
+            check_binding(bindings[bid],configuration['instrumentId'],dep['content'])
+    else:
+        require(record.auxiliaryEvidence is None,'native v1 auxiliary evidence')
+        require(provenance==dict(provider='haCommands',version='1',recipe=a['provider']['recipe']),
+            'native HA recipe declaration')
+        filt=a['entryFilter'];actual=bundle.entryFilter
+        require((actual is not None)==(filt is not None),'native filter presence')
+        if filt is not None:
+            declared=next(f for f in a['features'] if f['requestId']==filt['requestId'])
+            source=next(v for v in p.inputs if v.inputId==declared['inputId'])
+            require(json.loads(actual.provenance)==dict(provider='candleDirection',version='1',request=declared,
+                sourceHeader=source.header,inputFingerprint=source.inputFingerprint),'native filter declaration')
+
+
 def extract(record, configuration, period, child):
     r = record.result; initial = r.policy.initialCapital
     require(record.labels == dict(instrumentId=configuration['instrumentId'],
         allocationId=configuration['allocationId'], windowId=period['periodId']), 'native labels')
     require((r.window.startMs, r.window.endMs) == tuple(month_boundary(period[k]) for k in ('startUtc','endUtc')),
             'native period bounds')
+    live_declarations(record,configuration,child)
     metrics = extract_metrics(record)
     path, trades = r.path.to_pydict(), r.trades.to_pylist()
     gross = math.fsum(t['grossPnl'] for t in trades)
@@ -149,9 +231,12 @@ def validate(unit, config, period, child, *, synthetic):
         origin = to_ms(child['preparationStartUtc'])
         for v in e['inputs']:
             s=sources[v['inputId']]; h=v['header']
+            validate_fingerprint_header(h)
             target = config['instrumentId'] if s['instrumentId']=='target' else s['instrumentId']
-            require(h['instrument_id']==target and h['timeframe_minutes']==s['timeframeMinutes'] and h['warmup_start_ms']==origin,
+            require(h['instrument_id']==target and h['timeframe_minutes']==s['timeframeMinutes'] and h['warmup_start_ms']==origin and
+                h['start_ms']==month_boundary(period['startUtc']) and h['end_ms']==month_boundary(period['endUtc']),
                     'prepared source/warmup binding')
+        native_identities(execution,allocation,period)
         bindings={b['inputId']:b for b in child.get('auxiliaryInputs',[])}
         used_aux={f['bindingId'] for f in allocation.get('auxiliaryFeatures',[])}
         require([a['inputId'] for a in execution['auxiliary']]==sorted(used_aux), 'auxiliary evidence roster')
@@ -166,7 +251,15 @@ def validate(unit, config, period, child, *, synthetic):
     require(type(months) is list and len(months)==len(slots),'complete monthly roster')
     initial=m['initialCapital']; prefix=True; previous=initial; previous_balance=initial;peak_bound=initial
     start=slots[0]['startMs'];step=config['timeframeMinutes']*60000
-    for row, slot in zip(months,slots):
+    end=slots[-1]['endMs'];coverage=m['coverage'];last=coverage['lastObservedCloseMs']
+    if coverage['observedBars']:
+        require(type(last) is int and start<last<=end and (last-start)%step==0 and
+            coverage['missingTailSlots']==(end-last)//step,'last observation/grid/tail')
+    else: require(last is None and m['exitReasons'].get('terminal',0)==0,'unobserved terminal')
+    require(months[-1]['closingSampleMs']==last,'final observed sample')
+    owner=trade_month(last,slots,end) if m['exitReasons'].get('terminal',0) else None
+    latest=None
+    for index,(row, slot) in enumerate(zip(months,slots)):
         closed(row,MONTH_KEYS)
         require(all(row[k]==v for k,v in slot.items()),'month coordinates')
         for k in ('observedBars','expectedBars','closedTrades','terminalTradeCount'):integer(row[k],k)
@@ -175,6 +268,15 @@ def validate(unit, config, period, child, *, synthetic):
         for k in ('openingEquity','closingEquity','openingBalance','closingBalance','minEquity','maxEquity','terminalExitFees'):
             require(type(row[k]) in (int,float), 'monthly financial type')
         require(row['terminalExitFees']>=0 and (row['terminalTradeCount'] or row['terminalExitFees']==0), 'terminal fee count')
+        if index!=owner:require(row['terminalTradeCount']==0 and row['terminalExitFees']==0,'terminal month ownership')
+        require(row['openingSampleMs']==(start if index==0 else latest),'opening sample continuity')
+        if row['observedBars']:
+            require(last is not None and type(row['closingSampleMs']) is int and slot['startMs']<row['closingSampleMs']<=min(slot['endMs'],last) and
+                (row['closingSampleMs']-start)%step==0,'observed month sample')
+        else: require(row['closingSampleMs']==latest,'empty month sample carry')
+        if last is not None and slot['startMs']<last<=slot['endMs']:
+            require(row['observedBars']>0 and row['closingSampleMs']==last,'last observation equity month')
+        latest=row['closingSampleMs']
         require(row['openingEquity']==previous and row['openingBalance']==previous_balance,'monthly diagnostic continuity')
         require(row['minEquity']<=min(row['openingEquity'],row['closingEquity'])<=max(row['openingEquity'],row['closingEquity'])<=row['maxEquity'], 'monthly extrema')
         peak_bound=max(peak_bound,row['maxEquity'])
@@ -191,6 +293,9 @@ def validate(unit, config, period, child, *, synthetic):
         require((dd is not None)==(row['observedBars']>0) and row['carriedPeakStatus']==('available' if dd is not None else 'noObservedBars'), 'carried DD availability')
         require(dd is None or type(dd) in (int,float) and dd>=0, 'carried DD bounds')
         if dd is not None:
+            if row['closingExact']:
+                floor=max(0,100*(peak_bound-row['closingEquity'])/peak_bound)
+                require(dd>=floor or reconciles(dd,floor),'carried DD below observed endpoint')
             bound=100*(1-row['minEquity']/(peak_bound if row['minEquity']>=0 else initial))
             require(dd<=max(0,bound) or reconciles(dd,max(0,bound)), 'carried DD exceeds retained extrema bound')
         local=row['localDrawdownPct']

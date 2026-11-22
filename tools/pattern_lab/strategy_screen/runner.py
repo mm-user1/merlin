@@ -17,7 +17,7 @@ from ..study.bracket_rules import normalize_rules
 from ..study import workers as workers_module
 from .request import normalize_request, configurations, child_request, cell_id
 from .facts import extract
-from .artifacts import Writer, save_json, safe_path, output_path, reserve, completion_valid, load_strategy_screen
+from .artifacts import Writer, save_json, safe_path, output_path, load_strategy_screen
 
 
 def implementation(auxiliary):
@@ -91,14 +91,29 @@ def execute_group(group,make_job,period,child,pool,workers,progress,timings):
             del job;submitted+=1
             progress.state['maximumInFlight']=max(progress.state['maximumInFlight'],submitted-consumed)
         if consumed not in ready:
-            kind,key,records=pool.take()
+            progress.state.update(phase='receive',currentJob=None,affectedJobs=[])
+            try:kind,key,records=pool.take()
+            except workers_module.WorkerLostError as exc:
+                progress.state['reasonCode']='nativeWorkerLost'
+                orphaned=set(exc.orphaned)
+                if orphaned and orphaned<=pending.keys():
+                    affected=[coordinate(group[i]) for i in sorted(pending[k] for k in orphaned)]
+                    if len(affected)==1:progress.state['currentJob']=affected[0]
+                    else:progress.state['affectedJobs']=affected
+                raise
+            except workers_module.WorkerTransportError:
+                progress.state['reasonCode']='nativeWorkerTransportFailed';raise
+            except Exception:
+                progress.state['reasonCode']='nativeWorkerReceiveFailed';raise
             progress.state.update(phase='extract',currentJob=coordinate(group[pending[key]]) if key in pending else None)
+            if kind!='result':progress.state['reasonCode']='nativeWorkerJobFailed'
             require(kind=='result' and key in pending,'native worker failed')
             index=pending.pop(key);require(len(records)==1,'one native account per job')
             tick=time.perf_counter();ready[index]=extract(records[0],group[index],period,child)
             timings['extractionSeconds']+=time.perf_counter()-tick;del records
         progress.state['maximumCompactBuffer']=max(progress.state['maximumCompactBuffer'],len(ready)+16)
         while consumed in ready:
+            progress.state.update(phase='append',currentJob=coordinate(group[consumed]),affectedJobs=[])
             unit=ready.pop(consumed);consumed+=1
             yield unit
             del unit;progress.state['completedResults']+=1;progress.write()
@@ -133,6 +148,16 @@ def admit_auxiliary(doc,children,roots,output,pack):
 
 
 def run_strategy_screen(request,*,data_root,output_root,workers=1,auxiliary_roots=None):
+    # Leave the private handler before raising: `from None` alone still exposes
+    # __context__. In particular, never return OSError.filename from admission.
+    try:
+        return _run(request,data_root=data_root,output_root=output_root,workers=workers,auxiliary_roots=auxiliary_roots)
+    except Exception:
+        pass
+    raise PatternLabDataError('Strategy Screen rejected or failed; see sanitized owned status if created.')
+
+
+def _run(request,*,data_root,output_root,workers,auxiliary_roots):
     normalized=normalize_request(request);doc=normalized.document
     integer(workers,'workers',1);require(workers<=6,'workers must be 1..6')
     rows=configurations(doc);pack=safe_path(data_root);output=output_path(output_root,pack)
@@ -153,11 +178,14 @@ def run_strategy_screen(request,*,data_root,output_root,workers=1,auxiliary_root
         raw={e['instrument_id']:e for e in manifest.read_manifest(pack)['instruments']}
         rules={c['instrumentId']:normalize_rules(raw[c['instrumentId']]) for c in doc['cells']}
         require(session.inspect(verify=True)['verification_check']['ok'],'pack integrity admission')
-        root=reserve(output);writer=pool=None
+        root=output;writer=pool=None;owned=False
         state=dict(state='running',phase='initialize',currentJob=None,plannedResults=2*len(rows),completedResults=0,
             requestedWorkers=workers,maximumInFlight=0,maximumCompactBuffer=0,startedUtc=datetime.now(timezone.utc).isoformat())
         timings=dict(preparationSeconds=0.,extractionSeconds=0.,directExecutionSeconds=0.);physical={};started=time.perf_counter()
         try:
+            root.parent.mkdir(parents=True,exist_ok=True)
+            root.mkdir(exist_ok=False)
+            owned=True
             save_json(root/'study.json',dict(schema='pattern-lab.strategy-screen-plan.v1',request=doc,configurations=rows))
             progress=Progress(root,state);writer=Writer(root,normalized,source)
             effective=min(workers,max(len(g) for g in groups.values()));state['effectiveWorkers']=effective
@@ -168,8 +196,12 @@ def run_strategy_screen(request,*,data_root,output_root,workers=1,auxiliary_root
                 for period in reversed(doc['periods']):
                     for cid,group in groups.items():
                         child=children[(period['periodId'],cid)];instrument=child['instruments'][0];local_physical={}
-                        state.update(phase='prepare',currentJob=dict(periodId=period['periodId'],cellId=cid))
-                        tick=time.perf_counter();bindings,deps=prepare_scope(session,child,instrument,entries,snapshots,local_physical)
+                        state.update(phase='prepare',currentJob=dict(periodId=period['periodId'],cellId=cid),
+                            currentGroup=dict(periodId=period['periodId'],cellId=cid),affectedJobs=[])
+                        tick=time.perf_counter()
+                        try:bindings,deps=prepare_scope(session,child,instrument,entries,snapshots,local_physical)
+                        except PatternLabDataError:
+                            state['reasonCode']='nativePreparationRejected';raise
                         timings['preparationSeconds']+=time.perf_counter()-tick
                         amap={a['allocationId']:a for a in child['allocations']}
                         def make_job(c):
@@ -190,11 +222,18 @@ def run_strategy_screen(request,*,data_root,output_root,workers=1,auxiliary_root
             if writer is not None:
                 try:writer.close()
                 except BaseException as cleanup:state['writerCleanupErrorType']=type(cleanup).__name__
-            if not completion_valid(root):
-                state.update(state='failed',errorType=type(exc).__name__,reasonCode='strategyScreenOperationFailed')
-                if not (root/'study.json').is_file():state['plan']=dict(request=doc,configurations=rows)
-                try:save_json(root/'status.json',state)
+            # A read/hash error does not prove that atomic publication failed.
+            # Only known absence authorizes mutation of an owned run.
+            uncommitted=False
+            if owned:
+                try:(root/'completion.json').lstat()
+                except FileNotFoundError:uncommitted=True
                 except OSError:pass
-            if isinstance(exc,KeyboardInterrupt):raise KeyboardInterrupt from None
-            raise PatternLabDataError('Strategy Screen failed; see sanitized owned status.') from None
+            if uncommitted:
+                state.update(state='failed',errorType=type(exc).__name__)
+                state.setdefault('reasonCode','strategyScreenOperationFailed')
+                state['plan']=dict(request=doc,configurations=rows)
+                try:save_json(root/'status.json',state)
+                except Exception:pass  # Unwritable storage cannot promise a saved status.
+            raise
     return load_strategy_screen(root)

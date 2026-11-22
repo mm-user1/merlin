@@ -17,6 +17,18 @@ def results(reader):
     return [reader.result(r['configurationId'],r['periodId']) for r in reader.result_rows]
 
 
+def capture_native(root, *, auxiliary=False):
+    """Small test-only record roster; production still prunes each result."""
+    from unittest.mock import patch
+    from tools.pattern_lab.strategy_screen import runner
+    extract=runner.extract;records=[]
+    def capture(record,c,p,child):
+        records.append((record,c,p,child))
+        return extract(record,c,p,child)
+    with patch.object(runner,'extract',capture):reader=run(root,auxiliary=auxiliary)
+    return reader,records
+
+
 def compact_unit(config,period,ordinal=0):
     """Invented compact fixture, explicitly without native execution evidence."""
     from ._configuration_capacity import unit as old_unit

@@ -1,6 +1,7 @@
 """Bounded six-file artifacts and stored-only, deterministic numerical export."""
 from copy import deepcopy
 from pathlib import Path
+import stat
 import zipfile
 
 from ..accounts.contracts import require
@@ -22,9 +23,12 @@ LIMITATION='Compact consistency only; full execution, per-fill fee arithmetic, d
 
 def safe_path(value):
     path=Path(value).expanduser().absolute()
-    for p in (path,*path.parents):
-        require(not p.is_symlink() and not p.is_junction(),'symlink/reparse path refused')
-        if p.exists():require(not getattr(p.lstat(),'st_file_attributes',0)&0x400,'reparse path refused')
+    # Inspect from the root down, before traversing a possibly linked component.
+    for p in reversed((path,*path.parents)):
+        try: info=p.lstat()
+        except FileNotFoundError: continue
+        require(not stat.S_ISLNK(info.st_mode) and not getattr(info,'st_file_attributes',0)&0x400,
+                'symlink/reparse path refused')
     return path.resolve()
 
 
@@ -35,6 +39,15 @@ def output_path(value, *inputs):
         source=safe_path(source)
         require(not path.is_relative_to(source) and not source.is_relative_to(path),'overlapping/protected output')
     require(not path.exists(),'new output directory required')
+    for parent in path.parents:
+        names=set()
+        for name in ('completion.json','study.json','selection.json','status.json','analysis.json','receipt.json'):
+            try:(parent/name).lstat()
+            except FileNotFoundError:continue
+            names.add(name)
+        # Names alone reserve ownership; never open/follow a marker.
+        require(not names.intersection(('completion.json','study.json','selection.json','status.json')) and
+                not {'analysis.json','receipt.json'}<=names,'output nested in an owned artifact')
     return path
 
 

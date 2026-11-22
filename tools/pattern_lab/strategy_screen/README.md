@@ -80,6 +80,10 @@ instrument IDs remain identities across venues. Equivalent normalized settings
 are rejected per cell. Allocation renaming does not change configuration identity;
 snapshot/input identity is separate from logical configuration matching.
 
+Python `minClosedTradesByTimeframe` keys must already be canonical positive-integer
+strings naming declared TFs. Integer/bool/float keys are rejected before JSON
+ownership copying; normalization never changes the caller's mapping.
+
 Both periods are admitted before creating output or executing recent. Execution
 order is recent first, then earlier, with ascending instrument, numeric TF and
 configuration ID. Each account starts flat with the common initial capital,
@@ -138,12 +142,14 @@ uses the effective per-TF threshold whenever trade count is known, independently
 of classification. Short native annualization can make a flat February account
 unclassifiable while its zero return/trades remain real available values.
 
-The protected pack-preparation API currently refuses an entirely empty research
-span before producing an account. This coordinator preserves that failure rather
-than synthesizing a completed empty result. The executor's genuine unobserved
-subwindow metrics/classification are covered separately. Extending coordinator
-preparation to publish a wholly unobserved period needs a tech-lead disposition;
-this implementation does not bypass the existing native guard.
+The protected pack-preparation API refuses a required research span with no
+complete bar before producing an account. This is a supported failure limitation:
+the entire screen fails with `nativePreparationRejected`, its owning period/cell
+and honest completed count, even when recent accounts already completed. No
+complete summary or seal is published. This reason also covers other native
+preparation data rejections; it does not assert that every rejection is empty.
+Clock, storage and worker failures have separate reasons. Genuine native
+unobserved-subwindow metrics/classification remain unavailable where supported.
 
 Scope breadth exposes pooled counts and `equalCellPct` separately. Multi-cell
 cards average cell fractions including all declared settings. Metric medians pool
@@ -199,9 +205,26 @@ numeric projections support summaries. No durable full native study is created.
 
 All input/output roots must be disjoint and outputs new. Symlink/reparse path
 components are rejected before resolution. Preflight rejection leaves output
-absent. Once reserved, failures retain sanitized status and reconstructible plan
+absent and exposes a fresh safe Python domain error without private exception
+context. Before any mkdir, ancestors are checked by entry name for `completion.json`,
+`study.json`, `selection.json`, `status.json`, or the pair `analysis.json` and
+`receipt.json`. Malformed files, directories and dangling marker links reserve
+ownership without being opened. Inspection errors reject admission. This also
+conservatively reserves unrelated `status.json` files. An unmarked empty directory
+or half of an analysis pair is not a recognizable artifact; ordinary siblings
+remain valid. This is a bounded existing-output guard under single-writer use,
+not a general filesystem race sandbox.
+
+Once exclusively reserved, failures retain sanitized status and reconstructible plan
 coordinates where writable, close owned resources, and do not seal. Atomic
 completion is the commit point; a late load/return failure cannot invalidate it.
+An existing or uncertain completion marker prevents failed-state rewriting even
+when its contents cannot temporarily be read. A failed reservation never grants
+ownership. Worker-loss status maps only fully known pending IDs: one owner, an
+ordered bounded `affectedJobs` list for several, or no precise owner. Receive-wide
+failures keep period/cell context; each buffered append sets its own coordinate.
+Completed counts advance only after a successful append. Unwritable storage and
+hard process stops cannot guarantee a saved failed status.
 Source generations are checked around dispatch and immediately before sealing.
 
 `load` checks sealed structural/content integrity and fresh-copy access without
@@ -211,6 +234,22 @@ with `fullExecutionRetained=false`. Full execution, per-fill fee arithmetic,
 daily Sharpe chronology and DD-path chronology cannot be replayed from monthly
 facts. Recorded attribution can differ from current sources; coherent fabricated
 history cannot be authenticated by these checks.
+
+Live extraction checks normalized native policy/window/candle declarations,
+HA/filter or auxiliary provider/feature/component metadata, actual dependency
+bindings and native identity links before pruning. Extraction, writer admission
+and stored verification all recompute the native preparation/account equations
+and validate recorded execution rules against the target header. Terminal counts
+and fees belong to the month derived from the last observed close; equity's
+separate boundary convention is retained. Exact observed closing endpoints impose
+a DD floor using the full prefix of monthly maxima, with native tolerance. Signed
+equity, inexact boundaries and unobserved months retain their existing semantics.
+
+Compact verification cannot derive commands from commandId, detect a coherently
+borrowed provider-only command/account pair, hash original candles from headers,
+or authenticate a consumed slice against an absent snapshot. Snapshot pins are
+admission provenance. Stronger consistency checks do not establish authenticity
+or replay the pruned path.
 
 The current task's verification scope is Windows. Linux case sensitivity,
 numerical portability and cross-host replay are not claimed. See the maintained

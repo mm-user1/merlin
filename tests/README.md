@@ -10,13 +10,26 @@ economic files for both `[2]` and `[6]`; run both on Windows through
 `tools/run_tests.py` with external temporary roots. Maintained tests need no
 ignored work fixture or market data.
 
-The current T03A gate includes those five modules, the eight accepted configuration
-study/report/CLI modules in its release plan, mandatory installed Node report
-checks, and final full `tests/pattern_lab` preservation. The sole baseline
+The current bounded correction gate includes those five modules, the eight accepted
+configuration study/report/CLI modules in its release plan, and mandatory installed
+Node report checks. Regressions include real-directory ancestor ownership,
+status-only failures, native declaration/identity binding, independently resealed
+contradictions, signed two-month extraction oracles, terminal timing, reservation
+and completion failures, worker attribution, exception context and the real
+six-of-twelve empty-span failure. Explicit injected numerical paths exercise
+extraction; they are not claimed as executed HA outcomes. The sole baseline
 deselection is
 `tests/pattern_lab/test_pattern_lab_cli.py::TestImportIsolation::test_pyarrow_is_referenced_only_by_pattern_lab_sources`.
-Full-suite JUnit can cover the focused cases only with exact collected IDs,
-parameters, final sources and environment. Test processes run sequentially.
+The parent full preservation remains exit 1 (2441 passed, 19 failed, one skipped).
+Twelve worker cases passed a source-matching rerun. The released bounded follow-up
+adopts exactly seven unchanged WinError 1314 legacy link cases and one permission
+skip as environmental limitations. No general link exclusion or green full-suite
+claim is made. Probe ordinary-token capability once; run the exact seven if
+available, without security changes or elevation. New ownership checks use real
+directories and deterministic reparse refusal tests; mocked branches do not
+certify real links. No fresh full-suite/capacity rerun is required when protected
+sources, storage, retention and analytics remain unchanged and validation stays
+bounded per result. Test processes run sequentially.
 Native test process-tree budget is 4 GiB, task scratch 1 GiB and free disk at
 least 10 GiB; the separate compact-only 3,200-setting case has a 1 GiB tree budget.
 Frozen analytical parity and exact ordinary/auxiliary offline archive verification
