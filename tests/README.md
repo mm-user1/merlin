@@ -1,5 +1,28 @@
 # Tests
 
+## Strategy Screen backend
+
+The five `tests/pattern_lab/test_strategy_screen_{contracts,facts,analytics,artifacts,coordinator}.py`
+modules exercise sparse/native-v2 projection, monthly direct-array parity,
+cross-month trades, signed DD, availability/denominators, compact integrity,
+stored-only analysis and publication lifecycle. Worker parity includes exact
+economic files for both `[2]` and `[6]`; run both on Windows through
+`tools/run_tests.py` with external temporary roots. Maintained tests need no
+ignored work fixture or market data.
+
+The current T03A gate includes those five modules, the eight accepted configuration
+study/report/CLI modules in its release plan, mandatory installed Node report
+checks, and final full `tests/pattern_lab` preservation. The sole baseline
+deselection is
+`tests/pattern_lab/test_pattern_lab_cli.py::TestImportIsolation::test_pyarrow_is_referenced_only_by_pattern_lab_sources`.
+Full-suite JUnit can cover the focused cases only with exact collected IDs,
+parameters, final sources and environment. Test processes run sequentially.
+Native test process-tree budget is 4 GiB, task scratch 1 GiB and free disk at
+least 10 GiB; the separate compact-only 3,200-setting case has a 1 GiB tree budget.
+Frozen analytical parity and exact ordinary/auxiliary offline archive verification
+are separate hash-pinned local review helpers. No Linux/cross-host, new browser,
+full application or UAC recertification gate is claimed for this Windows task.
+
 ## Comparative configuration reports
 
 `test_configuration_report.py` covers the API/CLI, sidecars, publication cleanup,

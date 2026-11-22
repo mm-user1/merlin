@@ -1,5 +1,11 @@
 # Pattern Lab research guide
 
+For sparse two-period native execution and exact monthly numerical evidence, see
+the [Strategy Screen backend](strategy_screen/README.md). Its `strategy-screen`,
+`strategy-screen-verify` and `strategy-screen-analyze` commands retain every
+declared setting and produce compact facts/JSON analytics. Periods execute
+independently; no report UI, automatic selection or linked account is implied.
+
 For native all-configuration IS/HO1/HO2 execution and offline compact results,
 see [configuration studies](configuration_study/README.md). This backend retains
 exact metrics and display curves; full account studies remain the replay evidence

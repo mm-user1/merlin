@@ -7,6 +7,13 @@ strategy matrix. It does not duplicate route or source-file inventories.
 
 ## Component map
 
+Pattern Lab also provides the standalone
+[Strategy Screen backend](../tools/pattern_lab/strategy_screen/README.md): explicit
+sparse settings, independent earlier/recent native accounts, exact compact
+monthly facts and offline descriptive JSON analytics. It reuses accepted account
+execution and workers, remains separate from Merlin runtime, and does not provide
+the future Strategy Screen report UI or automatic trading selection.
+
 ```text
 src/core/             V1/V2 execution, optimization, Grid, WFA, metrics,
                       persistence, analytics, post-processing, and exports

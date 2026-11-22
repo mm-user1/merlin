@@ -55,7 +55,8 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # unchanged.  One dispatch set serves both, so no parallel exception handler and
 # no remapping of an unrelated command is introduced.
 CONFIGURATION_COMMANDS = ("configuration-study", "configuration-verify", "configuration-public")
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS + ("configuration-report",)
+SCREEN_COMMANDS = ("strategy-screen", "strategy-screen-verify", "strategy-screen-analyze")
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS + SCREEN_COMMANDS + ("configuration-report",)
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -234,6 +235,15 @@ def build_parser() -> argparse.ArgumentParser:
     account_command.add_argument("--workers", type=int, default=1)
     account_command.add_argument("--retention-profile", choices=("standard", "debug"), default="standard")
     account_command.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
+    screen = commands.add_parser("strategy-screen", help="Run a native two-period Strategy Screen.")
+    for flag in ("request", "data-root", "output-root"):
+        screen.add_argument("--"+flag, type=Path, required=True)
+    screen.add_argument("--workers", type=int, choices=range(1,7), default=1)
+    screen.add_argument("--auxiliary-root", action="append", default=[], metavar="ALIAS=PATH")
+    for command in SCREEN_COMMANDS[1:]:
+        offline = commands.add_parser(command, help="Verify or analyze a compact Strategy Screen offline.")
+        offline.add_argument("--run-root", type=Path, required=True)
+        if command == "strategy-screen-analyze":offline.add_argument("--output-root", type=Path, required=True)
     comparative = commands.add_parser("configuration-report", help="Render a verified compact configuration study offline.")
     comparative.add_argument("--run-root", type=Path, required=True)
     comparative.add_argument("--output-root", type=Path, required=True)
@@ -429,6 +439,23 @@ def _run(args: argparse.Namespace) -> int:
         )
         _emit(pack_data.slice_metadata(loaded))
         return EXIT_OK
+    if args.command in SCREEN_COMMANDS:
+        from .strategy_screen import run_strategy_screen, verify_strategy_screen, analyze_strategy_screen
+        from .accounts.contracts import require
+        if args.command == "strategy-screen-verify":
+            _emit(verify_strategy_screen(args.run_root))
+        elif args.command == "strategy-screen-analyze":
+            _emit(dict(status='complete',outputRoot=str(analyze_strategy_screen(args.run_root,output_root=args.output_root))))
+        else:
+            roots={}
+            for binding in args.auxiliary_root:
+                alias,separator,path=binding.partition('=')
+                require(separator and alias and path and alias not in roots,'auxiliary-root requires unique ALIAS=PATH')
+                roots[alias]=Path(path)
+            result=run_strategy_screen(args.request,data_root=args.data_root,output_root=args.output_root,
+                workers=args.workers,auxiliary_roots=roots or None)
+            _emit(dict(status='complete',runRoot=str(result.root),counts=result.metadata['counts']))
+        return EXIT_OK
     if args.command == "configuration-report":
         from .configuration_report import render_configuration_report
         path = render_configuration_report(args.run_root, output_root=args.output_root,
@@ -525,7 +552,7 @@ def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
     """Explain a failure on stderr, and add structured JSON where it is contracted."""
     if command == "configuration-report":
         exc = PatternLabDataError("Configuration report generation failed; no completed report was published.")
-    elif command in CONFIGURATION_COMMANDS:
+    elif command in CONFIGURATION_COMMANDS + SCREEN_COMMANDS:
         # Stored or worker exceptions may contain owner-only outcomes. Never
         # serialize their messages, context, causes or worker traceback here.
         exc = PatternLabDataError("Configuration operation failed; inspect sanitized technical status.")

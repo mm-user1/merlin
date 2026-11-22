@@ -1,5 +1,11 @@
 # Tools
 
+Pattern Lab's [Strategy Screen backend](pattern_lab/strategy_screen/README.md)
+adds `strategy-screen`, `strategy-screen-verify` and `strategy-screen-analyze`.
+It executes an explicit sparse roster in two independent periods and retains
+compact monthly facts and descriptive JSON analytics. The synthetic example is
+`python -B -m tools.pattern_lab.examples.strategy_screen_synthetic`.
+
 Pattern Lab's [configuration-study backend](pattern_lab/configuration_study/README.md)
 runs full declared IS/HO1/HO2 rosters and publishes bounded compact results.
 Use `configuration-study`, `configuration-verify` and `configuration-public` under
