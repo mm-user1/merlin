@@ -1,5 +1,26 @@
 # Tests
 
+## Offline Strategy Screen report
+
+`test_strategy_screen_report.py`, `test_strategy_screen_report_payload.py` and
+`test_strategy_screen_report_js.py` cover full-verification admission, native field
+and histogram populations, calendar/availability boundaries, closed presentation,
+safe deterministic receipt-last publication and the actual generated JavaScript
+in installed Node. Node absence fails this gate. Helpers are maintained synthetic
+fixtures independent of ignored work files. Use `tools/run_tests.py --keep-temp --`
+with external `MERLIN_TEST_ROOT`; run these three modules with the five Strategy
+Screen, four Configuration Study, three Configuration Report and CLI modules.
+Only the existing CLI pyarrow import-isolation deselection is assigned; actual
+2/6-worker cases remain. No full suite or UAC rerun is implied.
+
+Separate local evidence verifies frozen analytical parity, genuine ordinary and
+auxiliary offline API/CLI regeneration with live entry points blocked, installed
+Chrome file:// behavior at 1440/1920, and three complete 3,200-setting builds/opens.
+The compact-only capacity helper includes valid missing observations and is not
+native execution. Resource limits, receipt/source attribution and field mapping
+are in the [report guide](../tools/pattern_lab/strategy_screen_report/README.md).
+Chrome/Node do not replace the owner's Firefox visual/focus review.
+
 ## Strategy Screen backend
 
 The five `tests/pattern_lab/test_strategy_screen_{contracts,facts,analytics,artifacts,coordinator}.py`

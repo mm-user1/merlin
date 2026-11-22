@@ -56,7 +56,7 @@ COLLECTOR_COMMANDS = ("collect", "update", "recover", "abort-update")
 # no remapping of an unrelated command is introduced.
 CONFIGURATION_COMMANDS = ("configuration-study", "configuration-verify", "configuration-public")
 SCREEN_COMMANDS = ("strategy-screen", "strategy-screen-verify", "strategy-screen-analyze")
-STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS + SCREEN_COMMANDS + ("configuration-report",)
+STUDY_COMMANDS = ("study", "report", "analyze", "analysis-report", "freeze-candidate", "validate-candidate", "account-study", "account-report", "selection", "selection-report") + CONFIGURATION_COMMANDS + SCREEN_COMMANDS + ("configuration-report", "strategy-screen-report")
 JSON_STATUS_COMMANDS = COLLECTOR_COMMANDS + STUDY_COMMANDS
 
 
@@ -244,6 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
         offline = commands.add_parser(command, help="Verify or analyze a compact Strategy Screen offline.")
         offline.add_argument("--run-root", type=Path, required=True)
         if command == "strategy-screen-analyze":offline.add_argument("--output-root", type=Path, required=True)
+    screen_report = commands.add_parser("strategy-screen-report", help="Render a fully verified Strategy Screen offline.")
+    screen_report.add_argument("--run-root", type=Path, required=True)
+    screen_report.add_argument("--output-root", type=Path, required=True)
+    screen_report.add_argument("--presentation", type=Path)
+    screen_report.add_argument("--export-view-data", action="store_true")
     comparative = commands.add_parser("configuration-report", help="Render a verified compact configuration study offline.")
     comparative.add_argument("--run-root", type=Path, required=True)
     comparative.add_argument("--output-root", type=Path, required=True)
@@ -439,6 +444,12 @@ def _run(args: argparse.Namespace) -> int:
         )
         _emit(pack_data.slice_metadata(loaded))
         return EXIT_OK
+    if args.command == "strategy-screen-report":
+        from .strategy_screen_report import render_strategy_screen_report
+        path = render_strategy_screen_report(args.run_root, output_root=args.output_root,
+            presentation=args.presentation, export_view_data=args.export_view_data)
+        _emit({"status": "complete", "command": args.command, "report": str(path)})
+        return EXIT_OK
     if args.command in SCREEN_COMMANDS:
         from .strategy_screen import run_strategy_screen, verify_strategy_screen, analyze_strategy_screen
         from .accounts.contracts import require
@@ -550,7 +561,9 @@ def _run(args: argparse.Namespace) -> int:
 
 def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
     """Explain a failure on stderr, and add structured JSON where it is contracted."""
-    if command == "configuration-report":
+    if command == "strategy-screen-report":
+        exc = PatternLabDataError("Strategy Screen report generation failed; no completed report was published.")
+    elif command == "configuration-report":
         exc = PatternLabDataError("Configuration report generation failed; no completed report was published.")
     elif command in CONFIGURATION_COMMANDS + SCREEN_COMMANDS:
         # Stored or worker exceptions may contain owner-only outcomes. Never
@@ -580,6 +593,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _run(args)
     except KeyboardInterrupt:
+        if command == "strategy-screen-report":
+            message = "Strategy Screen report generation was interrupted; no completed report was published."
+            _emit({"status": "interrupted", "command": command, "error_code": "interrupted", "error": message})
+            print("pattern-lab: " + message, file=sys.stderr)
+            return EXIT_INTERRUPTED
         if command == "configuration-report":
             _emit({"status": "interrupted", "command": command, "error_code": "interrupted",
                    "error": "Configuration report generation was interrupted; no completed report was published."})

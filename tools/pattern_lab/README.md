@@ -4,7 +4,12 @@ For sparse two-period native execution and exact monthly numerical evidence, see
 the [Strategy Screen backend](strategy_screen/README.md). Its `strategy-screen`,
 `strategy-screen-verify` and `strategy-screen-analyze` commands retain every
 declared setting and produce compact facts/JSON analytics. Periods execute
-independently; no report UI, automatic selection or linked account is implied.
+independently; no automatic selection or linked execution account is implied.
+Rebuild a standalone two-period HTML with the separate
+[Strategy Screen report](strategy_screen_report/README.md):
+`strategy-screen-report --run-root SCREEN --output-root NEW_REPORT`, optionally
+`--presentation FILE --export-view-data`. It fully verifies compact evidence and
+uses saved statistics; it does not read market data or execute accounts.
 
 For native all-configuration IS/HO1/HO2 execution and offline compact results,
 see [configuration studies](configuration_study/README.md). This backend retains

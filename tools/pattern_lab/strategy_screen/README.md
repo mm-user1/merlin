@@ -3,8 +3,12 @@
 Strategy Screen is a descriptive, two-period backend. It executes every explicitly
 declared setting in each period with the accepted account executor, retains exact
 compact monthly evidence, and calculates canonical numerical summaries. It does
-not choose a trading universe, optimize settings, render a report, or carry money
+not choose a trading universe, optimize settings, or carry money
 or positions between periods. No outcome establishes an executable edge.
+The separate [offline report](../strategy_screen_report/README.md) consumes this
+public reader after full verification: `strategy-screen-report --run-root SCREEN
+--output-root NEW_REPORT [--presentation FILE --export-view-data]`. Report output
+does not require market packs, auxiliary snapshots or retained execution paths.
 
 ## Python and CLI
 

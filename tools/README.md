@@ -6,6 +6,12 @@ It executes an explicit sparse roster in two independent periods and retains
 compact monthly facts and descriptive JSON analytics. The synthetic example is
 `python -B -m tools.pattern_lab.examples.strategy_screen_synthetic`.
 
+Its separate [offline Strategy Screen report](pattern_lab/strategy_screen_report/README.md)
+uses `strategy-screen-report --run-root SCREEN --output-root NEW_REPORT`, with
+optional `--presentation FILE --export-view-data`. It fully verifies compact native
+evidence and publishes deterministic report.html/report.json plus optional view JSON.
+It does not run accounts or need market/auxiliary inputs.
+
 Pattern Lab's [configuration-study backend](pattern_lab/configuration_study/README.md)
 runs full declared IS/HO1/HO2 rosters and publishes bounded compact results.
 Use `configuration-study`, `configuration-verify` and `configuration-public` under
