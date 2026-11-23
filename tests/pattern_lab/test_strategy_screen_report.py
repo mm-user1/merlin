@@ -175,6 +175,24 @@ def test_genuine_full_february_zero_trades_retains_low_activity(tmp_path):
                           subtitle='Artificial-price native execution fixture; not market research'))
     assert json.loads((html.parent/'view-data.json').read_bytes())['detail']['settings'][0]['periods']['earlier']==p
 
+    import shutil,subprocess
+    node=shutil.which('node');assert node, 'Node is required for the actual February captions'
+    probe=r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const d=JSON.parse(html.match(/<script id="screen-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+vm.runInThisContext(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+const api=SSRScreen,initial=api.initial();
+for(const [fieldView,distribution,n] of [['scatter','returnPct',0],['distribution','returnPct',1],['distribution','annualizedProfitPct',0]]){
+ const markup=api.views(d,{...initial,fieldView,distribution},['field-content'])['field-content'];
+ assert.ok(markup.match(/<small tabindex="0"[^>]*>([^<]*)<\/small>/)[1]===`${n} / 1 shown`);
+}
+const cards=api.views(d,initial,['overview','scope-overview']);
+for(const markup of Object.values(cards)){assert.ok(markup.includes('0/1 settings'));assert.ok(markup.includes('0 available / 1 missing'));}
+"""
+    child=subprocess.run([node,'-e',probe,str(html)],capture_output=True,text=True,encoding='utf-8',timeout=30)
+    assert child.returncode==0,child.stdout+child.stderr
+
 
 @pytest.mark.parametrize('exception',[RuntimeError,KeyboardInterrupt])
 def test_receipt_replace_is_commit_point(reader,tmp_path,monkeypatch,exception):

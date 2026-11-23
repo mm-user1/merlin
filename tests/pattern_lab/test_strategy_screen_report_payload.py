@@ -157,3 +157,44 @@ def test_each_float_against_direct_boundary_oracle(lo,hi,step):
             assert expected==[actual],(value,actual,expected)
     value=scale['hi'];result=histogram([value],stats([value]),scale)
     assert result['indices'][result['counts'].index(1)]==count-1
+
+
+@pytest.mark.parametrize('ids,expected',[
+    (['OKX_DOGE-USDT-SWAP','BYBIT_AAAUSDT','UNKNOWN'],['DOGE','AAAUSDT','UNKNOWN']),
+    (['A_X','B_X','C_A_X','VENUE_'],['A_X','B_X','C_A_X','VENUE_']),
+    (['A_Z','B_A','_EMPTY','Q_<tag>'],['Z','A','_EMPTY','<tag>']),
+    (['X','A_X'],['X','A_X'])])
+def test_report_wide_labels_are_unique_without_changing_id_order(ids,expected):
+    from tools.pattern_lab.strategy_screen_report.model import instrument_labels
+    labels=instrument_labels(ids)
+    assert list(labels)==ids and list(labels.values())==expected
+    assert len(set(labels.values()))==len(ids) and all(labels.values())
+
+
+@pytest.mark.parametrize('minutes,label',[(30,'30m'),(60,'1h'),(120,'2h'),(240,'4h'),(1440,'1D'),(2880,'2D'),(90,'90m'),(110,'110m')])
+def test_exact_timeframe_labels(minutes,label):
+    from tools.pattern_lab.strategy_screen_report.model import timeframe_label
+    assert timeframe_label(minutes)==label
+
+
+@pytest.mark.parametrize('earlier,recent,expected',[
+    (['2025-01','2025-12'],['2026-01','2026-10'],{'earlier':'2025','recent':'2026'}),
+    (['2025-01','2025-02'],['2025-06','2025-12'],{'earlier':'Earlier','recent':'Recent'}),
+    (['2024-12','2025-01'],['2026-06','2026-10'],{'earlier':'Earlier','recent':'Recent'}),
+    (['2031-06','2031-07'],['2032-01','2032-02'],{'earlier':'2031','recent':'2032'})])
+def test_short_periods_use_declared_months_not_display_labels(earlier,recent,expected):
+    from tools.pattern_lab.strategy_screen_report.model import period_shorts
+    assert period_shorts({p:[{'month':m} for m in months] for p,months in [('earlier',earlier),('recent',recent)]})==expected
+
+
+def test_materialized_labels_keep_raw_scope_keys_and_dates(reader):
+    options=presentation_options(None,reader.metadata);options['periodLabels']={'earlier':'Arbitrary year 9999','recent':'Another caption'}
+    v=build_view(reader,options)
+    assert v['meta']['tickers']==sorted(v['meta']['tickers'])
+    assert [p['short'] for p in v['meta']['periods']]==['Earlier','Recent']
+    assert [p['label'] for p in v['meta']['periods']]==list(options['periodLabels'].values())
+    for p,raw in zip(v['meta']['periods'],reader.metadata['request']['periods']):
+        assert p['start']==raw['startUtc'] and p['end']==raw['endUtc']
+    for sid,c in v['cellmeta'].items():
+        assert c['ticker']==c['instrumentId']
+        assert v['scopes'][sid]['label'].endswith('1D')

@@ -53,8 +53,9 @@
       const values=periods.map(p=>overviewValue(s.periods[p.id],m,p)),delta=overviewDelta(0,s.changes[m],m);
       return `<div class="metric-card" ${cardAttrs(m,interactive)}><div class="metric-label">${label}</div><div class="metric-values">${periods.map((p,i)=>{
         const block=s.periods[p.id],v=values[i],fraction=['interesting','profitable'].includes(m)?block[m]:m==='positiveWithoutBest2'?block.concentration.own['2'].positive:null;
-        const detail=fraction?ratio(fraction)+` settings · ${fraction.available} available / ${fraction.missing} missing`:m==='tradesPerMonth'?`${block.lowActivity}/${block.declared} below ${esc(data.meta.activityLabel.toLowerCase().replace(/^below /,""))}`:'n='+block.medians[m].n;
-        return `<div class="metric-period" style="background:${cardColor(data,m,v)}"><small>${esc(p.label)}</small><b>${m==='tradesPerMonth'?num(v,0):pct(v,m==='annualizedProfitPct')}</b><em>${detail}</em></div>`;
+        const detail=fraction?ratio(fraction)+` settings`:m==='tradesPerMonth'?`${block.lowActivity}/${block.declared} below ${esc(data.meta.activityLabel.toLowerCase().replace(/^below /,""))}`:'n='+block.medians[m].n;
+        const evidence=fraction||block.medians[m],tip=`${p.label}: ${fraction?`${fraction.available} available / ${fraction.missing} missing`:`n=${evidence.n}`}${evidence.reason?` · ${evidence.reason}`:''}`;
+        return `<div class="metric-period" style="background:${cardColor(data,m,v)}"><small>${esc(p.label)}</small><b>${m==='tradesPerMonth'?num(v,0):pct(v,m==='annualizedProfitPct')}</b><em tabindex="0" data-tip="${esc(tip)}" aria-label="${esc(detail+'. '+tip)}">${detail}</em></div>`;
       }).join('')}</div><div class="delta ${delta.tone}">${delta.text} change</div></div>`;
     }).join('')+(interactive?'<span class="overview-selection" aria-hidden="true"></span>':'')+'</div>';
   }
@@ -90,7 +91,7 @@
       const isCell=!!data.cellmeta[id],member=isCell&&current.cells.length>1&&current.cells.length<Object.keys(data.cellmeta).length&&current.cells.includes(id);
       return `<td class="${isTotal?'matrix-total':''}"><button class="matrix-card${member?' member':''}${m==='retention'?' retention-card':''}" data-scope="${esc(id)}" data-matrix-scope="${esc(id)}" ${isCell?`data-cell="${esc(id)}"`:''} aria-pressed="${state.scope===id}" aria-label="${esc(scope.label)}; ${esc(title)}">${matrixValues(data,scope,m)}</button></td>`;
     }
-    return `<table class="matrix-table"><thead><tr><th scope="col">Ticker / TF</th>${data.meta.timeframes.map(t=>`<th scope="col">${tf(t)}</th>`).join('')}<th scope="col" class="matrix-total">All timeframes</th></tr></thead><tbody>${data.meta.tickers.map(ticker=>`<tr><th scope="row">${esc(ticker)}</th>${data.meta.timeframes.map(t=>cell(Object.keys(data.cellmeta).find(c=>data.cellmeta[c].ticker===ticker&&data.cellmeta[c].tf===t))).join('')}${cell(data.meta.scopeIds.instrument[ticker],true)}</tr>`).join('')}<tr class="matrix-total-row"><th scope="row">All tickers</th>${data.meta.timeframes.map(t=>cell(data.meta.scopeIds.timeframe[String(t)])).join('')}${cell('all',true)}</tr></tbody></table>`;
+    return `<table class="matrix-table"><thead><tr><th scope="col">Ticker / TF</th>${data.meta.timeframes.map(t=>`<th scope="col">${tf(t)}</th>`).join('')}<th scope="col" class="matrix-total">All timeframes</th></tr></thead><tbody>${data.meta.tickers.map(ticker=>`<tr><th scope="row">${esc(globalThis.SSRLinkedChart.tickerLabel(data,ticker))}</th>${data.meta.timeframes.map(t=>cell(Object.keys(data.cellmeta).find(c=>data.cellmeta[c].ticker===ticker&&data.cellmeta[c].tf===t))).join('')}${cell(data.meta.scopeIds.instrument[ticker],true)}</tr>`).join('')}<tr class="matrix-total-row"><th scope="row">All tickers</th>${data.meta.timeframes.map(t=>cell(data.meta.scopeIds.timeframe[String(t)])).join('')}${cell('all',true)}</tr></tbody></table>`;
   }
   function matrixDisplay(data,state){
     if(!state.compact)return `<div data-matrix-view="${state.metric}">${matrix(data,state)}</div>`;
@@ -120,7 +121,7 @@
   }
   function distributions(data,state){
     const s=data.scopes[state.scope],m=state.distribution,all=data.meta.periods.map(p=>s.periods[p.id].distributions[m]),max=Math.max(...all.flatMap(d=>d.counts));
-    return '<div class="plots">'+data.meta.periods.map((p,i)=>{const d=all[i];return `<div><div class="plot-title"><strong>${esc(p.label)}</strong><small>n=${d.n}</small></div>${histogram(d,m,max,p.label)}<div class="quantiles"><span>Median <b>${pct(d.median,true)}</b></span><span>Middle 50%<br><b>${pct(d.q1,true)} to ${pct(d.q3,true)}</b></span></div></div>`;}).join('')+'</div><p class="note">Y = number of settings. Red bars are below zero; teal bars are at or above zero. Fixed bin edges across all scopes and both periods; no tails are clipped. Hover or focus a bar for its count.</p>';
+    return '<div class="plots">'+data.meta.periods.map((p,i)=>{const d=all[i];return `<div><div class="plot-title"><strong>${esc(p.label)}</strong><small tabindex="0" data-tip="${esc(`${d.n} plotted; ${s.periods[p.id].declared-d.n} excluded by coverage/metric eligibility${d.reason?`; ${d.reason}`:''}`)}" aria-label="${esc(`${d.n} / ${s.periods[p.id].declared} shown. ${s.periods[p.id].declared-d.n} excluded by coverage/metric eligibility${d.reason?`; ${d.reason}`:''}`)}">${d.n} / ${s.periods[p.id].declared} shown</small></div>${histogram(d,m,max,p.label)}<div class="quantiles"><span>Median <b>${pct(d.median,true)}</b></span><span>Middle 50%<br><b>${pct(d.q1,true)} to ${pct(d.q3,true)}</b></span></div></div>`;}).join('')+'</div><p class="note">Y = number of settings. Red bars are below zero; teal bars are at or above zero. Fixed bin edges across all scopes and both periods; no tails are clipped. Hover or focus a bar for its count.</p>';
   }
   function concentration(data,state){
     const s=data.scopes[state.scope];

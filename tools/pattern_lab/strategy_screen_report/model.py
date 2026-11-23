@@ -124,3 +124,28 @@ def histogram(values, saved, scale):
     return {**quantiles(saved), **scale, 'indices': indices,
             'counts': [occupied[i] for i in indices],
             'edges': [lo+i*step for i in range(count+1)] if count <= 256 else [lo, hi]}
+
+
+def instrument_labels(instruments):
+    """One roster-wide display lookup; raw IDs remain authoritative."""
+    candidates = {}
+    for ident in instruments:
+        prefix, separator, contract = ident.partition('_')
+        candidate = (contract if separator else ident).removesuffix('-USDT-SWAP') if not separator or prefix and contract else ident
+        candidates[ident] = candidate or ident
+    counts = Counter(candidates.values())
+    labels = {ident: ident if counts[label] > 1 or label in candidates and label != ident else label
+              for ident, label in candidates.items()}
+    require(all(labels.values()) and len(set(labels.values())) == len(labels), 'unique instrument labels')
+    return labels
+
+
+def timeframe_label(minutes):
+    return f'{minutes // 1440}D' if minutes % 1440 == 0 else f'{minutes // 60}h' if minutes % 60 == 0 else f'{minutes}m'
+
+
+def period_shorts(calendars):
+    years = {pid: {m['month'][:4] for m in months} for pid, months in calendars.items()}
+    if all(len(y) == 1 for y in years.values()) and years['earlier'] != years['recent']:
+        return {pid: next(iter(y)) for pid, y in years.items()}
+    return dict(earlier='Earlier', recent='Recent')

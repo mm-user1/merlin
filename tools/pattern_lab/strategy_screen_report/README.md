@@ -237,3 +237,19 @@ The subsequent command-boundary/literal-label correction uses the same 16-module
 vector plus new regressions, stored native/auxiliary API/API/CLI and legacy view-byte
 parity, generated Node and bounded Chrome at 1920/1440. It does not repeat the
 capacity campaign above; those measurements remain historical evidence.
+The compact display keeps canonical instrument and numeric timeframe order. One
+roster-wide, nonempty unique instrument label map removes the first exchange prefix
+and only the recognized -USDT-SWAP suffix, falling back to full IDs on collisions
+or ambiguous/empty splits. Existing instrument/cell/timeframe scope labels carry
+these names; full IDs remain in data, filter keys, exports and evidence details.
+Timeframes use whole days, otherwise whole hours, otherwise integer minutes.
+Short period captions use distinct single calendar years from declared UTC months;
+otherwise they use Earlier/Recent. Full labels and exact dates remain in details.
+
+Overview and scope cards retain supporting fractions/n/low-trade counts; focusable
+supporting text exposes availability and saved reasons without another visible line.
+Scatter captions show P / D shown with declared D before category filtering. Their
+focus/hover detail partitions D into P plotted, S-P unavailable within the earlier
+cohort and D-S outside that cohort. Whole-period histograms show d.n / D under their
+own unfiltered coverage/metric eligibility, exposing saved reasons where available.
+Monthly and individual-curve populations remain unchanged.

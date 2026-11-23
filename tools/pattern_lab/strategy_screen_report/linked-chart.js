@@ -11,6 +11,8 @@
   }
   const pct=v=>finite(v)?`${v>0?'+':''}${v.toFixed(1)}%`:'N/A';
   const date=t=>new Date(t).toISOString().slice(0,10);
+  const tickerLabel=(data,id)=>data.scopes[data.meta.scopeIds.instrument[id]].label;
+  const periodTip=p=>`${p.label}: ${p.start} to ${p.end} (UTC, end exclusive)`;
   function series(data,scope,resetRecent=false){
     const periods=data.meta.periods,cells=new Set(data.scopes[scope].cells);
     return data.detail.settings.filter(s=>cells.has(s.cell)).map(s=>{
@@ -30,7 +32,7 @@
         base=finite(base)&&months.length&&values.length===months.length&&finite(last)?base*(1+last/100):null;
       });
       const cell=data.cellmeta[s.cell],tf=cell.tf%1440===0?`${cell.tf/1440}D`:cell.tf%60===0?`${cell.tf/60}h`:`${cell.tf}m`;
-      return {id:s.id,ticker:cell.ticker,tf:cell.tf,label:`${cell.ticker} · ${tf} · ${s.label}`,points,periods:s.periods,color:returnColor(s.periods[data.meta.periods[0].id]?.returnPct)};
+      return {id:s.id,ticker:cell.ticker,tf:cell.tf,label:`${tickerLabel(data,cell.ticker)} · ${tf} · ${s.label}`,points,periods:s.periods,color:returnColor(s.periods[data.meta.periods[0].id]?.returnPct)};
     });
   }
   const initialFilters=()=>({tickers:[],timeframes:[],category:'all',min:false,max:false,basis:'earlier'});
@@ -101,6 +103,7 @@
     const basisLabel=document.createElement('span');basisLabel.className='linked-control-label';basisLabel.textContent='Min / max by';left.append(basisLabel,basisGroup);
     const resetLabel=document.createElement('label');resetLabel.className='linked-reset-label';
     const resetInput=document.createElement('input');resetInput.type='checkbox';resetInput.id='linked-reset-year';resetInput.checked=true;
+    resetLabel.title=periodTip(data.meta.periods[1]);
     resetLabel.append(resetInput,document.createTextNode(`Start ${data.meta.periods[1].short} at zero`));left.append(resetLabel);
     const right=document.createElement('div');right.className='linked-filter-controls';toolbar.append(left,right);periodBox.after(toolbar);
     const legend=document.createElement('div');legend.className='linked-color-legend';
@@ -122,10 +125,10 @@
       };
       parent.append(b);controls.push({b,key,value});return b;
     }
-    for(const [key,label] of [['earlier',`${data.meta.periods[0].short} return`],['recent',`${data.meta.periods[1].short} return`],['linked','Linked return']])button(basisGroup,label,'basis',key);
+    for(const [key,label] of [['earlier',`${data.meta.periods[0].short} return`],['recent',`${data.meta.periods[1].short} return`],['linked','Linked return']]){const b=button(basisGroup,label,'basis',key);b.title=key==='linked'?data.meta.periods.map(periodTip).join(' · '):periodTip(data.meta.periods.find(p=>p.id===key));}
     function group(label){const g=document.createElement('div');g.className='linked-filter-group';g.setAttribute('role','group');g.setAttribute('aria-label',label);right.append(g);return g;}
     const tickers=group('Ticker filters'),tfs=group('Timeframe filters');
-    data.meta.tickers.forEach(t=>button(tickers,t,'tickers',t));
+    data.meta.tickers.forEach(t=>button(tickers,tickerLabel(data,t),'tickers',t));
     data.meta.timeframes.forEach(tf=>button(tfs,tf%1440===0?`${tf/1440}D`:tf%60===0?`${tf/60}h`:`${tf}m`,'timeframes',tf));
     const categories=group(`Classification in ${data.meta.periods[0].short}`);
     for(const [key,label] of [['all','All'],['interesting','Interesting'],['profitable','Profitable, not interesting'],['loss','Not profitable'],['lowActivity',data.meta.activityLabel]])button(categories,label,'category',key);
@@ -285,12 +288,12 @@
       low.textContent=colorBounds.n?pct(colorBounds.min):'N/A';high.textContent=colorBounds.n?pct(colorBounds.max):'N/A';
       ramp.style.background=`linear-gradient(90deg,${returnColor(colorBounds.min,colorBounds)},${returnColor(0,colorBounds)},${returnColor(colorBounds.max,colorBounds)})`;
       lines=filterLines(allLines,filters);if(!lines.some(l=>l.id===pinned))pinned=null;hover=null;pointer=null;
-      const tickerLabel=filters.tickers.length?filters.tickers.join(' + '):'All tickers';
+      const tickerSummary=filters.tickers.length?filters.tickers.map(t=>tickerLabel(data,t)).join(' + '):'All tickers';
       const tfLabel=filters.timeframes.length?filters.timeframes.map(tf=>tf%1440===0?`${tf/1440}D`:tf%60===0?`${tf/60}h`:`${tf}m`).join(' + '):'All timeframes';
       const categoryLabel={all:'All categories',interesting:'Interesting',profitable:'Profitable, not interesting',loss:'Not profitable',lowActivity:data.meta.activityLabel}[filters.category];
       const basisLabel=filters.basis==='linked'?'linked return':`${data.meta.periods.find(p=>p.id===filters.basis).short} return`;
       const extremeLabel=filters.min||filters.max?` · ${[filters.min?'Min':'',filters.max?'Max':''].filter(Boolean).join(' + ')} by ${basisLabel}`:'';
-      $('linked-scope').textContent=`${tickerLabel} · ${tfLabel} · ${categoryLabel} in ${data.meta.periods[0].short}${extremeLabel}`;
+      $('linked-scope').textContent=`${tickerSummary} · ${tfLabel} · ${categoryLabel} in ${data.meta.periods[0].short}${extremeLabel}`;
       const available=lines.filter(l=>l.points.some(p=>p.month&&finite(p.v))).length;
       $('linked-count').textContent=`${available} shown / ${lines.length} selected / ${allLines.length} configurations · ${lines.length-available} unavailable`;
       select.replaceChildren(new Option('Choose a configuration…',''),...lines.map(l=>new Option(l.label,l.id)));
@@ -311,6 +314,6 @@
       first:lines[0]?{id:lines[0].id,label:lines[0].label,color:lines[0].color,points:lines[0].points}:null});
     return {setScope};
   }
-  const api={series,scale,clampView,mount,initialFilters,matches,filterLines,rankValue,returnColor,colorDomain,filtersFromScope};globalThis.SSRLinkedChart=api;
+  const api={tickerLabel,series,scale,clampView,mount,initialFilters,matches,filterLines,rankValue,returnColor,colorDomain,filtersFromScope};globalThis.SSRLinkedChart=api;
   if(typeof module!=='undefined')module.exports=api;
 })();

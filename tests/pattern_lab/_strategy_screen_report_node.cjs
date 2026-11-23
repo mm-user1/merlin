@@ -60,7 +60,7 @@ console.log(JSON.stringify({ok:true,node:process.version,scopes:Object.keys(data
 {
  const i=2**51+1,lo=0,step=10,hi=(i+5)*step;
  const h={lo,hi,step,bins:i+5,indices:[i,i+1],counts:[1,1],n:2};
- const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{distributions:{returnPct:h}}]))}}};
+ const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{declared:h.n,distributions:{returnPct:h}}]))}}};
  const markup=screen.views(d,{...screen.initial(),fieldView:'distribution',distribution:'returnPct'},['field-content'])['field-content'];
  const intervals=[...markup.matchAll(/aria-label="1 settings in ([^"]+)"/g)].slice(0,2).map(m=>m[1].replaceAll(',','').replace('%','').split(' to ').map(Number));
  assert.equal(intervals[0][1],intervals[1][0]);
@@ -80,6 +80,7 @@ for(const [schema,implementation,synthetic,label] of [
 // F5: independently inspect coordinates, thresholds, counts and paired accessible fields.
 for(const threshold of [-10,-30,0,1e308])for(const count of [0,1]){
  const d={...data,meta:{...data.meta,criteria:{...data.meta.criteria,annualizedProfitPct:threshold,mtmMaxDdPct:0}},detail:{...data.detail,settings:[]}};
+ d.scopes={...d.scopes,all:{...d.scopes.all,periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{...d.scopes.all.periods[p.id],declared:count}]))}};
  if(count){
   const s=structuredClone(data.detail.settings[0]);
   for(const p of Object.values(s.periods))Object.assign(p,{annualizedProfitPct:threshold,mtmMaxDdPct:0,classification:{valid:true,lowActivity:false}});
@@ -88,7 +89,8 @@ for(const threshold of [-10,-30,0,1e308])for(const count of [0,1]){
  const markup=screen.views(d,screen.initial(),['field-content'])['field-content'];
  assert.ok(!/NaN|Infinity/.test(markup));
  assert.equal([...markup.matchAll(/<circle /g)].length,count*2);
- assert.equal([...markup.matchAll(new RegExp(`${count} shown / ${count} selected.*?0 unavailable`,'g'))].length,2);
+ assert.equal([...markup.matchAll(new RegExp(`${count} / ${count} shown</small>`,'g'))].length,2);
+ assert.equal([...markup.matchAll(new RegExp(`data-tip="${count} plotted; 0 unavailable within earlier cohort; 0 outside earlier cohort"`,'g'))].length,2);
  for(const m of markup.matchAll(/<path d="M60,([^H]+)H([^V]+)V24"/g)){
   assert.ok(+m[1]>=24&&+m[1]<=317);assert.ok(+m[2]>=60&&+m[2]<=740);
  }
@@ -118,7 +120,7 @@ console.log(JSON.stringify({ok:true,corrections:['F3 indexed sparse boundaries',
   {lo:-(big+3)*10,hi:0,step:10,bins:big+3,indices:[0,1,2],counts:[2,1,1],n:4},
   {lo:-12,hi:12,step:6,bins:4,indices:[0,1,2,3],counts:[1,1,1,2],n:5},
   {lo:-20,hi:20,step:10,bins:4,indices:[0,1,2,3],counts:[1,1,1,2],n:5}]){
-  const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{distributions:{returnPct:h}}]))}}};
+  const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{declared:h.n,distributions:{returnPct:h}}]))}}};
   const markup=screen.views(d,{...screen.initial(),fieldView:'distribution',distribution:'returnPct'},['field-content'])['field-content'];
   const bars=[...markup.matchAll(/<rect [^>]+>/g)].slice(0,h.indices.length);
   const digits=x=>x.replaceAll(',','').replace(/\.0$/,'');
@@ -142,4 +144,53 @@ console.log(JSON.stringify({ok:true,corrections:['F3 indexed sparse boundaries',
   assert.deepEqual(domain,[BigInt(h.lo).toString(),'0',BigInt(h.hi).toString()]);
  }
  console.log(JSON.stringify({ok:true,exactLiteralIntervals:true,oracle:'BigInt integral digits; no Number round trip'}));
+}
+// T03B-4: saved scope declarations, fixed earlier cohorts and accessible detail.
+{
+ const d=structuredClone(data),pattern=d.detail.settings[0];
+ for(const p of Object.values(d.scopes.all.periods))p.declared=3;
+ d.detail.settings=Object.entries({A:['interesting','missing'],B:['interesting','loss'],C:['missing','interesting']}).map(([id,kinds])=>{
+  const s=structuredClone(pattern);s.id=id;
+  ['earlier','recent'].forEach((pid,i)=>{const p=s.periods[pid],kind=kinds[i];Object.assign(p,{annualizedProfitPct:kind==='missing'?null:12,mtmMaxDdPct:5});
+   Object.assign(p.classification,{valid:kind!=='missing',interesting:kind==='interesting',profitable:kind==='interesting',lowActivity:kind==='missing'});
+   p.availability.annualizedProfitPct={available:kind!=='missing',reason:kind==='missing'?'shortSpan':null};});return s;
+ });
+ for(const [group,counts,selected] of [['interesting',[2,1],2],['lowActivity',[0,1],1],['profitable',[0,0],0]]){
+  const text=screen.views(d,{...screen.initial(),fieldGroup:group},['field-content'])['field-content'];
+  const captions=[...text.matchAll(/<small tabindex="0" data-tip="([^"]*)" aria-label="[^"]*">([^<]*)<\/small>/g)];
+  assert.deepEqual(captions.map(m=>m[2]),counts.map(n=>`${n} / 3 shown`));
+  assert.deepEqual(captions.map(m=>m[1]),counts.map(n=>`${n} plotted; ${selected-n} unavailable within earlier cohort; ${3-selected} outside earlier cohort`));
+  assert.deepEqual(text.split('<svg ').slice(1).map(x=>[...x.matchAll(/<circle /g)].length),counts);
+ }
+ for(const scope of Object.keys(data.scopes))for(const metric of ['returnPct','annualizedProfitPct']){
+  const markup=screen.views(data,{...screen.initial(),scope,fieldView:'distribution',distribution:metric,fieldGroup:'interesting'},['field-content'])['field-content'];
+  const plain=screen.views(data,{...screen.initial(),scope,fieldView:'distribution',distribution:metric},['field-content'])['field-content'];assert.equal(markup,plain);
+  for(const p of Object.values(data.scopes[scope].periods)){
+   assert.equal(p.distributions[metric].counts.reduce((a,b)=>a+b,0),p.distributions[metric].n);
+   assert.ok(markup.includes(`${p.distributions[metric].n} / ${p.declared} shown</small>`));
+  }
+ }
+ for(const key of ['overview','scope-overview']){
+  const markup=screen.views(data,screen.initial(),[key])[key];
+  assert.ok(!/>[^<]*\d+ available \/ \d+ missing[^<]*</.test(markup));
+  assert.ok(/<em tabindex="0" data-tip="[^"]*available \/ [^"]*missing/.test(markup));
+ }
+ const matrix=screen.views(data,{...screen.initial(),compact:false},['matrix-grid'])['matrix-grid'];
+ const positions=data.meta.tickers.map(id=>matrix.indexOf(`<th scope="row">${chart.tickerLabel(data,id)}</th>`));
+ assert.ok(positions.every((v,i)=>v>=0&&(!i||v>positions[i-1])));
+ for(const s of chart.series(data,'all')){
+  assert.ok(data.meta.tickers.includes(s.ticker));assert.ok(s.label.startsWith(chart.tickerLabel(data,s.ticker)+' · '));
+ }
+ console.log(JSON.stringify({ok:true,compactPresentation:true,counters:'saved declarations; fixed earlier cohorts',labels:'raw IDs preserved'}));
+}
+// Display escaping never changes the filter identity or canonical roster order.
+{
+ const d=structuredClone(data),id=d.meta.tickers[0],scope=d.meta.scopeIds.instrument[id];
+ d.scopes[scope].label='<tag>&"';
+ const text=screen.views(d,{...screen.initial(),compact:false},['matrix-grid'])['matrix-grid'];
+ assert.ok(text.includes('&lt;tag&gt;&amp;&quot;'));
+ assert.ok(!text.includes('<tag>'));
+ const lines=chart.series(d,'all').filter(l=>l.ticker===id);
+ assert.ok(lines.length && lines.every(l=>l.label.startsWith('<tag>&"')));
+ assert.ok(chart.filtersFromScope(d,scope).tickers.includes(id)||d.meta.tickers.length===1);
 }

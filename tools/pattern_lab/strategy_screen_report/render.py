@@ -12,7 +12,7 @@ from ..strategy_screen import load_strategy_screen, verify_strategy_screen
 from .model import canonical, presentation_options, view_bytes
 from .payload import build_view
 
-VERSION = 'strategy-screen-report.3'
+VERSION = 'strategy-screen-report.4'
 FAILURE = 'Strategy Screen report generation failed; no completed report was published.'
 INTERRUPTED = 'Strategy Screen report generation was interrupted; no completed report was published.'
 UNCERTAIN = 'Strategy Screen report publication could not be confirmed; output was preserved for inspection.'

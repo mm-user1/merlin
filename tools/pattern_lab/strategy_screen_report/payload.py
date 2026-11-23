@@ -3,7 +3,7 @@ from datetime import datetime
 import math
 
 from ..accounts.contracts import require
-from .model import VIEW, canonical, finite, histogram, histogram_scale, quantiles, scalars
+from .model import VIEW, canonical, finite, histogram, histogram_scale, quantiles, scalars, instrument_labels, timeframe_label, period_shorts
 
 METRICS = ('returnPct', 'annualizedProfitPct', 'mtmMaxDdPct', 'trades', 'tradesPerMonth')
 COLORS = {**{k: [0, 40, 60, 100] for k in ('retention', 'interesting', 'profitable', 'positiveWithoutBest2')},
@@ -67,6 +67,8 @@ def build_view(reader, options):
     require('all' in summaries and len(summaries) == len(native_scopes), 'scope roster')
     calendars = {p: summaries['all']['periods'][p]['monthly'] for p in ('earlier', 'recent')}
     cells = {c['cellId']: dict(ticker=c['instrumentId'], instrumentId=c['instrumentId'], tf=c['timeframeMinutes']) for c in configurations}
+    labels = instrument_labels({c['ticker'] for c in cells.values()})
+    short_names = period_shorts(calendars)
     cell_scope = {s['key']: s['scopeId'] for s in native_scopes if s['kind'] == 'cell'}
     # UI keys are native scope IDs, including cell scopes; the canonical cell ID is retained too.
     cellmeta = {cell_scope[k]: {**v, 'cellId': k} for k, v in cells.items()}
@@ -139,8 +141,8 @@ def build_view(reader, options):
         a, b = (periods[p]['concentration']['own']['2']['equalCellPositivePct'] for p in ('earlier', 'recent'))
         changes['positiveWithoutBest2'] = b-a if finite(a) and finite(b) else None
         label = ('All configurations' if native['kind'] == 'panel' else
-                 f"{cells[native['key']]['ticker']} · {cells[native['key']]['tf']}m" if native['kind'] == 'cell' else
-                 str(native['key']) + ('m' if native['kind'] == 'timeframe' else ''))
+                 f"{labels[cells[native['key']]['ticker']]} · {timeframe_label(cells[native['key']]['tf'])}" if native['kind'] == 'cell' else
+                 timeframe_label(native['key']) if native['kind'] == 'timeframe' else labels[native['key']])
         scopes[sid] = dict(id=sid, scopeId=sid, kind=native['kind'], label=label,
                           cells=[cell_scope[c] for c in native['cells']], periods=periods, changes=changes, persistence=persistence)
     periods = []
@@ -148,7 +150,7 @@ def build_view(reader, options):
         pid = p['periodId']; start, end = (p[k][:10] for k in ('startUtc', 'endUtc'))
         label = options['periodLabels'].get(pid, f'{start} – {end}')
         months = calendars[pid]
-        periods.append(dict(id=pid, label=label, short=label, start=p['startUtc'], end=p['endUtc'], months=len(months),
+        periods.append(dict(id=pid, label=label, short=short_names[pid], start=p['startUtc'], end=p['endUtc'], months=len(months),
             days=(datetime.fromisoformat(end)-datetime.fromisoformat(start)).days,
             tail=' – '.join(m['month'] for m in months[-3:]) if len(months) >= 3 else 'N/A: fewer than three months'))
     criteria = doc['criteria']; minima = {str(c['tf']): criteria['minClosedTradesByTimeframe'].get(str(c['tf']), criteria['minClosedTrades']) for c in cells.values()}
