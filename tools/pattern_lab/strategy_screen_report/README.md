@@ -169,7 +169,8 @@ the interrupted outcome. Normal publication still returns the HTML path and exit
 
 Command-specific cold imports and dependency preparation share the sanitized CLI
 boundary. CLI success notification requires one full character-count stdout write
-and a successful flush; short or invalid write counts fail without retry. A notification failure
+and a successful flush. Valid integer counts include int subclasses but exclude
+Boolean values; short or invalid write counts fail without retry. A notification failure
 or interrupt preserves the report, returns 2/130 and attempts one fixed stderr
 diagnostic stating that publication succeeded but notification failed/interrupted.
 It never attempts another stdout payload. Secondary diagnostic failures preserve

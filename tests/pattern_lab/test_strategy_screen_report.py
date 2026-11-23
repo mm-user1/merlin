@@ -475,3 +475,47 @@ def test_in_process_healthy_streams_survive_one_shot_fault(reader,tmp_path,phase
     assert result['descriptorIdentityPreserved']==[True,True] and result['objectsRestored']
     receipt=json.loads((output/'report.json').read_bytes())
     assert receipt['html']['sha256']==render.sha((output/'report.html').read_bytes())
+
+
+@pytest.mark.parametrize('kind',['int','subclass','short-subclass','float','oversized','bool'])
+def test_buffered_notification_count_visible_at_return(reader,tmp_path,monkeypatch,kind):
+    import io
+    from tools.pattern_lab import __main__ as cli
+    class Count(int):
+        pass
+    class Buffered(io.TextIOWrapper):
+        def __init__(self,raw):
+            super().__init__(raw,encoding='utf-8',newline='\n',write_through=False)
+            self.writes=0;self.flushes=0;self.offered=''
+        def write(self,text):
+            self.writes+=1;self.offered=text
+            count=super().write(text[:7] if kind=='short-subclass' else text)
+            if kind in ('subclass','short-subclass'):return Count(count)
+            if kind=='float':return float(count)
+            if kind=='oversized':return count+1
+            if kind=='bool':return True
+            return count
+        def flush(self):
+            self.flushes+=1
+            return super().flush()
+    raw=io.BytesIO();stdout=Buffered(raw);stderr=io.StringIO();output=tmp_path/'buffered'
+    original_streams=(sys.stdout,sys.stderr)
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(sys,'stdout',stdout);m.setattr(sys,'stderr',stderr)
+            code=cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(output)])
+            # Snapshot before any caller flush, close, detach or destruction.
+            visible=raw.getvalue();counts=(stdout.writes,stdout.flushes)
+            assert sys.stdout is stdout and sys.stderr is stderr
+        assert (sys.stdout,sys.stderr)==original_streams
+        if kind in ('int','subclass'):
+            assert (code,*counts,len(visible))==(0,1,1,len(stdout.offered.encode('utf-8')))
+            assert visible==stdout.offered.encode('utf-8')
+            assert json.loads(visible)['status']=='complete' and not stderr.getvalue()
+        else:
+            assert code==2 and counts==(1,0)
+            assert stderr.getvalue().strip()=='pattern-lab: Strategy Screen report was published; completion notification failed.'
+        receipt=json.loads((output/'report.json').read_bytes())
+        assert receipt['html']['sha256']==render.sha((output/'report.html').read_bytes())
+    finally:
+        stdout.close()

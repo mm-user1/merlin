@@ -343,7 +343,7 @@ def _emit_report(payload):
     """One complete text write and flush, only for the Strategy Screen report."""
     text = pack_manifest.dumps_json(payload) + '\n'
     count = sys.stdout.write(text)
-    if type(count) is not int or count != len(text):
+    if not isinstance(count, int) or isinstance(count, bool) or count != len(text):
         raise OSError('Incomplete report notification')
     sys.stdout.flush()
 
