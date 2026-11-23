@@ -339,43 +339,47 @@ def _emit(payload) -> None:
     sys.stdout.write(pack_manifest.dumps_json(payload) + "\n")
 
 
-def _strategy_screen_report_command(args):
-    """Generation and bounded notification have separate dispositions."""
-    import os
-    from .strategy_screen_report import render_strategy_screen_report
-    from .strategy_screen_report.render import (
-        FAILURE, INTERRUPTED, UNCERTAIN, PublicationUnknown, PublicationInterrupted,
-    )
+def _emit_report(payload):
+    """One complete text write and flush, only for the Strategy Screen report."""
+    text = pack_manifest.dumps_json(payload) + '\n'
+    count = sys.stdout.write(text)
+    if type(count) is not int or count != len(text):
+        raise OSError('Incomplete report notification')
+    sys.stdout.flush()
 
-    def discard_buffer(stream):
-        # Prevent buffered shutdown from retrying a broken pipe (exit 120).
-        # Only this command's failed stream is affected; no retry on that pipe.
-        try:
-            with open(os.devnull, 'wb') as sink:
-                os.dup2(sink.fileno(), stream.fileno())
-        except (Exception, KeyboardInterrupt):
-            pass
+
+def _strategy_screen_report_command(args, failed_streams=None):
+    """Generation and bounded notification have separate dispositions."""
+    # Startup diagnostics cannot depend on importing the module that failed.
+    failure = 'Strategy Screen report generation failed; no completed report was published.'
+    interruption = 'Strategy Screen report generation was interrupted; no completed report was published.'
+    uncertainty = 'Strategy Screen report publication could not be confirmed; output was preserved for inspection.'
+    unknown_types = ()
+
+    def failed(stream):
+        if failed_streams is not None:
+            failed_streams.append(stream)
 
     def diagnostic(message):
         try:
             sys.stderr.write('pattern-lab: ' + message + '\n')
             sys.stderr.flush()
         except (Exception, KeyboardInterrupt):
-            discard_buffer(sys.stderr)
+            failed(sys.stderr)
 
     code = EXIT_OK; message = None; unknown = False
     try:
+        from .strategy_screen_report import render_strategy_screen_report
+        from .strategy_screen_report.render import PublicationUnknown, PublicationInterrupted
+        unknown_types = (PublicationUnknown, PublicationInterrupted)
         pack_data.require_pyarrow()
         path = render_strategy_screen_report(args.run_root, output_root=args.output_root,
             presentation=args.presentation, export_view_data=args.export_view_data)
-    except PublicationInterrupted:
-        code = EXIT_INTERRUPTED; message = UNCERTAIN; unknown = True
-    except PublicationUnknown:
-        code = EXIT_ERROR; message = UNCERTAIN; unknown = True
-    except KeyboardInterrupt:
-        code = EXIT_INTERRUPTED; message = INTERRUPTED
-    except Exception:
-        code = EXIT_ERROR; message = FAILURE
+    except (Exception, KeyboardInterrupt) as error:
+        interrupted = isinstance(error, KeyboardInterrupt)
+        unknown = isinstance(error, unknown_types)
+        code = EXIT_INTERRUPTED if interrupted else EXIT_ERROR
+        message = uncertainty if unknown else interruption if interrupted else failure
     if code == EXIT_OK:
         payload = dict(status='complete', command=args.command, report=str(path))
     else:
@@ -385,15 +389,14 @@ def _strategy_screen_report_command(args):
         if unknown:
             payload['publicationState'] = 'unknown'
     try:
-        _emit(payload)
-        sys.stdout.flush()
+        _emit_report(payload)
     except (Exception, KeyboardInterrupt) as notification:
         if code == EXIT_OK:
             interrupted = isinstance(notification, KeyboardInterrupt)
             code = EXIT_INTERRUPTED if interrupted else EXIT_ERROR
             message = ('Strategy Screen report was published; completion notification '
                        + ('was interrupted.' if interrupted else 'failed.'))
-        discard_buffer(sys.stdout)
+        failed(sys.stdout)
     if message is not None:
         diagnostic(message)
     return code
@@ -640,12 +643,12 @@ def _report_failure(command: str, exc: PatternLabError, label: str) -> None:
     print(f"pattern-lab: {label}{exc}", file=sys.stderr)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv, failed_streams=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     command = getattr(args, "command", "")
     if command == "strategy-screen-report":
-        return _strategy_screen_report_command(args)
+        return _strategy_screen_report_command(args, failed_streams)
     try:
         return _run(args)
     except KeyboardInterrupt:
@@ -690,5 +693,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_ERROR
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    # An embedding caller owns its streams and subsequent process lifetime.
+    return _main(argv)
+
+
+def _standalone():
+    failed_streams = []
+    code = _main(None, failed_streams)
+    # Only a terminating report invocation suppresses retries of failed buffered
+    # streams at interpreter shutdown. Callable main() never changes descriptors.
+    if failed_streams:
+        import os
+        for stream in failed_streams:
+            try:
+                with open(os.devnull, 'wb') as sink:
+                    os.dup2(sink.fileno(), stream.fileno())
+            except (Exception, KeyboardInterrupt):
+                pass
+    return code
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_standalone())

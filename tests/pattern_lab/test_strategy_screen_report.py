@@ -301,7 +301,7 @@ def test_cli_published_notification_boundary(reader,tmp_path,monkeypatch,phase,k
         m.setattr(sys,'stdout',stdout);m.setattr(sys,'stderr',stderr)
         if phase=='emit':
             def fail(payload):raise kind('PRIVATE_EMIT')
-            m.setattr(cli,'_emit',fail)
+            m.setattr(cli,'_emit_report',fail)
         assert cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(out)])==(130 if kind is KeyboardInterrupt else 2)
     receipt=json.loads((out/'report.json').read_bytes())
     assert receipt['html']['sha256']==render.sha((out/'report.html').read_bytes())
@@ -362,3 +362,116 @@ def test_current_validation_sources_and_change_sensitivity(reader,tmp_path,monke
     for name in names:
         key='tools/pattern_lab/'+name;p=copy/key;p.write_bytes(p.read_bytes()+b'\n# source attribution witness\n')
         assert render.sources()[key]!=original[key]
+
+@pytest.mark.parametrize('target',['package','renderer'])
+@pytest.mark.parametrize('kind',['OSError','KeyboardInterrupt'])
+def test_cold_report_imports_are_sanitized(reader,tmp_path,target,kind):
+    import subprocess
+    output=tmp_path/'cold'
+    child=subprocess.run([sys.executable,'-B','-X','utf8','-m','tests.pattern_lab._strategy_screen_report_helpers',
+        'cold',str(reader.root),str(output),kind,target],capture_output=True,text=True,encoding='utf-8',timeout=60)
+    expected=130 if kind=='KeyboardInterrupt' else 2
+    assert child.returncode==expected,child.stderr
+    payload=json.loads(child.stdout)
+    assert payload==dict(status='interrupted' if expected==130 else 'failed',command='strategy-screen-report',
+        error_code='interrupted' if expected==130 else PatternLabDataError.error_code,error=render.INTERRUPTED if expected==130 else render.FAILURE)
+    assert child.stderr.strip()=='pattern-lab: '+payload['error']
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('count',[7,0,None,True,-1,'7','full'])
+def test_report_notification_checks_character_count(reader,tmp_path,monkeypatch,count):
+    import io
+    from tools.pattern_lab import __main__ as cli
+    class Short(io.StringIO):
+        calls=0;offered=''
+        def write(self,text):
+            self.calls+=1;self.offered=text
+            if count=='full':return super().write(text)
+            super().write(text[:7] if count==7 else '')
+            return count
+    stdout=Short();stderr=io.StringIO();output=tmp_path/'unicode-é'
+    with monkeypatch.context() as m:
+        m.setattr(sys,'stdout',stdout);m.setattr(sys,'stderr',stderr)
+        code=cli.main(['strategy-screen-report','--run-root',str(reader.root),'--output-root',str(output)])
+        assert sys.stdout is stdout and sys.stderr is stderr
+    assert stdout.calls==1 and code==(0 if count=='full' else 2)
+    if count=='full':assert json.loads(stdout.getvalue())['status']=='complete' and not stderr.getvalue()
+    else:assert stderr.getvalue().strip()=='pattern-lab: Strategy Screen report was published; completion notification failed.'
+    receipt=json.loads((output/'report.json').read_bytes())
+    assert receipt['html']['sha256']==render.sha((output/'report.html').read_bytes())
+
+
+@pytest.mark.parametrize('unknown,interrupted',[(False,False),(False,True),(True,False),(True,True)])
+def test_short_secondary_notification_retains_generation_disposition(tmp_path,monkeypatch,unknown,interrupted):
+    import io
+    from tools.pattern_lab import __main__ as cli
+    import tools.pattern_lab.strategy_screen_report as package
+    kind=(render.PublicationInterrupted if interrupted else render.PublicationUnknown) if unknown else (KeyboardInterrupt if interrupted else PatternLabDataError)
+    def fail(*a,**k):raise kind('PRIVATE_GENERATION')
+    class Short(io.StringIO):
+        calls=0
+        def write(self,text):self.calls+=1;super().write(text[:7]);return 7
+    output=Short();error=io.StringIO()
+    with monkeypatch.context() as m:
+        m.setattr(package,'render_strategy_screen_report',fail);m.setattr(sys,'stdout',output);m.setattr(sys,'stderr',error)
+        assert cli.main(['strategy-screen-report','--run-root','absent','--output-root',str(tmp_path/'out')])==(130 if interrupted else 2)
+    assert output.calls==1 and not (tmp_path/'out').exists()
+    message=render.UNCERTAIN if unknown else render.INTERRUPTED if interrupted else render.FAILURE
+    assert error.getvalue().strip()=='pattern-lab: '+message
+
+
+@pytest.mark.parametrize('existing',[False,True])
+@pytest.mark.parametrize('name',['report.html','view-data.json','report.json'])
+@pytest.mark.parametrize('phase',['fileno','fstat','close'])
+@pytest.mark.parametrize('kind',[OSError,KeyboardInterrupt])
+def test_claim_inspection_failure_cleans_owned_output_and_retries(reader,tmp_path,monkeypatch,existing,name,phase,kind):
+    output=tmp_path/'out'
+    if existing:output.mkdir()
+    original_open=Path.open;original_stat=render.os.fstat;claim_fd=None
+    class Claim:
+        def __init__(self,stream):self.stream=stream
+        def __enter__(self):return self
+        def __exit__(self,*args):
+            self.stream.close()
+            if phase=='close':raise kind('PRIVATE_CLOSE')
+        def fileno(self):
+            if phase=='fileno':raise kind('PRIVATE_FILENO')
+            return self.stream.fileno()
+    def open_claim(path,*args,**kwargs):
+        nonlocal claim_fd
+        stream=original_open(path,*args,**kwargs)
+        if path==output/name and (args==('xb',) or kwargs.get('mode')=='xb'):
+            claim_fd=stream.fileno();return Claim(stream)
+        return stream
+    def inspect(fd):
+        if phase=='fstat' and fd==claim_fd:raise kind('PRIVATE_FSTAT')
+        return original_stat(fd)
+    with monkeypatch.context() as m:
+        m.setattr(Path,'open',open_claim);m.setattr(render.os,'fstat',inspect)
+        with pytest.raises(KeyboardInterrupt if kind is KeyboardInterrupt else PatternLabDataError) as caught:
+            render_strategy_screen_report(reader.root,output_root=output,export_view_data=True)
+    assert caught.value.args==(render.INTERRUPTED if kind is KeyboardInterrupt else render.FAILURE,)
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert output.exists()==existing
+    if existing:assert not list(output.iterdir())
+    html=render_strategy_screen_report(reader.root,output_root=output,export_view_data=True)
+    assert json.loads((output/'report.json').read_bytes())['html']['sha256']==render.sha(html.read_bytes())
+
+
+@pytest.mark.parametrize('phase',['notification','write','flush','stderr-write','stderr-flush'])
+@pytest.mark.parametrize('kind',['OSError','KeyboardInterrupt'])
+def test_in_process_healthy_streams_survive_one_shot_fault(reader,tmp_path,phase,kind):
+    import subprocess
+    output=tmp_path/'healthy'
+    child=subprocess.run([sys.executable,'-B','-X','utf8','-m','tests.pattern_lab._strategy_screen_report_helpers',
+        phase,str(reader.root),str(output),kind],capture_output=True,text=True,encoding='utf-8',timeout=60)
+    assert child.returncode==0,child.stderr
+    for stream,label in ((child.stdout,'STDOUT'),(child.stderr,'STDERR')):
+        assert 'BEFORE_'+label in stream and 'AFTER_'+label in stream,stream
+        assert 'PRIVATE_' not in stream and 'Traceback' not in stream
+    result=json.loads(Path(str(output)+'.child.json').read_bytes())
+    assert result['mainReturn']==(130 if kind=='KeyboardInterrupt' and not phase.startswith('stderr-') else 2)
+    assert result['descriptorIdentityPreserved']==[True,True] and result['objectsRestored']
+    receipt=json.loads((output/'report.json').read_bytes())
+    assert receipt['html']['sha256']==render.sha((output/'report.html').read_bytes())

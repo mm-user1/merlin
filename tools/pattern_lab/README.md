@@ -12,7 +12,10 @@ Rebuild a standalone two-period HTML with the separate
 uses saved statistics; it does not read market data or execute accounts.
 The report preserves uncertain final publication for inspection. Confirmed
 publication and CLI notification have separate outcomes; see the report guide
-for fixed diagnostics, exit codes and receipt attribution.
+for fixed diagnostics, exit codes and receipt attribution. Cold command imports
+are sanitized; notification requires a complete text write and flush. Callable
+main preserves caller streams, while standalone shutdown handles broken pipes.
+Histogram endpoint labels retain exact integral digits even beyond safe integers.
 
 For native all-configuration IS/HO1/HO2 execution and offline compact results,
 see [configuration studies](configuration_study/README.md). This backend retains

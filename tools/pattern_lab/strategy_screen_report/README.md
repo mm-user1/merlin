@@ -150,7 +150,8 @@ report.json, or analysis.json plus receipt.json reserve ownership even if malfor
 or dangling. Siblings are permitted.
 
 Inputs/options are validated before creating output parents. Unique temporary
-files are checked and destinations claimed exclusively. report.json is published
+files are checked and destinations claimed exclusively. Ownership is registered
+immediately after exclusive creation, before optional descriptor metadata or close. report.json is published
 last and is the completion point. A successful final replacement confirms publication.
 If that call raises, one bounded reconciliation distinguishes the exact receipt
 from the intact owned empty claim. The former confirms success; the latter permits
@@ -166,12 +167,18 @@ CLI failure/interruption use exits 2/130 and fixed JSON; uncertainty also includ
 `publicationState=unknown`. Either replacement or reconciliation interruption selects
 the interrupted outcome. Normal publication still returns the HTML path and exit 0.
 
-CLI success notification includes stdout write and flush. A notification failure
+Command-specific cold imports and dependency preparation share the sanitized CLI
+boundary. CLI success notification requires one full character-count stdout write
+and a successful flush; short or invalid write counts fail without retry. A notification failure
 or interrupt preserves the report, returns 2/130 and attempts one fixed stderr
 diagnostic stating that publication succeeded but notification failed/interrupted.
 It never attempts another stdout payload. Secondary diagnostic failures preserve
 the determined disposition; a broken buffered pipe cannot change it to shutdown
-exit 120. These semantics apply only to the Strategy Screen report command.
+exit 120 in the standalone module invocation. Callable main(argv=None) leaves the
+caller's stream objects and descriptors intact after transient faults; stream
+lifecycle remains the embedding caller's responsibility. Shutdown-only descriptor
+disposition belongs to the terminating standalone invocation. These semantics
+apply only to the Strategy Screen report command.
 
 Receipt schema is `pattern-lab.strategy-screen-report.v1`; view schema is
 `pattern-lab.strategy-screen-report-view.v1`. Receipts bind the input completion
@@ -219,3 +226,13 @@ previous draw duration. No-redraw epochs report zero with zero callback count.
 Raw counts/durations, linear p95, settling wall time and browser/heap memory are
 separate evidence; callback CPU is not GPU/compositor completion.
 
+
+Histogram interval text uses exact integral binary64 endpoints, including values
+beyond Number.MAX_SAFE_INTEGER, in tooltips, accessible labels and domain labels.
+An interval-specific BigInt conversion preserves decimal digits without changing
+membership, counts or general metric formatting.
+
+The subsequent command-boundary/literal-label correction uses the same 16-module
+vector plus new regressions, stored native/auxiliary API/API/CLI and legacy view-byte
+parity, generated Node and bounded Chrome at 1920/1440. It does not repeat the
+capacity campaign above; those measurements remain historical evidence.

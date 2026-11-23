@@ -110,3 +110,36 @@ for(const unavailable of ['earlier','recent']){
  for(const text of ['N/A (shortSpan)','MTM DD 0.0%','0 trades','Coverage complete','Trade minimum 37'])assert.ok(points[0][1].includes(text),text);
 }
 console.log(JSON.stringify({ok:true,corrections:['F3 indexed sparse boundaries','F4 three evidence identities','F5 empty/extreme coordinates and paired accessible availability']}));
+// T03B-2: compare literal digits to exact integers, never to Number(label).
+{
+ const big=2**51+1;
+ for(const h of [
+  {lo:0,hi:(big+3)*10,step:10,bins:big+3,indices:[big,big+1,big+2],counts:[2,1,1],n:4},
+  {lo:-(big+3)*10,hi:0,step:10,bins:big+3,indices:[0,1,2],counts:[2,1,1],n:4},
+  {lo:-12,hi:12,step:6,bins:4,indices:[0,1,2,3],counts:[1,1,1,2],n:5},
+  {lo:-20,hi:20,step:10,bins:4,indices:[0,1,2,3],counts:[1,1,1,2],n:5}]){
+  const d={meta:{periods:data.meta.periods},scopes:{all:{periods:Object.fromEntries(data.meta.periods.map(p=>[p.id,{distributions:{returnPct:h}}]))}}};
+  const markup=screen.views(d,{...screen.initial(),fieldView:'distribution',distribution:'returnPct'},['field-content'])['field-content'];
+  const bars=[...markup.matchAll(/<rect [^>]+>/g)].slice(0,h.indices.length);
+  const digits=x=>x.replaceAll(',','').replace(/\.0$/,'');
+  assert.equal(bars.length,h.indices.length);
+  for(let j=0;j<bars.length;j++){
+   const i=h.indices[j],a=BigInt(h.lo+i*h.step),b=BigInt(Math.min(h.hi,h.lo+(i+1)*h.step));
+   const aria=bars[j][0].match(/aria-label="(\d+) settings in (.*?) to (.*?)%"/);
+   const tip=bars[j][0].match(/data-tip="[^&]*&#10;(.*?)% to (.*?)% (\(.*?\))&#10;(\d+) settings"/);
+   assert.ok(aria&&tip,bars[j][0]);
+   assert.deepEqual([digits(aria[2]),digits(aria[3])],[a.toString(),b.toString()]);
+   assert.deepEqual([digits(tip[1]),digits(tip[2])],[a.toString(),b.toString()]);
+   assert.equal(+aria[1],h.counts[j]);assert.equal(+tip[4],h.counts[j]);
+   assert.equal(tip[3],i===h.bins-1?'(inclusive)':'(upper exclusive)');
+   if(j)assert.equal(a,BigInt(h.lo+(h.indices[j-1]+1)*h.step));
+   if(h.lo===0&&j===0){
+    assert.equal(digits(aria[2]),'22517998136852488');assert.equal(digits(aria[3]),'22517998136852500');
+    for(const v of [22517998136852488n,22517998136852496n])assert.ok(a<=v&&v<b);
+   }
+  }
+  const domain=[...markup.matchAll(/<text [^>]*y="148"[^>]*>(.*?)%<\/text>/g)].slice(0,3).map(m=>digits(m[1]));
+  assert.deepEqual(domain,[BigInt(h.lo).toString(),'0',BigInt(h.hi).toString()]);
+ }
+ console.log(JSON.stringify({ok:true,exactLiteralIntervals:true,oracle:'BigInt integral digits; no Number round trip'}));
+}

@@ -28,8 +28,13 @@ availability. Trusted Chrome checks sparse matrix coordinates, Enter activation 
 replacement-select focus at nonzero scroll. The corrected helper times a fixed
 20-gesture population using fresh per-action sums of drawing callback CPU durations,
 with callback-count controls, separate settling/memory and retained target misses.
-Use pinned compact examples and one capacity smoke per role for this follow-up;
-the predecessor's three-sample campaign remains historical evidence.
+Those capacity/focus measurements remain historical evidence for the later
+command-boundary/literal-label correction. Its assigned vector retains every
+inherited case and adds cold-import child failures, short/invalid write counts,
+immediate claim ownership/retry, healthy real in-process stdout/stderr pipes,
+and exact BigInt decimal label oracles. Keep the standalone buffered closed-pipe
+and no-fd controls. Use stored API/API/CLI and legacy view-byte parity plus bounded
+Chrome 1920/1440 label/focus/export checks; no new capacity campaign is required.
 
 ## Strategy Screen backend
 

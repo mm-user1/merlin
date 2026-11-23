@@ -12,7 +12,7 @@ from ..strategy_screen import load_strategy_screen, verify_strategy_screen
 from .model import canonical, presentation_options, view_bytes
 from .payload import build_view
 
-VERSION = 'strategy-screen-report.2'
+VERSION = 'strategy-screen-report.3'
 FAILURE = 'Strategy Screen report generation failed; no completed report was published.'
 INTERRUPTED = 'Strategy Screen report generation was interrupted; no completed report was published.'
 UNCERTAIN = 'Strategy Screen report publication could not be confirmed; output was preserved for inspection.'
@@ -106,7 +106,9 @@ def assemble_html(raw):
 
 
 def publish_file(temporary, destination, owned):
-    with destination.open('xb') as stream:
+    stream = destination.open('xb')
+    owned['claims'][destination] = None
+    with stream:
         info = os.fstat(stream.fileno())
         owned['claims'][destination] = (info.st_dev, info.st_ino)
     if destination.name == 'report.json':

@@ -107,15 +107,16 @@
     const explanation=m==='mtmMaxDdPct'?`Neutral through ${lim[0]}%; full red at ${hi}%.`:m==='annualizedProfitPct'?`Neutral at 0%; saturation at ${lo}% and +${hi}%.`:`Neutral ${lim[1]}–${lim[2]}${unit}; saturation at ${lim[0]} and ${hi}${unit}.`;
     return `<div class="matrix-legend"><strong>${title}</strong><span>${lo}${unit}</span><span class="matrix-ramp" style="background:linear-gradient(90deg,${ramp})"></span><span>${hi}${unit}</span><span>${explanation} Same scale as the overview; values are not clipped.</span>${['retention','interesting','profitable','positiveWithoutBest2'].includes(m)?'<span class="matrix-unavailable">N/A</span>':''}${m==='retention'?'<span>Left: Profitable &middot; Right: Interesting. Below: advantage over previously unsuccessful settings.</span>':''}</div>`;
   }
+  const intervalText=v=>Number.isInteger(v)?BigInt(v).toLocaleString('en-US')+'.0':String(v);
   function histogram(d,metric,maxCount,period){
     if(!d.n)return '<p class="subtle">N/A · n=0</p>';
     const x0=28,w=290,h=108,top=16,unit=metric==='monthlyContribution'?' pp':'%';
     const x=v=>x0+(v-d.lo)/(d.hi-d.lo)*w;
     const bars=d.counts.map((n,j)=>{
       const i=d.indices[j],a=d.lo+i*d.step,b=d.lo+(i+1)*d.step,width=w/d.bins;
-      return `<rect tabindex="0" role="img" x="${x(a)}" y="${top+h-n/Math.max(1,maxCount)*h}" width="${Math.max(.01,width*.92)}" height="${n/Math.max(1,maxCount)*h}" fill="${b<=0?'#bc8a83':'#639d8f'}" data-tip="${esc(period)}&#10;${num(a)}${unit} to ${num(b)}${unit}${i===d.bins-1?' (inclusive)':' (upper exclusive)'}&#10;${n} settings" aria-label="${n} settings in ${num(a)} to ${num(b)}${unit}"/>`;
+      return `<rect tabindex="0" role="img" x="${x(a)}" y="${top+h-n/Math.max(1,maxCount)*h}" width="${Math.max(.01,width*.92)}" height="${n/Math.max(1,maxCount)*h}" fill="${b<=0?'#bc8a83':'#639d8f'}" data-tip="${esc(period)}&#10;${intervalText(a)}${unit} to ${intervalText(b)}${unit}${i===d.bins-1?' (inclusive)':' (upper exclusive)'}&#10;${n} settings" aria-label="${n} settings in ${intervalText(a)} to ${intervalText(b)}${unit}"/>`;
     }).join('');
-    return `<svg viewBox="0 0 340 160" aria-label="${esc(period)} distribution"><line x1="${x0}" x2="${x0+w}" y1="${top+h}" y2="${top+h}" stroke="#cdd7d1"/><text x="2" y="${top+4}">${maxCount}</text><text x="9" y="${top+h}">0</text>${bars}<line x1="${x(0)}" x2="${x(0)}" y1="${top}" y2="${top+h}" stroke="#6b7f75" stroke-dasharray="2 3"/><text x="${x0}" y="148">${num(d.lo,0)}${unit}</text><text x="${x(0)}" y="148" text-anchor="middle">0${unit}</text><text x="${x0+w}" y="148" text-anchor="end">${num(d.hi,0)}${unit}</text></svg>`;
+    return `<svg viewBox="0 0 340 160" aria-label="${esc(period)} distribution"><line x1="${x0}" x2="${x0+w}" y1="${top+h}" y2="${top+h}" stroke="#cdd7d1"/><text x="2" y="${top+4}">${maxCount}</text><text x="9" y="${top+h}">0</text>${bars}<line x1="${x(0)}" x2="${x(0)}" y1="${top}" y2="${top+h}" stroke="#6b7f75" stroke-dasharray="2 3"/><text x="${x0}" y="148">${intervalText(d.lo)}${unit}</text><text x="${x(0)}" y="148" text-anchor="middle">0${unit}</text><text x="${x0+w}" y="148" text-anchor="end">${intervalText(d.hi)}${unit}</text></svg>`;
   }
   function distributions(data,state){
     const s=data.scopes[state.scope],m=state.distribution,all=data.meta.periods.map(p=>s.periods[p.id].distributions[m]),max=Math.max(...all.flatMap(d=>d.counts));
